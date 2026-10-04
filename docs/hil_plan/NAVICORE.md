@@ -1565,7 +1565,9 @@ original slot), `ncota.relay_full_via_w1` (`navicore_ota_relay_full`), `ncota.re
 
 ### NC-WP11 — SBUS faults (`sbus.*`, needs INF8)
 
-> **Status 2026-09-29: bench-run once (`20260929-201950`), five tests fixed since and not yet re-run**
+> **Status 2026-10-04: bench-verified** (`20261004-124219`: 40 of the 45 `sbus.*` pass, and the five that fail are the
+> designed `(should)` tests - D-NC21 twice, D-NC72, D-NC73 and `reconfig_parked_tap_cleared`'s older finding; the fix
+> below is `16973fc`, merged `39c60da`). **First run, 2026-09-29: five tests fixed since**
 > (`suites/s50_navicore_sbus_faults.py`, 12 `sbus` tests, four `(should)`; all twelve in `hil/servos.py`; one behind
 > `sbus_reset`). In that run `sbus.test_verbs`, `sbus16_autodetect`, `lock_after_glitch`, `prefix_ambiguity_raw` and
 > `test_verbs_ram_only` passed, and D-NC72's and D-NC73's `(should)` tests failed as designed, each decoding exactly the

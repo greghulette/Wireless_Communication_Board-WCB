@@ -800,6 +800,12 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     inventory hash byte-identical. Bench: `20260929-194057` (81 of 86; the five failures triaged), `-200710` (43 of 44) and `-201645` (4 of 4); the first run showed a 3 s idle mount costing a big restore four
     tokens to out-of-memory, now unmounted per call. INF8/NC-WP11 and IX-WP9/10 are merged (`7aec01a`, `dfc8538`),
     not yet bench-run. Next: flash the SBUS controller and run NC-WP11, run IX-WP9/10, then the overnight full run.
+  - 2026-10-04 13:10: the overnight full run `20260929-203948` after phase 2 (988 pass, 67 `(should)` as designed,
+    13 others, none a firmware defect; logged in HIL_WEEK_DECISIONS.md) was the week's last work before the usage
+    limit stopped everything from 09-30 02:00 to 10-04 12:20. Since: NC-WP11's rc_trig fix merged and the SBUS
+    controller's tests bench-verified (`20261004-124219`); `wizard.app_fake_relay_card` polls (`20261004-123158`); the
+    three flakes pass on rerun. Next: the Intellex agent finishes `wifi_link_loss` (stale association) and the three
+    flash tests, then a full run tonight.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
