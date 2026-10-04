@@ -22,7 +22,7 @@ import urllib.parse
 from hil.intellex import (IntellexHost, require, run_intellex_py, run_intellex_test, run_venv, seed_firmware,
                           seed_wiki, stage)
 from hil.runner import Skip, test
-from hil.ws import WsClient
+from hil.ws import WsClient, WsEndpoint
 
 SHIM_TAG = '<script src="/_intellex.js"></script>'   # Intellex host.py SHIM_TAG
 STATUS_KEYS = ("attached", "target", "lastError", "reconnecting", "wantsLink", "kind", "role", "relayId")
@@ -669,6 +669,113 @@ def identify_direct_pong(bench):
     src/discover.py:221-222) though its docstring says only a direct one counts (:154-158). A fake pyserial Serial
     answers the PING, so no port is opened (tests/intellex/py/discover_units.py)."""
     run_intellex_py(bench, "intellex.identify_direct_pong", "discover_units.py", args={"group": "direct_pong_should"})
+
+
+# ------------------------------------------------------------------ found on the bench in IX-WP9: a link whose far end vanished
+DROP_GAP_S = 2.5            # the longest /_api/status may go unanswered, polled every 0.25 s, while the host drops a link
+DROP_SHOW_S = 3.0           # from the host's 'link is dead' line to /_api/status showing the link lost
+DROP_WATCH_S = 40.0         # the probe's verdict comes ~8 s after the attach; its stall on Intellex e9f95f2 lasts 10 s
+
+
+def drop_stall_problems(samples, verdict_at):
+    """The /_api/status polls a test took while a host dropped a WebSocket link -> ([problem], facts). samples: [(sent,
+    done, attached)] in seconds from the far end's silence, attached None for a poll that got no answer (done is when it
+    gave up); verdict_at: when the host's 'link is dead' line arrived, or None. Every problem is a (should) of INTELLEX.md
+    finding 19 but the first, which says the probe never fired at all."""
+    answered = [(s, d, a) for s, d, a in samples if a is not None]
+    gaps = [(b[1] - a[1], a[1]) for a, b in zip(answered, answered[1:])]
+    gap, gap_from = max(gaps) if gaps else (0.0, None)
+    lost = next((d for _, d, a in answered if a is False), None)
+    facts = {"verdict_s": None if verdict_at is None else round(verdict_at, 1),
+             "lost_s": None if lost is None else round(lost, 1), "longest_unanswered_s": round(gap, 1),
+             "unanswered_polls": sum(1 for _, _, a in samples if a is None)}
+    if verdict_at is None:
+        return ["the host never printed its 'link is dead' verdict: its liveness probe did not fire on a silent far end "
+                "(host.py reconnect_loop)"], facts
+    problems = []
+    if gap > DROP_GAP_S:
+        problems.append(f"(should) /_api/status went unanswered for {gap:.1f} s from {gap_from:.1f} s after the far end "
+                        f"fell silent (the verdict came at {verdict_at:.1f} s): host.py:1596 drops the link on the event "
+                        f"loop, and closing the WebSocket waits websockets' close_timeout (10 s) for a close frame that "
+                        f"never comes (INTELLEX.md finding 19)")
+    if lost is None:
+        problems.append("(should) /_api/status never showed the link lost (INTELLEX.md finding 19)")
+    elif lost - verdict_at > DROP_SHOW_S:
+        problems.append(f"(should) /_api/status showed the link lost {lost - verdict_at:.1f} s after the host's 'link is "
+                        f"dead' line, over {DROP_SHOW_S:.0f} s (INTELLEX.md finding 19)")
+    return problems, facts
+
+
+@test("intellex.link_drop_no_stall", "(should) A WebSocket link whose far end vanishes - as an access point does when "
+      "its board restarts: no close frame, no FIN, new connects refused - is dropped without stalling the host: "
+      "/_api/status never goes unanswered for over 2.5 s and shows the link lost within 3 s of the host's own 'link is "
+      "dead' line; a stand-in endpoint on 127.0.0.2:80, no board and no WiFi (INTELLEX.md finding 19)")
+def link_drop_no_stall(bench):
+    """Intellex src/host.py reconnect_loop: after PROBE_IDLE_S (6 s) without a byte from the droid, three failed TCP
+    probes of its port 80 print '<host> unreachable after <n>s idle - link is dead' and call bridge._drop() on the event
+    loop itself (:1583-1596). _drop() closes the transport (:249-256), and WebSocketTransport.close() (ws_transport.py
+    :89-99) runs websockets' closing handshake, which waits close_timeout - 10 s by default (websockets 17.1,
+    sync/connection.py:1024-1040) - for a close frame a vanished far end never sends; every request the host would
+    serve, every page, waits with it. The loop's own comment on open() (host.py:1604-1609) names this failure for the
+    open. Found on the bench in intellex.wifi_link_loss (run 20260929-202852: the verdict 11.8 s after NaviCore's REBOOT,
+    the status answering again at 21.9 s). Here the far end is hil/ws.py WsEndpoint on 127.0.0.2:80 (a loopback
+    address nothing else here uses: attach_validation counts on 127.0.0.1:80 being closed), silenced one second after
+    the attach: its listener closes, so the probe's connect is refused, and the open socket stays open with nothing
+    read or sent. A poll of /_api/status every 0.25 s, 1 s each, from the silence until the status has shown the link
+    lost for 2 s."""
+    import threading
+    import time
+    require(bench)
+    try:
+        ep = WsEndpoint("127.0.0.2", 80)
+    except OSError as e:
+        raise Skip(f"nothing can listen on 127.0.0.2:80 here ({e}): the stand-in needs port 80, the one Intellex's "
+                   f"WebSocket transport and liveness probe use (ws_transport.py DEFAULT_PORT, host.py reconnect_loop)")
+    sd = stage(bench, "intellex.link_drop_no_stall", tools="none")
+    samples, seen = [], {}
+    try:
+        with IntellexHost(bench, sd) as host:
+            host.attach({"kind": "ws", "host": "127.0.0.2", "role": "navicore"}, timeout=20)
+            st, body = host.json("GET", "/_api/status", timeout=5)
+            if not (isinstance(body, dict) and body.get("attached")):
+                raise AssertionError(f"the host did not attach to the stand-in endpoint: {st} {body}")
+            time.sleep(1.0)
+            stop = threading.Event()
+
+            def watch():                          # when the verdict line arrives, to 50 ms
+                while not stop.is_set():
+                    if "verdict" not in seen and any("link is dead" in x for x in list(host.lines)):
+                        seen["verdict"] = time.monotonic() - t0
+                    time.sleep(0.05)
+            t0 = time.monotonic()
+            ep.go_silent()
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            lost_at = None
+            try:
+                while time.monotonic() - t0 < DROP_WATCH_S:
+                    sent = time.monotonic() - t0
+                    try:
+                        st, body = host.json("GET", "/_api/status", timeout=1.0)
+                        att = bool(body.get("attached")) if st == 200 and isinstance(body, dict) else None
+                    except OSError:
+                        att = None
+                    done = time.monotonic() - t0
+                    samples.append((round(sent, 2), round(done, 2), att))
+                    if att is False and lost_at is None:
+                        lost_at = done
+                    if lost_at is not None and done - lost_at >= 2.0:
+                        break
+                    time.sleep(0.25)
+            finally:
+                stop.set()
+                watcher.join(timeout=1.0)
+    finally:
+        ep.close()
+    problems, facts = drop_stall_problems(samples, seen.get("verdict"))
+    facts["accepted"] = ep.accepted
+    bench.note(f"intellex.link_drop_no_stall: {facts}")
+    assert not problems, "; ".join(problems)
 
 
 # ------------------------------------------------------------------ IX-WP4: the pages, in a browser

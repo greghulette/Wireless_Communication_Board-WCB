@@ -401,6 +401,34 @@ Found while writing IX-WP9 and IX-WP10 (2026-09-29, Intellex `e9f95f2`):
       refusal on W2 and then asks it for `?VERSION` over a port opened with both lines low; the harness resets a W2 it
       finds in the loader. It costs no flash write either way: a refusal that did not hold would write the image W2
       already runs.
+    - Confirmed on the bench (run `20260929-203453`): after the refused flash W2 answered nothing on its own port until
+      the harness's EN pulse (RTS, DTR low).
+
+Found on the bench in IX-WP9 (run `20260929-202852`, Intellex `e9f95f2`):
+
+19. **Dropping a dead WebSocket link stalls the whole host for 10 s.**
+    - The reconnect loop's liveness probe declares a silent link dead - "<host> unreachable after <n>s idle — link is
+      dead" - and calls `bridge._drop()` on the event loop itself (`host.py:1583-1596`). `_drop()` closes the transport
+      (`:249-256`), and `WebSocketTransport.close()` (`ws_transport.py:89-99`) runs websockets' closing handshake, which
+      waits `close_timeout` - 10 s by default (websockets 17.1, `sync/connection.py:1024-1040`) - for a close frame that
+      a vanished access point never sends. Nothing else runs meanwhile: `/_api/status`, every page's `/_link`, the flash
+      status. The loop's own comment on `open()` (`host.py:1604-1609`) names the same failure for the open: "while a
+      droid was unreachable the whole server stopped answering: /_api/status timed out, and the page went dead".
+    - On the bench, `intellex.wifi_link_loss`: NaviCore's REBOOT through the link at 0 s, the probe's verdict at 11.8 s,
+      then "keepalive ping failed ... timed out while closing connection" 10.04 s later, and not one status poll
+      answered in between: the lost link showed at 21.9 s, against the ~15 s Intellex's own comments promise
+      (`ws_transport.py:73-74`). The probe's "~9 s" (`host.py:1439-1440`) is ~11-12 s in practice: each failed probe
+      spends its 1 s timeout beside the loop's 1 s sleep.
+    - Related, and why that run could not say more: a failed reattach is silent. `except TransportError` (`host.py:1638`)
+      counts the failure and, with the bounce off or not due (`:1655-1671`), neither prints it nor keeps it in
+      `last_error`, so `/_api/status` said "probe failed (droid AP down?)" for the whole minute the reattach kept
+      failing, and the log cannot say why.
+    - Reproduced with no board: `intellex.link_drop_no_stall` (`(should)`, s32) attaches a staged host to a stand-in
+      endpoint on 127.0.0.2:80 (`hil/ws.py` `WsEndpoint`) that then vanishes - its listener closed, the open socket kept
+      open and unanswered - and polls `/_api/status` every 0.25 s: 10.3 s unanswered and the loss shown 10.0 s after the
+      verdict, with the same verdict line and traceback as the bench.
+    - Fix shape, for Intellex: drop the link off the event loop (`await asyncio.to_thread(bridge._drop)`), and close a
+      link already judged dead with a short `close_timeout`.
 
 ---
 
@@ -605,6 +633,7 @@ Wireless_Communication_Board-WCB/
                            transports, discover, the flash units, the fake-esptool pipeline, paths/applog/winsize/certs
   tests/hil/hil/intellex.py   stage(), class IntellexHost (start, attach, detach, stop), run_intellex_test(), run_intellex_py()
   tests/hil/hil/ws.py         + read BINARY frames (opcode 0x2; read_until drops them today, :85-100) and send an optional Origin header
+                              + WsEndpoint: a stand-in board endpoint that vanishes like a restarting AP (finding 19)
   tests/hil/suites/s32_intellex.py         no board (DX15)
   tests/hil/suites/s33_intellex_bench.py   the transports and the bridge on the boards (IX-WP5, IX-WP6)
   tests/hil/suites/s34_intellex_tools.py   the tools on the boards (IX-WP7, IX-WP8; DX26)
@@ -950,7 +979,7 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 | `intellex.wifi_nc_tool` | opt-in `navicore_wifi` | Attach `{kind:ws, host:192.168.4.1, role:navicore}`. The label reads `· WiFi 192.168.4.1 ▾`. The OTA button reads `Update over WiFi (OTA)` with the WiFi title. The flash buttons are disabled with the not-USB message. `POST /_api/flash` gets the USB 409. |
 | `intellex.wifi_wizard_via_navicore` | opt-in `navicore_wifi`; `config_guard` on every WCB; `?RTERM,STOP` on every WCB in `finally` | The Wizard through NaviCore as its doorway: a relay card at 20, or the plain-board route, and baselines for W1 and W2. This answers "still to verify on hardware" (`docs/WCB_WIZARD.md:321-323`). |
 | `intellex.wifi_rterm_rate` | opt-in `navicore_wifi` | The open F21 question: why Intellex re-arms `?RTERM` every second (`docs/HIL_TEST_AUDIT.md:506-512`). Once the Wizard has pulled every WCB through NaviCore, count the `?RTERM,START,<NaviCore>` session starts on each WCB's own USB console for 60 s, beside the re-arms the page wrote. Record the rate, and fail any WCB above 6 (DX10, DX42). |
-| `intellex.wifi_link_loss` | opt-in `intellex_reboot` | NaviCore `REBOOT` through the link. The host notices within 15 s. The log has **no** `re-associating` line (`--no-auto-bounce`). It reattaches once the AP is back, and the pages see a PONG again. |
+| `intellex.wifi_link_loss` | opt-in `intellex_reboot` | NaviCore `REBOOT` through the link. The host notices: `/_api/status` shows the loss within 30 s (its own 15 s plus finding 19's 10 s stall, which `intellex.link_drop_no_stall` pins). The log has **no** `re-associating` line (`--no-auto-bounce`). Once the PC's link carries a connect to 192.168.4.1:80 again (`hil/wlan.py` `rejoin(reach=)`), it reattaches within 30 s and a page sees a PONG again. |
 | `intellex.wifi_ap_hop_reidentify` | attended, opt-in `intellex_wifi_join` | While attached, move Wi-Fi 2 from NaviCore's AP to W1's (a temporary `HIL-` profile, as in `s28_wifi.py:254-351`). `/_api/status` flips from role `navicore` to `wcb` with `relayId` 1, and the log shows that **before** the attach (rule 10). The NaviCore tool goes to Via WCB. Then move back. |
 | `intellex.wifi_bounce_scoped` | attended, opt-in `intellex_wifi_join` | `discover.wifi_bounce(<NaviCore's SSID>)` (the name in the script's environment only) bounces only Wi-Fi 2. "Wi-Fi" stays connected in every sample the harness takes while it runs, and its default route stays. Wi-Fi 2 ends back on NaviCore's network with a lease. |
 
@@ -959,11 +988,14 @@ Every test ends by restoring `STOP_MONITOR` and the harness's debug flags.
 | Effort | 12 h. |
 | Bench | About 10 minutes, plus the attended part. |
 
-**Status (2026-09-29): written and dry-run; not yet run on the bench.** In `suites/s35_intellex_wifi.py`, with
-`tests/intellex/specs/wifi_board.spec.js` and the venv script `tests/intellex/py/wifi_units.py`; every row above is
-written, and `intellex.ws_transport_navicore` (s33, IX-WP5) now joins the same way (DX34), which is what left it skipped
-in `20260929-122112`. A leashed host allowed no COM port is attached to `ws://192.168.4.1/ws` with role `navicore`, as
-Intellex's chooser attaches an identified droid.
+**Status (2026-09-29): bench-run in `20260929-202852`; `wifi_link_loss` reworked since, not yet re-run.** In
+`suites/s35_intellex_wifi.py`, with `tests/intellex/specs/wifi_board.spec.js` and the venv script
+`tests/intellex/py/wifi_units.py`; every row above is written, and `intellex.ws_transport_navicore` (s33, IX-WP5) now
+joins the same way (DX34), which is what left it skipped in `20260929-122112`. A leashed host allowed no COM port is
+attached to `ws://192.168.4.1/ws` with role `navicore`, as Intellex's chooser attaches an identified droid. On the
+bench `ws_transport_navicore`, `wifi_discover`, `wifi_nc_tool`, `wifi_wizard_via_navicore` and `wifi_rterm_rate` pass,
+the two attended tests skip (`intellex_wifi_join` unticked), and `wifi_link_loss` failed there: finding 19, and the
+shape it has now (below).
 
 - The credential rule (DX36): a host attached over WiFi records the SSID it asks Windows for (`host.py` api_attach,
   `discover.ssid_for_host`) and names both networks when the adapter moves (`_reidentify_if_moved`: `network changed
@@ -985,11 +1017,26 @@ Intellex's chooser attaches an identified droid.
   succeeded, an ETM came-ONLINE edge through the relay and relayRouteAll's re-arm of a board already managed send it,
   three frames a call (sendMgmtReliable); relayRouteAll runs again from the shim's 2 s poll only while the relay card
   shows a board unmanaged. F21 was seen with the bundle Intellex ships, which predates that code; the bench run
-  measures the working-tree Wizard (DX3).
+  measures the working-tree Wizard (DX3). On the bench: no `?RTERM,START` on either WCB in the minute after every
+  board was pulled (the relay card 4 s after the page opened, both boards at 6 s), and none written by the page: F21's
+  once-a-second re-arm does not reproduce with the working-tree Wizard.
 - `wifi_link_loss` is behind `intellex_reboot` and checks `navicore_wifi` in its body; it runs harness-side with raw
-  `/_link` clients and `nc_guard`. What brings the adapter back is not Intellex's (`--no-auto-bounce`): Windows
-  reassociates through a profile in auto mode, and `pc_on_ap`'s temporary profile is manual, so `hil/wlan.py` `rejoin`
-  connects it again after 30 s without an association, and the note says which happened.
+  `/_link` clients and `nc_guard`. Two measurements from `20260929-202852` shape it:
+  - The loss showed at 21.9 s: the probe's verdict at 11.8 s, then 10 s in which the host answered nothing while it
+    closed the dead WebSocket (finding 19). The stall is `intellex.link_drop_no_stall`'s `(should)`, board-free
+    (DX45); here the loss need only show within 30 s (`NOTICE_LIMIT_S`: the 15 s, the 10 s stall, 5 s), and time over
+    15 s is noted.
+  - The host did not reattach in the 60 s after the harness saw Wi-Fi 2 connected with its 192.168.4.2 lease. That
+    adapter was never back. REBOOT deauthenticates nobody (`navicore_ota.h:184-204`), and Windows kept the old
+    association: its WLAN AutoConfig log has no event at all from the join (20:32:20) to the harness's own disconnect
+    (20:33:50), while the restarted access point dropped the station's frames. So `hil/wlan.py` `rejoin(reach=)` wants
+    a TCP connect to 192.168.4.1:80 within 10 s and otherwise re-associates the adapter - netsh disconnect, then the
+    temporary profile connected again, what Intellex's own bounce would do with its leash off - and the host gets 30 s
+    from that proof (`REATTACH_S`: its loop retries about every second, 5 s per open) (DX46).
+  - Intellex's bounce would not have fired either: it acts only on a wrong route (`host.py:1655-1671`), and a stale
+    association keeps the lease and the route. NaviCore's own measurement had Windows re-attach after ~11 s of dead
+    air (`navicore_ota.h:184-199`); on this bench's spare adapter (a TP-Link USB adapter) under the manual temporary
+    profile it did not in 90 s.
 - `wifi_ap_hop_reidentify` asserts the tool's state after a reload at each end (a connect made there is what rule 10
   guards) and notes whether the shim's `watchLink` switched it without one.
 - Dry runs (DX44): a real staged host, the real tools under Playwright and the harness bodies themselves, against a
@@ -998,7 +1045,10 @@ Intellex's chooser attaches an identified droid.
   `discover.ssid_for_host` reading a scratch file instead of netsh and `_on_ap` replaced: `wifi_discover`,
   `wifi_nc_tool`, `wifi_wizard_via_navicore`, `wifi_rterm_rate`, `wifi_link_loss` and `wifi_ap_hop_reidentify` pass
   there, and no network name reached session.log, the stage's log or the copied log. `wifi_bounce_scoped` ran only its
-  script, with `wifi_bounce` stubbed (its netsh is the test). Nothing joined, bounced or read the PC's WiFi.
+  script, with `wifi_bounce` stubbed (its netsh is the test). Nothing joined, bounced or read the PC's WiFi. The fake's
+  REBOOT closed its sockets and refused connects for 4 s, which a restarting access point does not do - it goes
+  silent, no FIN and no deauthentication - so the dry run passed `wifi_link_loss`; `hil/ws.py` `WsEndpoint` vanishes
+  the real way.
 
 #### IX-WP10: Flashing
 
@@ -1058,12 +1108,13 @@ cached listing. H1 just makes that deterministic.
 | Effort | 12 h. |
 | Bench | About 3 minutes per flash. |
 
-**Status (2026-09-29): written and dry-run; not yet run on the bench.** In `suites/s36_intellex_flash.py`, with
-`tests/intellex/specs/flash_board.spec.js`. Every row above is written, plus the `(should)` test
-`intellex.flash_refused_board_runs` for the new finding 18. The four W2 flashes (`flash_w2_update`, `flash_w2_full`,
-`flash_one_at_a_time`, `flash_refused_board_runs`) are behind `intellex_flash`; the Factory Reset behind the attended
-`intellex_flash_factory`; the NaviCore app behind `intellex_flash_navicore` (all registered in `hil/optin.py`,
-unticked).
+**Status (2026-09-29): bench-run in `20260929-203453`: `flash_w2_update`, `flash_w2_full`, `flash_one_at_a_time` and
+`flash_navicore_app` pass, `flash_refused_board_runs` fails as designed (finding 18), and the attended Factory Reset
+has not run.** In `suites/s36_intellex_flash.py`, with `tests/intellex/specs/flash_board.spec.js`. Every row above is
+written, plus the `(should)` test `intellex.flash_refused_board_runs` for finding 18. The four W2 flashes
+(`flash_w2_update`, `flash_w2_full`, `flash_one_at_a_time`, `flash_refused_board_runs`) are behind `intellex_flash`,
+the NaviCore app behind `intellex_flash_navicore`, both ticked since D74; the Factory Reset behind the attended
+`intellex_flash_factory`, unticked.
 
 - Identity (DX39): each W2 test reads W2's version and skips unless `results/builds/wcb-esp32-meshq`'s app carries it,
   checks the three files (the app's magic, version and size; the bootloader's magic; a table with app0 at 0x10000 and
@@ -1094,6 +1145,11 @@ unticked).
   progress read 0 throughout (finding 13). The harness bodies of `flash_w2_update`, `flash_refused_board_runs` and
   `flash_navicore_app` ran with the bench mocked; the refused flash ran `flash-id --after no-reset` alone, wrote
   nothing, and the host reattached the port with no reset (finding 18). No port was opened and nothing was flashed.
+- On the bench (`20260929-203453`): each W2 flash took 22-27 s and wrote exactly its mode's regions, every one
+  verified (Update 0xE000 and 0x10000; Flash 0x1000, 0x8000, 0xE000 and 0x10000), W2 running app0 before and after;
+  NaviCore answered PING again 19 s after the click, moved from app1 to app0 with the same App SHA256 (its FLASHED.md
+  row). Every progress reading was 0 (finding 13) and NaviCore's flash printed six `Deprecated` lines (finding 14):
+  both confirmed on the bench.
 
 #### IX-WP11: OTA through Intellex (opt-in `intellex_ota`)
 
@@ -1283,6 +1339,8 @@ suites that follow are not affected (the F21 precedent).
 | DX42 | `wifi_rterm_rate` counts each WCB's own USB console (the harness's hooks) and the re-arms the page wrote, and bounds each board at DX10's 6 a minute. A normal test, not `(should)`. | The console count is the effect, the page's frames the cause. Reading the current Wizard and shim finds no periodic re-arm, so a failure is a measurement to triage, not a known defect. |
 | DX43 | Finding 18's test drives the host's API with no page: a full flash of a seed with no bootloader, then `?VERSION` on W2's own port opened with both lines low; a stranded W2 is reset into its app. | The defect is the host's; the page adds nothing. Nothing is written either way: a refusal that did not hold would write the image W2 already runs. |
 | DX44 | The dry runs run the real staged host, the real tools under Playwright and the harness bodies against fakes: a fake pyserial for the host (a simulated W2 console, the NaviCore emulator), the repo's fake esptool, and a fake NaviCore endpoint on 127.0.0.1:80 that can turn into a W1 doorway; the staged `discover.ssid_for_host` reads a scratch file. None of it is committed. | No bench, no port, no netsh; the scaffolding stands in only for what the bench provides, so what runs is the code the bench run will run. |
+| DX45 | Finding 19's `(should)` is a board-free s32 test, `intellex.link_drop_no_stall`: a staged host attached to `hil/ws.py` `WsEndpoint` on 127.0.0.2:80, which vanishes (listener closed, the open socket kept open and silent). `wifi_link_loss` keeps only a 30 s notice limit and notes time over 15 s. | The stall is the host's, and needs no NaviCore restart, no WiFi and no servo to show: the stand-in reproduces the bench's verdict line, traceback and 10 s exactly, every run. 127.0.0.2 because `attach_validation` counts on 127.0.0.1:80 being closed. A normal bench test that fails on a known defect would hide a regression in the reattach it exists for. |
+| DX46 | `hil/wlan.py` `rejoin(reach=)`: connected with a lease is not back. The link must carry a TCP connect to the access point within 10 s, or the harness re-associates the adapter (netsh disconnect, the temporary profile connected again) and wants the connect then. `wifi_link_loss` times the reattach from that proof, 30 s. | Run `20260929-202852`: a REBOOT deauthenticates nobody, and Windows kept the stale association for 90 s with no WLAN event. Intellex's own remedy, the bounce, is leashed off here (and fires only on a wrong route), so the harness stands in for Windows; the reattach is then Intellex's alone. |
 
 ---
 
@@ -1295,3 +1353,4 @@ suites that follow are not affected (the F21 precedent).
 | 2026-09-29 | IX-WP3 to IX-WP6 bench-verified (`20260929-043806`, 54 `intellex.*`): 45 pass; the seven `(should)` tests fail as designed (findings 1-3, 5, 12-15); `ws_transport_navicore` skips until the PC's second adapter is on NaviCore's AP (IX-WP9) and `serial_device_loss_navicore` ran behind `intellex_reboot`, now ticked (D59). |
 | 2026-09-29 | IX-WP7 and IX-WP8 written: 15 tests in `suites/s34_intellex_tools.py` (the 13 plan rows, plus `(should)` tests for the new findings 16 and 17), specs `wizard_board.spec.js` and `nc_board.spec.js`, `tests/intellex/lib/board.js`. `run_intellex_test` gains `link_check` (the rawLink) and `recover`; `boot_check` and `reset_into_app`; opt-in `intellex_nc_save` registered, unticked. Finding 4 narrowed to W1's relay window. Status notes on IX-WP7 and IX-WP8; decisions DX26-DX33 (§4.5). Dry-run against simulated boards; not yet run on the bench. Commit `_(pending)_`. |
 | 2026-09-29 | IX-WP9 and IX-WP10 written: 13 tests. `suites/s35_intellex_wifi.py` (seven: discovery, the config tool and the Wizard over WiFi through NaviCore, the RTERM re-arm rate, the link lost to a NaviCore restart, and the attended AP hop and bounce) and `suites/s36_intellex_flash.py` (six: W2's Update, Flash and one-at-a-time, the `(should)` test for the new finding 18, the attended Factory Reset, NaviCore's app); `intellex.ws_transport_navicore` now joins NaviCore's AP itself. Specs `wifi_board.spec.js` and `flash_board.spec.js`, venv script `wifi_units.py`. `run_intellex_test` gains `seed`, `hide` and `hooks` (the bridge's `/hook`); `IntellexHost` and `copy_logs` take network names out; `hil/wlan.py` `rejoin`. Opt-ins `intellex_flash`, `intellex_flash_factory`, `intellex_flash_navicore` and `intellex_wifi_join` registered, unticked; the unattended WiFi tests use `navicore_wifi`. Finding 18; status notes on IX-WP9 and IX-WP10; decisions DX34-DX44 (§4.6). Dry-run against a fake endpoint, a simulated W2 and the fake esptool; not yet run on the bench. Commit `_(pending)_`. |
+| 2026-09-29 | IX-WP9 and IX-WP10 on the bench (`20260929-202852`, `20260929-203453`): 5 WiFi and 4 flash tests pass, the two attended WiFi tests skip, `flash_refused_board_runs` fails as designed. Findings 13, 14 and 18 confirmed on the bench; finding 19 (dropping a dead WebSocket link stalls the host 10 s) found by `wifi_link_loss`, with a board-free `(should)` `intellex.link_drop_no_stall` (`hil/ws.py` `WsEndpoint`). `wifi_link_loss` reworked: a 30 s notice limit, `wlan.rejoin(reach=)` re-associating a stale association, the reattach timed from a proven connect (DX45, DX46). Commit `_(pending)_`. |

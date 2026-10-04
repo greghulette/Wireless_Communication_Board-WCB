@@ -49,7 +49,10 @@ from suites.s46_navicore_boot import _line1, _restartable, _restarted, _uptime_m
 NC_WS = {"kind": "ws", "host": NC_AP_IP, "role": "navicore"}   # what Intellex's chooser attaches for a NaviCore
 RATE_S = 60                 # wifi_rterm_rate's window (INTELLEX.md IX-WP9)
 RATE_BOUND = 6              # DX10: at most 6 ?RTERM,START a minute on a board, one every 10 s
-NOTICE_S = 15               # the host notices a dead WiFi link within this (plan; ws_transport.py pings every 5 s)
+NOTICE_S = 15               # Intellex's own figure for noticing a vanished AP (ws_transport.py:66-76; its probe ~9 s)
+CLOSE_STALL_S = 10          # finding 19: dropping the dead link stalls the host for websockets' close_timeout
+NOTICE_LIMIT_S = NOTICE_S + CLOSE_STALL_S + 5   # wifi_link_loss: noticed at all; the 15 s is link_drop_no_stall's
+REATTACH_S = 30             # from the PC's link carrying a connect: the loop retries every ~1 s, 5 s per open
 PING = '{"type":"PING"}\n'
 PONG = b'"type":"PONG"'
 STARTED = "[RTERM] Session started"      # WCB_RemoteTerm.cpp startSession, printed for every START, re-arms included
@@ -314,18 +317,26 @@ def wifi_rterm_rate(bench):
 
 # ============================================================ the link lost: a NaviCore restart
 @test("intellex.wifi_link_loss", "A NaviCore REBOOT through an Intellex host attached to its access point: the host "
-      "notices within 15 s, never re-associates the adapter itself (--no-auto-bounce: no 're-associating' line), "
-      "attaches again once the access point is back and the PC holds a lease, and a page on the link gets a PONG again "
-      "(opt-in intellex_reboot, with navicore_wifi; 1 NaviCore restart; IX-WP9)", needs=["navicore"],
+      "notices the lost link (its /_api/status within 30 s: its own 15 s plus finding 19's 10 s stall), never "
+      "re-associates the adapter itself (--no-auto-bounce: no 're-associating' line), attaches again within 30 s of "
+      "the PC's link carrying a connect to the access point again, and a page on the link gets a PONG again (opt-in "
+      "intellex_reboot, with navicore_wifi; 1 NaviCore restart; IX-WP9)", needs=["navicore"],
       opt_in="intellex_reboot")
 def wifi_link_loss(bench):
     """Intellex src/ws_transport.py (a ping every 5 s, 10 s to answer) and host.py reconnect_loop (an idle-gated TCP
     probe; with --no-auto-bounce never wifi_bounce): a restart takes NaviCore's access point down, and the host must
-    notice, keep the target and attach again by itself. What brings the adapter back is not Intellex's: Windows
-    reassociates through a profile in auto mode, and pc_on_ap's temporary profile is manual, so hil/wlan.py rejoin
-    connects it again after 30 s without an association, and says which happened. REBOOT goes through the link (a raw
-    /_link page), is ACKed, and restarts NaviCore 250 ms later (NaviCore.ino); proved by its uptime over USB. Inside
-    nc_guard, skipped while the recorder holds anything (D33), as every NaviCore restart."""
+    notice, keep the target and attach again by itself. REBOOT goes through the link (a raw /_link page), is ACKed, and
+    restarts NaviCore 250 ms later (NaviCore.ino); proved by its uptime over USB. Inside nc_guard, skipped while the
+    recorder holds anything (D33), as every NaviCore restart.
+
+    Run 20260929-202852 set the shape. Noticing: the probe declared the link dead 11.8 s after the REBOOT, then the
+    host answered nothing for 10 s while it closed the dead WebSocket on its event loop (INTELLEX.md finding 19), so
+    /_api/status showed the loss at 21.9 s. That stall is pinned by the board-free (should) test
+    intellex.link_drop_no_stall; here the notice only has to come within NOTICE_LIMIT_S, and over NOTICE_S is noted.
+    What brings the PC's link back is not Intellex's here (its bounce is leashed off), and "connected with a lease" did
+    not: REBOOT deauthenticates nobody, and Windows kept the old association for 90 s with no WLAN event while the
+    restarted AP dropped its frames. So hil/wlan.py rejoin(reach=) proves a TCP connect to 192.168.4.1:80 and
+    re-associates the adapter when there is none, and the host is timed from that proof."""
     if "navicore_wifi" not in optin.enabled(bench.cfg):
         raise Skip(optin.skip_reason("navicore_wifi"))
     _free_of_others(bench)
@@ -349,14 +360,16 @@ def wifi_link_loss(bench):
                 m = g.nc.dev.mark()
                 t_cmd = time.monotonic()
                 a.send('{"type":"REBOOT"}\n')
-                st, took = _wait_status(host, lambda s: not s.get("attached"), NOTICE_S + 15)
+                st, took = _wait_status(host, lambda s: not s.get("attached"), NOTICE_LIMIT_S)
                 if took is None:
-                    problems.append(f"the host still called the link attached {NOTICE_S + 15} s after the REBOOT")
+                    problems.append(f"the host still called the link attached {NOTICE_LIMIT_S} s after the REBOOT")
                 else:
                     facts["noticed_s"] = round(took, 1)
+                    dead = next((x for x in host.lines if "link is dead" in x), None)
+                    facts["verdict"] = dead is not None     # the probe's line (host.py reconnect_loop)
                     if took > NOTICE_S:
-                        problems.append(f"the host noticed the lost link {took:.1f} s after the REBOOT, over "
-                                        f"{NOTICE_S} s")
+                        facts["over_notice"] = (f"{took - NOTICE_S:.1f} s over Intellex's own {NOTICE_S} s: its close "
+                                                f"stall (INTELLEX.md finding 19, intellex.link_drop_no_stall)")
                 closing = time.monotonic() + 5.0          # the close frame follows the drop by a moment
                 while a.closed is None and time.monotonic() < closing:
                     time.sleep(0.1)
@@ -371,11 +384,11 @@ def wifi_link_loss(bench):
                 up = _uptime_ms(g.nc)
                 if not _restarted(up, (time.monotonic() - t_cmd) * 1000):
                     problems.append(f"NaviCore's uptime {up} ms: the REBOOT through the link did not restart it")
-                facts["rejoin"] = wlan.rejoin(bench, name, ssid, "NaviCore's")
-                st, took = _wait_status(host, lambda s: bool(s.get("attached")), 60)
+                facts["rejoin"] = wlan.rejoin(bench, name, ssid, "NaviCore's", reach=(NC_AP_IP, 80))
+                st, took = _wait_status(host, lambda s: bool(s.get("attached")), REATTACH_S)
                 if took is None:
-                    problems.append(f"the host did not attach again within 60 s of the PC's lease "
-                                    f"({status_view(st, (ssid,))})")
+                    problems.append(f"the host did not attach again within {REATTACH_S} s of {NC_AP_IP}:80 taking a "
+                                    f"connect from this PC ({status_view(st, (ssid,))})")
                 else:
                     facts["reattached_s"] = round(took, 1)
                     b = LinkTap(host.port, name="B")
