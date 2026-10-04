@@ -58,11 +58,6 @@ test('wizard.push_fake_card_edits one edit on each card push_fake leaves out sen
 });
 
 test('wizard.push_fake_kyber_own_maestro (should) a local-Kyber board with a Maestro of its own and one on another board, pulled and pushed with no edit, sends nothing (W-20)', async ({ page }) => {
-  test.fail(true, 'W-20: the backup lists the Maestro table before ?KYBER,LOCAL (WCB.ino collectConfigCommands: the Kyber claims ' +
-                  'late), so the parser files WCB2\'s Maestro as a target first and appends the board\'s own from the KYBER line ' +
-                  '(parser.js:688-701, :878-881); autoComputeKyberTargets puts the live boards\' Maestros first (app.js:9901-9916). ' +
-                  'The same targets in another order make kyberChanged true (parser.js:1424-1427): the push re-sends ?KYBER,CLEAR ' +
-                  'and ?KYBER,LOCAL, and a KYBER line reboots the board (commandStringNeedsReboot)');
   await openWizard(page);
   // In collectConfigCommands' order: KYBER,CLEAR early (board()), the Maestro table, then KYBER,LOCAL with its targets.
   await pullFake(page, 1, board(['BAUD,S1,57600', 'BAUD,S2,115200', 'LABEL,S2,Kyber Maestro', 'BCAST,OUT,S2,OFF',

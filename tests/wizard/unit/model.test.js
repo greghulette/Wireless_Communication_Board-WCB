@@ -198,7 +198,7 @@ test('W-17 (should): a system file keeps the WCB quantity it was saved with when
   assert.deepEqual(back.boards.map((x) => x.wcbQuantity), [2, 2, 2, 2]);
 });
 
-test('W-20 (should): the same Kyber targets in another order are not a change', { todo: 'W-20: kyberChanged compares the target lists as JSON, order included (parser.js:1424-1427)' }, () => {
+test('W-20 (should): the same Kyber targets in another order are not a change', () => {
   const base = chain('?MAESTRO,M1:W1S1:57600', '?MAESTRO,M2:W2S1:57600', '?KYBER,LOCAL,S2,M1:W1S1:57600,M2:W2S1:57600');
   assert.deepEqual(base.kyber.targets.map((t) => t.id), [2, 1], 'the parse order the backup gives: the table\'s proxy first');
   const cfg = clone(base);

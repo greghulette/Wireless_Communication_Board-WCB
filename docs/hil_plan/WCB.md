@@ -456,7 +456,8 @@ Behaviour that lives in app.js goes to WP41. **U, needs no board, M.**
 > every field of the model, so a field added later without a `diffConfigs` line fails it (the six fields have been in
 > `diffConfigs` since W-11); row 4 (the mapping and PWM-output round trip, and that an added or edited mapping re-sends
 > the table while a removed mapping or output port builds nothing - left as found); row 8 (every claim); row 9 (WiFi,
-> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s. Rows 1, 2, 5, 6 and 7
+> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s (W-20's guards its fix
+> since 2026-10-04). Rows 1, 2, 5, 6 and 7
 > were already pinned (`roundtrip.test.js` W-1, W-2, W-3, W-6; `pull.test.js` W-7).
 
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
@@ -798,7 +799,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13, W-14 and W-19 are fixed (each row says how); W-15 to W-18, W-20 and W-21 are not.
+> **Status 2026-10-04:** W-13, W-14, W-19 and W-20 are fixed (each row says how); W-15 to W-18 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -848,6 +849,9 @@ fix; per the conventions, each fix also needs its doc row.
   :688-701); autoComputeKyberTargets puts the live boards' Maestros first (app.js:9901-9916); and kyberChanged compares
   the lists as JSON, order included (parser.js:1424-1427). `wizard.push_fake_kyber_own_maestro`; a `todo` in
   `unit/model.test.js`.
+  **Fixed:** the targets compare as a set (`_kyberTargetsKey`, parser.js), in kyberChanged and in diffConfigs: the
+  board forwards to every target whatever the list's order (forwardDataFromKyber, WCB_Maestro.cpp). Both tests guard it
+  (the unit test is no longer a `todo`).
 - **W-21** Removing a bidirectional serial mapping clears only the source board (removeMappingRow, app.js:3939-3979).
   _removeBidirRows drops the destination's mirrored row from the page and sends nothing (app.js:3981-3992), and a push
   never clears a removed mapping (parser.js:1689-1702), so the reverse mapping stays on the destination board.

@@ -834,7 +834,7 @@ the bench lacks its wiring).
 | `wizard.app_fake_wcb_number_above_floor` | A board above the WCB quantity can be renumbered to any number its dropdown offers (no board) | — (WCB.md W-18) |
 | `wizard.app_fake_pull_leaves_nothing_pending` | Pulling a board leaves nothing pending in General: no 'push to all boards' toast, Push All not flagged (no board) | — (WCB.md W-19) |
 | `wizard.push_fake_kyber_own_maestro` | A local-Kyber board with a Maestro of its own and one on another board, pulled and pushed with no edit, sends nothing (no board) | — (WCB.md W-20) |
-| `wizard.parser` (`unit/model.test.js` todo) | The same Kyber targets in another order are not a change (noted, not failed) | — (WCB.md W-20) |
+| `wizard.parser` (`unit/model.test.js`) | The same Kyber targets in another order are not a change | — (WCB.md W-20) |
 | `wizard.editors_fake_bidir_remove` | Removing a bidirectional serial mapping also clears its mirror on the destination board (no board) | — (WCB.md W-21) |
 | `wizard.mapping_bidir_relay` | On the bench: Remove on W1 clears W2's reverse mapping too (the harness clears what is left) | — (WCB.md W-21) |
 | `intellex.nc_via_usb_doorway` | The NaviCore config tool reached through W1 over USB is in Via WCB after every connect, a reload inside W1's relay window included, so "Update over USB (OTA)" cannot send `?OTALOCAL` to W1 | — (INTELLEX.md finding 4) |
@@ -1009,7 +1009,7 @@ must ignore a mapping row's UI-only `bidir` key and a Maestro table's key order,
 a push changes the command characters in: checked against a model of the firmware's `delimCharOk`/`prefixCharOk` for
 every combination of seven characters, including every refusal's two-push advice (`docs/hil_plan/WCB.md` §3,
 W-1 to W-11).
-`unit/model.test.js` walks the rest of the model a push writes (WCB-WP40): `diffConfigs` must report a change to every field a push writes, serial and PWM mappings round-trip (an added or edited mapping re-sends the whole table; a removed one builds nothing, because no push clears a mapping), `evaluatePortClaims` for each device, mapping and Kyber mode, WiFi JOIN/AP/OFF (fake SSIDs only), the WDP OFF forms, and Kyber local. Two `todo` tests pin the parser halves of W-17 and W-20.
+`unit/model.test.js` walks the rest of the model a push writes (WCB-WP40): `diffConfigs` must report a change to every field a push writes, serial and PWM mappings round-trip (an added or edited mapping re-sends the whole table; a removed one builds nothing, because no push clears a mapping), `evaluatePortClaims` for each device, mapping and Kyber mode, WiFi JOIN/AP/OFF (fake SSIDs only), the WDP OFF forms, and Kyber local. A `todo` test pins the parser half of W-17; W-20's (the same Kyber targets in another order are not a change) passes and guards its fix.
 Note `kyber.targets` (Maestros on other boards) is derived — the Wizard recomputes it from every connected board at
 push time — so the round-trip comparisons leave it out.
 
@@ -1444,7 +1444,8 @@ that must time a step with the bench asks the harness through a bridge hook (§5
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-10-04 | _(pending)_ | **W-14 fixed** (`hil_plan/WCB.md` §3): a push that reboots a board on the shared port pulls it again (`_pullAfterSharedReboot`): 3 s after its boot banner, as the direct path pulls 3 s after its reconnect. `wizard.push_fake_shared_reboot_repull` passes and guards it (its `test.fail` is gone); `wizard.push_reboot_path` (bench, not re-run) still pulls once more itself, after the Wizard's pull. |
+| 2026-10-04 | _(pending)_ | **W-20 fixed** (`hil_plan/WCB.md` §3): a local Kyber's targets compare as a set (`_kyberTargetsKey`, parser.js), in the push's kyberChanged and in diffConfigs, so a no-edit push of a local-Kyber board with its own Maestro and another board's sends nothing. `wizard.push_fake_kyber_own_maestro` passes (its `test.fail` is gone) and the `unit/model.test.js` W-20 test is no longer a `todo`. |
+| 2026-10-04 | `8832b0d` | **W-14 fixed** (`hil_plan/WCB.md` §3): a push that reboots a board on the shared port pulls it again (`_pullAfterSharedReboot`): 3 s after its boot banner, as the direct path pulls 3 s after its reconnect. `wizard.push_fake_shared_reboot_repull` passes and guards it (its `test.fail` is gone); `wizard.push_reboot_path` (bench, not re-run) still pulls once more itself, after the Wizard's pull. |
 | 2026-10-04 | `537fe01` | **W-19 fixed** (`hil_plan/WCB.md` §3): a first pull or a file load mirrors the board's General values with the change notice held (`_mirrorGeneral`), so nothing toasts "push to all boards" and Push All stays green. `wizard.app_fake_pull_leaves_nothing_pending` passes and guards it (its `test.fail` is gone). |
 | 2026-10-04 | `9339c84` | **W-13 fixed** (`hil_plan/WCB.md` §3): the Wizard's immediate sends read the board's live function identifier (`_liveFuncChar`) and command character (`_liveCmdChar`), never the General value not yet pushed. `wizard.app_fake_pending_funcchar` passes and guards it (its `test.fail` is gone). |
 | 2026-10-04 | _(pending)_ | `hil/wlan.py` `pc_on_ap(reach=)`: a join's lease must also carry a TCP connect to the access point, or the harness renews the lease (`ipconfig /release`, `/renew` on that adapter only) and then re-associates once; s45 `_on_ap` asks it of NaviCore's port 80, for every `ncwifi` and Intellex WiFi test. In `20261004-125412` three NaviCore joins held a lease and carried nothing; `20261004-130438` passed all six unattended Intellex WiFi tests with it. IX-WP9/10 bench-verified (`hil_plan/INTELLEX.md`). |
