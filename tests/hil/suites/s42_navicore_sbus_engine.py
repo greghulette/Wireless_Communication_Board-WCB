@@ -298,6 +298,8 @@ def _press(ctl, i, hold_s):
 
 
 def _taps(nc, since, mode, slot):
+    """[(host time, tap number)] of the rc_trig lines for matrix `slot` in `mode` since mark `since`: the tap alone,
+    where s41 _rc_trigs keeps (mode, btn, tap)."""
     return [(ts, k[2]) for ts, k in _rc_trigs(nc, since, {(mode, slot)})]
 
 
