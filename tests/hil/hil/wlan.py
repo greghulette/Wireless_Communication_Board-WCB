@@ -175,7 +175,7 @@ SPARE_ONLY_SKIP = ("the only WiFi adapter on this PC carries its default route, 
 
 
 @contextlib.contextmanager
-def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False):
+def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None):
     """The PC's chosen WiFi adapter on the access point `ssid` for the block, holding a 192.168.4.x lease from it ->
     the adapter's name; Skip where that cannot be done here. `whose` names the AP in messages ("W1's"); the SSID is
     never quoted. Windows side: a temporary profile named HIL-<ssid> on the chosen adapter only, never one of the
@@ -185,7 +185,10 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False):
     every network name scrubbed; they carry no key. On the way out the adapter goes back to the network it was on, and
     failing to is added to `problems` (and noted, for when the block raised). No association in 30 s, or no lease in
     ADDR_WAIT_S, raises after the same cleanup. spare_only: Skip rather than take the adapter that carries the PC's
-    default route (NaviCore's tests, D-NC14; s28's take it when it is the only one)."""
+    default route (NaviCore's tests, D-NC14; s28's take it when it is the only one). reach ((host, port)): the lease
+    must also carry a TCP connect there (_carries), as rejoin's must. In run 20261004-125412 three NaviCore joins held a
+    lease and carried nothing (a connect to NaviCore timed out) while two others worked; in 20261004-130438, with this
+    check, all fifteen carried a connect at once. The cause is not known; the check costs nothing when the link works."""
     if os.name != "nt":
         raise Skip("netsh (Windows) drives the PC's WiFi here")
     adapter, why = pick_adapter(bench)
@@ -227,6 +230,8 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False):
         if not addr:
             raise AssertionError(f"{name} associated with {whose} access point but got no 192.168.4.x lease in {secs} s "
                                  f"({renewed or 'no renew'}; it holds {ipv4(name) or 'no address'})")
+        if reach is not None:
+            _carries(bench, name, ssid, whose, addr, reach)
         yield name
     finally:
         try:
@@ -251,6 +256,38 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False):
                 else:
                     problems.append(msg + ": reconnect it by hand")
                     bench.note(problems[-1])
+
+
+def _carries(bench, name, ssid, whose, addr, reach):
+    """After pc_on_ap's lease: a TCP connect to `reach` within REACH_WAIT_S, or - once each - a fresh DHCP exchange on
+    this adapter alone (ipconfig /release then /renew: a new lease, and the access point learns this station's address
+    again), then a re-association of the temporary profile. Still nothing is noted, not raised: a test that expects the
+    port closed decides for itself, and the others fail on their own first connect."""
+    target = f"{reach[0]}:{reach[1]}"
+    got = reach_wait(*reach)
+    if got is not None:
+        bench.note(f"{name}: {target} took a connect {got} s after the lease")
+        return
+    bench.note(f"{name} holds {addr} but {target} took no connect in {REACH_WAIT_S:.0f} s: the harness renews the lease")
+    for args in (["ipconfig", "/release", name], ["ipconfig", "/renew", name]):
+        try:
+            subprocess.run(args, capture_output=True, text=True, timeout=40)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    addr2, secs, _ = address_wait(name)
+    got = reach_wait(*reach) if addr2 else None
+    if got is not None:
+        bench.note(f"{name}: after the renew, lease {addr2} and {target} took a connect {got} s later")
+        return
+    bench.note(f"{name}: after the renew ({addr2 or 'no lease'} in {secs} s) {target} still took no connect: the "
+               f"harness re-associates {name} once")
+    netsh("disconnect", f"interface={name}")
+    _connect_tmp(bench, name, ssid, whose, "re-associating a link that carried nothing")
+    addr3, secs, _ = address_wait(name)
+    got = reach_wait(*reach) if addr3 else None
+    bench.note(f"{name}: re-associated, " + (f"lease {addr3} {secs} s after" if addr3 else f"no lease in {secs} s")
+               + (f"; {target} took a connect {got} s later" if got is not None
+                  else f"; {target} still took no connect in {REACH_WAIT_S:.0f} s"))
 
 
 def default_routes():

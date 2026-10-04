@@ -806,6 +806,11 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     controller's tests bench-verified (`20261004-124219`); `wizard.app_fake_relay_card` polls (`20261004-123158`); the
     three flakes pass on rerun. Next: the Intellex agent finishes `wifi_link_loss` (stale association) and the three
     flash tests, then a full run tonight.
+  - 2026-10-04 14:05: phase 3's IX-WP9/10 bench-verified: the Intellex agent's fixes merged (finding 19, the stale
+    association after NaviCore's REBOOT, W2's probes released before esptool resets it) and the NaviCore WiFi join
+    now proves its link (`pc_on_ap(reach=)`); `20261004-125412` (flash) and `20261004-130438` (WiFi, with `ncwifi`)
+    leave only designed `(should)` failures. Next: a full run after phase 3, then IX-WP11/12 (OTA through Intellex,
+    online features) and phase 4 as Greg decides; IX-WP13 is attended.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests

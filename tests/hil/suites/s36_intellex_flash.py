@@ -242,9 +242,10 @@ def park_probes(bench, wcb):
     """Release every probe channel bound to a port of WCB `wcb` before esptool resets it into its ROM loader -> how
     many. A bound channel's TX drives that WCB's RX line high (a UART idles high); a released one is a weak pull-up
     (wcb_probe unbindChannel). In full run 20260929-203948 every write-flash on W2 failed to reach download mode
-    ('Wrong boot mode detected (0x17)', all 38 tries) with probe2 bound to W2's S1, S3, S4 and S5 - S3's RX is GPIO4,
-    which the ESP32 latches at reset - while the same flashes passed in 20260929-203453, where no probe had bound a
-    channel since its boot. The next test that wires a port binds it again (hil/links.py bind)."""
+    ('Wrong boot mode detected (0x17)', all 38 tries) with probe2 bound to W2's S1, S3, S4 and S5 - RX pins GPIO21, 4, 27
+    and 26 on hardware 2.4, none a strapping pin; a TX held high into a chip under reset can back-power it through the
+    pin's protection diode - while the same flashes passed in 20260929-203453, where no probe had bound a channel since
+    its boot. The mechanism is a correlation, not proven. The next test that wires a port binds it again (hil/links.py bind)."""
     n = 0
     for link in bench.links.all():
         if link.wcb == wcb and link.channel is not None:

@@ -303,7 +303,7 @@ def _on_ap(bench, problems):
     if ap is None:
         raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
     ssid, pw = ap
-    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True) as name:
+    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, reach=(NC_AP_IP, 80)) as name:
         yield nc, cfg, name
 
 
