@@ -574,6 +574,9 @@ test('wizard.app_fake_relay_card a MgmtRelay gets its card anchored at its numbe
   expect(await card.textContent()).toContain('Relaying2 board(s)');
   expect(await card.locator('button', { hasText: 'Manage via relay' }).count()).toBe(2);
 
+  // Each board's pulled chain carries the alias its WDP advert names (W2 'Dome', WCB3 'Legs'), as a real board's does:
+  // with none, the Wizard took the advert's alias for an edit whenever the advert landed after the pull, and Push All
+  // below sent ?ALIAS (full run 20261004-133802; alone the advert came first).
   // Manage all: both armed at once (RTERM,START x3 each), then pulled one after the other.
   await page.evaluate(() => { __fake.log.length = 0; window.__all = relayRouteAll(19); });
   const pulls = () => page.evaluate(() => __fake.sent(19).filter((s) => /MGMT,PULL,\d+,P$/.test(s)));
@@ -583,9 +586,9 @@ test('wizard.app_fake_relay_card a MgmtRelay gets its card anchored at its numbe
   await expect.poll(() => page.evaluate(() => __fake.sent(19).filter((s) => s.includes('RTERM,START'))
     .map((s) => s.split(',')[2]).sort()), { timeout: 3000 }).toEqual(['2', '2', '2', '3', '3', '3']);
   expect(await pulls(), 'WCB3 waits for WCB2\'s reply').toEqual(['?MGMT,PULL,2,P']);
-  await page.evaluate((l) => boardConnections[19]._handleLine(l), `[MGMT:CONFIG,2]${reply(chain(board([], { wcb: 2 })))}`);
+  await page.evaluate((l) => boardConnections[19]._handleLine(l), `[MGMT:CONFIG,2]${reply(chain(board(['ALIAS,Dome'], { wcb: 2 })))}`);
   await expect.poll(pulls).toEqual(['?MGMT,PULL,2,P', '?MGMT,PULL,3,P']);
-  await page.evaluate((l) => boardConnections[19]._handleLine(l), `[MGMT:CONFIG,3]${reply(chain(board([], { wcb: 3 })))}`);
+  await page.evaluate((l) => boardConnections[19]._handleLine(l), `[MGMT:CONFIG,3]${reply(chain(board(['ALIAS,Legs'], { wcb: 3 })))}`);
   await page.evaluate(() => window.__all);
   await page.waitForTimeout(800);            // each pull that lands re-arms its terminal again, 3 x 250 ms
   expect(await page.evaluate(() => [remoteRelayForBoard[2], remoteRelayForBoard[3], !!boardBaselines[2], !!boardBaselines[3]]))

@@ -811,6 +811,10 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     now proves its link (`pc_on_ap(reach=)`); `20261004-125412` (flash) and `20261004-130438` (WiFi, with `ncwifi`)
     leave only designed `(should)` failures. Next: a full run after phase 3, then IX-WP11/12 (OTA through Intellex,
     online features) and phase 4 as Greg decides; IX-WP13 is attended.
+  - 2026-10-04 19:15: the full run after phase 3 (`20261004-133802`): 994 pass, 70 `(should)` as designed, five
+    others that all pass on rerun (`20261004-190017`); W2 intermittently refuses esptool's reset into its ROM
+    loader (hardware). Greg is back and adding bench hardware (a WCB v3.2 and a probe, see the gaps in §7 and
+    WCB-WP59). Next: phase 4 (`run.py` and the GUI cover all three; docs current), then the new boards' tests.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
   and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
