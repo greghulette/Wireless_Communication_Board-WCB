@@ -815,10 +815,17 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
     others that all pass on rerun (`20261004-190017`); W2 intermittently refuses esptool's reset into its ROM
     loader (hardware). Greg is back and adding bench hardware (a WCB v3.2 and a probe, see the gaps in §7 and
     WCB-WP59). Next: phase 4 (`run.py` and the GUI cover all three; docs current), then the new boards' tests.
+  - 2026-10-04 19:40: phase 4's core holds: one `run.py` and one GUI drive all three systems (1,088 tests, every
+    device kind checked, 34 opt-ins), the board-free checks pass (self-test 120/120, Wizard unit 85 + 3 todo, host
+    tests), and §6's summary is current. Left for Greg: IX-WP14's Intellex `CLAUDE.md` hooks note and filing
+    Intellex findings 1-5, 8, 10 (his repo); DX12's CI job; IX-WP11/12; the new boards' tests once wired.
 - **Done:** the review (all 28 suites); the §5 fixes; every §7 work package that can run here, as the suites
   `s24`-`s29` and `s31`, `tests/wizard/unit/devices.test.js` and `wizard.kyber_auto_targets`; F1-F10, F12, F13, F20
-  and F21 fixed on Greg's decisions. 499 tests registered; `selftest.py` 48/48; Wizard unit tests 36/36; host tests
-  `wdp_wire_test` and `config_parts_test` pass; every no-board Playwright spec passes.
+  and F21 fixed on Greg's decisions. Since then the away week's three phases (the progress notes below): on
+  2026-10-04 1,088 tests are registered across the WCBs (with the Wizard's 71), NaviCore (about 300: `nc*`,
+  `navicore`, `nctool`, `sbus`) and Intellex (83), one `run.py` and one GUI drive them all (every device kind has
+  its Check, every opt-in its box: 34), `selftest.py` passes 120/120, the Wizard unit tests 85 with 3 `todo` pins
+  (W-17, W-20 and a latent NaviCore tool defect), both host tests pass, and CI's Wizard tests pass.
 - **Verified on the bench:** the runs in §5; full run `20260924-092602` with servos (459 pass, 6 fail, 8 skip, every
   failure triaged in §5); the F5-F10 runs `20260924-120036` and `20260924-120958`; and the F12 runs `20260924-131417`
   and `20260924-133332`; the F13 runs `20260924-181517` and `20260924-190431` (27/27); the full run `20260924-190733` on the
