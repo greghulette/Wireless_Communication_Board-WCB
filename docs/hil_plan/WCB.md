@@ -872,7 +872,7 @@ fix; per the conventions, each fix also needs its doc row.
   the lists as JSON, order included (parser.js:1424-1427). `wizard.push_fake_kyber_own_maestro`; a `todo` in
   `unit/model.test.js`.
   **Fixed:** the targets compare as a set (`_kyberTargetsKey`, parser.js), in kyberChanged and in diffConfigs: the
-  board forwards to every target whatever the list's order (forwardDataFromKyber, WCB_Maestro.cpp). Both tests guard it
+  board forwards to every target whatever the list's order (forwardDataFromKyber, WCB.ino). Both tests guard it
   (the unit test is no longer a `todo`).
 - **W-21** Removing a bidirectional serial mapping clears only the source board (removeMappingRow, app.js:3939-3979).
   _removeBidirRows drops the destination's mirrored row from the page and sends nothing (app.js:3981-3992), and a push

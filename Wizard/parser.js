@@ -1878,7 +1878,7 @@ function _mappingsKey(list) {
 }
 
 // A local Kyber's targets as a set, for comparing. The board forwards to each target whatever the list's order
-// (forwardDataFromKyber walks kyberTargets[], WCB_Maestro.cpp), and the order differs by source: a pull lists the
+// (forwardDataFromKyber walks kyberTargets[] per byte, WCB.ino), and the order differs by source: a pull lists the
 // Maestro table's proxies before the KYBER line's own (collectConfigCommands, WCB.ino, claims the Kyber late), and
 // autoComputeKyberTargets (app.js) puts the live boards' Maestros first. Compared in order, the same targets were a
 // change: a no-edit push re-sent ?KYBER,CLEAR and ?KYBER,LOCAL, and a KYBER line reboots the board (W-20).
