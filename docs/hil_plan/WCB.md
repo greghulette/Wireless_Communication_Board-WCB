@@ -801,7 +801,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 to W-16, W-19 and W-20 are fixed (each row says how); W-17, W-18 and W-21 are not.
+> **Status 2026-10-04:** W-13 to W-16 and W-18 to W-20 are fixed (each row says how); W-17 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -846,6 +846,9 @@ fix; per the conventions, each fix also needs its doc row.
 - **W-18** A board above the WCB quantity cannot be renumbered past it: its dropdown offers numbers up to its own
   (app.js:3194-3202), but onWCBNumberChange takes only numbers up to the General quantity (app.js:2080-2081), so the pick
   shows and is dropped. `wizard.app_fake_wcb_number_above_floor`.
+  **Fixed:** onWCBNumberChange takes any number the firmware takes (1-20, updateWCBNumber in WCB.ino), which covers
+  every number the dropdown offers; and a quantity change refreshes the number dropdowns from each board's own number,
+  never below it, where it used to clamp them to the quantity.
 - **W-19** A first pull (and a file load) mirrors the board's values into General through the handlers for a user's edit
   (app.js:8971-8973), each of which toasts "Changes pending — push to all boards to apply" and sets
   generalSettingsDirty (app.js:1212-1216): Push All is flagged after every first connect, with nothing to push.

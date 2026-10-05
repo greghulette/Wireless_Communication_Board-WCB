@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.20:05.R.OCT.2026';
+const UI_VERSION = '04.20:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1284,12 +1284,13 @@ function onWCBQuantityChange() {
   systemConfig.general.wcbQuantity = qty;
   updateGeneralBaseline();   // as every General handler does: the next pull compares the quantity too (W-16)
   renderBoards(qty);
-  // Update all existing board WCB-number dropdowns to reflect new range
+  // Update all existing board WCB-number dropdowns to reflect new range - never below a board's own number, which can
+  // sit above the quantity (WDP joins boards there): clamped, the dropdown showed a number the config did not hold (W-18).
   for (let n = 1; n <= qty; n++) {
     const numSel = document.getElementById(`b${n}-wcb-number`);
     if (numSel) {
-      const cur = parseInt(numSel.value) || n;
-      populateWCBDropdown(numSel, qty, Math.min(cur, qty), true);
+      const cur = boardConfigs[n]?.wcbNumber || parseInt(numSel.value) || n;
+      populateWCBDropdown(numSel, Math.max(qty, cur), cur, true);
     }
   }
 }
@@ -2104,8 +2105,10 @@ function onWCBNumberChange(n) {
   const sel = document.getElementById(`b${n}-wcb-number`);
   if (!sel) return;
   const val = parseInt(sel.value);
-  const qty = systemConfig?.general?.wcbQuantity || WCB_MAX;
-  if (boardConfigs[n] && val >= 1 && val <= qty) boardConfigs[n].wcbNumber = val;
+  // Any number the firmware takes (1..MAX_WCB_COUNT, updateWCBNumber in WCB.ino), not just up to the quantity: the
+  // dropdown offers up to the quantity or the board's own number, whichever is higher (populateUIFromConfig), since WDP
+  // joins boards above the quantity - and a pick above the quantity showed in the dropdown and was dropped (W-18).
+  if (boardConfigs[n] && val >= 1 && val <= WCB_MAX) boardConfigs[n].wcbNumber = val;
   updateBoardAliasUI(n);   // header reads "WCB {wcbNumber} (Alias)"
   onBoardFieldChange(n);
 }

@@ -494,9 +494,6 @@ test('wizard.app_fake_identity the identity fields: the LED pin shows for 3.x bo
 });
 
 test('wizard.app_fake_wcb_number_above_floor (should) a board above the WCB quantity can be renumbered to any number its dropdown offers (W-18)', async ({ page }) => {
-  test.fail(true, 'W-18: populateUIFromConfig offers numbers up to the board\'s own (app.js:3196-3202), but onWCBNumberChange takes ' +
-                  'only numbers up to the General quantity (app.js:2080-2081): WCB5 on a WCBQ 2 mesh shows 4 picked while the ' +
-                  'config keeps 5, and the push sends nothing');
   await openWizard(page);
   await pullFake(page, 1, board([], { wcb: 5, wcbq: 2 }));       // migrates to slot 5
   expect(await page.evaluate(() => [...document.getElementById('b5-wcb-number').options].map((o) => o.value)))
