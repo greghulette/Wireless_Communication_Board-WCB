@@ -112,6 +112,19 @@ def wheel_steps(ev):
     return -ev.delta if sys.platform == "darwin" else int(-ev.delta / 120)
 
 
+def mac_no_zoom(win):
+    """Take the green zoom button off a macOS window before it is first shown; the window still resizes by its edges.
+    The python.org Python 3.9 on the bench Mac ships Tk 8.6.8, which aborts the whole process (NSInvalidArgumentException,
+    'Unlocking Focus on wrong view (<_NSThemeZoomWidget>)') when that button is clicked on macOS 15 - fixed in Tk 8.6.10.
+    "standardFloating" is the close and minimise buttons."""
+    if sys.platform != "darwin":
+        return
+    try:
+        win.tk.call("::tk::unsupported::MacWindowStyle", "style", win._w, "document", "closeBox collapseBox resizable")
+    except tk.TclError:
+        pass
+
+
 def _dark_titlebar(win):
     """The Windows title bar is OS chrome, not Tk: it stays white unless the window asks for the dark
     one. DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on current Windows 10/11 and 19 on early 1809-1903
@@ -1436,6 +1449,7 @@ class App:
         if not runs:
             return
         win = tk.Toplevel(self.root)
+        mac_no_zoom(win)
         win.title("Paused runs")
         win.configure(bg=THEME["bg"])
         win.transient(self.root)
@@ -2148,6 +2162,7 @@ def main():
     except Exception:
         pass
     root = tk.Tk()
+    mac_no_zoom(root)
     app = App(root)
     _dark_titlebar(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
