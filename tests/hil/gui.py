@@ -66,6 +66,8 @@ checkpoint.freeze_harness(HERE)   # the sources this process runs, for the resum
 BENCH_PATH = os.path.join(HERE, "bench.json")
 RESULTS = os.path.join(HERE, "results")
 
+OPTIN_MAX_H = 240   # px: the opt-in panel scrolls past this, so the test table below always keeps its height
+
 FONT = ("Segoe UI", 10)
 BOLD = ("Segoe UI", 10, "bold")
 MONO = ("Consolas", 9)
@@ -926,7 +928,30 @@ class App:
         self.no_servos_check = ttk.Checkbutton(head, text=f"No moving servos (skips {n} tests)",
                                                variable=self.no_servos_var, command=self.on_no_servos_toggle)
         self.no_servos_check.pack(side="right")
-        self.optin_body = ttk.Frame(box, padding=(4, 4, 0, 0))
+        # Open, the 35 opt-ins in two columns are ~700 px tall: on a MacBook they pushed the test table, and the run's
+        # progress in it, off the window. They scroll inside a strip at most OPTIN_MAX_H tall instead.
+        self.optin_outer = ttk.Frame(box)
+        ocanvas = tk.Canvas(self.optin_outer, highlightthickness=0, borderwidth=0, height=OPTIN_MAX_H, bg=THEME["bg"])
+        oscroll = ttk.Scrollbar(self.optin_outer, orient="vertical", command=ocanvas.yview)
+        ocanvas.configure(yscrollcommand=oscroll.set)
+        oscroll.pack(side="right", fill="y")
+        ocanvas.pack(side="left", fill="both", expand=True)
+        self.optin_body = ttk.Frame(ocanvas, padding=(4, 4, 0, 0))
+        body_win = ocanvas.create_window((0, 0), window=self.optin_body, anchor="nw")
+        self.optin_body.bind("<Configure>", lambda e: ocanvas.configure(scrollregion=ocanvas.bbox("all"),
+                                                                         height=min(e.height, OPTIN_MAX_H)))
+        ocanvas.bind("<Configure>", lambda e: ocanvas.itemconfigure(body_win, width=e.width))   # columns spread
+
+        def wheel(ev):
+            try:
+                w = self.root.winfo_containing(ev.x_root, ev.y_root)
+            except KeyError:            # a combobox's popdown list has no Tk path name here
+                return
+            while w is not None and w is not ocanvas:
+                w = w.master
+            if w is ocanvas:
+                ocanvas.yview_scroll(wheel_steps(ev), "units")
+        self.root.bind_all("<MouseWheel>", wheel, add="+")
         self.optin_checks, self.optin_cost_vars = {}, {}
         on = optin.enabled(self.bench.cfg)
         # Two columns, each entry a checkbox and its cost over a small grey line saying what it does: ten full-width
@@ -950,9 +975,9 @@ class App:
     def toggle_optins(self):
         self.optin_open = not self.optin_open
         if self.optin_open:
-            self.optin_body.pack(fill="x")
+            self.optin_outer.pack(fill="x")
         else:
-            self.optin_body.pack_forget()
+            self.optin_outer.pack_forget()
         self.optin_toggle_btn.configure(text="Hide" if self.optin_open else "Show")
 
     def on_optin_toggle(self, key):
