@@ -183,6 +183,12 @@ def select(selectors):
     return [t for t in REGISTRY if not selectors or any(fnmatch.fnmatch(t["id"], s) for s in selectors)]
 
 
+def unmatched(selectors):
+    """The selectors no registered test matches. select() drops them in silence, so a typo, or the '\r' a Windows list
+    file leaves on every id, runs fewer tests than asked and still reads '0 failed' (2026-10-05: 103 of 104 ids)."""
+    return [s for s in selectors or [] if not any(fnmatch.fnmatch(t["id"], s) for t in REGISTRY)]
+
+
 class Bench:
     BAUD = {"wcb": 115200, "probe": PROBE_BAUD, "navicore": 115200, "sbus": 115200}
 
@@ -968,6 +974,8 @@ def run(bench_path, selectors, results_root, discover=False, control=None, on_ch
         first_time = not os.path.exists(bench.links.path)
         disc = bool(discover or (first_time and bench.probe_names() and bench.has("wcb1")))
         tests = select(selectors)
+        for s in unmatched(selectors):
+            print(f"WARNING: {s!r} matches no test")
         ckpt = start_run(bench, tests, " ".join(selectors) or "everything", selectors=list(selectors or []),
                          discover=disc, no_servos=no_servos)
         print(f"Run {ckpt.name} · {len(tests)} tests · pause: Ctrl+C, or create results/{ckpt.name}/{PAUSE}")

@@ -12759,5 +12759,21 @@ def t_mismatch_scalar_secret(tmp):
 TESTS.append(t_mismatch_scalar_secret)
 
 
+def t_unmatched_selectors(tmp):
+    """runner.unmatched names the selectors no registered test matches - a typo, or an id read from a CRLF file with
+    its '\r' still on - and only those, globs included."""
+    saved = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = [{"id": "mesh.alias"}, {"id": "mesh.chain_split"}, {"id": "wled.basic"}]
+        got = runner.unmatched(["mesh.*", "wled.basic", "wled.basic\r", "nope.*", "mesh.alias"])
+        assert got == ["wled.basic\r", "nope.*"], got
+        assert runner.unmatched([]) == [] and runner.unmatched(None) == []
+    finally:
+        runner.REGISTRY[:] = saved
+
+
+TESTS.append(t_unmatched_selectors)
+
+
 if __name__ == "__main__":
     sys.exit(main())
