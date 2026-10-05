@@ -1254,8 +1254,11 @@ function parseSystemFile(fileContent) {
   // Sort boards by WCB number
   system.boards.sort((a, b) => a.wcbNumber - b.wcbNumber);
 
-  // Update quantity to match actual board count if file has more boards
-  if (system.boards.length > system.general.wcbQuantity) {
+  // The quantity is the one the file was saved with. It is the mesh's floor, not a board count: a board above it (one
+  // WDP joined) and a client slot are boards of their own, and raising the quantity to the number of sections made a
+  // reload add default boards the file never held and push that number to every board (W-17). Only a file whose
+  // [GENERAL] carries no ?WCBQ (buildSystemFile always writes one) still takes the number of boards.
+  if (!/(?:^|\^)\?WCBQ,/im.test(sections['GENERAL'] || '') && system.boards.length > system.general.wcbQuantity) {
     system.general.wcbQuantity = system.boards.length;
   }
 
@@ -1742,8 +1745,12 @@ function buildSystemFile(system) {
 
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
-    const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
-    let chain = buildCommandString(boardWithQty, null, true, FILE_OPTS);
+    // Each board as parseSystemFile reads it back, General's shared fields winning (applyGeneralToBoard) - as every
+    // push writes them too. Written from the board's own copy, a slot General never reached (a client slot, a board
+    // WDP added after the General fields were set) carried other values, and a reload put General's in (W-17).
+    const boardOut = { ...board };
+    applyGeneralToBoard(system.general, boardOut);
+    let chain = buildCommandString(boardOut, null, true, FILE_OPTS);
     // A client slot (a WCB_Client device: a card, never pushed) keeps its type and alias through the file as the
     // Wizard-only ?CLIENT token; without it the slot reloaded as a WCB with no clientAlias. The slot's WCB config
     // still rides along, as the slot keeps it for a flip back to WCB. Last in the chain, so a Wizard from before the

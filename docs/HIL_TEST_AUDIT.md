@@ -824,8 +824,9 @@ Applied 2026-09-23 (evening), after the review. "bench" = verified by the target
   and F21 fixed on Greg's decisions. Since then the away week's three phases (the progress notes below): on
   2026-10-04 1,088 tests are registered across the WCBs (with the Wizard's 71), NaviCore (about 300: `nc*`,
   `navicore`, `nctool`, `sbus`) and Intellex (83), one `run.py` and one GUI drive them all (every device kind has
-  its Check, every opt-in its box: 34), `selftest.py` passes 120/120, the Wizard unit tests 85 with 3 `todo` pins
-  (W-17, W-20 and a latent NaviCore tool defect), both host tests pass, and CI's Wizard tests pass.
+  its Check, every opt-in its box: 34), `selftest.py` passes 120/120, the Wizard unit tests 87 with 1 `todo` pin
+  (a latent NaviCore tool defect; W-17's and W-20's pass since their fixes, 2026-10-04), both host tests pass, and
+  CI's Wizard tests pass.
 - **Verified on the bench:** the runs in §5; full run `20260924-092602` with servos (459 pass, 6 fail, 8 skip, every
   failure triaged in §5); the F5-F10 runs `20260924-120036` and `20260924-120958`; and the F12 runs `20260924-131417`
   and `20260924-133332`; the F13 runs `20260924-181517` and `20260924-190431` (27/27); the full run `20260924-190733` on the

@@ -188,7 +188,7 @@ test('Kyber local: the port, the targets, and the Marcuino port read from its la
 });
 
 // ── (should) the parser halves of W-17 and W-20 ─────────────────────────────────────────────────────────────────────
-test('W-17 (should): a system file keeps the WCB quantity it was saved with when it holds a board above it or a client slot', { todo: 'W-17: parseSystemFile raises general.wcbQuantity to the number of [WCB] sections (parser.js:1257-1260)' }, () => {
+test('W-17 (should): a system file keeps the WCB quantity it was saved with when it holds a board above it or a client slot', () => {
   const sys = P.createDefaultSystemConfig();
   sys.general.wcbQuantity = 2;
   const b = (n, extra = {}) => Object.assign(P.createDefaultBoardConfig(), { wcbNumber: n, hwVersion: 24 }, extra);

@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.20:07.R.OCT.2026';
+const UI_VERSION = '04.20:10.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -9361,6 +9361,11 @@ function loadSystemFileContent(content) {
     }));
 
     renderBoards(system.general.wcbQuantity);
+    // A board above the quantity (one WDP joined) and a client slot get sections of their own, as the export wrote
+    // them: the floor alone left them with none, so the next export wrote them from a missing card, with no labels,
+    // sequences or variables (W-17). The same numbers populateUIFromConfig fills below.
+    addDiscoveredBoards(system.boards.map((b, i) => b.wcbNumber || (i + 1))
+                                     .filter((n) => n > system.general.wcbQuantity));
     for (let i = 0; i < system.boards.length; i++) {
       const board = system.boards[i];
       const n = board.wcbNumber || (i + 1);

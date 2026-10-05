@@ -458,8 +458,8 @@ Behaviour that lives in app.js goes to WP41. **U, needs no board, M.**
 > every field of the model, so a field added later without a `diffConfigs` line fails it (the six fields have been in
 > `diffConfigs` since W-11); row 4 (the mapping and PWM-output round trip, and that an added or edited mapping re-sends
 > the table while a removed mapping or output port builds nothing - left as found); row 8 (every claim); row 9 (WiFi,
-> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s (W-20's guards its fix
-> since 2026-10-04). Rows 1, 2, 5, 6 and 7
+> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s (both guard their
+> fixes since 2026-10-04). Rows 1, 2, 5, 6 and 7
 > were already pinned (`roundtrip.test.js` W-1, W-2, W-3, W-6; `pull.test.js` W-7).
 
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
@@ -801,7 +801,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 to W-16 and W-18 to W-20 are fixed (each row says how); W-17 and W-21 are not.
+> **Status 2026-10-04:** W-13 to W-20 are fixed (each row says how); W-21 is not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -843,6 +843,12 @@ fix; per the conventions, each fix also needs its doc row.
   sections 1..that number (app.js:9270), adding default boards the file never held and none for a board above them; the
   next export writes such a board from its missing DOM, with no labels, sequences or variables (app.js:9309-9327).
   `wizard.app_fake_system_file_reload`; the parser half is a `todo` in `unit/model.test.js`.
+  **Fixed:** parseSystemFile keeps the quantity the file was saved with (only a `[GENERAL]` with no `?WCBQ`, which
+  buildSystemFile always writes, still takes the number of boards); loadSystemFileContent gives each board above the
+  quantity, client slots included, a section of its own (addDiscoveredBoards) before filling it; and buildSystemFile
+  writes each board with General's shared fields applied, as parseSystemFile reads it back - a client slot General had
+  never reached reloaded with General's MAC octets and mesh password. Both tests guard it (the unit test is no longer a
+  `todo`).
 - **W-18** A board above the WCB quantity cannot be renumbered past it: its dropdown offers numbers up to its own
   (app.js:3194-3202), but onWCBNumberChange takes only numbers up to the General quantity (app.js:2080-2081), so the pick
   shows and is dropped. `wizard.app_fake_wcb_number_above_floor`.

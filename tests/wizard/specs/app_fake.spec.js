@@ -433,10 +433,6 @@ test('wizard.app_fake_system_file the export writes every board the Wizard knows
 });
 
 test('wizard.app_fake_system_file_reload (should) a saved system file loads back as it was saved: the WCB quantity it carries, no board it did not hold, and a board above the floor with its labels, sequences and variables, so saving it again writes the same file (W-17)', async ({ page }) => {
-  test.fail(true, 'W-17: parseSystemFile raises the WCB quantity to the number of [WCB] sections (parser.js:1257-1260), client slots and ' +
-                  'boards above the floor included; loadSystemFileContent then renders sections for 1..that number only (app.js:9270), ' +
-                  'adding default boards that were never in the file, and none for a board above it - which the next export writes ' +
-                  'from its missing DOM, with no labels, sequences or variables (app.js:9314-9327)');
   await fourSlots(page);
   const first = await captureExport(page, () => exportSystemFile());
   await openWizard(page);                  // a fresh page, as when the file is opened another day
