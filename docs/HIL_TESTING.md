@@ -292,6 +292,18 @@ wire and test alone.
   `--no-servos` cannot stop that; W1's stand-in Maestro (probe on W1 S1) and a Kyber-local W1 in the `kyber.*` tests
   would see that traffic too. **A dormant Kyber sends nothing** (Greg, 2026-10-05), so it can stay powered during runs
   as long as nothing commands it; tests that drive it should be opt-in.
+- **Kyber settings that matter here** (its docs: https://nhutchison.github.io/KyberEditor/docs/, read 2026-10-05):
+  - *Expert → Maestro* baud rate and frame format must be **115200 8N1**: a Kyber-local WCB port is fixed at 115200.
+  - *General → Startup Scripts*: a non-zero Maestro 1/2 script runs **at the Kyber's boot**, so powering it on moves
+    Maestro 2 through W3. Set both to 0 on the bench, or power it on only between runs.
+  - *Skip Script if One Already Running* (and the *Expert* script-blocking options, default on) send the Maestro a
+    script-status query and read the reply, so they need W3 S2 TX → Kyber RX wired; through W3 the reply comes back
+    from the remote Maestro over the mesh. Without the return line they wait briefly, then fail open.
+  - *Random Events* fire on a timer only when a Random On/Off RC channel is assigned and switched on: none on a bench
+    with no receiver.
+  - Its USB is a CP210x. Plugged into the PC, its serial monitor forwards MarcDuino commands verbatim to the body
+    electronics (`:SE00\r`, `$1`, ...) and answers host-link verbs (`HELLO`, `GET`, `SET`, `PING`): a way for a
+    future test to make the Kyber send on W3 S5 on demand. No verb to press a pad button is documented.
 - `W3S2` and `W3S5` are `port_devices` with no `port_stimulus`: the harness sends nothing there and auto-detect leaves
   them alone.
 
