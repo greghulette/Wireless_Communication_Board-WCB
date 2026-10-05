@@ -284,8 +284,12 @@ wire and test alone.
 | Maestro port | S2 | Kyber TX → W3 S2 RX, Kyber RX → W3 S2 TX, GND–GND | `?KYBER,LOCAL,S2`, then reboot it (the command says "Reboot required" and does not reboot) |
 | MarcDuino port | S5 | Kyber TX → W3 S5 RX, GND–GND | 9600, plain text: nothing to set |
 
-- **Check the Kyber's logic level first.** WCB pins are 3.3 V with no level shifters; nothing in this repo documents
-  the Kyber's. A 5 V TX needs a level shifter or divider into W3's RX pins.
+- **The Kyber's outputs are 5 V (Greg, 2026-10-05); WCB3's pins are 3.3 V with no level shifters and the S3 is not
+  5 V tolerant.** Both Kyber TX lines (Maestro → W3 S2 RX, MarcDuino → W3 S5 RX) go through a level shifter: a
+  4-channel BSS138 bidirectional module, LV side to W3's 3.3 V and GND, HV side to the Kyber's 5 V and GND, grounds
+  common; route W3 S2 TX → Kyber RX through it too, since 3.3 V is marginal for a 5 V input. Without a module, a divider
+  on each Kyber TX line works for those one-way lines: 1 kΩ in series from the Kyber TX, 2 kΩ from the W3 RX pin to
+  GND (~3.3 V).
 - **It moves real servos.** Kyber bytes are forwarded over the mesh to W2's real Maestro 2, and `--no-servos` cannot
   stop that. W1's stand-in Maestro (probe on W1 S1) and a Kyber-local W1 in the `kyber.*` tests would also see its
   traffic. Keep the Kyber powered off during runs until tests are written for it (opt-in).
