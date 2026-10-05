@@ -655,10 +655,10 @@ class App:
         nc_probe = wiring.navicore_probe(b)
         fixtures = b.cfg.get("fixtures", {})
         usb = b.usb_wcbs()
-        gap, step, box_w, dev_w = 22, 34, 210, 190
+        gap, step, box_w, dev_w, p_w = 22, 34, 210, 190, 300
         x_dev = 44                         # room on its left for the lane of wires between two devices
-        x_w = x_dev + dev_w + 90 if drows else 24
-        x_p = x_w + box_w + 190
+        x_w = x_dev + dev_w + 120 if drows else 24     # room on each device wire for its label
+        x_p = x_w + box_w + 170
 
         def h_of(n_rows):
             return 44 + n_rows * step
@@ -747,16 +747,52 @@ class App:
             c.create_oval(px - 5, py - 5, px + 5, py + 5, fill=THEME["panel"], outline=PURPLE, width=2)
             self.xy[("D", ep)] = (px, py)
 
+        NC_SHORT = {"SBO": "J2", "S3": "J4", "S4": "J5", "S5": "J6", "MAE": "J3"}     # NaviCore's connectors
+
+        def line_name(ep):
+            """What else is wired to this WCB port / NaviCore pin (a device_links end): the line a tap listens on."""
+            for r in drows:
+                other = r["b"] if r["a"] == ep else r["a"] if r["b"] == ep else None
+                if other:
+                    kind, _n, _p = wiring.endpoint(other)
+                    return fixtures.get(kind, {}).get("title") or wiring.endpoint_label(b, other)
+            dev = b.port_devices().get(ep)
+            return describe_device(dev) if dev else {"navicore:SBO": "SBUS OUT", "navicore:MAE": "Maestro bus"}.get(ep)
+
+        def header_note(nc, wcb_or_pin, port, tap, prefix=""):
+            ep = f"navicore:{port}" if nc else f"W{wcb_or_pin}{port}"
+            where = f"NaviCore {NC_SHORT.get(port, port)}" if nc else f"W{wcb_or_pin} {port}"
+            note = f"→ {where}"
+            if tap:
+                name = line_name(ep)
+                note += f", taps {name}" if name else ", listen-only"
+            return (prefix + " " if prefix else "") + note
+
+        probe_note = {}
+        for link in b.links.all() + b.links.nc_all():
+            nc = getattr(link, "navicore", False)
+            probe_note[(link.probe_name, link.header)] = header_note(nc, None if nc else link.wcb, link.port, link.tap)
+        # Still to wire: what the plan suggests, and an optional listen-only tap on a device's line (the Kyber's).
+        for r in rows:
+            todo = r["status"] == "to do" or (r["status"] == "device" and r["tap"] and not r["link"])
+            if todo and r["probe"] and (r["probe"], r["header"]) not in probe_note:
+                probe_note[(r["probe"], r["header"])] = header_note(
+                    r["nc"], r["wcb"], r["port"], r["tap"], "to do" if r["status"] == "to do" else "optional")
+
         def draw_probe(pn, y):
             planned = pn in later_probes
             dev_port = "" if planned else b.cfg["devices"][pn].get("port", "?")
             sub = "not plugged in yet" if planned else dev_port.rsplit("/", 1)[-1].replace("cu.", "", 1)
-            h = box(x_p, y, box_w, len(HEADERS), pn + ("  - NaviCore's" if pn == nc_probe else ""), sub,
+            h = box(x_p, y, p_w, len(HEADERS), pn + ("  - NaviCore's" if pn == nc_probe else ""), sub,
                     THEME["probe"], planned)
             for k, header in enumerate(HEADERS):
                 py, key = pin_y(y, k), f"{pn}:{header}"
                 dot(x_p, py, key, "pport", planned)
-                c.create_text(x_p + 22, py, anchor="w", text=f"header {header}", fill=GREY if planned else THEME["fg"])
+                c.create_text(x_p + 18, py, anchor="w", text=header, fill=GREY if planned else THEME["fg"])
+                note = probe_note.get((pn, header))
+                if note:
+                    c.create_text(x_p + 46, py, anchor="w", text=note[:44], font=(FONT[0], 8),
+                                  fill=GREY if note.startswith(("to do", "optional")) else THEME["mute"])
                 self.xy[("P", key)] = (x_p, py)
             return h
 
@@ -803,15 +839,18 @@ class App:
                           fill=GREY if planned else THEME["fg"])
             c.create_text(x_dev + 12, top + 30, anchor="w", text=sub[:34], fill=GREY, font=(FONT[0], 8))
             for p, py in zip(opins, ys):
-                c.create_text(x_dev + 12, py, anchor="w", text=fx.get("pins", {}).get(p, p.replace("_", " "))[:24],
+                # A pin wired to another device has its dot on the left, where the lane between devices runs; each
+                # pin's name sits beside its own dot.
+                left = f"{owner}:{p}" in dev_to_dev
+                name = fx.get("pins", {}).get(p, p.replace("_", " "))[:24]
+                c.create_text(x_dev + 14 if left else x_dev + dev_w - 14, py, anchor="w" if left else "e", text=name,
                               fill=GREY if planned else THEME["fg"])
-                # A pin wired to another device has its dot on the left, where the lane between devices runs.
-                dev_dot(x_dev if f"{owner}:{p}" in dev_to_dev else x_dev + dev_w, py, f"{owner}:{p}")
+                dev_dot(x_dev if left else x_dev + dev_w, py, f"{owner}:{p}")
             return top + h
 
         # ---- the rows
         y = 16
-        width_all = x_p + box_w + 24
+        width_all = x_p + p_w + 24
         for ri, ctr in enumerate(centers + ([("X", None)] if spare_probes else [])):
             top = y
             if ri:
@@ -827,11 +866,12 @@ class App:
                     py, key = pin_y(y, k), f"W{w}{port}"
                     dot(x_w + box_w, py, key, "wport", planned)
                     dev = b.port_devices().get(key)
-                    if dev:
-                        c.create_text(x_w + 12, py, anchor="w", text=f"{port}  {describe_device(dev)}"[:28], fill=BLUE)
-                    else:
-                        c.create_text(x_w + 12, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26],
-                                      fill=GREY if planned else THEME["fg"])
+                    c.create_text(x_w + box_w - 16, py, anchor="e", text=port, font=BOLD,
+                                  fill=GREY if planned else THEME["fg"])
+                    role = describe_device(dev) if dev else labels.get(port, "")
+                    if role:
+                        c.create_text(x_w + 14, py, anchor="w", text=role[:22], font=(FONT[0], 8),
+                                      fill=BLUE if dev else (GREY if planned else THEME["mute"]))
                     self.xy[("W", key)] = (x_w + box_w, py)
                     if key in dev_eps:
                         dev_dot(x_w, py, key)
@@ -841,8 +881,11 @@ class App:
                 nlabels = fixtures.get("navicore", {}).get("pins", {})
                 for k, port in enumerate(nc_pins):
                     py = pin_y(y, k)
-                    c.create_text(x_w + 12, py, anchor="w", text=wiring.NC_LABEL.get(port) or nlabels.get(port, port),
-                                  fill=THEME["fg"])
+                    name = wiring.NC_LABEL.get(port) or nlabels.get(port, port)
+                    if port in nc_rows:        # a probe pin: by its dot on the right
+                        c.create_text(x_w + box_w - 16, py, anchor="e", text=name, fill=THEME["fg"])
+                    else:                      # wired only to a device: by its dot on the left
+                        c.create_text(x_w + 14, py, anchor="w", text=name, fill=THEME["fg"])
                     if port in nc_rows:
                         key = nc_rows[port]["key"]
                         dot(x_w + box_w, py, key, "ncport", False)
@@ -865,11 +908,12 @@ class App:
 
         # ---- wires: planned probe wires, found probe wires, then the device wires
         for r in rows:
-            if r["status"] == "to do" and r["probe"]:
+            optional = r["status"] == "device" and r["tap"] and not r["link"]
+            if (r["status"] == "to do" or optional) and r["probe"]:
                 a = self.xy.get(("N" if r["nc"] else "W", r["key"]))
                 e = self.xy.get(("P", f"{r['probe']}:{r['header']}"))
                 if a and e:
-                    c.create_line(*a, *e, fill=THEME["edge"], width=2, dash=(2, 4))
+                    c.create_line(*a, *e, fill=THEME["edge"], width=2, dash=(2, 6) if optional else (2, 4))
         for link in b.links.all() + b.links.nc_all():
             a = self.xy.get(("N" if getattr(link, "navicore", False) else "W", link.key))
             e = self.xy.get(("P", f"{link.probe_name}:{link.header}"))
@@ -890,9 +934,15 @@ class App:
             width = 5 if self.selected_key == r["key"] else 3
             if abs(a[0] - e[0]) < 1:
                 pts = (a[0], a[1], lane, a[1], lane, e[1], e[0], e[1])
+                if r["tag"]:                   # along the lane, reading upward
+                    c.create_text(lane - 8, (a[1] + e[1]) / 2, text=r["tag"], angle=90, font=(FONT[0], 8), fill=color,
+                                  tags=("dlink", r["key"]))
                 lane -= 8
             else:
                 pts = (*a, *e)
+                if r["tag"]:                   # above the wire's middle
+                    c.create_text((a[0] + e[0]) / 2, (a[1] + e[1]) / 2 - 9, text=r["tag"], font=(FONT[0], 8),
+                                  fill=color, tags=("dlink", r["key"]))
             c.create_line(*pts, fill=color, width=width, dash=dash, tags=("dlink", r["key"]))
         box_all = c.bbox("all")
         if box_all:

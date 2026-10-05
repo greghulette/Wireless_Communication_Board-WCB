@@ -227,7 +227,8 @@ def device_plan(bench):
             status = "not checked"
         rows.append(dict(key=key, wcb=None, port=None, probe=None, header=None, tap=False, device="", link=None,
                          nc=False, dev=True, planned=planned, status=status, unlocks=list(l.get("proof", [])),
-                         kind=l.get("kind", "serial"), label=l.get("label", key), a=l["from"], b=l["to"],
+                         kind=l.get("kind", "serial"), label=l.get("label", key), tag=l.get("tag", ""),
+                         a=l["from"], b=l["to"],
                          a_label=endpoint_label(bench, l["from"]), b_label=endpoint_label(bench, l["to"]),
                          signal=l.get("signal", ""), how=l.get("how", ""), check=l.get("check", ""),
                          results=[(p, s, d) for d, p, s in results], actual=""))
