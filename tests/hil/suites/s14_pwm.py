@@ -14,8 +14,8 @@ import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, Watch, config_guard, link, marker, probe_in_mesh, quiet_lines, require_tokens, snapshot,
-                           token, usb_wcb)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, probe_in_mesh, quiet_lines,
+                           require_tokens, snapshot, token, usb_wcb)
 
 
 def _has(lines, text):
@@ -861,32 +861,36 @@ def clear_all_reaches_remote(bench):
             s3.pwm_stop()
 
 
-@test("pwm.clear_all_many_remote_outputs", "?MAP,PWM,CLEAR,ALL with six outputs aimed at W2 and one at WCB3: each W2 port's clear is sent once, WCB3's still names its own port, and W2 is left with no PWM outputs (re-scan #12; W1 x2, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S3", "W1S4", "W1S5"])
+@test("pwm.clear_all_many_remote_outputs", "?MAP,PWM,CLEAR,ALL with six outputs aimed at W2 and one at an absent board (WCB3 here): each W2 port's clear is sent once, the absent board's still names its own port, and W2 is left with no PWM outputs (re-scan #12; W1 x2, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S3", "W1S4", "W1S5"])
 def clear_all_many_remote_outputs(bench):
     """WCB coverage re-scan #12 (docs/hil_plan/WCB.md WCB-WP15 row 5). clearAllPWMMappings (WCB_PWM.cpp) listed each
     remote output in remotePorts[board][5] with no bound, one entry per mapping output. Two mappings with three W2
     outputs each put six entries in W2's row, and the sixth landed in WCB3's first slot (for WCB20, past the end of
     the array). WCB3's mapping is made first, so its slot is filled before the spill; it then printed the spilled W2
-    port, S5, instead of its own S4. The list is a per-board set now, so each W2 port's clear goes out once. WCB3 must
-    be a board this bench does not have: its sends fail, as in pwm.remote_unreachable_failed."""
+    port, S5, instead of its own S4. The list is a per-board set now, so each W2 port's clear goes out once. The third
+    board must be one this bench does not have, so its sends fail as in pwm.remote_unreachable_failed: absent_wcbs'
+    first number. That is 3 on a bench of W1 and W2, the row W2's spill lands in. With a real WCB3 it is 4, and a spill
+    would land in the empty WCB3 row instead: no own port to overwrite, but still a repeated W2 clear or an extra
+    'removal to WCB3' line, either of which the exact list of removal lines fails."""
     ins = [link(bench, 1, p) for p in ("S3", "S4", "S5")]
     w = usb_wcb(bench)
     _no_pwm(bench, 1, 2)
     require_tokens(bench, 2, *[f"?BCAST,{d},S{p},ON" for d in ("OUT", "IN") for p in (3, 4, 5)])
-    if 3 in {int(n) for x in w.run("?WDP,DUMP", timeout=8) for n in re.findall(r"^\[WDP:N=(\d+),", x)}:
-        raise Skip("WCB3 is on this mesh; the spill test needs it absent")
+    gone = absent_wcbs(bench)[0]
+    if gone in {int(n) for x in w.run("?WDP,DUMP", timeout=8) for n in re.findall(r"^\[WDP:N=(\d+),", x)}:
+        raise Skip(f"WCB{gone} is on this mesh; the spill test needs it absent")
     problems = []
     with config_guard(bench, 1, 2):
         cleared = False
         try:
             for l in ins:
                 l.pwm_out(0)
-            m = w.send("?MAP,PWM,S3,W3S4")
+            m = w.send(f"?MAP,PWM,S3,W{gone}S4")
             w.send("?MAP,PWM,S4,W2S3,W2S4,W2S5")
             w.send("?MAP,PWM,S5,W2S3,W2S4,W2S5")
             _pwm_reboot(w, m)
             listing = [x.rstrip() for x in w.run("?MAP,PWM,LIST")]
-            want = ["Input: Serial3 -> Outputs: W3S4", "Input: Serial4 -> Outputs: W2S3 W2S4 W2S5",
+            want = [f"Input: Serial3 -> Outputs: W{gone}S4", "Input: Serial4 -> Outputs: W2S3 W2S4 W2S5",
                     "Input: Serial5 -> Outputs: W2S3 W2S4 W2S5"]
             if [x for x in listing if x.startswith("Input:")] != want:
                 raise AssertionError(f"setup: W1's mappings are {listing}")
@@ -897,7 +901,7 @@ def clear_all_many_remote_outputs(bench):
             cleared = True
             sent = sorted(x.rstrip() for x in w.dev.since(m) if x.startswith("Sent PWM output removal to WCB"))
             expect = sorted([f"Sent PWM output removal to WCB2: ?MAP,PWM,CLEAR,OUT,S{p}" for p in (3, 4, 5)] +
-                            ["Sent PWM output removal to WCB3: ?MAP,PWM,CLEAR,OUT,S4"])
+                            [f"Sent PWM output removal to WCB{gone}: ?MAP,PWM,CLEAR,OUT,S4"])
             if sent != expect:
                 problems.append(f"removal lines {sent}, expected {expect}")
             _pwm_reboot(w, m)

@@ -2,8 +2,10 @@
 
 Everything here changes W1 through its own USB console and puts it back the same way, so a board that is unreachable
 over the mesh for a moment is still reachable to the test. Rules:
-- W1's WDP is off while W1 is WCB 3, so no board or client can learn a WCB 3 (W2 would persist it; NaviCore would
-  auto-join it): auto-join only ever runs from a WDP advert (WCB_WDP.cpp, addActivePeer), and heartbeats persist nothing.
+- W1 is renumbered only to a board number nobody has (suites/common.py absent_wcbs: WCB 3 on a bench of W1 and W2, 4
+  once a real WCB3 is listed), and its WDP is off meanwhile, so no board or client can learn that number (W2 would
+  persist it; NaviCore would auto-join it): auto-join only ever runs from a WDP advert (WCB_WDP.cpp, addActivePeer), and
+  heartbeats persist nothing.
 - ?WCBCH and ?WCB apply at boot, ?HW only at boot (the pin map), ?MAC,2 at once (the receive filter). ?HW is set and
   put back WITHOUT a reboot in between: booting W1 on another board's pin map would take its ports away.
 - ?EPASS and ?ERASE,NVS are not sent: the first would put the mesh credential in test code, the second needs the
@@ -17,13 +19,14 @@ over the mesh for a moment is still reachable to the test. Rules:
   ident.hw_setter on a same-chip version), row 2 (ident.mac_hex_refused), row 3 (wdp.peers.add_forget_survive_quick_reboot;
   its plain-reboot half, the restore count, is boot.banner_w1 in s29 and wdp.autojoin_permanent_downgrade in s18),
   row 4 (wdp.peers.fingerprint_discard), row 5 (wdp.peers.forget_learned_persists), row 6 (ident.sender_id_mac_bound)
-  and row 7 (the Maestro self-slot repair inside ident.wcb_number_reboot, which reuses that test's WCB 3 boot).
+  and row 7 (the Maestro self-slot repair inside ident.wcb_number_reboot, which reuses that test's renumbered boot).
 """
 import re
 import time
 
 from hil.runner import Skip, test
-from suites.common import Console, Watch, config_guard, link, marker, require_tokens, snapshot, token, usb_wcb
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, require_tokens, snapshot, token,
+                           usb_wcb)
 from suites.s14_pwm import _no_pwm, _pwm_reboot
 from suites.s22_maestro_kyber import _kyber_list, _require_kyber_broadcast_remote, _restore_remote, _wdp_off
 from suites.s99_etm import _peers_online
@@ -106,31 +109,37 @@ def _m8_rows(w):
     return [x.rstrip() for x in w.run("?MAESTRO,LIST") if x.startswith("  Maestro 8 ")]
 
 
-@test("ident.wcb_number_reboot", "?WCB,3 renumbers W1 at the next boot: the chain says ?WCB,3, the WDP self row and the ETM heartbeats say 3, and a Maestro proxy M8 -> W3 added first comes back from that boot repaired into a local S1 slot; ?WCB,21 is refused; ?MAESTRO,CLEAR,M8, ?WCB,1 and a reboot put it back (WDP off; 2 reboots)", needs=["wcb1"], links=[])
+@test("ident.wcb_number_reboot", "?WCB,<n> renumbers W1 at the next boot, n a board nobody has (3 here): the chain says ?WCB,<n>, the WDP self row and the ETM heartbeats say n, and a Maestro proxy M8 -> W<n> added first comes back from that boot repaired into a local S1 slot; ?WCB,21 is refused; ?MAESTRO,CLEAR,M8, ?WCB,1 and a reboot put it back (WDP off; 2 reboots)", needs=["wcb1"], links=[])
 def wcb_number_reboot(bench):
     """saveWCBNumberToPreferences (WCB_Storage.cpp:248-257) takes effect live for the number itself (so a push's later
     MAESTRO lines use it) and at boot for the radio address, peers and ETM.
 
-    The Maestro self-slot repair (WCB-WP16 row 7) rides the same WCB 3 boot, so it adds no identity window of its own. A
-    remote proxy M8 -> W3, added while W1 is still WCB 1 (a remote slot stores port 0 and host 3, WCB_Maestro.cpp:869-879),
-    points at W1 itself once W1 boots as WCB 3. setup() runs normalizeMaestroSelfSlots right after the number is loaded
-    (WCB.ino:9365, :9384): the slot becomes local on S1 and is saved (WCB_Storage.cpp:2618-2631). A local slot is
-    advertised over WDP, so it is cleared while W1 is still WCB 3 with its WDP off, and WDP stays off, failing the test
-    loudly, if it cannot be cleared (docs/HIL_TESTING.md §1). The clear leaves S1 alone because W1's own local Maestro
-    still uses the port (_self_slot_setup)."""
+    The new number is absent_wcbs' first (suites/common.py): 3 on a bench of W1 and W2, 4 once a real WCB3 is listed,
+    since W1 booting as a board on the mesh would be a second radio with its MAC and id. The bench precondition that was
+    ?WCBQ,2 is now W1's floor below that number (2 below 3 here). Every restore path ends on ?WCB,1 and a reboot.
+
+    The Maestro self-slot repair (WCB-WP16 row 7) rides the same renumbered boot, so it adds no identity window of its
+    own. A remote proxy M8 -> W<n>, added while W1 is still WCB 1 (a remote slot stores port 0 and host n,
+    WCB_Maestro.cpp:869-879), points at W1 itself once W1 boots as WCB n. setup() runs normalizeMaestroSelfSlots right
+    after the number is loaded (WCB.ino:9365, :9384): the slot becomes local on S1 and is saved
+    (WCB_Storage.cpp:2618-2631). A local slot is advertised over WDP, so it is cleared while W1 is still WCB n with its
+    WDP off, and WDP stays off, failing the test loudly, if it cannot be cleared (docs/HIL_TESTING.md §1). The clear
+    leaves S1 alone because W1's own local Maestro still uses the port (_self_slot_setup)."""
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
     if me != 1:
         raise Skip("the console board is not WCB 1")
+    new = absent_wcbs(bench)[0]
     problems = []
     with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
-        if token(before[1], "?WCBQ,") != "?WCBQ,2":
-            raise Skip("W1's WCBQ is not 2")
+        q = token(before[1], "?WCBQ,")
+        if q is None or int(q.split(",")[1]) >= new:
+            raise Skip(f"W1's {q} floor takes in WCB{new}" if q else "W1's chain has no ?WCBQ")
         if "?WDP,OFF" in before[1]:
             raise Skip("W1's WDP is already off, so this test could not tell its own ?WDP,OFF apart from the bench's")
         rows2 = {int(m.group(1)) for x in _crun(c2, "?WDP,DUMP", 1.5) for m in [re.match(r"^\[WDP:N=(\d+),", x)] if m}
-        if 3 in rows2:
-            raise Skip("W2 already knows a WCB 3")
+        if new in rows2:
+            raise Skip(f"W2 already knows a WCB {new}")
         baud, why = _self_slot_setup(before[1], me)
         if baud is None:
             bench.note(f"Maestro self-slot repair not checked: {why}")
@@ -140,35 +149,35 @@ def wcb_number_reboot(bench):
         try:
             try:
                 if baud is not None:
-                    out = w.run(f"?MAESTRO,M8:W3S1:{baud}")
+                    out = w.run(f"?MAESTRO,M8:W{new}S1:{baud}")
                     m8 = True
-                    if not _has(out, "✓ Maestro 8: Remote on WCB3 (unicast, slot "):
-                        problems.append(f"?MAESTRO,M8:W3S1:{baud} printed {out}")
+                    if not _has(out, f"✓ Maestro 8: Remote on WCB{new} (unicast, slot "):
+                        problems.append(f"?MAESTRO,M8:W{new}S1:{baud} printed {out}")
                 out = w.run("?WCB,21")
                 if not _has(out, "Invalid WCB number 21. Valid range: 1-20."):
                     problems.append(f"?WCB,21 printed {out}")
-                out = w.run("?WCB,3")
+                out = w.run(f"?WCB,{new}")
                 renumbered = True
-                problems += _in_order(out, ["Changed WCB Number to: 3", "Please reboot to take full effect"], "?WCB,3")
-                if "?WCB,3" not in snapshot(bench, 1):
-                    problems.append("the chain does not say ?WCB,3")
+                problems += _in_order(out, [f"Changed WCB Number to: {new}", "Please reboot to take full effect"], f"?WCB,{new}")
+                if f"?WCB,{new}" not in snapshot(bench, 1):
+                    problems.append(f"the chain does not say ?WCB,{new}")
                 bm = w.reboot()
                 if m8:
                     if not _has(w.dev.since(bm), REPAIRED_M8):
-                        problems.append(f"the WCB 3 boot did not print {REPAIRED_M8!r}")
-                    # LIST tells the two apart; the chain cannot: while W1 is WCB 3 a local S1 slot and a proxy to W3 both
-                    # emit M8:W3S1:<baud> (emitMaestroBackup, WCB_Maestro.cpp:1145-1162).
+                        problems.append(f"the WCB {new} boot did not print {REPAIRED_M8!r}")
+                    # LIST tells the two apart; the chain cannot: while W1 is WCB n a local S1 slot and a proxy to W<n>
+                    # both emit M8:W<n>S1:<baud> (emitMaestroBackup, WCB_Maestro.cpp:1145-1162).
                     rows = _m8_rows(w)
                     if rows != ["  Maestro 8 → Local S1"]:
-                        problems.append(f"after the WCB 3 boot ?MAESTRO,LIST lists Maestro 8 as {rows}, not one local S1 slot")
-                if not _has(w.run("?WDP,DUMP", timeout=8), "[WDP:N=3,"):
-                    problems.append("after the reboot the WDP self row is not N=3")
+                        problems.append(f"after the WCB {new} boot ?MAESTRO,LIST lists Maestro 8 as {rows}, not one local S1 slot")
+                if not _has(w.run("?WDP,DUMP", timeout=8), f"[WDP:N={new},"):
+                    problems.append(f"after the reboot the WDP self row is not N={new}")
                 w.run("?DEBUG,ETM,ON")
                 m = w.dev.mark()
                 try:
-                    w.dev.expect(r"^\[ETM\] Heartbeat sent \(WCB3\)", timeout=30, since=m)
+                    w.dev.expect(rf"^\[ETM\] Heartbeat sent \(WCB{new}\)", timeout=30, since=m)
                 except AssertionError:
-                    problems.append("no ETM heartbeat as WCB3 within 30 s of the reboot")
+                    problems.append(f"no ETM heartbeat as WCB{new} within 30 s of the reboot")
                 w.run("?DEBUG,ETM,OFF")
             finally:
                 w.run("?DEBUG,ETM,OFF")
@@ -190,7 +199,7 @@ def wcb_number_reboot(bench):
                 except AssertionError:
                     pass
             if m8:
-                problems.append("W1's WDP is left OFF: its Maestro 8 (a local S1 slot once a WCB 3 boot repaired it) could "
+                problems.append(f"W1's WDP is left OFF: its Maestro 8 (a local S1 slot once a WCB {new} boot repaired it) could "
                                 "not be cleared, and WDP would advertise it. On W1's USB console type ?MAESTRO,CLEAR,M8, "
                                 "check ?MAESTRO,LIST, then ?WDP,ON")
             else:
@@ -199,9 +208,9 @@ def wcb_number_reboot(bench):
         if not _has(w.run("?WDP,DUMP", timeout=8), "[WDP:N=1,"):
             problems.append("after the restore the WDP self row is not N=1")
         rows2 = {int(m.group(1)) for x in _crun(c2, "?WDP,DUMP", 1.5) for m in [re.match(r"^\[WDP:N=(\d+),", x)] if m}
-        if 3 in rows2:
-            problems.append("W2 learned a WCB 3 although W1's WDP was off")
-            _crun(c2, "?WDP,FORGET,3")
+        if new in rows2:
+            problems.append(f"W2 learned a WCB {new} although W1's WDP was off")
+            _crun(c2, f"?WDP,FORGET,{new}")
     assert not problems, "; ".join(problems)
 
 
@@ -436,21 +445,24 @@ def mac_hex_refused(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("ident.sender_id_mac_bound", "An ETM packet whose sender id is not its source MAC's last octet is dropped before anything reads it: W1 renumbered to 3 live (its radio address still ends .01) has its unicast to W2 dropped as an id-spoof, never ACKed or run, and W2 learns no WCB 3; ?WCB,1 goes back at once (no reboot; W1 is WCB 3 for about 3 s, its WDP off)", needs=["wcb1", "wcb2"])
+@test("ident.sender_id_mac_bound", "An ETM packet whose sender id is not its source MAC's last octet is dropped before anything reads it: W1 renumbered live to a board nobody has (3 here; its radio address still ends .01) has its unicast to W2 dropped as an id-spoof, never ACKed or run, and W2 learns no such board; ?WCB,1 goes back at once (no reboot; W1 is renumbered for about 3 s, its WDP off)", needs=["wcb1", "wcb2"])
 def sender_id_mac_bound(bench):
     """WCB-WP16 row 6. The ETM receive path checks the claimed sender against the source MAC's last octet before
     presence, ACKs, WDP or commands see the packet (espNowReceiveCallback, WCB.ino:5258-5271), and says so under
     ?DEBUG,ETM: '[ETM] Dropped id-spoof: senderWCB=<n> but src MAC .<octet>'. ?WCB sets WCB_Number live
     (WCB_Storage.cpp:248-257) while the radio address stays the one setup() gave it (WCB.ino:9595), so every packet W1
-    sends in the window claims 3 from ...:01, and no probe verb is needed (the other sender guards do need one:
-    docs/hil_plan/WCB.md WCB-WP59). ?WCB also writes NVS, so ?WCB,1 goes back first in the finally and W1 is never reset
-    in the window. W1's WDP is off, so it sends no advert as 3: NaviCore's WCB_Client has the same gate
-    (WCB_Client.cpp:2701-2705), but a learn there would persist, and heartbeats persist nothing on either side."""
+    sends in the window claims the new number from ...:01, and no probe verb is needed (the other sender guards do need
+    one: docs/hil_plan/WCB.md WCB-WP59). ?WCB also writes NVS, so ?WCB,1 goes back first in the finally and W1 is never
+    reset in the window. W1's WDP is off, so it sends no advert as that number: NaviCore's WCB_Client has the same gate
+    (WCB_Client.cpp:2701-2705), but a learn there would persist, and heartbeats persist nothing on either side. The
+    number is absent_wcbs' first, 3 on a bench of W1 and W2: a real board's id would make W2's id-spoof lines and its
+    WCB<n> lines ambiguous between W1 and that board."""
     w2s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     if bench.usb_wcb_number() != 1:
         raise Skip("the console board is not WCB 1")
-    spoof = "[ETM] Dropped id-spoof: senderWCB=3 but src MAC .1"
+    new = absent_wcbs(bench)[0]
+    spoof = f"[ETM] Dropped id-spoof: senderWCB={new} but src MAC .1"
     problems = []
     with config_guard(bench, 1, 2) as before, Console(bench, 2) as c2:
         if c2.remote:
@@ -458,8 +470,8 @@ def sender_id_mac_bound(bench):
         if token(before[1], "?WCB,") != "?WCB,1":
             raise Skip(f"W1's chain says {token(before[1], '?WCB,')}, not ?WCB,1")
         rows2 = {int(m.group(1)) for x in _crun(c2, "?WDP,DUMP", 1.5) for m in [re.match(r"^\[WDP:N=(\d+),", x)] if m}
-        if 3 in rows2:
-            raise Skip("W2 already knows a WCB 3")
+        if new in rows2:
+            raise Skip(f"W2 already knows a WCB {new}")
         if "?WDP,OFF" in before[1]:
             raise Skip("W1's WDP is already off, so this test could not tell its own ?WDP,OFF apart from the bench's")
         t = marker()
@@ -472,14 +484,14 @@ def sender_id_mac_bound(bench):
                 problems.append("W2's ?DEBUG,ETM,ON did not confirm")
             w.run("?DEBUG,ETM,ON")
             watch = Watch(w2s2)
-            out = w.run("?WCB,3")
+            out = w.run(f"?WCB,{new}")
             renumbered = True
-            problems += _in_order(out, ["Changed WCB Number to: 3", "Please reboot to take full effect"], "?WCB,3")
+            problems += _in_order(out, [f"Changed WCB Number to: {new}", "Please reboot to take full effect"], f"?WCB,{new}")
             wm = w.send(f";W2,;S2{t}")
             try:
                 w.dev.expect(rf"\[ETM\] WCB2 failed to ACK seq \d+ after 3 retries: ;S2{t}", timeout=10, since=wm)
             except AssertionError:
-                problems.append("W1's unicast as WCB 3 was not reported unacknowledged after its 3 retries")
+                problems.append(f"W1's unicast as WCB {new} was not reported unacknowledged after its 3 retries")
         finally:
             if renumbered:
                 back = _has(w.run("?WCB,1"), "Changed WCB Number to: 1")
@@ -489,23 +501,23 @@ def sender_id_mac_bound(bench):
             _crun(c2, "?DEBUG,ETM,OFF")
             if back:
                 w.run("?WDP,ON")
-            else:                                  # WDP stays off: W1 must not advertise while it may still say 3
-                problems.append("RESTORE NOT CONFIRMED: W1 may still be WCB 3, and its WDP is left OFF. On W1's USB "
+            else:                                  # WDP stays off: W1 must not advertise while it may still say <new>
+                problems.append(f"RESTORE NOT CONFIRMED: W1 may still be WCB {new}, and its WDP is left OFF. On W1's USB "
                                 "console type ?WCB,1, check that ?backup says ?WCB,1, then ?WDP,ON - before anything "
                                 "reboots W1")
         drops = [x for x in seen if x.startswith(spoof)]
-        bench.note(f"W2 dropped {len(drops)} packet(s) from W1 as id-spoofs while W1 claimed WCB 3")
+        bench.note(f"W2 dropped {len(drops)} packet(s) from W1 as id-spoofs while W1 claimed WCB {new}")
         if not drops:
-            problems.append(f"W2 printed no {spoof!r} while W1 claimed to be WCB 3")
+            problems.append(f"W2 printed no {spoof!r} while W1 claimed to be WCB {new}")
         if t.encode() in watch.got(w2s2):
-            problems.append("W2 ran the command W1 sent as WCB 3")
-        acted = [x for x in seen if re.search(r"\bWCB3\b", x) and not x.startswith(spoof)]
+            problems.append(f"W2 ran the command W1 sent as WCB {new}")
+        acted = [x for x in seen if re.search(rf"\bWCB{new}\b", x) and not x.startswith(spoof)]
         if acted:
-            problems.append(f"W2 acted on a packet claiming WCB 3: {acted[:3]}")
+            problems.append(f"W2 acted on a packet claiming WCB {new}: {acted[:3]}")
         rows2 = {int(m.group(1)) for x in _crun(c2, "?WDP,DUMP", 1.5) for m in [re.match(r"^\[WDP:N=(\d+),", x)] if m}
-        if 3 in rows2:
-            problems.append("W2 learned a WCB 3")
-            _crun(c2, "?WDP,FORGET,3")
+        if new in rows2:
+            problems.append(f"W2 learned a WCB {new}")
+            _crun(c2, f"?WDP,FORGET,{new}")
         t2 = marker()
         watch = Watch(w2s2)
         w.send(f";W2,;S2{t2}")
@@ -714,7 +726,9 @@ def forget_learned_persists(bench):
         learned = _learned_peers(w, floor)
         if not learned:
             raise Skip("W1 has no learned peer to forget")
-        k, rest = learned[0], learned[1:]
+        # an absent one (6 on this bench) before a bench board W1 learned from its adverts (a real WCB3 above the floor)
+        k = next((x for x in learned if x not in bench.wcb_numbers()), learned[0])
+        rest = [x for x in learned if x != k]
         count = _live_peers(w)
         bench.note(f"learned peers before: {learned}; forgetting WCB{k}; live peers {count}")
         forgot = False

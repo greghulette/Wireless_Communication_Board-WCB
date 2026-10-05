@@ -14,8 +14,8 @@ from contextlib import contextmanager
 
 from hil.runner import Skip, test
 from hil.wcb import WCB, chain_crc
-from suites.common import (Console, Watch, config_guard, link, marker, nonce, padded, probe_in_mesh, quiet_lines,
-                           require_tokens, snapshot, token, usb_wcb, wire)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, nonce, padded, probe_in_mesh,
+                           quiet_lines, require_tokens, snapshot, token, usb_wcb, wire)
 
 
 @test("mesh.unicast_acked", ";W2 unicast is delivered and ACKed exactly once in W1's ETM stats",
@@ -480,9 +480,11 @@ def frag_sessions(bench):
     dropped before any of that, unlogged. The lines print only under ?DEBUG,MGMT (RAM only), on W2's console. Every
     chunk is one unacknowledged broadcast, so each arm first reads from W2's own log that the chunks it depends on
     arrived, and runs again under new ids when one was lost. B's lone second chunk opens a session of its own that
-    holds the next id off for 2 s, which the busy arm waits out."""
+    holds the next id off for 2 s, which the busy arm waits out. The other board is absent_wcbs' first number (3 on a
+    bench of W1 and W2): a real one would run the session's ;S2 lines."""
     s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
+    gone = absent_wcbs(bench)[0]
     problems = []
     with Console(bench, 2) as c2:
         m = c2.send("?DEBUG,MGMT,ON")
@@ -542,18 +544,18 @@ def frag_sessions(bench):
             else:
                 problems.append("stale: no try in 3 had C's chunk and both of D's reach W2")
 
-            # 3. a session for WCB3 (not on the bench) is none of W2's business
+            # 3. a session for a board not on the bench is none of W2's business
             F = _sid()
             watch = Watch(s2)
             cm = c2.mark()
-            _chunk(w, 3, F, 0, 2, f";S2{marker('f')}^")
+            _chunk(w, gone, F, 0, 2, f";S2{marker('f')}^")
             time.sleep(0.15)
-            _chunk(w, 3, F, 1, 2, f";S2{marker('f')}")
+            _chunk(w, gone, F, 1, 2, f";S2{marker('f')}")
             time.sleep(1.5)
             if watch.got(s2):
-                problems.append(f"a session for WCB3 put {watch.got(s2)!r} on W2 S2")
+                problems.append(f"a session for WCB{gone} put {watch.got(s2)!r} on W2 S2")
             if _has_line(c2.lines(cm), rf"[Ss]ession {F}\b"):
-                problems.append("W2 logged a session addressed to WCB3")
+                problems.append(f"W2 logged a session addressed to WCB{gone}")
 
             # 4. timeout: E0 only; W2 drops the session 15 s after it
             for attempt in range(1, 4):

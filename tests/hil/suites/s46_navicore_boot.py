@@ -509,12 +509,13 @@ def roll_call_missing_board(bench):
     """checkBootRollCall (NaviCore.ino:5343-5362) names each board in 1..quantity, itself aside, that is not online 30 s
     after the join. The plan's version, W2 deafened across the boot, cannot show it on this bench: the floor is
     quantity 1, so W2 is never in the roll call, and ncmesh.deaf stops a board's reception, not its heartbeats
-    (hil/ncmesh.py deaf). So the floor is raised, inside nc_guard, to the lowest id above it that no board uses (3 here:
-    W1 and W2 then online, WCB3 absent), and NaviCore restarts on it (the quantity is read once, into WCB_Client, at
-    boot, :4834-4838). What that changes for ~40 s: NaviCore pre-registers WCB3 as a peer and tracks it for ensured
-    broadcasts. What it does not: the learned-peer record in NVS (_loadLearnedPeers skips a learned id the floor covers
-    and saves nothing, WCB_Client.cpp:1745-1774), the mesh identity (deviceId, channel, password) and the octets. The
-    snapshot goes back and NaviCore restarts onto quantity 1 however the body ended (_put_back)."""
+    (hil/ncmesh.py deaf). So the floor is raised, inside nc_guard, to the lowest id above it that no board uses - not
+    one NaviCore hears or lists, and not a bench WCB - (3 on a bench of W1 and W2: both then online, WCB3 absent; 4
+    with a real WCB3 online in the floor too), and NaviCore restarts on it (the quantity is read once, into WCB_Client,
+    at boot, :4834-4838). What that changes for ~40 s: NaviCore pre-registers that board as a peer and tracks it for
+    ensured broadcasts. What it does not: the learned-peer record in NVS (_loadLearnedPeers skips a learned id the
+    floor covers and saves nothing, WCB_Client.cpp:1745-1774), the mesh identity (deviceId, channel, password) and the
+    octets. The snapshot goes back and NaviCore restarts onto quantity 1 however the body ended (_put_back)."""
     nc = _nc(bench)
     _restartable(nc)
     problems, facts = [], {}

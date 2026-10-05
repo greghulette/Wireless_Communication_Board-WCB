@@ -563,8 +563,9 @@ def get_fallback_unicast_within_wcbq(bench):
     answers. Observed with WCBQ raised to 5 and id 5: WCB2 ACKs a broadcast, never a unicast to WCB5."""
     w = usb_wcb(bench)
     with config_guard(bench, 1) as before:
-        if token(before[1], "?WCBQ,") != "?WCBQ,2":
-            raise Skip("W1 is not ?WCBQ,2")
+        base = token(before[1], "?WCBQ,")
+        if base is None or int(base.split(",")[1]) >= 5:          # 5 must join the floor here and leave it after
+            raise Skip(f"W1's {base} floor already takes in WCB5" if base else "W1's chain has no ?WCBQ")
         if any(t.upper().startswith("?MAESTRO,M5:") for t in before[1]):
             raise Skip("W1 has a Maestro 5 slot")
         try:
@@ -583,7 +584,7 @@ def get_fallback_unicast_within_wcbq(bench):
         finally:
             w.run("?DEBUG,ETM,OFF")
             w.run("?VAR,CLEAR,m5err")
-            w.run("?WCBQ,2")
+            w.run(base)
     seqs = _sent_seq(control, ";M5,goHome")
     if seqs and _acked_by(control, 2, seqs[0]):
         raise Skip("WCB2 ACKed the ;M5,goHome unicast as well, so an ACK cannot tell unicast from broadcast here")
@@ -600,8 +601,9 @@ def fallback_unicast_wcbq_probe(bench):
     w = usb_wcb(bench)
     bad = []
     with config_guard(bench, 1) as before:
-        if token(before[1], "?WCBQ,") != "?WCBQ,2":
-            raise Skip("W1 is not ?WCBQ,2")
+        base = token(before[1], "?WCBQ,")
+        if base is None or int(base.split(",")[1]) >= 5:          # 5 must join the floor here and leave it after
+            raise Skip(f"W1's {base} floor already takes in WCB5" if base else "W1's chain has no ?WCBQ")
         if any(t.upper().startswith("?MAESTRO,M5:") for t in before[1]):
             raise Skip("W1 has a Maestro 5 slot")
         try:
@@ -632,7 +634,7 @@ def fallback_unicast_wcbq_probe(bench):
         finally:
             w.run("?DEBUG,OFF")
             w.run("?DEBUG,MAESTRO,OFF")
-            w.run("?WCBQ,2")
+            w.run(base)
     assert not bad, "; ".join(bad)
 
 

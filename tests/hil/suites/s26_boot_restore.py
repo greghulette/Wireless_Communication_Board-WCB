@@ -22,7 +22,8 @@ import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import Console, Watch, config_guard, link, marker, nonce, require_tokens, snapshot, token, usb_wcb
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, nonce, require_tokens, snapshot,
+                           token, usb_wcb)
 from suites.s15_hcr_mp3_dfp import (_clear_all_w2, _device_tokens, _dfp, _in_order, _inject, _lf, _no_recall_keys,
                                      _relabel, _require_free, _run, _steps, _unlearn)
 from suites.s18_etm_config_wdp import _prefix_chars, _restore_prefixes, _sent
@@ -243,28 +244,35 @@ def off_reboot(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("peers.wcbq_reboot", "?WCBQ,3 survives a W1 reboot: the banner and ?config count 3, WCB3 is registered but never seen; ?WCBQ,2 puts it back live (1 reboot)", needs=["wcb1"], links=[])
+@test("peers.wcbq_reboot", "?WCBQ raised to an absent board (WCB3 here) survives a W1 reboot: the banner and ?config count it, it is registered but never seen; the baseline ?WCBQ puts the floor back live (1 reboot)", needs=["wcb1"], links=[])
 def wcbq_reboot(bench):
-    """Never below the real fleet (2): W2 would auto-join as a persisted learned peer on its next advert."""
+    """Never below the real fleet (the baseline, 2 on this bench): W2 would auto-join as a persisted learned peer on its
+    next advert. The floor goes from W1's own ?WCBQ to absent_wcbs' first number - ?WCBQ,3 on a bench of W1 and W2, 4
+    once a real WCB3 is listed - and back to the baseline token; a baseline at or above the absent board cannot show it
+    joining, so the test skips."""
     w = usb_wcb(bench)
+    gone = absent_wcbs(bench)[0]
     problems = []
     with config_guard(bench, 1) as before:
-        if token(before[1], "?WCBQ,") != "?WCBQ,2":
-            raise Skip("W1's WCBQ is not 2")
+        base = token(before[1], "?WCBQ,")
+        floor = int(base.split(",")[1]) if base else None
+        if floor is None or floor >= gone:
+            raise Skip(f"W1's {base} floor already takes in WCB{gone}" if base else "W1's chain has no ?WCBQ")
         try:
-            assert _has(w.run("?WCBQ,3"), "Saved WCB quantity: 3.")
+            assert _has(w.run(f"?WCBQ,{gone}"), f"Saved WCB quantity: {gone}.")
             bm = w.reboot()
-            if not _has(w.dev.since(bm), "Number of WCBs in the system: 3"):
-                problems.append("the boot banner does not count 3 WCBs")
+            if not _has(w.dev.since(bm), f"Number of WCBs in the system: {gone}"):
+                problems.append(f"the boot banner does not count {gone} WCBs")
             cfg = w.run("?config")
-            if not _has(cfg, "Number of WCBs in the system: 3") or not any(re.match(r"^  WCB3: 02:[0-9A-F]{2}:[0-9A-F]{2}:00:00:03  Not yet seen", x) for x in cfg):
-                problems.append("?config after the reboot does not list WCB3 as not yet seen")
-            if not any(x.startswith("Live peers: ") and "(WCBQ floor 3" in x for x in w.run("?PEERSLIVE")):
-                problems.append("?PEERSLIVE after the reboot does not show floor 3")
+            if not _has(cfg, f"Number of WCBs in the system: {gone}") or \
+                    not any(re.match(rf"^  WCB{gone}: 02:[0-9A-F]{{2}}:[0-9A-F]{{2}}:00:00:{gone:02X}  Not yet seen", x) for x in cfg):
+                problems.append(f"?config after the reboot does not list WCB{gone} as not yet seen")
+            if not any(x.startswith("Live peers: ") and f"(WCBQ floor {gone}" in x for x in w.run("?PEERSLIVE")):
+                problems.append(f"?PEERSLIVE after the reboot does not show floor {gone}")
         finally:
-            w.run("?WCBQ,2")
-        if not any(x.startswith("Live peers: ") and "(WCBQ floor 2" in x for x in w.run("?PEERSLIVE")):
-            problems.append("?WCBQ,2 did not restore the floor live")
+            w.run(base)
+        if not any(x.startswith("Live peers: ") and f"(WCBQ floor {floor}" in x for x in w.run("?PEERSLIVE")):
+            problems.append(f"{base} did not restore the floor live")
     assert not problems, "; ".join(problems)
 
 

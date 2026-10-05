@@ -16,8 +16,8 @@ import time
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
 from hil.wcb import BOOT_LINE
-from suites.common import (Console, Watch, config_guard, link, marker, padded, prime, probe_in_mesh, require_tokens,
-                           snapshot, token, usb_wcb)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, padded, prime, probe_in_mesh,
+                           require_tokens, snapshot, token, usb_wcb)
 
 
 def _has(lines, text):
@@ -664,21 +664,24 @@ def raw_remote_s0_refused(bench):
 
 @test("map.unreachable_board", "A destination on a non-peer board fails visibly: raw under ?DEBUG,ON, text as an ungated ETM line", needs=["wcb1"])
 def unreachable_board(bench):
+    """The destination is absent_wcbs' first number, 3 on a bench of W1 and W2: no board answers to it, and it is a peer
+    only when W1's ?WCBQ floor reaches it."""
     s2 = link(bench, 1, "S2")
     w = usb_wcb(bench)
     _no_mappings(w)
-    tokens = bench.config_tokens(1, refresh=True)
-    if token(tokens, "?WCBQ,") not in ("?WCBQ,1", "?WCBQ,2"):
-        raise Skip("WCBQ is above 2, so WCB3 may be a peer")
+    gone = absent_wcbs(bench)[0]
+    floor = token(bench.config_tokens(1, refresh=True), "?WCBQ,")
+    if floor is None or int(floor.split(",")[1]) >= gone:
+        raise Skip(f"W1's {floor} floor takes in WCB{gone} as a peer" if floor else "W1's chain has no ?WCBQ")
     with config_guard(bench, 1):
         try:
-            w.run("?MAP,SERIAL,S2,R,W3S1")
+            w.run(f"?MAP,SERIAL,S2,R,W{gone}S1")
             w.run("?DEBUG,ON")
             m = w.dev.mark()
             s2.send(b"\x41")
             raw = w.dev.expect(r"^ESP-NOW raw serial send failed! Error: (-?\d+)", timeout=2, since=m)
             w.run("?DEBUG,OFF")
-            w.run("?MAP,SERIAL,S2,W3S1")
+            w.run(f"?MAP,SERIAL,S2,W{gone}S1")
             prime(s2)
             time.sleep(0.3)
             m = w.dev.mark()

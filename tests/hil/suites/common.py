@@ -296,8 +296,35 @@ def mesh_params(bench):
                 channel=int(value("?WCBCH,")), quantity=int(value("?WCBQ,")), checksum=value("?ETM,CHKSM,").upper() == "ON")
 
 
-# The two WCBs, W1's persisted learned peers 6 and 9, the old MgmtRelay (19) and NaviCore (20).
+# The two WCBs, W1's persisted learned peers 6 and 9, the old MgmtRelay (19) and NaviCore (20). Any other WCB on the
+# bench (bench.wcb_numbers(), a WCB3 once it is listed) is refused too, by probe_in_mesh: a probe joined under a
+# real board's id shares its MAC, and its temporary advert downgrades that learned peer and persists it
+# (WCB_WDP.cpp:658-669).
 FORBIDDEN_MESH_IDS = (1, 2, 6, 9, 19, 20)
+# A board number is 1..MAX_WCB_COUNT wherever the firmware takes one: ?WCB (WCB.ino:6707), ?WCBQ
+# (saveWCBQuantityPreferences, WCB_Storage.cpp:515), a ;W target (WCB.ino:8153), a ?MGMT,PULL target (WCB.ino:5163).
+MAX_WCB_COUNT = 20                               # WCB.ino:129
+
+
+def absent_wcbs(bench, n=1):
+    """The n lowest board numbers from 3 up that no WCB on this bench has, for a test that needs a board nobody answers
+    to: a ;W<n> nobody ACKs, a ?WCBQ floor member never seen, a renumbering of W1 that collides with no one. [3] on a
+    bench of W1 and W2, so the tests that used a literal 3 send exactly what they sent; [4] once a real WCB3 is listed.
+
+    Left out besides bench.wcb_numbers(): NaviCore's id (hil.links.NAVICORE_ID, the special peer, WCB.ino:138) and the
+    rest of FORBIDDEN_MESH_IDS - W1's persisted learned peers 6 and 9 are peers already, so not absent, and 19 is the id
+    s15's NEVER_HEARD keeps unheard. The probe clients' temporary ids are NOT left out: they take 3-5, 7, 8 and 10-18
+    (s05 CLIENT_IDS, s19 MESH_IDS, s13/s14/s15/s18/s21/s22/s43), so nothing would be left, and probe_in_mesh forgets a
+    client when its test ends. What one leaves on W1 until its next boot is that id's ?STATS counters and 'heard since
+    boot' (lastSeenMs, wcbPeerEverSeen, WCB.ino:9209-9212); peers.wcbq_live, which reads the absent board's counters as
+    zeros, runs in s18, before s19's clients take 3 and 4 in a full run. Skip when fewer than n numbers are left."""
+    from hil.links import NAVICORE_ID
+    from hil.runner import Skip
+    taken = set(bench.wcb_numbers()) | set(FORBIDDEN_MESH_IDS) | {NAVICORE_ID}
+    free = [k for k in range(3, MAX_WCB_COUNT + 1) if k not in taken]
+    if len(free) < n:
+        raise Skip(f"fewer than {n} board numbers 3-{MAX_WCB_COUNT} are free of this bench's WCBs and reserved ids")
+    return free[:n]
 
 
 @contextmanager
@@ -316,6 +343,8 @@ def probe_in_mesh(bench, probe_name, device_id, forget=True, **overrides):
     from hil.runner import Skip
     if device_id in FORBIDDEN_MESH_IDS:
         raise AssertionError(f"mesh id {device_id} is reserved on this bench")
+    if device_id in bench.wcb_numbers():         # a listed WCB3 takes s19's var_sets id, whether it is powered or not
+        raise Skip(f"mesh id {device_id} is WCB{device_id}'s, a board on this bench")
     w = WCB(bench.dev("wcb1"))
     row = next((x for x in w.run("?WDP,DUMP", timeout=8) if x.startswith(f"[WDP:N={device_id},")), "")
     if "PEER=2" in row:

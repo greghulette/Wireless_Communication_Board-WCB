@@ -12821,5 +12821,39 @@ def t_comports_one_per_board(tmp):
 TESTS.append(t_comports_one_per_board)
 
 
+def t_absent_wcbs(tmp):
+    """suites/common.py absent_wcbs: the board number a test uses for 'a WCB nobody answers to'. On a bench of W1 and W2
+    it is 3, the literal those tests used before a real WCB3 joined; a listed WCB3 (its own USB or mesh_only_wcbs) moves
+    it to 4; NaviCore's id and the other reserved ids are never handed out, and running out is a Skip. probe_in_mesh
+    refuses a bench WCB's id the same way, before it touches a device."""
+    from hil.links import NAVICORE_ID
+    import suites.common as C
+
+    def bench(*wcbs, mesh_only=()):
+        devices = {f"wcb{n}": {"port": f"COMFAKE{n}", "kind": "wcb", "wcb": n} for n in wcbs}
+        b = tmp.bench(devices)
+        b.cfg["mesh_only_wcbs"] = list(mesh_only)
+        return b
+
+    two = bench(1, 2)
+    assert two.wcb_numbers() == [1, 2] and C.absent_wcbs(two) == [3], C.absent_wcbs(two)
+    assert C.absent_wcbs(bench(1, 2, 3)) == [4], "a WCB3 with its own USB is not absent"
+    assert C.absent_wcbs(bench(1, 2, mesh_only=[3])) == [4], "a mesh-only WCB3 is not absent"
+    assert C.absent_wcbs(bench(1, 2, 3, 4, 5)) == [7], "6 is one of W1's persisted learned peers (FORBIDDEN_MESH_IDS)"
+    every = C.absent_wcbs(two, 14)
+    assert every == [3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18], every
+    assert NAVICORE_ID == 20 and not set(every) & {1, 2, 6, 9, 19, NAVICORE_ID}, every
+    assert "fewer than 15 board numbers" in str(_raises(lambda: C.absent_wcbs(two, 15), runner.Skip))
+    full = bench(*range(1, NAVICORE_ID))            # every WCB number below NaviCore's is on the bench
+    _raises(lambda: C.absent_wcbs(full), runner.Skip)
+    # probe_in_mesh: a bench WCB's id is a Skip, a reserved one a test bug; both before any device is opened
+    msg = str(_raises(lambda: C.probe_in_mesh(bench(1, 2, 3), "probe1", 3).__enter__(), runner.Skip))
+    assert msg == "mesh id 3 is WCB3's, a board on this bench", msg
+    _raises(lambda: C.probe_in_mesh(two, "probe1", NAVICORE_ID).__enter__(), AssertionError)
+
+
+TESTS.append(t_absent_wcbs)
+
+
 if __name__ == "__main__":
     sys.exit(main())

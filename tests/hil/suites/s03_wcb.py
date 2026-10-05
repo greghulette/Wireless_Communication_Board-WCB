@@ -10,7 +10,7 @@ import time
 from hil.runner import Skip, test
 from hil.wcb import (CONFIG_TEXT, PULL_MAX, WCB, Pull, PullCollector, PullRefused, chain_crc, comparable, dev_note,
                      group_tokens, parse_error, parse_part, parse_pull_line, screen_code)
-from suites.common import config_guard, marker, remote_wcbs, token, usb_wcb
+from suites.common import absent_wcbs, config_guard, marker, remote_wcbs, token, usb_wcb
 
 CHK_LINE = re.compile(r"^(.*)\^[?]CHK([0-9A-Fa-f]{8})$")
 # PULL_MAX (hil/wcb.py) is MGMT_MAX_CHUNKS x (CONFIG_PAYLOAD_SIZE - 1) = 2912: the most one relay session carries. A
@@ -1001,26 +1001,26 @@ def mgmt_result_too_large(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("wcb.pull_wrong_target", "?MGMT,PULL,3,P - addressed to a board the bench does not have - is dropped by W2 before its dedup (no 'Config request' or 'Duplicate' line under ?DEBUG,MGMT) and brings W1 no pull line; the same pull of W2 is then taken and answered (WCB-WP25)", needs=["wcb1", "wcb2"])
+@test("wcb.pull_wrong_target", "?MGMT,PULL,<n>,P - addressed to a board the bench does not have (3 here) - is dropped by W2 before its dedup (no 'Config request' or 'Duplicate' line under ?DEBUG,MGMT) and brings W1 no pull line; the same pull of W2 is then taken and answered (WCB-WP25)", needs=["wcb1", "wcb2"])
 def pull_wrong_target(bench):
     """handleConfigReqPacket (WCB.ino) returns on targetWCB != WCB_Number before anything else is logged; the relay
-    (handleMgmtPullRequest) accepts any target 1-20, so the request does go out. Read-only apart from ?DEBUG,MGMT."""
-    if 3 in bench.wcb_numbers():
-        raise Skip("WCB3 is on this bench")
+    (handleMgmtPullRequest) accepts any target 1-20, so the request does go out (a broadcast, WCB.ino:5188). The target
+    is absent_wcbs' first number, 3 on a bench of W1 and W2. Read-only apart from ?DEBUG,MGMT."""
+    gone = absent_wcbs(bench)[0]
     w1, w2 = usb_wcb(bench), _w2(bench)
     problems = []
     try:
         _knob(w2, "?DEBUG,MGMT,ON")
         m1, m2 = w1.dev.mark(), w2.dev.mark()
-        w1.dev.send("?MGMT,PULL,3,P")
+        w1.dev.send(f"?MGMT,PULL,{gone},P")
         time.sleep(3.0)
         logged = [x for x in w2.dev.since(m2) if re.match(r"^\[MGMT\] (Config request|Duplicate config request) from "
                                                          r"WCB1", x)]
         if logged:
-            problems.append(f"W2 logged {len(logged)} config request line(s) for a pull addressed to WCB3")
+            problems.append(f"W2 logged {len(logged)} config request line(s) for a pull addressed to WCB{gone}")
         stray = [x[:24] for x in w1.dev.since(m1) if parse_pull_line(x)]
         if stray:
-            problems.append(f"W1 printed pull lines for a pull of WCB3: {stray}")
+            problems.append(f"W1 printed pull lines for a pull of WCB{gone}: {stray}")
         m2 = w2.dev.mark()
         w1.pull_reply(2, timeout=10, verify=False)
         if not any(re.search(ACCEPTED_W1, x) for x in w2.dev.since(m2)):

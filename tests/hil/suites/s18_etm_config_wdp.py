@@ -23,8 +23,8 @@ from contextlib import contextmanager
 from hil.navicore import NaviCore
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (FORBIDDEN_MESH_IDS, Console, Watch, config_guard, link, marker, mesh_params, nonce, padded,
-                           probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
+from suites.common import (FORBIDDEN_MESH_IDS, Console, Watch, absent_wcbs, config_guard, link, marker, mesh_params,
+                           nonce, padded, probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
 
 ETM_KEYS = ("TIMEOUT", "HB", "MISS", "BOOT", "COUNT", "DELAY")
 
@@ -735,43 +735,58 @@ def peerslive_consistency(bench):
         assert _has(_crun(c2, "?PEERSLIVE"), "Live peers: "), "W2 did not answer ?PEERSLIVE"
 
 
-@test("peers.wcbq_live", "?WCBQ,3 registers WCB3 live (never seen: fire-once, no retry); invalid values are rejected; restoring 2 removes it", needs=["wcb1"], links=[])
+@test("peers.wcbq_live", "?WCBQ raised to an absent board (WCB3 here) registers it live (never seen: fire-once, no retry); invalid values are rejected; restoring the baseline removes it", needs=["wcb1"], links=[])
 def wcbq_live(bench):
-    """Never below the real fleet (2): W2 would auto-join as a PERSISTED learned peer on its next advert."""
+    """Never below the real fleet (the baseline, 2 on this bench): W2 would auto-join as a PERSISTED learned peer on its
+    next advert. The floor goes from W1's own ?WCBQ to absent_wcbs' first number - ?WCBQ,3 on a bench of W1 and W2 - and
+    back. An id between the two registers too unless W1 counts it already (with a real WCB3 the absent board is 4, and a
+    WCB3 W1 has learned is a peer before the raise), so the live count expects each of those; the never-seen checks are
+    on the absent board alone. A baseline at or above the absent board cannot show it joining: Skip."""
     w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    gone = absent_wcbs(bench)[0]
     bad = []
     t = marker()
     with config_guard(bench, 1) as before:
-        if token(before[1], "?WCBQ,") != "?WCBQ,2":
-            raise Skip("W1's WCBQ is not 2")
+        base = token(before[1], "?WCBQ,")
+        floor = int(base.split(",")[1]) if base else None
+        if floor is None or floor >= gone:
+            raise Skip(f"W1's {base} floor already takes in WCB{gone}" if base else "W1's chain has no ?WCBQ")
         n, _ = _live_peers(w)
+        between = [k for k in range(floor + 1, gone) if k != me]
+        if between:                    # none on a bench of W1 and W2: ?WCBQ,2 -> 3
+            peers = {int(m.group(1)) for x in _cfg(w) for m in [re.match(r"^  WCB(\d+): ", x)]
+                     if m and "(this board)" not in x}
+            between = [k for k in between if k not in peers]
+        joins = 1 + len(between)
         try:
             w.run("?DEBUG,ETM,ON")
             for cmd, want in (("?WCBQ", "Invalid WCB quantity 0. Valid range: 1-20."), ("?WCBQ,21", "Invalid WCB quantity 21. Valid range: 1-20."),
-                              ("?WCBQ,3", "Saved WCB quantity: 3. Peer registrations reconciled live (no reboot needed).")):
+                              (f"?WCBQ,{gone}", f"Saved WCB quantity: {gone}. Peer registrations reconciled live (no reboot needed).")):
                 if not _has(w.run(cmd), want):
                     bad.append(f"{cmd} lacks {want!r}")
-            if not _live_peers(w)[1].startswith(f"Live peers: {n + 1} (WCBQ floor 3"):
-                bad.append(f"after ?WCBQ,3: {_live_peers(w)[1]}")
+            if not _live_peers(w)[1].startswith(f"Live peers: {n + joins} (WCBQ floor {gone}"):
+                bad.append(f"after ?WCBQ,{gone}: {_live_peers(w)[1]} (expected {n} + {joins})")
             cfg = _cfg(w)
-            if not _has(cfg, "Number of WCBs in the system: 3") or not any(re.match(r"^  WCB3: 02:[0-9A-F]{2}:[0-9A-F]{2}:00:00:03  Not yet seen", x) for x in cfg):
-                bad.append("?config does not list WCB3 as not yet seen")
+            if not _has(cfg, f"Number of WCBs in the system: {gone}") or \
+                    not any(re.match(rf"^  WCB{gone}: 02:[0-9A-F]{{2}}:[0-9A-F]{{2}}:00:00:{gone:02X}  Not yet seen", x) for x in cfg):
+                bad.append(f"?config does not list WCB{gone} as not yet seen")
             wm = w.dev.mark()
-            w.send(f";W3,;S0{t}")
+            w.send(f";W{gone},;S0{t}")
             time.sleep(1.2)
             lines = w.dev.since(wm)
             if not _has(lines, f";S0{t}") or not any(re.search(r"\[ETM\] Seq \d+ resolved", x) for x in lines) \
                     or _has(lines, "Retry") or _has(lines, "failed to ACK"):
-                bad.append("the send to a never-seen WCB3 was not fire-once")
-            if not any(re.match(r"^WCB3: Sent: 0, ACKd: 0, Retries: 0, Failed: 0, OFFLINE", x) for x in w.run("?STATS")):
-                bad.append("WCB3 stats row")
+                bad.append(f"the send to a never-seen WCB{gone} was not fire-once")
+            if not any(re.match(rf"^WCB{gone}: Sent: 0, ACKd: 0, Retries: 0, Failed: 0, OFFLINE", x) for x in w.run("?STATS")):
+                bad.append(f"WCB{gone} stats row")
         finally:
-            w.run("?WCBQ,2")
+            w.run(base)
             w.run("?DEBUG,ETM,OFF")
         if _live_peers(w)[0] != n:
-            bad.append("restoring WCBQ 2 did not drop WCB3")
-        if not _has(w.run(";W3,x"), "WCB 3 is not a reachable target — it isn't a configured or learned peer or the controller."):
-            bad.append(";W3 still reachable")
+            bad.append(f"restoring {base} did not drop WCB{gone}")
+        if not _has(w.run(f";W{gone},x"), f"WCB {gone} is not a reachable target — it isn't a configured or learned peer or the controller."):
+            bad.append(f";W{gone} still reachable")
     assert not bad, "; ".join(bad)
 
 
@@ -1342,8 +1357,9 @@ def add_forget_noop_ids(bench):
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
     tokens = snapshot(bench, me)
-    if token(tokens, "?WCBQ,") != "?WCBQ,2":
-        raise Skip("W1's WCBQ is not 2")
+    q = token(tokens, "?WCBQ,")
+    if q is None or int(q.split(",")[1]) < 2:                     # ?WDP,ADD,2 below is the floor-peer case
+        raise Skip(f"W1's {q} floor does not take in W2" if q else "W1's chain has no ?WCBQ")
     n, line = _live_peers(w)
     checks = [(f"?WDP,ADD,{me}", f"[WDP] could not add WCB{me}"), ("?WDP,ADD,0", "[WDP] usage: ?WDP,ADD,<id>"),
               ("?WDP,ADD", "[WDP] usage: ?WDP,ADD,<id>"), ("?WDP,FORGET,0", "[WDP] usage: ?WDP,FORGET,<id>")]
