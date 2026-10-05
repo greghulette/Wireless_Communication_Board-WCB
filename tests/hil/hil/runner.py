@@ -208,13 +208,42 @@ class Bench:
         self.links = LinkManager(self, os.path.join(results_root, "links.json"))
         self.links.load()
 
+    # The bench is driven from more than one computer, and each names its ports its own way (COM6 on Windows,
+    # /dev/cu.wchusbserial52D20606051 on a Mac). This computer's live in results/ports.json, untracked, over
+    # bench.json's, so Find devices on one never rewrites the other's ports in git.
+    @property
+    def ports_path(self):
+        return os.path.join(self.results_root, "ports.json")
+
+    def _read_json(self, path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+
     def reload_config(self):
         with open(self.bench_path, encoding="utf-8") as f:
             self.cfg = json.load(f)
+        for name, port in self._read_json(self.ports_path).items():
+            d = self.cfg.get("devices", {}).get(name)
+            if isinstance(d, dict) and port:
+                d["port"] = port
 
     def save_config(self):
-        # Atomic: bench.json is tracked in git, and a power-off mid-write would leave it truncated.
-        atomic_write_json(self.bench_path, self.cfg)
+        """This computer's ports to results/ports.json; everything else to bench.json, where each device keeps the port
+        the file already had. A device new to bench.json is written with this computer's port, as a first guess for
+        the next one. Atomic: bench.json is tracked in git, and a power-off mid-write would leave it truncated."""
+        devices = self.cfg.get("devices", {})
+        atomic_write_json(self.ports_path, {n: d["port"] for n, d in devices.items()
+                                            if isinstance(d, dict) and d.get("port")})
+        tracked = (self._read_json(self.bench_path).get("devices") or {})
+        out = json.loads(json.dumps(self.cfg))
+        for name, d in out.get("devices", {}).items():
+            was = (tracked.get(name) or {}).get("port") if isinstance(tracked.get(name), dict) else None
+            if isinstance(d, dict) and was:
+                d["port"] = was
+        atomic_write_json(self.bench_path, out)
 
     # ------------------------------------------------------------ logging
     def new_session(self):

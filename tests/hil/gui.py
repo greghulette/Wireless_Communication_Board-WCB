@@ -25,6 +25,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -82,6 +83,30 @@ THEME = DARK   # main() swaps in LIGHT for --light, before any widget is built
 
 GREEN, AMBER, RED, BLUE, GREY = THEME["green"], THEME["amber"], THEME["red"], THEME["blue"], THEME["grey"]
 STATUS_COLOR = {"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE, "RETRY": AMBER}
+
+
+def scrolled(tree):
+    """Grid `tree` into its parent, which holds nothing else, with a vertical and a horizontal scrollbar. Its columns
+    keep their own width (stretch off): dragging a border pushes the columns after it right instead of squeezing the
+    next one, and a row wider than the window scrolls sideways instead of being cut off."""
+    parent = tree.master
+    for col in ("#0",) + tuple(tree["columns"]):
+        tree.column(col, stretch=False)
+    ys = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+    xs = ttk.Scrollbar(parent, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    ys.grid(row=0, column=1, sticky="ns")
+    xs.grid(row=1, column=0, sticky="ew")
+    parent.rowconfigure(0, weight=1)
+    parent.columnconfigure(0, weight=1)
+    return tree
+
+
+def wheel_steps(ev):
+    """Scroll units for a <MouseWheel> event: Windows reports 120 a notch, macOS Tk 1 or more a notch, so the
+    /120 alone turned every Mac scroll into 0."""
+    return -ev.delta if sys.platform == "darwin" else int(-ev.delta / 120)
 
 
 def _dark_titlebar(win):
@@ -455,7 +480,7 @@ class App:
             while w is not None and w is not side:
                 w = w.master
             if w is side:
-                rcanvas.yview_scroll(int(-ev.delta / 120), "units")
+                rcanvas.yview_scroll(wheel_steps(ev), "units")
         self.root.bind_all("<MouseWheel>", wheel, add="+")
 
         left = ttk.Frame(body)
@@ -469,7 +494,9 @@ class App:
                        "dotted grey = planned, not wired yet   blue port = a real device").pack(anchor="w", pady=(6, 0))
 
         ttk.Label(right, text="What to connect", font=BOLD).pack(anchor="w")
-        self.plan_tree = ttk.Treeview(right, columns=("status", "wire", "unlocks"), show="tree headings", height=10)
+        plan_box = ttk.Frame(right)
+        plan_box.pack(fill="x")
+        self.plan_tree = ttk.Treeview(plan_box, columns=("status", "wire", "unlocks"), show="tree headings", height=10)
         self.plan_tree.heading("#0", text="WCB port")
         self.plan_tree.heading("status", text="Status")
         self.plan_tree.heading("wire", text="Wire to")
@@ -480,7 +507,7 @@ class App:
         self.plan_tree.column("unlocks", width=50, anchor="center")
         for s, c in (("connected", GREEN), ("found, not verified", AMBER), ("to do", RED), ("device", BLUE)):
             self.plan_tree.tag_configure(s, foreground=c)
-        self.plan_tree.pack(fill="x")
+        scrolled(self.plan_tree)
         self.plan_tree.bind("<<TreeviewSelect>>", self.on_plan_select)
 
         self.plan_text = tk.Text(right, height=8, width=48, wrap="word", font=FONT, relief="flat",
@@ -798,9 +825,7 @@ class App:
             self.test_tree.tag_configure(s, foreground=col)
         self.test_tree.tag_configure("missing", foreground=GREY)
         self.test_tree.tag_configure("optoff", foreground=GREY)
-        ys = ttk.Scrollbar(pane, orient="vertical", command=self.test_tree.yview)
-        self.test_tree.configure(yscrollcommand=ys.set)
-        self.test_tree.pack(side="top", fill="both", expand=True)
+        scrolled(self.test_tree)
         self.test_tree.bind("<Double-1>", self.on_test_double)
         self.test_tree.bind("<<TreeviewSelect>>", self.on_test_select)
         self.test_detail = tk.Text(f, height=10, wrap="word", font=MONO, relief="flat",
@@ -1006,6 +1031,12 @@ class App:
                                           t["title"]), tags=(tag,))
             if status:
                 counts[status] = counts.get(status, 0) + 1
+        if first and runner.REGISTRY:
+            # Wide enough for the longest title, so the sideways scroll reaches its end. Only on the first fill: a
+            # later refresh must not undo a width dragged by hand.
+            measure = tkfont.nametofont("TkDefaultFont").measure
+            want = max(measure(t["title"]) for t in runner.REGISTRY) + 24
+            self.test_tree.column("title", width=max(self.test_tree.column("title", "width"), want))
         self.summary_var.set("   ".join(f"{k} {v}" for k, v in sorted(counts.items())))
         self.update_estimates()
 
@@ -1216,7 +1247,9 @@ class App:
         win.title("Paused runs")
         win.configure(bg=THEME["bg"])
         win.transient(self.root)
-        tree = ttk.Treeview(win, columns=("what", "done", "when", "why", "state"), show="tree headings", height=10)
+        box = ttk.Frame(win, padding=12)
+        box.pack(fill="both", expand=True)
+        tree = ttk.Treeview(box, columns=("what", "done", "when", "why", "state"), show="tree headings", height=10)
         for col, text, width in (("#0", "Run", 170), ("what", "What", 160), ("done", "Done", 80),
                                  ("when", "When", 150), ("why", "Why", 380), ("state", "State", 90)):
             tree.heading(col, text=text)
@@ -1231,7 +1264,7 @@ class App:
             tree.insert("", "end", iid=s["path"], text=s["name"], values=(
                 s.get("label") or "", f"{s['done']} / {s['total']}", (s.get("updated") or "")[:16].replace("T", " "),
                 why, state), tags=(s["state"],))
-        tree.pack(fill="both", expand=True, padx=12, pady=12)
+        scrolled(tree)
         bar = ttk.Frame(win, padding=(12, 0, 12, 12))
         bar.pack(fill="x")
 

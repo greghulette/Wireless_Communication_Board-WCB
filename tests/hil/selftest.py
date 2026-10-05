@@ -182,6 +182,10 @@ class Tmp:
         path = os.path.join(self.root, "bench.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f)
+        try:
+            os.remove(os.path.join(self.results, "ports.json"))   # a fresh bench: no ports a previous one saved
+        except FileNotFoundError:
+            pass
         return runner.Bench(path, self.results)
 
     def close(self):
@@ -701,7 +705,11 @@ def t_reidentify_never_guesses(tmp):
         b, ck = setup(ports, dict(good, COM9=good["COM15"]))
         moves, _ = resume.reidentify(b, ck, lambda s: None, wait_s=0)
         assert moves == ["wcb2 COM15 -> COM9"], moves
-        assert json.loads(read(b.bench_path))["devices"]["wcb2"]["port"] == "COM9"
+        # ... as this computer's port (results/ports.json); bench.json keeps the port it had, for the other computers
+        assert json.loads(read(b.ports_path))["wcb2"] == "COM9"
+        assert json.loads(read(b.bench_path))["devices"]["wcb2"]["port"] == "COM15"
+        b.reload_config()
+        assert b.cfg["devices"]["wcb2"]["port"] == "COM9"
         # the bench WCB1 is gone and another board answers as WCB1: never adopted without asking
         ports = dict(home)
         del ports["COM6"]
