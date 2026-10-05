@@ -260,11 +260,12 @@ def _serial_mapped(w, port):
     return any(re.search(rf"Serial{port[1]} ->", x) for x in w.run("?MAP,SERIAL,LIST"))
 
 
-@test("wizard.mapping_bidir_relay", "(should) The Wizard's mapping editor on W1 with W2 behind it: Save with bidir maps W1 S2 -> W2 S4 on W1 and the reverse on W2, lines flow both ways, and Remove clears both (W-21: W2's reverse stays)", needs=["wcb1", "wcb2"])
+@test("wizard.mapping_bidir_relay", "(should) The Wizard's mapping editor on W1 with W2 behind it: Save with bidir maps W1 S2 -> W2 S4 on W1 and the reverse on W2, lines flow both ways, and Remove clears both (W-21)", needs=["wcb1", "wcb2"])
 def mapping_bidir_relay(bench):
     """WCB-WP21 row 3, serial half. The spec proves both mappings with probe lines; this checks what Remove leaves.
     The remote PWM destination half is left to wizard.editors_fake_mappings (no board): on the bench it would cost two
-    PWM reboots of W1 for a clear the fake already shows is sent. W-21: removeMappingRow clears only the source."""
+    PWM reboots of W1 for a clear the fake already shows is sent. W-21: Remove on W1 also clears W2's reverse half,
+    through W1 (fixed 2026-10-04); this checks it on W2 itself."""
     s2, w2s4 = link(bench, 1, "S2"), link(bench, 2, "S4")
     w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
     if _serial_mapped(w, "S2") or _serial_mapped(w2, "S4"):

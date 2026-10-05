@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.20:10.R.OCT.2026';
+const UI_VERSION = '04.20:15.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3970,6 +3970,9 @@ async function removeMappingRow(rowId, n) {
   // Capture mapping info before removing from DOM
   const type = document.getElementById(`${rowId}-type`)?.value;
   const src  = parseInt(document.getElementById(`${rowId}-src`)?.value);
+  // A bidirectional serial mapping goes with its reverse halves, found now, while the row's destinations are on the page.
+  const reverses = (type === 'Serial' && src && document.getElementById(`${rowId}-bidir`)?.checked)
+    ? _bidirReverseHalves(rowId, n, src) : [];
 
   // Remove any bidir reverse-mapping rows that were created by this row
   _removeBidirRows(rowId);
@@ -3981,31 +3984,88 @@ async function removeMappingRow(rowId, n) {
 
   // Send clear command to the board
   if (!type || !src) return;
-  const config = boardConfigs[n];
-  const lfi    = _liveFuncChar(n);
-  const cmd    = `${lfi}MAP,${type.toUpperCase()},CLEAR,S${src}`;
+  if (await _sendMapCommand(n, `MAP,${type.toUpperCase()},CLEAR,S${src}`)) {
+    showToast(`Mapping cleared on WCB ${boardConfigs[n]?.wcbNumber || n}`, 'success');
+    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(boardConfigs[n]?.mappings || []));
+  }
+  // ...and off each destination board. Dropping the mirrored row from the page alone (_removeBidirRows) left the
+  // reverse mapping running there, and no push clears it: a removed mapping builds nothing (W-21).
+  for (const r of reverses) await _removeReverseHalf(r);
+}
+
+// Send one ?MAP command (its body, without the function identifier) to board n at once: direct, or as a one-chunk MGMT
+// session through its relay. True when it went; a board out of reach is toasted and keeps the mapping until it is
+// cleared by hand.
+async function _sendMapCommand(n, body) {
+  const cmd    = `${_liveFuncChar(n)}${body}`;
   const relayN = remoteRelayForBoard[n];
   try {
     if (relayN) {
       const relayConn = boardConnections[relayN];
-      if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return; }
+      if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return false; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc   = _relayFuncChar(relayN);
       const mgmtTargetWCB = boardConfigs[n]?.wcbNumber || n;
-      const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`;
-      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
+      await sendMgmtReliable(relayConn, `${_relayFuncChar(relayN)}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`, relayN);
     } else {
       const conn = boardConnections[n];
-      if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return; }
+      if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return false; }
       await conn.send(cmd + '\r');
       termLog(n, cmd, 'in');
     }
-    showToast(`Mapping cleared on WCB ${config?.wcbNumber || n}`, 'success');
-    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config?.mappings || []));
+    return true;
   } catch (err) {
     console.error('[removeMappingRow] send failed:', err);
     showToast('Failed to clear mapping on board', 'error');
+    return false;
   }
+}
+
+// Is mapping m the reverse half of S<src> on board srcWcb: a serial mapping from `port` back to W<srcWcb>S<src>?
+function _isReverseOf(m, port, srcWcb, src) {
+  return String(m.type).toUpperCase() === 'SERIAL' && m.sourcePort === port &&
+         (m.destinations ?? []).some(d => d.wcbNumber === srcWcb && d.port === src);
+}
+
+// The reverse halves of the bidirectional serial mapping on row rowId (board n, source port src): for each remote
+// destination W<d>S<p>, the mapping S<p> -> W<n>S<src> that board d holds - by its baseline, what was sent to it.
+// Found by config, not by the page's bidir link (data-bidir-from): a pull draws a board's cards again under new ids
+// and the link is gone, while detectBidirMappings ticks the box again from the configs alone.
+function _bidirReverseHalves(rowId, n, src) {
+  const srcWcb = boardConfigs[n]?.wcbNumber || n;
+  const out = [];
+  document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
+    const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value) || 0;
+    const port = parseInt(destRow.querySelector('[id$="-port"]')?.value);
+    const slot = wcb > 0 && wcb !== srcWcb ? _slotForWcbNumber(wcb) : null;
+    if (slot === null || slot === n || Number.isNaN(port)) return;
+    const held = boardBaselines[slot]?.mappings?.find(m => _isReverseOf(m, port, srcWcb, src));
+    if (held) out.push({ slot, port, srcWcb, src, held: JSON.parse(JSON.stringify(held)) });
+  });
+  return out;
+}
+
+// Take a reverse half off its board: ?MAP,SERIAL,CLEAR when it was that port's only destination, else the mapping again
+// without it. The board's config and baseline lose it too, and its cards are drawn again if they still showed it.
+async function _removeReverseHalf({ slot, port, srcWcb, src, held }) {
+  const back = (d) => d.wcbNumber === srcWcb && d.port === src;
+  const rest = held.destinations.filter(d => !back(d));
+  const body = rest.length
+    ? `MAP,SERIAL,S${port}${held.rawMode ? ',R' : ''}` + rest.map(d => (d.wcbNumber === 0 ? `,S${d.port}` : `,W${d.wcbNumber}S${d.port}`)).join('')
+    : `MAP,SERIAL,CLEAR,S${port}`;
+  const drop = (list) => {               // the reverse destination, and the mapping once nothing is left of it
+    const i = (list ?? []).findIndex(m => _isReverseOf(m, port, srcWcb, src));
+    if (i < 0) return false;
+    list[i].destinations = list[i].destinations.filter(d => !back(d));
+    if (!list[i].destinations.length) list.splice(i, 1);
+    return true;
+  };
+  if (drop(boardConfigs[slot]?.mappings)) {
+    populateMappingsFromConfig(slot, boardConfigs[slot]);
+    detectBidirMappings(slot);
+  }
+  if (!(await _sendMapCommand(slot, body))) return;
+  drop(boardBaselines[slot]?.mappings);
+  showToast(`Reverse mapping cleared on WCB ${boardConfigs[slot]?.wcbNumber || slot}`, 'success');
 }
 
 function _removeBidirRows(sourceRowId) {

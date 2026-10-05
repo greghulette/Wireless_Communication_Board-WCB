@@ -220,7 +220,7 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 ### WCB-WP21: Wizard, Playwright on the bench through the HIL bridge (H/M)
 New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U; row 9 needs one attended setup. L.**
 
-> **Status 2026-09-29: done and bench-verified (`20260929-101257`, `-104602`, `-105553`: six pass, and `wizard.mapping_bidir_relay` fails as designed, W1's mapping cleared and W2's reverse left, W-21; the first run's failures were the harness's, fixed: `docs/HIL_TESTING.md` revision log).** `tests/wizard/specs/board_more.spec.js`, run by s30 as
+> **Status 2026-09-29: done and bench-verified (`20260929-101257`, `-104602`, `-105553`: six pass, and `wizard.mapping_bidir_relay` fails as designed, W1's mapping cleared and W2's reverse left, W-21 - fixed 2026-10-04, not yet re-run on the bench; the first run's failures were the harness's, fixed: `docs/HIL_TESTING.md` revision log).** `tests/wizard/specs/board_more.spec.js`, run by s30 as
 > `wizard.push_reboot_path` and `wizard.push_reboot_path_direct` (row 1), `wizard.push_all_relay` (row 2),
 > `wizard.mapping_bidir_relay` (row 3, `(should)`: W-21), `wizard.seq_var_editors` (row 4), `wizard.wdp_da_forget` (row 5)
 > and `wizard.relay_terminal` (row 6). Every bench push first checks the verbs it will send (`tests/wizard/lib/wizard.js`
@@ -801,7 +801,10 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 to W-20 are fixed (each row says how); W-21 is not.
+> **Status 2026-10-04:** all nine are fixed (each row says how): their `test.fail` and `todo` markers are gone, the
+> titles keep `(should)`, and the tests guard the fixes. Not yet run on the bench since: `wizard.mapping_bidir_relay`
+> (W-21, W1 and W2), `wizard.push_reboot_path` (W-14's pull, W1), and the other `wizard.*` bench specs, whose sends
+> W-13 moved to the live function identifier.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -875,6 +878,13 @@ fix; per the conventions, each fix also needs its doc row.
   _removeBidirRows drops the destination's mirrored row from the page and sends nothing (app.js:3981-3992), and a push
   never clears a removed mapping (parser.js:1689-1702), so the reverse mapping stays on the destination board.
   `wizard.editors_fake_bidir_remove`, and on the bench `wizard.mapping_bidir_relay`.
+  **Fixed:** removing a row whose bidir box is ticked also takes its reverse half off each destination board
+  (`_bidirReverseHalves`, `_removeReverseHalf`, app.js): `?MAP,SERIAL,CLEAR,S<p>` there, direct or through its relay,
+  or the mapping again without the reverse destination when it has others, and the reverse leaves that board's config,
+  baseline and cards. The reverse is found by config (the destination board's baseline), not by the page's
+  `data-bidir-from` link, which a pull loses when it draws the cards again - the bench's path. Left as found: unticking
+  bidir and saving the row leaves a reverse half already sent on its board (applyBidirMapping drops it from the page
+  only).
 
 **Doc drift found by the scan** (fix it in the same commit as the tests):
 - WDP_DESIGN.md §9: Maestro auto-add is per-host (WCB_Maestro.cpp:911-914), and the Maestro-remote flip runs on every
