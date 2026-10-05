@@ -13,6 +13,7 @@ Two failure modes are handled here rather than in every test (both cost a whole 
   "<<serial error>>" and exit for good, so every later test on that device errored. It now reopens the
   same port (DTR/RTS still deasserted) until it comes back or the device is closed.
 """
+import os
 import re
 import threading
 import time
@@ -51,9 +52,20 @@ class SerialDevice:
         # that before every send stalled and lost input on the S3 native-USB ports (NaviCore's GET_CONFIG replies
         # arrived ~10 s late or not at all, 2026-09-22). 2 s covers ~23 KB at 115200 - far above any line sent.
         s.write_timeout = 2.0
-        s.dtr = False
+        if os.name == "nt":
+            s.dtr = False
+            s.rts = False
+            s.open()
+            return s
+        # macOS and Linux raise DTR and RTS on open, and pyserial then lowers DTR before RTS: RTS alone is the
+        # auto-reset circuit's (and the S3 USB-Serial/JTAG's) reset, so every open rebooted the board - Find devices'
+        # ?VERSION landed in its boot log (measured on a CP2102N WCB, 2026-10-05). RTS goes low at the open and DTR
+        # after it: DTR alone only straps IO0, read at a reset that never comes. exclusive=True is Windows' one owner
+        # per COM port: without it a second process (run.py beside the GUI) opens the port too and takes half its lines.
+        s.exclusive = True
         s.rts = False
         s.open()
+        s.dtr = False
         return s
 
     def open(self):
