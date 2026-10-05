@@ -133,6 +133,19 @@ OPT_INS = {
                "what is attached",
         "estimate_s": 30,
     },
+    "navicore_wire": {
+        "title": "NaviCore's own pins (probe 3)",
+        "what": "The seven ncwire tests (suites/s51_navicore_wire.py; docs/hil_plan/NAVICORE.md NC-WP14). They need a third "
+                "V2.4 probe wired to NaviCore's own pins as D-NC37 has it - header S1 a listen-only tap on SBUS OUT, S2 "
+                "NaviCore's S3, S3 and S4 its S4 and S5, S5 a listen-only tap on its Maestro bus - and run.py "
+                "--discover run after the wiring, so the N20 wires are found. They read what NaviCore writes on those "
+                "pins (plain text out S3-S5, 200 long lines in one test; SBUS OUT; the Maestro bus's query frames, which "
+                "move nothing) and type lines into S3-S5; one saves serialBcast in and out for a few seconds (inside "
+                "nc_guard). With navicore_aux_tx ticked too, two write HCR frames out S4; with navicore_reboot, one "
+                "restarts NaviCore.",
+        "why": "needs probe 3 wired to NaviCore's own pins as docs/hil_plan/NAVICORE.md D-NC37 has it",
+        "estimate_s": 25,
+    },
     "navicore_fault": {
         "title": "NaviCore fault hooks (hook build)",
         "what": "Uses the NAVICORE_HIL_HOOKS fault verbs (#L91-#L93: a corrupted /config.json, an overflowing "

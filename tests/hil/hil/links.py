@@ -8,6 +8,12 @@ result is saved to results/links.json and reused until the next `--discover`.
 A probe has five channels: A/B hardware UARTs and C/D/E software serial. A link is bound to a
 channel only while a test uses it; hardware channels go to links above SW_MAX_BAUD, and when a
 probe runs out the least-recently-used link on it gives its channel up.
+
+A probe can also be wired to NaviCore's own pins (docs/hil_plan/NAVICORE.md D-NC37, NC-WP14). Those wires are NcLinks,
+keyed N<id><port> (N20S3, N20S4, N20S5, N20MAE, N20SBO), found by the second half of discover() and kept apart from the
+WCB wires: LinkManager.nc_links, links.json "navicore_links". Everything that walks the WCB wires - all(), the GUI's
+wiring diagram, the resume's wire checks, the checkpoint's links canon - never sees one; the probe bookkeeping (channels,
+restarts, hand-offs) treats both alike.
 """
 import json
 import os
@@ -15,14 +21,75 @@ import re
 import time
 from datetime import datetime
 
-from .checkpoint import atomic_write_text
+from .checkpoint import atomic_write_text, redact_text
 from .probe import HEADERS, HW_CHANNELS, HW_ONLY_HEADERS, SW_CHANNELS, restart_what
 from .wcb import WCB
 
 SW_MAX_BAUD = 38400
 
+# ---------------------------------------------------------------- NaviCore's own pins (docs/hil_plan/NAVICORE.md D-NC37)
+NC_PORTS = ("S3", "S4", "S5", "MAE", "SBO")     # its aux ports, the local Maestro bus (Serial2), SBUS OUT
+NC_AUX = ("S3", "S4", "S5")                     # firmware numbering; the mesh calls them S1-S3 (rc_config.h:2030-2047)
+NC_TAPS = ("MAE", "SBO")                        # a device already drives these lines: the probe only listens (RXONLY)
+# The bauds D-NC37 wires for. Tests bind what GET_CONFIG auxBaud says at run time (nc_bauds); SBUS OUT is always 100000
+# 8E2 inverted (sbus_reader.h:62; NaviCore.ino:4836-4846).
+NC_DEFAULT_BAUD = {"S3": 115200, "S4": 9600, "S5": 9600, "MAE": 57600, "SBO": 100000}
+NC_FORMAT = {"SBO": ("8E2", True)}              # (format, inverted); every other NaviCore pin is 8N1, not inverted
+NC_KEY = re.compile(r"^N(\d+)(S[345]|MAE|SBO)$")
+NAVICORE_ID = 20                                # the mesh id a key carries when NaviCore's own cannot be read
+# SBUS OUT re-emits ~111 frames a second (the controller's 9 ms stream, teed byte for byte): thousands of edges in a quiet
+# 0.3 s window. A pin with fewer is not SBUS OUT.
+NC_SBUS_MIN_EDGES = 200
+SBUS_HEADER, SBUS_FOOTER, SBUS_LENGTHS = 0x0F, 0x00, (25, 36)    # hil/sbus.py HEADER, FOOTER, FRAME_LEN
+
+
+def nc_key(node, port):
+    """'N20S3' for NaviCore id 20's port S3."""
+    return f"N{node}{port}"
+
+
+def nc_bauds(cfg):
+    """{port: baud} for NaviCore's wired pins from GET_CONFIG `cfg`: auxBaud's S3, S4, S5 and maestro (rcSanBaud has
+    clamped each into 1200-115200 on the way in, rc_config.h:1952-1960, so this is what the port runs), and SBUS OUT's
+    fixed 100000. A value GET_CONFIG lacks keeps NC_DEFAULT_BAUD's."""
+    ab = (cfg or {}).get("auxBaud") or {}
+    out = dict(NC_DEFAULT_BAUD)
+    for port, key in (("S3", "S3"), ("S4", "S4"), ("S5", "S5"), ("MAE", "maestro")):
+        v = ab.get(key) if isinstance(ab, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            out[port] = v
+    return out
+
+
+def sbus_run(data):
+    """(frame length, offset, count) of the longest run of back-to-back SBUS frames in `data` - 25 or 36 bytes each, 0x0F
+    first and 0x00 last, the next one starting right after - or (0, 0, 0). How discovery tells SBUS OUT from any other
+    busy pin. A 0x0F inside a frame (byte 32 of this bench's resting frame, docs/HIL_TESTING.md §6) starts a run only
+    by a coincidence that the next frame then breaks."""
+    data = bytes(data)
+    best = (0, 0, 0)
+    for n in SBUS_LENGTHS:
+        for i in range(len(data)):
+            if data[i] != SBUS_HEADER:
+                continue
+            k = 0
+            while (i + (k + 1) * n <= len(data) and data[i + k * n] == SBUS_HEADER
+                   and data[i + (k + 1) * n - 1] == SBUS_FOOTER):
+                k += 1
+            if k > best[2]:
+                best = (n, i, k)
+    return best
+
+
+def _line1(e):
+    """The first line of an error, credentials hashed: NaviCore's ExpectTimeout tail can hold a CONFIG line."""
+    text = str(e)
+    return redact_text(text.splitlines()[0] if text else type(e).__name__)[:160]
+
 
 class Link:
+    navicore = False      # True on an NcLink: a wire on one of NaviCore's own pins
+
     def __init__(self, mgr, wcb, port, probe, header, swap, tap=False, verified=False):
         self.mgr = mgr
         self.wcb, self.port = wcb, port
@@ -58,6 +125,10 @@ class Link:
         """Bind (or re-bind) this link. baud=None follows the WCB's configured baud for the port."""
         self.mgr.bind(self, baud, fmt, invert, hw)
         return self
+
+    def default_baud(self):
+        """The baud a bind with none given uses: the WCB's configured baud for the port (?BAUD,S<n>)."""
+        return self.mgr.bench.port_baud(self.wcb, self.port)
 
     def _ch(self):
         if self.channel is not None and self.mgr.rebooted_since_bind(self):
@@ -167,6 +238,42 @@ class Link:
         self.mgr.release(self)
 
 
+class NcLink(Link):
+    """A probe wire on one of NaviCore's own pins (NC_PORTS): the aux ports S3-S5, duplex (the probe reads what NaviCore
+    writes and can type into its RX), and SBUS OUT and the local Maestro bus, listen-only taps. NaviCore's mesh id stands
+    where a Link has its WCB number, so binding, the hand-off guard and probe restarts are Link's own. What differs: the
+    key (N20S3, never W20S3), the baud a bind with none uses (what discovery last read from GET_CONFIG, else
+    NC_DEFAULT_BAUD; the ncwire tests always bind the GET_CONFIG value themselves), and SBUS OUT's 8E2, inverted."""
+    navicore = True
+
+    def __init__(self, mgr, port, probe, header, swap, tap=None, verified=False, node=NAVICORE_ID):
+        if port not in NC_PORTS:
+            raise ValueError(f"not a NaviCore pin: {port} ({', '.join(NC_PORTS)})")
+        super().__init__(mgr, int(node), port, probe, header, swap, tap=bool(tap) or port in NC_TAPS,
+                         verified=verified)
+
+    def __repr__(self):
+        kind = "tap" if self.tap else "duplex"
+        return f"{self.key} -> {self.probe_name} {self.header}{' SWAP' if self.swap else ''} ({kind})"
+
+    @property
+    def key(self):
+        return nc_key(self.wcb, self.port)
+
+    def to_json(self):
+        return dict(node=self.wcb, port=self.port, probe=self.probe_name, header=self.header, swap=self.swap,
+                    tap=self.tap, verified=self.verified)
+
+    def listen(self, baud=None, fmt=None, invert=None, hw=None):
+        """Bind (or re-bind) the wire; fmt and invert default to the pin's own (SBUS OUT: 8E2, inverted)."""
+        dfmt, dinv = NC_FORMAT.get(self.port, ("8N1", False))
+        self.mgr.bind(self, baud, fmt or dfmt, dinv if invert is None else invert, hw)
+        return self
+
+    def default_baud(self):
+        return self.mgr.nc_baud.get(self.port, NC_DEFAULT_BAUD[self.port])
+
+
 class LinkManager:
     def __init__(self, bench, path):
         self.bench = bench
@@ -178,6 +285,8 @@ class LinkManager:
         # for another wire under this wire's name - see Link._since_ok().
         self.handoff = {}
         self.discovered_at = None
+        self.nc_links = {}  # NaviCore port (NC_PORTS) -> NcLink
+        self.nc_baud = {}   # NaviCore port -> baud from discovery's GET_CONFIG (NcLink.default_baud)
 
     # ------------------------------------------------------------ persistence
     def load(self):
@@ -201,6 +310,7 @@ class LinkManager:
             except Exception:  # noqa: BLE001 - no session log open yet
                 print(msg)
             self.links = {}
+            self.nc_links = {}
             return False
         self.links = {}
         for d in data.get("links", []):
@@ -209,14 +319,26 @@ class LinkManager:
                 if self.device_on(link.wcb, link.port) is not None:
                     link.tap = True   # a links.json older than the device must not stay transmit-capable
                 self.links[(link.wcb, link.port)] = link
+        self.nc_links = {}
+        for d in data.get("navicore_links") or []:
+            try:
+                if d["probe"] in self.bench.cfg["devices"] and d["port"] in NC_PORTS:
+                    link = NcLink(self, d["port"], d["probe"], d["header"], bool(d.get("swap", False)),
+                                  tap=d.get("tap"), verified=bool(d.get("verified", False)),
+                                  node=d.get("node", NAVICORE_ID))
+                    self.nc_links[link.port] = link
+            except (KeyError, TypeError, ValueError):
+                continue        # a malformed row costs only itself
         self.discovered_at = data.get("discovered_at")
         return True
 
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         # Atomic: a power-off mid-write used to leave a truncated links.json, and Bench() then refused to load.
-        atomic_write_text(self.path, json.dumps({"discovered_at": self.discovered_at,
-                                                 "links": [l.to_json() for l in self.links.values()]}, indent=2))
+        data = {"discovered_at": self.discovered_at, "links": [l.to_json() for l in self.links.values()]}
+        if self.nc_links:   # only then: a bench with no probe on NaviCore keeps the links.json it always had
+            data["navicore_links"] = [l.to_json() for l in self.nc_links.values()]
+        atomic_write_text(self.path, json.dumps(data, indent=2))
 
     def restore(self, canon):
         """Rebuild the wires from a checkpoint's links canon (links.json missing on a resume, and the user said to
@@ -256,7 +378,40 @@ class LinkManager:
         return link
 
     def all(self, duplex_only=False):
+        """The WCB wires (never NaviCore's: nc_all)."""
         return [l for l in self.links.values() if not (duplex_only and l.tap)]
+
+    def get_key(self, key):
+        """The wire a test's port key names - 'W1S3' as get() finds it (a device-only port is hidden) or 'N20S3' as
+        nc_get() does - or None."""
+        m = NC_KEY.match(key)
+        if m:
+            return self.nc_get(m.group(2), int(m.group(1)))
+        m = re.match(r"^W(\d+)(S[1-5])$", key)
+        return self.get(int(m.group(1)), m.group(2)) if m else None
+
+    def nc_get(self, port, node=None):
+        """NaviCore's wire on `port` (NC_PORTS), or None; with `node`, only when NaviCore had that mesh id when the wire
+        was found."""
+        link = self.nc_links.get(port)
+        return link if link is not None and (node is None or link.wcb == node) else None
+
+    def nc_require(self, port):
+        """NaviCore's wire on `port`, or Skip naming the wiring it needs."""
+        link = self.nc_get(port)
+        if link is None:
+            from .runner import Skip
+            raise Skip(f"no wire on NaviCore's {port} ({nc_key(NAVICORE_ID, port)}): wire probe 3 as "
+                       f"docs/hil_plan/NAVICORE.md D-NC37 has it, then run --discover")
+        return link
+
+    def nc_all(self):
+        """NaviCore's wires."""
+        return list(self.nc_links.values())
+
+    def _every(self):
+        """The WCB wires and NaviCore's: everything a probe's channel bookkeeping walks."""
+        return list(self.links.values()) + list(self.nc_links.values())
 
     # ------------------------------------------------------------ real devices on WCB ports
     def device_on(self, wcb, port):
@@ -281,7 +436,7 @@ class LinkManager:
         self.owners.setdefault(probe_name, {}).clear()
         for key in [k for k in self.handoff if k[0] == probe_name]:
             del self.handoff[key]
-        for link in self.links.values():
+        for link in self._every():
             if link.probe_name == probe_name:
                 link.channel = None
                 link.params = None
@@ -327,7 +482,7 @@ class LinkManager:
         (a probe still panic-looping) ends the attempts: each would wait out the command timeout, and a restarted probe
         holds nothing anyway."""
         probe = self.bench.probes.get(probe_name)
-        stale = [(l, self.rebooted_since_bind(l)) for l in self.links.values()
+        stale = [(l, self.rebooted_since_bind(l)) for l in self._every()
                  if l.probe_name == probe_name and l.channel is not None]
         stale = [(l, hit) for l, hit in stale if hit is not None]
         owned = self._owned(probe_name)
@@ -369,10 +524,41 @@ class LinkManager:
             if l.probe_name == probe and l.header == header and key != (wcb, port):
                 self.release(l)
                 del self.links[key]
+        for p, l in list(self.nc_links.items()):         # ...a NaviCore pin's included
+            if l.probe_name == probe and l.header == header:
+                self.release(l)
+                del self.nc_links[p]
         link = Link(self, wcb, port, probe, header, swap=swap, tap=tap)
         self.links[(wcb, port)] = link
         self.save()
         return link
+
+    def set_nc_link(self, port, probe, header, swap=False, tap=None, node=NAVICORE_ID):
+        """Wire NaviCore's `port` to a probe header by hand: one wire per header, as set_link; MAE and SBO are always
+        listen-only. Discovery normally finds these (discover)."""
+        if port not in NC_PORTS:
+            raise ValueError(f"not a NaviCore pin: {port} ({', '.join(NC_PORTS)})")
+        old = self.nc_links.get(port)
+        if old:
+            self.release(old)
+        for key, l in list(self.links.items()):
+            if l.probe_name == probe and l.header == header:
+                self.release(l)
+                del self.links[key]
+        for p, l in list(self.nc_links.items()):
+            if p != port and l.probe_name == probe and l.header == header:
+                self.release(l)
+                del self.nc_links[p]
+        link = NcLink(self, port, probe, header, swap, tap=tap, node=node)
+        self.nc_links[port] = link
+        self.save()
+        return link
+
+    def remove_nc_link(self, port):
+        link = self.nc_links.pop(port, None)
+        if link:
+            self.release(link)
+            self.save()
 
     def remove_link(self, wcb, port):
         link = self.links.pop((wcb, port), None)
@@ -457,7 +643,7 @@ class LinkManager:
                                     # probe resets it and clears that table (see forget_probe)
         link.auto_baud = baud is None
         if baud is None:
-            baud = self.bench.port_baud(link.wcb, link.port)
+            baud = link.default_baud()
         params = (baud, fmt, invert)
         if link.header in HW_ONLY_HEADERS:
             if hw is False:
@@ -499,7 +685,7 @@ class LinkManager:
             self.handoff[(link.probe_name, ch)] = (link.key, probe.dev.mark())
         bind_mark = probe.dev.mark()        # before the BIND: a restart from here on unbinds it again
         probe.bind(ch, link.header, baud, fmt=fmt, invert=invert, swap=link.swap, rx_only=link.tap)
-        for other in self.links.values():   # belt and braces: one channel, one link
+        for other in self._every():         # belt and braces: one channel, one link
             if other is not link and other.probe_name == link.probe_name and other.channel == ch:
                 other.channel, other.params, other.bind_mark, other.clean_to = None, None, None, None
         owned[ch] = link
@@ -544,8 +730,15 @@ class LinkManager:
         return console, cmd, payload.encode() + b"\r"
 
     def discover(self, log=print):
+        """Find every wire: each WCB port in turn (below), then NaviCore's own pins (_discover_navicore). The WCB half
+        is what it always was; a pin busy in a baseline window is noted once, with its highest count, instead of once
+        per port swept (SBUS OUT on a probe header toggles through every window). -> every wire found, WCB wires
+        first."""
         bench = self.bench
         probes = {n: bench.probe(n) for n in bench.probe_names()}
+        prior_nc = dict(self.nc_links)
+        for l in prior_nc.values():          # the probes are reset below: no channel survives the sweep
+            l.channel = l.params = l.bind_mark = l.clean_to = None
         # Every WCB — the main console, any other USB-attached WCB, and mesh-only ones. (Building
         # this from mesh_only_wcbs alone silently skipped a WCB the moment it got a USB cable.)
         ports = [(w, p) for w in bench.wcb_numbers() for p in HEADERS]
@@ -560,7 +753,7 @@ class LinkManager:
         for p in probes.values():
             p.reset()
             p.edges_start()
-        found, notes = {}, []
+        found, notes, noisy = {}, [], {}
         try:
             for w, port in ports:
                 if f"W{w}{port}" in skip or self.device_only(w, port):
@@ -585,7 +778,9 @@ class LinkManager:
                             if isinstance(v, int) and isinstance(b, int) and v >= 6 and b == 0:
                                 cands.append((v, n, h, which))
                             elif b == "storm" or (isinstance(b, int) and b > 0):
-                                notes.append(f"{n} {h}.{which} noisy (baseline {b})")
+                                prev = noisy.get((n, h, which))
+                                if b == "storm" or not isinstance(prev, int) or b > prev:
+                                    noisy[(n, h, which)] = b if prev != "storm" else prev
                 if not cands:
                     continue
                 cands.sort(reverse=True)
@@ -596,6 +791,7 @@ class LinkManager:
         finally:
             for p in probes.values():
                 p.edges_stop()
+        notes += [f"{n} {h}.{which} noisy (baseline {b})" for (n, h, which), b in noisy.items()]
 
         self.links = found
         for link in self.links.values():
@@ -622,8 +818,183 @@ class LinkManager:
                                          tap=old.tap or self.device_on(w, port) is not None, verified=old.verified)
             taken.add((old.probe_name, old.header))
             notes.append(f"W{w}{port}: kept the wire added by hand (auto-detect does not sweep this port)")
+        nc_found = self._discover_navicore(probes, notes, prior_nc)
+        self.nc_links = prior_nc if nc_found is None else nc_found
         self.discovered_at = datetime.now().isoformat(timespec="seconds")
         self.save()
         for note in notes:
             log(f"  note: {note}")
-        return list(self.links.values())
+        return list(self.links.values()) + list(self.nc_links.values())
+
+    def _discover_navicore(self, probes, notes, prior):
+        """The NaviCore half of discover() -> {port: NcLink} found, each checked by its own bytes, or None when the half
+        could not run (NaviCore not answering, no probe header left): the NaviCore wires found before are kept then.
+
+        It runs on the probe headers no WCB wire took, so it needs a free one: on a bench whose probes all serve WCB
+        ports it sends NaviCore nothing. GET_CONFIG gives the bauds, the local Maestro slots and what is routed to
+        S3-S5; it is never noted (it holds the mesh and access point passwords, which Bench.log hashes on NaviCore's
+        lines). With every probe counting edges on its free pins:
+          - S3, S4, S5: a TEST_ACTION serial action of sixteen 'U' (0x55, an edge on every bit) out that port, the kind
+            of plain text navicore.serial_route_dbg puts there every run (RA_SERIAL, NaviCore.ino:2221-2240). A port an
+            HCR, MP3 Trigger, DFPlayer or WLED is routed to is left alone (NaviCore.local_devices): it would read them.
+          - MAE: ?MAE,GET,<slot>,0 on the first local Maestro slot, a read that puts AA <device> 10 00 on the Maestro
+            bus and moves nothing (maestroLocalQuery and maestroWrite, NaviCore.ino:692-787).
+          - SBO: nothing is sent. SBUS OUT re-emits the controller's stream while sbusOutEnabled is on (the byte tee,
+            sbus_reader.h:89-93), so its pin toggles through every quiet window; the busiest such pin that carries
+            back-to-back SBUS frames to a hardware channel at 100000 8E2 inverted (sbus_run) is the wire.
+        As for a WCB port, the pin that stayed quiet in its baseline window and toggled during the stimulus is the wire,
+        the busiest one when several did, and a hit on the header's TX pin means a straight-through cable (SWAP). Each
+        wire is then confirmed by its exact bytes at GET_CONFIG's baud: the 'U' line and its CR, or the Maestro frame. A
+        pin not swept this time (a device routed there, no local Maestro slot, SBUS OUT off) keeps the wire found
+        before, if its header is still free."""
+        bench = self.bench
+        if not bench.has("navicore") or not probes:
+            return {}
+        taken = {(l.probe_name, l.header) for l in self.links.values()}
+        free = [(n, h) for n in probes for h in HEADERS if (n, h) not in taken]
+        if not free:
+            notes.append("NaviCore's pins were not swept: every probe header serves a WCB port (D-NC37 wires a third "
+                         "probe to them)")
+            return None
+        from .navicore import NaviCore
+        try:
+            nc = NaviCore(bench.dev("navicore"))
+            nc.ping()
+            cfg = nc.config()
+        except Exception as e:  # noqa: BLE001 - a NaviCore that does not answer costs only its own wires
+            notes.append(f"NaviCore did not answer ({_line1(e)}): its pins were not swept, and the NaviCore wires "
+                         f"found before are kept")
+            return None
+        node = int((cfg.get("wcbNetwork") or {}).get("deviceId") or NAVICORE_ID)
+        bauds = nc_bauds(cfg)
+        self.nc_baud = dict(bauds)
+        owned = {d.rsplit(" on ", 1)[-1] for d in NaviCore.local_devices(cfg)}
+        slots = NaviCore.local_slots(cfg)
+        found, quiet, swept = {}, {}, []
+
+        def window():
+            """Edge counts over a quiet 0.3 s; each free pin's lowest count across windows goes into `quiet`."""
+            time.sleep(0.1)
+            for p in probes.values():
+                p.edges_read()
+            time.sleep(0.3)
+            base = {n: p.edges_read() for n, p in probes.items()}
+            for n, h in free:
+                for which in ("tx", "rx"):
+                    b = base[n][h][which]
+                    c = b if isinstance(b, int) else 0          # 'busy' or 'storm': not an SBUS candidate
+                    quiet[(n, h, which)] = min(quiet.get((n, h, which), c), c)
+            return base
+
+        for p in probes.values():
+            p.edges_start()
+        try:
+            window()
+            for port in NC_AUX + ("MAE",):
+                if port in owned:
+                    notes.append(f"NaviCore's {port} was not swept: a device is routed to it, and it would read the "
+                                 f"stimulus")
+                    continue
+                if port == "MAE" and not slots:
+                    notes.append("NaviCore's MAE was not swept: it has no local Maestro slot, so nothing writes its "
+                                 "Maestro bus")
+                    continue
+                swept.append(port)
+                base = window()
+                try:
+                    if port == "MAE":
+                        nc.cli(f"?MAE,GET,{slots[0][0]},0")
+                    else:
+                        nc.test_action({"type": "serial", "port": port, "cmd": "U" * 16})
+                except AssertionError as e:
+                    notes.append(f"NaviCore's {port}: the stimulus failed ({_line1(e)})")
+                    continue
+                time.sleep(0.45)
+                hit = {n: p.edges_read() for n, p in probes.items()}
+                used = {(l.probe_name, l.header) for l in found.values()}
+                cands = []
+                for n, h in free:
+                    if (n, h) in used:
+                        continue
+                    for which in ("tx", "rx"):
+                        v, b = hit[n][h][which], base[n][h][which]
+                        if isinstance(v, int) and isinstance(b, int) and v >= 6 and b == 0:
+                            cands.append((v, n, h, which))
+                if not cands:
+                    continue
+                cands.sort(reverse=True)
+                if len(cands) > 1:
+                    notes.append(f"NaviCore's {port}: several pins toggled {[c[1:] for c in cands]} - using the busiest")
+                _, n, h, which = cands[0]
+                found[port] = NcLink(self, port, n, h, which == "tx", node=node)
+        finally:
+            for p in probes.values():
+                p.edges_stop()
+
+        if not cfg.get("sbusOutEnabled"):
+            notes.append("NaviCore's SBO was not swept: sbusOutEnabled is off, so nothing transmits on SBUS OUT")
+        else:
+            swept.append("SBO")
+            used = {(l.probe_name, l.header) for l in found.values()}
+            cands = sorted(((c, n, h, w) for (n, h, w), c in quiet.items()
+                            if c >= NC_SBUS_MIN_EDGES and (n, h) not in used), reverse=True)
+            for c, n, h, which in cands[:4]:
+                trial = NcLink(self, "SBO", n, h, which == "tx", node=node)
+                run = (0, 0, 0)
+                try:
+                    trial.listen(hw=True)
+                    m = trial.mark()
+                    time.sleep(0.35)
+                    run = sbus_run(trial.received(m))
+                except AssertionError as e:
+                    notes.append(f"NaviCore's SBO: {n} {h} could not be read at 100000 8E2 inverted ({_line1(e)})")
+                finally:
+                    try:
+                        self.release(trial)
+                    except Exception:  # noqa: BLE001 - a probe gone since; the next bind reports it
+                        trial.channel = trial.params = None
+                if run[2] >= 3:
+                    trial.verified = True
+                    found["SBO"] = trial
+                    break
+            else:
+                notes.append("NaviCore's SBO: no free pin carried back-to-back SBUS frames at 100000 8E2 inverted"
+                             if cands else "NaviCore's SBO: no free pin toggled through every quiet window")
+
+        for port, link in found.items():
+            if port == "SBO":
+                continue
+            try:
+                link.listen(bauds[port])
+                m = link.mark()
+                if port == "MAE":
+                    nc.cli(f"?MAE,GET,{slots[0][0]},0")
+                    want = bytes([0xAA, int(slots[0][1]) & 0x7F, 0x10, 0x00])
+                else:
+                    nc.test_action({"type": "serial", "port": port, "cmd": "U" * 16})
+                    want = b"U" * 16 + b"\r"
+                link.expect(want, timeout=3, since=m)
+                link.verified = True
+            except AssertionError as e:
+                link.verified = False
+                notes.append(f"{link.key}: wire found but its bytes did not verify at {bauds[port]} baud - {_line1(e)}")
+            finally:
+                try:
+                    self.release(link)
+                except Exception:  # noqa: BLE001
+                    link.channel = link.params = None
+
+        held = {(l.probe_name, l.header) for l in self.links.values()} | {(l.probe_name, l.header)
+                                                                           for l in found.values()}
+        for port, old in prior.items():
+            if port in found or port in swept:
+                continue
+            if (old.probe_name, old.header) in held:
+                notes.append(f"{old.key}: dropped the wire found before - {old.probe_name} {old.header} now belongs "
+                             f"to another wire")
+                continue
+            found[port] = NcLink(self, port, old.probe_name, old.header, old.swap, tap=old.tap, verified=old.verified,
+                                 node=old.wcb)
+            held.add((old.probe_name, old.header))
+            notes.append(f"{old.key}: kept the wire found before (its pin was not swept this time)")
+        return found

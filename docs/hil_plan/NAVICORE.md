@@ -56,7 +56,7 @@ see it, or as close to it as this bench allows.
 | The mesh, from W1 and W2 | `;W20,<cmd>` typed on W1: CLI lines come back as `[TERM:20]`; JSON is bridged into `rcTelemetry::handle()` and answered as `{"sys":1,...}` lines on W1's USB inside its 20 s relay window. W2's own console for the far end. `_deaf_w1` (`s18_etm_config_wdp.py:293`) and the same `?MAC,3` flip on W2's console take a board off the air. | `s21:473-545` |
 | The probe as a mesh client | `probe_in_mesh` (`suites/common.py:304`): MESH JOIN with any `PASS`, `CHK` or `TEMP`, `MSEND` of up to 511 characters, which the library fragments (`wcb_probe/probe_main.cpp:1062-1080`). Ids 1, 2, 6, 9, 19 and 20 are refused (`common.py:300`). NaviCore drops a sender's command whose sequence number falls in its 32-wide anti-replay window (`WCBClient/src/WCB_Client.cpp:879-898`), so a reused probe id first sends 33 no-ops, or uses an id NaviCore has not heard this boot. | |
 | NaviCore's SoftAP and WebSocket | The PC's spare WiFi adapter joins NaviCore's AP through a temporary Windows profile, exactly as `wifi.pc_joins_ap_ws` joins W1's (`s28_wifi.py:187-266`); `hil/ws.py` (`:51-110`) speaks RFC 6455 to `ws://192.168.4.1/ws` (`navicore_wsserver.h:501-507`). The AP is up on the bench (`wifiEnabled` true); its SSID and password are read from GET_CONFIG at run time and never logged. | |
-| NaviCore's serial ports into probes | None wired: all ten probe headers serve W1 and W2 (`results/links.json`). Designed now, run later (NC-WP14). | §6 |
+| NaviCore's serial ports into probes | None wired yet: all ten probe headers serve W1 and W2 (`results/links.json`). NC-WP14's tests are written for a third probe on NaviCore's pins (D-NC37): opt-in `navicore_wire`, `suites/s51_navicore_wire.py`, wires `N20S3`-`N20SBO` found by `--discover` (`docs/HIL_TESTING.md` §2). | §6 |
 | The config tool | Playwright with a fake `navigator.serial` defined before the page's own scripts, the pattern Intellex ships (`Intellex/src/intellex_shim.js:1-30`, `:270-300`). Behind it: an in-Node emulator (L1, no board) or the harness's COM5 handle through the bridge (L2, the real board). Real Web Serial only when someone is at the bench (L3). | §5 |
 
 ### 1.2 Where effects are observed
@@ -994,6 +994,7 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 | `navicore_ota_relay_full` | the same image relayed through W1, twice (~12 min a pass, like W2's twin: `optin.py:44-50`) | off; run once by hand |
 | `navicore_esptool` | the recovery ladder's esptool rungs on the healthy board (`ncota.recovery_esptool`): download mode, the bench image into app0, `boot_app0.bin` into otadata | off: watched runs only (added 2026-09-28 with NC-WP2) |
 | `navicore_fault` | the HIL-hook faults (corrupt then restore `/config.json`, a failed save) | on once the hook image is flashed |
+| `navicore_wire` | NC-WP14's `ncwire` tests on NaviCore's own pins, through probe 3 wired as D-NC37 has it: text out S3-S5, lines typed in, SBUS OUT and the Maestro bus read; serialBcast saved inside `nc_guard` | off until probe 3 is wired (registered 2026-10-05 with NC-WP14) |
 | `navicore_identity` | persisted deviceId/channel/password changes that take NaviCore off the mesh until restored over USB | off: attended only |
 | `navicore_webserial` | the config tool over real Web Serial and esptool-js (L3): Chrome's one-time grant in `.profiles/navicore`, its open restarts NaviCore, and the Full Wipe & Flash test rewrites the bootloader, the table and app0 and erases NVS and otadata | off: attended only (registered 2026-09-29 with NC-WP13) |
 
@@ -1017,7 +1018,7 @@ of `docs/HIL_TEST_AUDIT.md` (status `todo` / `written` / `bench <run>` / `blocke
 | NC-WP11 | SBUS faults | `sbus.*`, ~8 | INF8 (D-NC8) | 5 h | unattended once the verbs exist |
 | NC-WP12 | Record and replay | `ncrec.*`, ~9 | NC-WP1 | 7 h | `navicore_clip_write` |
 | NC-WP13 | Config tool with the board (L2) and attended (L3) | `nctool.board_*`, `nctool.webserial_*` | NC-WP3, NC-WP1 | 7 h | L2 unattended; L3 attended |
-| NC-WP14 | NaviCore's own pins | `ncwire.*`, ~7 | a probe wired to NaviCore (D-NC37) | 6 h | blocked: hardware |
+| NC-WP14 | NaviCore's own pins | `ncwire.*`, 7 | a probe wired to NaviCore (D-NC37) | 6 h | written, opt-in `navicore_wire`; waits for probe 3 |
 
 **The first 48 hours**, in order:
 
@@ -1773,15 +1774,42 @@ The L2 and L3 tables of §5.4, each L2 spec wrapped in `nc_guard` by its harness
 >   `wcb_peers`; its own `rcfg` is a dead migration source, `rc_config.h:2213-2220`), which nc_guard re-learns from W1's
 >   adverts, so the test needs `wcb1`. When NaviCore had been on app1, hil/ncflash puts the boot slot back.
 
-### NC-WP14 — NaviCore's own pins (blocked: hardware)
+### NC-WP14 — NaviCore's own pins (written; waits for probe 3)
 
-Designed now so it runs the day a probe is wired (D-NC37): `ncwire.aux_bytes`, `ncwire.soft_tx_integrity` (200 long
+> **Status 2026-10-05: written as opt-in tests, not yet bench-run; needs probe 3 wired as D-NC37 has it and the
+> `navicore_wire` opt-in ticked.** `suites/s51_navicore_wire.py` holds the seven tests; each is opt-in `navicore_wire`
+> and names its N20 wires in `links=`, so it skips, saying what it lacks. `hil/links.py` holds the NaviCore wires
+> (`NcLink`; keys `N20S3`, `N20S4`, `N20S5`, `N20MAE`, `N20SBO`; `links.json` `"navicore_links"`) and the second half of
+> `--discover`, which sweeps NaviCore's pins on the probe headers no WCB wire took. The wiring, what goes into bench.json
+> and the order of the first run are in `docs/HIL_TESTING.md` §2 "NaviCore's own pins". `selftest.py` runs the seven
+> against `NaviWireModel` (NaviCore main 639e2e7's transmitter, tee, Maestro bus and RX monitor) and discovery against a
+> fake probe 3. No probe firmware change: wcb_probe v7 already binds a hardware channel at 100000 8E2 inverted, RX only.
+> Where the code differs from the plan:
+> - NaviCore's pins are a wire kind of their own, not a widened `port_devices`: they are not WCB ports, and everything
+>   that walks WCB wires (the GUI's diagram, the resume's wire checks, the checkpoint's links canon) stays as it was.
+> - `ncwire.s3_console_quiet`'s "on an IDF error" half is observed, not provoked: none of the hooks (`#L90`-`#L93`) makes an
+>   IDF error. The IDF console is UART0 in the core's precompiled sdkconfig (`CONFIG_ESP_CONSOLE_UART_NUM=0`), so the
+>   finding stands in the code; the test counts every `E (n) tag:` line NaviCore prints in its windows, fails if one
+>   reaches S3, and says when none was printed (on this bench they come with WiFi station churn). A hook that logs an
+>   `ESP_LOGE` on demand would make it deterministic: a NaviCore change, not made.
+> - `ncwire.tx_interleave` fires the device write on a serial action's ACK, not on the line's first bytes: a probe channel
+>   reports a burst only after about four character times of quiet, and a paced line has none until it ends. Both of its
+>   cases use a serial action (the mesh forward goes through the same pump).
+> - `ncwire.soft_tx_integrity` sends its 200 lines as serial actions, 100 to S4 and 100 to S5, under the SBUS stream and
+>   bridged PINGs from W1: a probe in mesh mode could not also be the instrument.
+> - `ncwire.sbus_out_tee` changes nothing: switching the tee off and on stays `nccfg.sbus_out_toggle`'s, and with
+>   sbusOutEnabled off the test only checks the line is silent.
+> - The `(should)` tests are `soft_tx_integrity` (D-NC24), `s3_console_quiet` (the map's `nc.aux.uart0_console_leak`)
+>   and `tx_interleave` (`nc.aux.tx_interleave`). Against the model only `tx_interleave` fails, as NaviCore's code says
+>   it must today; the other two are what the wire has to measure.
+
+Seven tests for the day probe 3 is wired (D-NC37): `ncwire.aux_bytes`, `ncwire.soft_tx_integrity` (200 long
 lines on S4/S5 under mesh and SBUS load: 0 RXERR, 0 mismatches; the map's finding that S4/S5 bit-bang with interrupts
 on), `ncwire.s3_console_quiet`, `ncwire.tx_interleave`, `ncwire.rx_monitor_bcast_in`, `ncwire.sbus_out_tee`
 (a hardware channel at 100000 8E2 INV RXONLY: bytes equal `#L13`, period ~9 ms), `ncwire.maestro_bus_tap`. The harness
-side: link keys for NaviCore ports (`N20S3`, `N20S4`, `N20S5`, `N20MAE`, `N20SBO`), a discovery stimulus through
-TEST_ACTION serial or `;W20,;s<n>`, bauds from GET_CONFIG `auxBaud`, and the `port_devices` pattern widened
-(`links.py:25-46`, `:532-554`, per the map).
+side: a wire kind for NaviCore's pins (`hil/links.py` `NcLink`) with the keys `N20S3`, `N20S4`, `N20S5`, `N20MAE` and
+`N20SBO`, found by discovery's second half (TEST_ACTION serial actions out S3-S5, a `?MAE,GET` read on the Maestro bus,
+SBUS OUT by its frames), and bauds from GET_CONFIG `auxBaud` at run time (`nc_bauds`).
 
 ## 5. The config tool (`NaviCore/config_tool`)
 
@@ -2044,7 +2072,7 @@ D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC73 are be
 | D-NC21 | A deferred tap still fires during failsafe, and a press in flight when frames stop resolves once they return. The failsafe gate resets the matrix debounce and abandons a hold but leaves the deferred tap (`NaviCore.ino:2782-2796`), and `checkDeferredTap` runs from `loop()` whatever the frames say (`:2404-2426`, called at `:5500`): a tap released just before failsafe fires tapWindowMs after its release, and a press held into it fires sooner, still held, since clearing `holdActive` (`:2790`) is what unparks it (`:2412`). With no frame nothing reaches `processSbus` (`:2757-2759`) - NaviCore has no frame timeout - so a press held when frames stop stays parked, and the first neutral frames after the outage are its release (`:2825-2837`, `rcMatrixRelease` `:2379-2402`): it fires tapWindowMs after the link returns. Read in the code writing NC-WP11; confirmed on the bench (run `20260929-201950`): a press let go during a 2.4 s outage fired tap 1 545 ms after the frames came back, and a tap whose release shared the failsafe's first frame fired 456 ms after it, the flag still on. | Failsafe and frame loss cancel any pending tap or hold; the press must be made again. | `sbus.failsafe_deferred_tap`, `sbus.frame_stop_held_press` |
 | D-NC22 | A null or empty `hcrDest`/`mp3Dest`/`dfpDest` object enables the device (serial S3, or WCB 2). | Read it as off. | `nccfg.dest_null_hazard` |
 | D-NC23 | Subroutine numbers 128-255 go out unmasked (`restartScript`, `subParam`, inbound `;M<dev>,<n>`), a command-range byte inside a Pololu frame. Cross-repo: `WcbMaestro` accepts up to 255. | Refuse n > 127 in WcbCmd (both firmwares; push WcbCmd first, WCB rule 1). | `ncdev.mae_subroutine_msb` and a WCB twin |
-| D-NC24 | S4/S5 transmit bit-banged with interrupts enabled (EspSoftwareSerial 8.1.0 defaults), while ARCHITECTURE §8 says they are masked. | Fix the docs now; change firmware only after a wire measures it (RMT TX, as WCB rule 13). | `ncwire.soft_tx_integrity` (blocked) |
+| D-NC24 | S4/S5 transmit bit-banged with interrupts enabled (EspSoftwareSerial 8.1.0 defaults), while ARCHITECTURE §8 says they are masked. | Fix the docs now; change firmware only after a wire measures it (RMT TX, as WCB rule 13). | `ncwire.soft_tx_integrity` (written; waits for probe 3) |
 | D-NC25 | The new-peer grace is 8 s (`NaviCore.ino:107`) but a WCB advertises every 60 s, so after a NaviCore boot every present WCB fires the alert and the peer actions. | Boards already online in the ETM table when the grace ends do not fire. | `ncboot.new_peer_after_boot` |
 | D-NC26 | A reassembled inbound command over 200 characters is cut silently into `RemoteCliMsg.cmd[200]` or `SerialFwdMsg.text[201]` (`NaviCore.ino:90`, `:327`). | Refuse it with a log line; never truncate. | `ncmesh.long_command_truncation` |
 | D-NC27 | A bridged WCB_SEND answers `ok:true` whatever `send()` returned (`rc_telemetry.h:1519-1524`: `ok = true` at `:1523`), and a fragmented one is dropped with no ACK. | Report the send result; handle and ACK the fragmented form. | `ncmesh.bridged_wcb_send_findings` |
@@ -2087,6 +2115,7 @@ D-NC16 to D-NC36, D-NC42 to D-NC48, D-NC56 to D-NC66 and D-NC70 to D-NC73 are be
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-05 | `cdde452` | NC-WP14 written as opt-in tests, not bench-run (probe 3 is not wired): `s51_navicore_wire.py` (seven `ncwire` tests, three `(should)`), opt-in `navicore_wire`, the NaviCore wires and their discovery in `hil/links.py`, six `selftest.py` cases. The NC-WP14 status note lists where the code differs from the plan. |
 | 2026-10-05 | `2c32b99` | The NaviCore `(should)` findings fixed on NaviCore main and bench-verified (status note in §7.2); D-NC74 to D-NC76 added. |
 | 2026-09-29 | _(pending)_ | NC-WP11's first bench run (`20260929-201950`, the controller flashed with INF8's image): seven of s50's twelve pass or fail as designed (D-NC72, D-NC73, the decoded windows as predicted); five misread rc_trig - s42 `_taps` gives `(host time, tap)` - and are fixed, `failsafe_deferred_tap`'s case A now raising the flag 150 ms after the release. D-NC21, D-NC72 and D-NC73 confirmed on the bench. `selftest.py`'s `NaviSbusModel` now runs NaviCore's SBUS engine, so those five run there too (it reproduced the bench's failures before the fix), with six more mutations; the glitch note and the model count one frame per loop pass, as `#L09` does. s42 `_taps` has a docstring. |
 | 2026-09-29 | `153e46d` | INF8 built and NC-WP11 written, neither flashed nor bench-run. SBUSController branch `hil-week` `de99467` (local; from `fae0af6`): the five RAM-only verbs, `stream`'s frame budget, the test reply and its probe; image `20260929-de99467-hil` in `.claude-worktrees/SBUSController/hil-week-image`. `hil/sbus.py`: the verb methods, `clear_faults`, `ReaderModel`; `NaviCore.sbus_dump` reads an SBUS-16 #L09; the resume clears the controller's test state. New `s50_navicore_sbus_faults.py` (12 `sbus` tests, four `(should)`: D-NC21 twice, D-NC72, D-NC73; all in `hil/servos.py`). New findings D-NC72 (a truncated frame decodes misaligned on a locked reader) and D-NC73 (a 16-locked reader decodes an SBUS-24 frame's 25-byte prefix); D-NC21's row now cites the code it was read in. `selftest.py` runs the suite against an image without the verbs and against a model of the wire, with seven mutations. The status notes list where the code differs from the plan. |

@@ -129,7 +129,7 @@ def main():
         from hil import wiring
         bench = runner.Bench(args.bench, results_root)
         if args.links:
-            for link in bench.links.all():
+            for link in bench.links.all() + bench.links.nc_all():
                 print(f"{link}  verified={link.verified}")
         if args.plan:
             for row in wiring.plan(bench):
