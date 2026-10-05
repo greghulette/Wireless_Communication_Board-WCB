@@ -250,13 +250,17 @@ SBUS OUT on a probe header is busy in all of them.
 
 **WCB3 is a HW 3.2 board (ESP32-S3).** It runs the S3 build of the WCB firmware
 (`esp32:esp32:esp32s3:PartitionScheme=min_spiffs`), not the image W1 and W2 run: WCB number 3, the bench's mesh
-password and ETM settings, `?WCBQ,3` on W3 only: W1 and W2 stay at 2, the baseline the tests restore, until the suites below are updated. Its S-header pads are those of V2.4 (5V, GND, TX, RX), 3.3 V,
+password and ETM settings, `?WCBQ,3` on W3. W1 and W2 can stay at 2: they learn WCB3 by WDP, and the tests restore
+whatever baseline they find. Its S-header pads are those of V2.4 (5V, GND, TX, RX), 3.3 V,
 no level shifters.
 
-> **Do not put WCB3 on the mesh during runs yet.** About 80 checks in ten suites use WCB 3 as *the board that is not
-> there*: `s27_identity_destructive` renumbers W1 to WCB 3 for a few seconds, and `pwm.*`, `map.unreachable_board`,
-> `peers.wcbq_live`, `mesh.*` and others send to WCB 3 expecting nobody to answer, or restore `?WCBQ` to 2. Until those
-> pick a free board number at runtime, keep WCB3 powered off during runs.
+> **List WCB3 in `bench.json` before it joins the mesh during a run** (plug it in, *Find devices*). Tests that need a
+> board nobody answers to pick it at runtime (`suites/common.py` `absent_wcbs`): 3 while `bench.json` has no WCB3, 4
+> once it does. A WCB3 on the mesh but not listed collides with them: `s27` renumbers W1 to 3 for a few seconds, and
+> `pwm.*`, `map.unreachable_board`, `peers.wcbq_*` and `wcb.pull_wrong_target` expect nobody to answer as 3.
+> With WCB3 listed, three things still differ: `var.mesh_client_sets` skips (its probe client takes id 3);
+> `maestro.clear_all_legacy_routing`'s `;M3` broadcast also reaches WCB3, which writes `AA 03 24` to its S1 (probe 4
+> sees it); and `ncwire`/`s21`'s expected-port lists cover W1 and W2 only.
 
 **Probe 4 to WCB3** (a V2.4 board flashed with `wcb_probe` v7, plugged in after probe 3):
 
@@ -290,8 +294,8 @@ wire and test alone.
 
 **Bring-up order:** flash probe 3, probe 4 and WCB3 → wire (Wiring tab, *What to connect*) → plug in probe 3, *Find
 devices* → probe 4, *Find devices* → WCB3 (powered, Kyber off), *Find devices* → *Auto-detect wires* →
-`run.py --links` lists `W3S1`, `W3S3`, `W3S4` and `N20S3`-`N20SBO` verified → power WCB3 off again before a full run
-(above).
+`run.py --links` lists `W3S1`, `W3S3`, `W3S4` and `N20S3`-`N20SBO` verified. WCB3 can then stay on for runs (above);
+the Kyber stays off.
 
 ---
 
