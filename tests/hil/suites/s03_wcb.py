@@ -991,9 +991,14 @@ def mgmt_result_too_large(bench):
             problems.append("W1 printed no [MGMT:STATS,2] line for two requests")
         elif not re.match(r"^\[MGMT:STATS,2\]\[ERROR\] Result too large to relay \(\d+ chars, max 2912\)\.", line):
             problems.append(f"W1's [MGMT:STATS,2] line is not the too-large error: {line[:100]!r}")
-        if line is not None and not any(re.match(r"^\[MGMT\] Result too large to relay: \d+ chars needs \d+ chunks, "
-                                                 r"max 16 \(2912 chars\)\.", x) for x in w2.dev.since(m2)):
-            problems.append("W2 did not print '[MGMT] Result too large to relay:'")
+        if line is not None:
+            # Waited for, not read at once: W2 prints its line after it has sent W1 the error, so it can reach the PC
+            # after W1's (16 ms after it on the Mac, run 20261005-105858, which failed this check).
+            try:
+                w2.dev.expect(r"^\[MGMT\] Result too large to relay: \d+ chars needs \d+ chunks, max 16 \(2912 chars\)\.",
+                              timeout=2, since=m2)
+            except AssertionError:
+                problems.append("W2 did not print '[MGMT] Result too large to relay:'")
     finally:
         w2.run("?STATS,RESET")
     left = [x for x in w2.run("?STATS", timeout=6) if "4294967295" in x]
