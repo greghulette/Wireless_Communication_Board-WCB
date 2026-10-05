@@ -188,7 +188,7 @@ test('Kyber local: the port, the targets, and the Marcuino port read from its la
 });
 
 // ── (should) the parser halves of W-17 and W-20 ─────────────────────────────────────────────────────────────────────
-test('W-17 (should): a system file keeps the WCB quantity it was saved with when it holds a board above it or a client slot', { todo: 'W-17: parseSystemFile raises general.wcbQuantity to the number of [WCB] sections (parser.js:1257-1260)' }, () => {
+test('W-17 (should): a system file keeps the WCB quantity it was saved with when it holds a board above it or a client slot', () => {
   const sys = P.createDefaultSystemConfig();
   sys.general.wcbQuantity = 2;
   const b = (n, extra = {}) => Object.assign(P.createDefaultBoardConfig(), { wcbNumber: n, hwVersion: 24 }, extra);
@@ -198,7 +198,7 @@ test('W-17 (should): a system file keeps the WCB quantity it was saved with when
   assert.deepEqual(back.boards.map((x) => x.wcbQuantity), [2, 2, 2, 2]);
 });
 
-test('W-20 (should): the same Kyber targets in another order are not a change', { todo: 'W-20: kyberChanged compares the target lists as JSON, order included (parser.js:1424-1427)' }, () => {
+test('W-20 (should): the same Kyber targets in another order are not a change', () => {
   const base = chain('?MAESTRO,M1:W1S1:57600', '?MAESTRO,M2:W2S1:57600', '?KYBER,LOCAL,S2,M1:W1S1:57600,M2:W2S1:57600');
   assert.deepEqual(base.kyber.targets.map((t) => t.id), [2, 1], 'the parse order the backup gives: the table\'s proxy first');
   const cfg = clone(base);

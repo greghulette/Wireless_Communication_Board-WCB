@@ -1254,8 +1254,11 @@ function parseSystemFile(fileContent) {
   // Sort boards by WCB number
   system.boards.sort((a, b) => a.wcbNumber - b.wcbNumber);
 
-  // Update quantity to match actual board count if file has more boards
-  if (system.boards.length > system.general.wcbQuantity) {
+  // The quantity is the one the file was saved with. It is the mesh's floor, not a board count: a board above it (one
+  // WDP joined) and a client slot are boards of their own, and raising the quantity to the number of sections made a
+  // reload add default boards the file never held and push that number to every board (W-17). Only a file whose
+  // [GENERAL] carries no ?WCBQ (buildSystemFile always writes one) still takes the number of boards.
+  if (!/(?:^|\^)\?WCBQ,/im.test(sections['GENERAL'] || '') && system.boards.length > system.general.wcbQuantity) {
     system.general.wcbQuantity = system.boards.length;
   }
 
@@ -1420,11 +1423,11 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // blocks run before the claim-late ?KYBER,LOCAL - so a device the Wizard now offers on S1 of a
   // local-Kyber board (tracker #73 D4) was refused, while the baseline recorded it as configured.
   // CLEAR on a REMOTE board releases no port (kyberLocalPort is 0), so kyberReleasedIdx stays -1.
-  // kyberChanged also gates the claim-late ?KYBER,LOCAL below.
+  // kyberChanged also gates the claim-late ?KYBER,LOCAL below. The targets compare as a set (_kyberTargetsKey).
   const kyberChanged = fullPush || !baseline ||
     baseline.kyber.mode !== config.kyber.mode ||
     baseline.kyber.port !== config.kyber.port ||
-    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
+    _kyberTargetsKey(baseline.kyber?.targets) !== _kyberTargetsKey(config.kyber?.targets);
   const baseKyberPort = baseline?.kyber?.mode === 'local' ? (baseline.kyber.port || 2) : 0;
   let kyberReleasedIdx = -1;
   if (config.kyber.mode === 'local') {
@@ -1742,8 +1745,12 @@ function buildSystemFile(system) {
 
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
-    const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
-    let chain = buildCommandString(boardWithQty, null, true, FILE_OPTS);
+    // Each board as parseSystemFile reads it back, General's shared fields winning (applyGeneralToBoard) - as every
+    // push writes them too. Written from the board's own copy, a slot General never reached (a client slot, a board
+    // WDP added after the General fields were set) carried other values, and a reload put General's in (W-17).
+    const boardOut = { ...board };
+    applyGeneralToBoard(system.general, boardOut);
+    let chain = buildCommandString(boardOut, null, true, FILE_OPTS);
     // A client slot (a WCB_Client device: a card, never pushed) keeps its type and alias through the file as the
     // Wizard-only ?CLIENT token; without it the slot reloaded as a WCB with no clientAlias. The slot's WCB config
     // still rides along, as the slot keeps it for a flip back to WCB. Last in the chain, so a Wizard from before the
@@ -1798,7 +1805,7 @@ function diffConfigs(configA, configB) {
   check('delimiter',      configA.delimiter,       configB.delimiter);
   check('funcChar',       configA.funcChar,        configB.funcChar);
   check('cmdChar',        configA.cmdChar,         configB.cmdChar);
-  check('kyber',          configA.kyber,           configB.kyber);
+  check('kyber',          _kyberKey(configA.kyber), _kyberKey(configB.kyber));   // targets as a set (W-20)
   check('mp3',            configA.mp3,             configB.mp3);
   check('hcr',            configA.hcr,             configB.hcr);
   check('dfp',            configA.dfp,             configB.dfp);
@@ -1869,6 +1876,16 @@ function _mappingsKey(list) {
     destinations: (m.destinations ?? []).map(d => ({ wcbNumber: d.wcbNumber, port: d.port })),
   })));
 }
+
+// A local Kyber's targets as a set, for comparing. The board forwards to each target whatever the list's order
+// (forwardDataFromKyber walks kyberTargets[] per byte, WCB.ino), and the order differs by source: a pull lists the
+// Maestro table's proxies before the KYBER line's own (collectConfigCommands, WCB.ino, claims the Kyber late), and
+// autoComputeKyberTargets (app.js) puts the live boards' Maestros first. Compared in order, the same targets were a
+// change: a no-edit push re-sent ?KYBER,CLEAR and ?KYBER,LOCAL, and a KYBER line reboots the board (W-20).
+function _kyberTargetsKey(targets) {
+  return (targets ?? []).map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).sort().join(',');
+}
+const _kyberKey = (k) => (k ? { ...k, targets: _kyberTargetsKey(k.targets) } : k);
 
 // ─────────────────────────────────────────────
 // Command characters: what the firmware accepts

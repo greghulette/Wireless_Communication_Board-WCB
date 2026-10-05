@@ -79,9 +79,6 @@ test('wizard.editors_fake_mappings the mapping editor sends at once: Save sends 
 });
 
 test('wizard.editors_fake_bidir_remove (should) removing a bidirectional serial mapping also clears its mirror on the destination board (W-21)', async ({ page }) => {
-  test.fail(true, 'W-21: removeMappingRow sends ?MAP,SERIAL,CLEAR only to the source board (app.js:3952-3972); _removeBidirRows drops ' +
-                  'the destination\'s mirrored row from the page and sends nothing (app.js:3981-3992), so the reverse mapping stays ' +
-                  'on the destination board, and no push clears it (a removed mapping builds nothing)');
   await w1AndW2(page);
   const { rowId } = await mappingRow(page, { src: 2, wcb: 2, port: 4, bidir: true });
   await page.evaluate((rowId) => saveMappingRow(rowId, 1), rowId);

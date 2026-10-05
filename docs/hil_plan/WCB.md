@@ -203,8 +203,10 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 > `wizard.push_fake_shared_reboot_repull` (W-14) and `wizard.push_fake_general_wcbq` (W-16). Row 3's matcher table and the
 > W-4/W-9 cases were already `push_fake.spec.js`. All pass headless and each `(should)` spec fails on its defect. The plan
 > against the code: a WCBQ edit reboots nothing (D28), so the reboot cases change the hardware version; the WDP state
-> has no card field (its commands are the mesh panel's, WP41 row 4); the General modal has no WCBQ row (W-16); and Push
-> All's four stages hold, but a relay on the shared port - the connection the first board gets - is reported lost (W-15).
+> has no card field (its commands are the mesh panel's, WP41 row 4); the General modal has no WCBQ row (W-16, fixed
+> 2026-10-04); and Push
+> All's four stages hold, but a relay on the shared port - the connection the first board gets - is reported lost (W-15,
+> fixed 2026-10-04).
 
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
 |---|---|---|---|---|
@@ -218,7 +220,7 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 ### WCB-WP21: Wizard, Playwright on the bench through the HIL bridge (H/M)
 New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U; row 9 needs one attended setup. L.**
 
-> **Status 2026-09-29: done and bench-verified (`20260929-101257`, `-104602`, `-105553`: six pass, and `wizard.mapping_bidir_relay` fails as designed, W1's mapping cleared and W2's reverse left, W-21; the first run's failures were the harness's, fixed: `docs/HIL_TESTING.md` revision log).** `tests/wizard/specs/board_more.spec.js`, run by s30 as
+> **Status 2026-09-29: done and bench-verified (`20260929-101257`, `-104602`, `-105553`: six pass, and `wizard.mapping_bidir_relay` fails as designed, W1's mapping cleared and W2's reverse left, W-21 - fixed 2026-10-04, not yet re-run on the bench; the first run's failures were the harness's, fixed: `docs/HIL_TESTING.md` revision log).** `tests/wizard/specs/board_more.spec.js`, run by s30 as
 > `wizard.push_reboot_path` and `wizard.push_reboot_path_direct` (row 1), `wizard.push_all_relay` (row 2),
 > `wizard.mapping_bidir_relay` (row 3, `(should)`: W-21), `wizard.seq_var_editors` (row 4), `wizard.wdp_da_forget` (row 5)
 > and `wizard.relay_terminal` (row 6). Every bench push first checks the verbs it will send (`tests/wizard/lib/wizard.js`
@@ -233,8 +235,9 @@ New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U
 > WCBQ edit reboots nothing (D28), so the reboot push is `?HW` with the board's own version, which changes nothing; "one
 > boot banner per push" holds on the shared port, which `connectBoard` gives the first board, while on a direct connection
 > the reconnect pulses DTR and resets the board again by design (app.js:5437-5445), so that variant notes the count; on
-> the shared port the Wizard never pulls after the reboot (W-14), so the spec pulls itself; Push All runs with W1 direct
-> (W-15); "W1 and W2 on USB" is impossible with one grant per Chrome profile, so W2 is managed through W1; row 5 uses W2 S4
+> the shared port the Wizard pulls 3 s after the boot banner (W-14, fixed 2026-10-04), and the spec pulls once more to
+> compare; Push All runs with W1 direct
+> (the close-and-reopen path; a shared relay's branch, W-15, is `wizard.push_fake_all_shared_relay`'s); "W1 and W2 on USB" is impossible with one grant per Chrome profile, so W2 is managed through W1; row 5 uses W2 S4
 > (s12's unlabelled WDP-DA port), not S3; "Manage all" exists only on a MgmtRelay card, which the bench does not have
 > (`wizard.app_fake_relay_card`). Each skips, saying why, when the bench cannot run it: W1 reports no hardware version
 > the Wizard sends (the reboot pushes), W1 S2 is claimed by a device or either port already has a serial mapping
@@ -455,7 +458,8 @@ Behaviour that lives in app.js goes to WP41. **U, needs no board, M.**
 > every field of the model, so a field added later without a `diffConfigs` line fails it (the six fields have been in
 > `diffConfigs` since W-11); row 4 (the mapping and PWM-output round trip, and that an added or edited mapping re-sends
 > the table while a removed mapping or output port builds nothing - left as found); row 8 (every claim); row 9 (WiFi,
-> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s. Rows 1, 2, 5, 6 and 7
+> WDP); row 10 (Kyber local); and the parser halves of W-17 and W-20 as `(should)` node `todo`s (both guard their
+> fixes since 2026-10-04). Rows 1, 2, 5, 6 and 7
 > were already pinned (`roundtrip.test.js` W-1, W-2, W-3, W-6; `pull.test.js` W-7).
 
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
@@ -794,9 +798,13 @@ fix; per the conventions, each fix also needs its doc row.
 - **W-11** diffConfigs ignores six fields (parser.js:1726-1768).
 - **W-12** The 'Firmware counts down ~3 s' comments are stale (app.js:7705, 9915).
 
-> **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6` and
-> **not fixed** (the main session decides). Each is pinned by a `(should)` test that fails today: `test.fail` in
-> Playwright (CI stays green, the harness reports FAIL), a node `todo` in `unit/model.test.js`.
+> **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
+> Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
+> the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
+> **Status 2026-10-04:** all nine are fixed (each row says how): their `test.fail` and `todo` markers are gone, the
+> titles keep `(should)`, and the tests guard the fixes. Not yet run on the bench since: `wizard.mapping_bidir_relay`
+> (W-21, W1 and W2), `wizard.push_reboot_path` (W-14's pull, W1), and the other `wizard.*` bench specs, whose sends
+> W-13 moved to the live function identifier.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -805,38 +813,78 @@ fix; per the conventions, each fix also needs its doc row.
   reboot (:9197), and the relay hops of a bidir mapping and a removed PWM output (:4305, :4247 - the case app.js:76-85
   says must never read boardConfigs). The board, still on its old character, broadcasts each line as text to its ports
   and the mesh (WCB.ino:6063-6066). `wizard.app_fake_pending_funcchar`.
+  **Fixed:** every immediate send reads the board's live character, `_liveFuncChar` (`_liveChar`, app.js), as the relay
+  hops already did: a switch seen since the baseline was stored (a boot banner, or a push's character switch, recorded
+  in `boardBootChars` with the baseline it was seen over), else the baseline, else the banner. So a push that switches
+  the characters and reboots is followed by the new ones until its verify pull. The command character's immediate
+  sends (the `;L` WLED controls, a sequence's Test, a temporary variable) read `_liveCmdChar` the same way.
 - **W-14** On the shared port - the connection the first board of a page gets (establishConnection) - a push that needs a
   reboot sends `?reboot` and stops: no reconnect, so no verify pull, and the baseline is not advanced (app.js:8038-8045).
   The next push sends every change of the first again and reboots the board again. `wizard.push_fake_shared_reboot_repull`.
+  **Fixed:** the shared branch starts `_pullAfterSharedReboot` (app.js), the verify pull the direct path gets from its
+  reconnect. With the port held open, the board's own lines say when it is back: the pull runs 3 s after the boot
+  banner's `Software Version:` line (the banner came 9-10 s after `?reboot` on the bench), 30 s after `Reboot queued`
+  (or an older firmware's `Rebooting in 2 seconds`) if no banner shows, and 4 s after `?reboot` if the board announced
+  no restart at all.
 - **W-15** Push All's last stage closes and reconnects every relay (app.js:9193-9218) with no shared-port branch. A shared
   relay has no port of its own, so reconnect() returns false at once (app.js:5393): "did not come back — reconnect
   manually", and the card goes Not connected while the hub still holds the port. `wizard.push_fake_all_shared_relay`.
+  **Fixed:** stage 4 has the shared branch boardGo has: a relay on the shared port is rebooted with its card left
+  connected, and `_pullAfterSharedReboot` (W-14) pulls it once it is back. The spec read a `b1-conn-label` no card has,
+  so its check could never pass; it reads the card's Connect button instead, as `board_more.spec.js` does, after showing
+  WCB1 connected.
 - **W-16** The General conflict check leaves out the WCB quantity (extractGeneralFields, GENERAL_FIELD_LABELS,
   app.js:1555-1595), although every push writes the General WCBQ into the board (app.js:7933, :8340). A second board on
   another quantity opens no modal, and its next push - a label, say - silently sends `?WCBQ` with the first board's value.
   `wizard.push_fake_general_wcbq`.
+  **Fixed:** the quantity is a General field like the rest (`wcbQuantity` in GENERAL_FIELD_LABELS, extractGeneralFields
+  and applyGeneralFieldsToBoardConfig): the modal names it, Keep marks the second board for a push of the kept value,
+  and Use puts the new one into General (onWCBQuantityChange). That handler now keeps the General baseline in step, as
+  the others do, so a pushed quantity change reads back as no mismatch.
 - **W-17** A saved system file does not load back as it was saved. parseSystemFile raises the WCB quantity to the number
   of [WCB] sections, client slots and boards above the floor included (parser.js:1257-1260); loadSystemFileContent renders
   sections 1..that number (app.js:9270), adding default boards the file never held and none for a board above them; the
   next export writes such a board from its missing DOM, with no labels, sequences or variables (app.js:9309-9327).
   `wizard.app_fake_system_file_reload`; the parser half is a `todo` in `unit/model.test.js`.
+  **Fixed:** parseSystemFile keeps the quantity the file was saved with (only a `[GENERAL]` with no `?WCBQ`, which
+  buildSystemFile always writes, still takes the number of boards); loadSystemFileContent gives each board above the
+  quantity, client slots included, a section of its own (addDiscoveredBoards) before filling it; and buildSystemFile
+  writes each board with General's shared fields applied, as parseSystemFile reads it back - a client slot General had
+  never reached reloaded with General's MAC octets and mesh password. Both tests guard it (the unit test is no longer a
+  `todo`).
 - **W-18** A board above the WCB quantity cannot be renumbered past it: its dropdown offers numbers up to its own
   (app.js:3194-3202), but onWCBNumberChange takes only numbers up to the General quantity (app.js:2080-2081), so the pick
   shows and is dropped. `wizard.app_fake_wcb_number_above_floor`.
+  **Fixed:** onWCBNumberChange takes any number the firmware takes (1-20, updateWCBNumber in WCB.ino), which covers
+  every number the dropdown offers; and a quantity change refreshes the number dropdowns from each board's own number,
+  never below it, where it used to clamp them to the quantity.
 - **W-19** A first pull (and a file load) mirrors the board's values into General through the handlers for a user's edit
   (app.js:8971-8973), each of which toasts "Changes pending — push to all boards to apply" and sets
   generalSettingsDirty (app.js:1212-1216): Push All is flagged after every first connect, with nothing to push.
   `wizard.app_fake_pull_leaves_nothing_pending`.
+  **Fixed:** syncGeneralFromConfig runs those handlers inside `_mirrorGeneral` (app.js), which holds
+  `_notifyGeneralChanged`: they still copy the values into systemConfig, every board's config and the General
+  baseline, and nothing toasts or flags Push All. A user's edit runs the same handlers unheld.
 - **W-20** A no-edit push of a local-Kyber board with a Maestro of its own and a target on another board re-sends
   `?KYBER,LOCAL`, and a KYBER line asks for a reboot (app.js:9075). The backup lists the Maestro table before the KYBER
   line (WCB.ino:3810, :3817), so the parser files the other board's Maestro as a target first (parser.js:877-882,
   :688-701); autoComputeKyberTargets puts the live boards' Maestros first (app.js:9901-9916); and kyberChanged compares
   the lists as JSON, order included (parser.js:1424-1427). `wizard.push_fake_kyber_own_maestro`; a `todo` in
   `unit/model.test.js`.
+  **Fixed:** the targets compare as a set (`_kyberTargetsKey`, parser.js), in kyberChanged and in diffConfigs: the
+  board forwards to every target whatever the list's order (forwardDataFromKyber, WCB.ino). Both tests guard it
+  (the unit test is no longer a `todo`).
 - **W-21** Removing a bidirectional serial mapping clears only the source board (removeMappingRow, app.js:3939-3979).
   _removeBidirRows drops the destination's mirrored row from the page and sends nothing (app.js:3981-3992), and a push
   never clears a removed mapping (parser.js:1689-1702), so the reverse mapping stays on the destination board.
   `wizard.editors_fake_bidir_remove`, and on the bench `wizard.mapping_bidir_relay`.
+  **Fixed:** removing a row whose bidir box is ticked also takes its reverse half off each destination board
+  (`_bidirReverseHalves`, `_removeReverseHalf`, app.js): `?MAP,SERIAL,CLEAR,S<p>` there, direct or through its relay,
+  or the mapping again without the reverse destination when it has others, and the reverse leaves that board's config,
+  baseline and cards. The reverse is found by config (the destination board's baseline), not by the page's
+  `data-bidir-from` link, which a pull loses when it draws the cards again - the bench's path. Left as found: unticking
+  bidir and saving the row leaves a reverse half already sent on its board (applyBidirMapping drops it from the page
+  only).
 
 **Doc drift found by the scan** (fix it in the same commit as the tests):
 - WDP_DESIGN.md §9: Maestro auto-add is per-host (WCB_Maestro.cpp:911-914), and the Maestro-remote flip runs on every

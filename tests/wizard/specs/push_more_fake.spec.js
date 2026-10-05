@@ -58,11 +58,6 @@ test('wizard.push_fake_card_edits one edit on each card push_fake leaves out sen
 });
 
 test('wizard.push_fake_kyber_own_maestro (should) a local-Kyber board with a Maestro of its own and one on another board, pulled and pushed with no edit, sends nothing (W-20)', async ({ page }) => {
-  test.fail(true, 'W-20: the backup lists the Maestro table before ?KYBER,LOCAL (WCB.ino collectConfigCommands: the Kyber claims ' +
-                  'late), so the parser files WCB2\'s Maestro as a target first and appends the board\'s own from the KYBER line ' +
-                  '(parser.js:688-701, :878-881); autoComputeKyberTargets puts the live boards\' Maestros first (app.js:9901-9916). ' +
-                  'The same targets in another order make kyberChanged true (parser.js:1424-1427): the push re-sends ?KYBER,CLEAR ' +
-                  'and ?KYBER,LOCAL, and a KYBER line reboots the board (commandStringNeedsReboot)');
   await openWizard(page);
   // In collectConfigCommands' order: KYBER,CLEAR early (board()), the Maestro table, then KYBER,LOCAL with its targets.
   await pullFake(page, 1, board(['BAUD,S1,57600', 'BAUD,S2,115200', 'LABEL,S2,Kyber Maestro', 'BCAST,OUT,S2,OFF',
@@ -187,19 +182,19 @@ test('wizard.push_fake_all_staged Push All runs remote boards first with the reb
 });
 
 test('wizard.push_fake_all_shared_relay (should) Push All with the relay on the shared port reboots it without reporting it lost: no "did not come back", and its card stays connected (W-15)', async ({ page }) => {
-  test.fail(true, 'W-15: boardGoAll stage 4 closes and reconnects every relay (app.js:9193-9218) with no shared-port branch; ' +
-                  'a shared connection has no port of its own, so reconnect() returns false at once (app.js:5393) - the page ' +
-                  'says the relay did not come back and greys its card, while the hub still holds the port');
   await threeBoards(page, { sharedRelay: true });
+  // A card shows its connection by its Connect button (updateConnectionUI; no card has a b<n>-conn-label, as
+  // board_more.spec.js notes), and the fake connects without the page's connect path: show WCB1 connected first.
+  await page.evaluate(() => updateConnectionUI(1, true));
   await page.evaluate(() => boardGoAll());
   await page.waitForTimeout(4500);
   const r = await page.evaluate(() => ({
     sent: __fake.sent(1), toasts: __fake.toastText(),
-    label: document.getElementById('b1-conn-label')?.textContent, go: document.getElementById('b1-btn-go')?.disabled,
+    connect: document.getElementById('b1-btn-connect')?.textContent, go: document.getElementById('b1-btn-go')?.disabled,
   }));
   expect(r.sent).toContain('?reboot');
   expect(r.toasts).not.toContain('did not come back');
-  expect([r.label, r.go], 'the shared relay still shown connected, Push enabled').toEqual(['Connected', false]);
+  expect([r.connect, r.go], 'the shared relay still shown connected, Push enabled').toEqual(['Disconnect', false]);
 });
 
 test('wizard.push_fake_reboot_path a USB push that needs a reboot sends ?reboot 1.5 s after the last ACK, closes and reopens the port, and pulls 3 s after the reconnect', async ({ page }) => {
@@ -225,8 +220,6 @@ test('wizard.push_fake_reboot_path a USB push that needs a reboot sends ?reboot 
 });
 
 test('wizard.push_fake_shared_reboot_repull (should) a push that reboots a board on the shared port pulls it again afterwards, as a USB push does (W-14)', async ({ page }) => {
-  test.fail(true, 'W-14: on the shared port boardGo sends ?reboot and stops (app.js:8038-8045): no reconnect, so no verify pull, and ' +
-                  'the baseline keeps the values from before the push - the next push sends every change again and reboots the board again');
   await openWizard(page);
   await pullFake(page, 1, board(), { shared: true });
   await edit(page, '#b1-hw-version', '23');
@@ -372,9 +365,6 @@ test('wizard.push_fake_planned_verbs the bench specs\' pre-flight (lib/wizard.js
 });
 
 test('wizard.push_fake_general_wcbq (should) a second board whose WCB quantity differs is named in the keep/use modal, like every other General field that goes into every board\'s push (W-16)', async ({ page }) => {
-  test.fail(true, 'W-16: extractGeneralFields and GENERAL_FIELD_LABELS (app.js:1555-1595) leave out wcbQuantity, although every push ' +
-                  'writes the General WCBQ into the board (app.js:7933): no modal opens, and WCB2\'s next push - a label, say - ' +
-                  'silently sends ?WCBQ with WCB1\'s value');
   await openWizard(page);
   await pullFake(page, 1, board([], { wcbq: 2 }));
   await pullFake(page, 2, board([], { wcb: 2, wcbq: 3 }));

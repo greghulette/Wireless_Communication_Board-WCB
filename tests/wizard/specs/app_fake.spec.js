@@ -433,10 +433,6 @@ test('wizard.app_fake_system_file the export writes every board the Wizard knows
 });
 
 test('wizard.app_fake_system_file_reload (should) a saved system file loads back as it was saved: the WCB quantity it carries, no board it did not hold, and a board above the floor with its labels, sequences and variables, so saving it again writes the same file (W-17)', async ({ page }) => {
-  test.fail(true, 'W-17: parseSystemFile raises the WCB quantity to the number of [WCB] sections (parser.js:1257-1260), client slots and ' +
-                  'boards above the floor included; loadSystemFileContent then renders sections for 1..that number only (app.js:9270), ' +
-                  'adding default boards that were never in the file, and none for a board above it - which the next export writes ' +
-                  'from its missing DOM, with no labels, sequences or variables (app.js:9314-9327)');
   await fourSlots(page);
   const first = await captureExport(page, () => exportSystemFile());
   await openWizard(page);                  // a fresh page, as when the file is opened another day
@@ -494,9 +490,6 @@ test('wizard.app_fake_identity the identity fields: the LED pin shows for 3.x bo
 });
 
 test('wizard.app_fake_wcb_number_above_floor (should) a board above the WCB quantity can be renumbered to any number its dropdown offers (W-18)', async ({ page }) => {
-  test.fail(true, 'W-18: populateUIFromConfig offers numbers up to the board\'s own (app.js:3196-3202), but onWCBNumberChange takes ' +
-                  'only numbers up to the General quantity (app.js:2080-2081): WCB5 on a WCBQ 2 mesh shows 4 picked while the ' +
-                  'config keeps 5, and the push sends nothing');
   await openWizard(page);
   await pullFake(page, 1, board([], { wcb: 5, wcbq: 2 }));       // migrates to slot 5
   expect(await page.evaluate(() => [...document.getElementById('b5-wcb-number').options].map((o) => o.value)))
@@ -654,10 +647,6 @@ test('wizard.app_fake_hub_flash_refused a flash or an erase on the shared port i
 });
 
 test('wizard.app_fake_pull_leaves_nothing_pending (should) pulling a board leaves nothing pending in General: no "push to all boards" toast and Push All not flagged (W-19)', async ({ page }) => {
-  test.fail(true, 'W-19: syncGeneralFromConfig mirrors the pulled values through onGeneralPasswordChange, onGeneralMacChange and ' +
-                  'onGeneralCmdCharChange (app.js:8971-8973), which are the handlers for a user\'s edit: each toasts "Changes pending ' +
-                  '— push to all boards to apply" and sets generalSettingsDirty (app.js:1212-1216), so Push All turns amber after ' +
-                  'every first pull, with nothing to push');
   await openWizard(page);
   await pullFake(page, 1, board());
   expect(await page.evaluate(() => __fake.toastText())).not.toContain('push to all boards');
@@ -666,10 +655,6 @@ test('wizard.app_fake_pull_leaves_nothing_pending (should) pulling a board leave
 });
 
 test('wizard.app_fake_pending_funcchar (should) a function identifier typed into General but not yet pushed is not used for the board\'s immediate commands - the board still reads its old one (W-13)', async ({ page }) => {
-  test.fail(true, 'W-13: onGeneralCmdCharChange writes the typed character into every boardConfigs entry at once (app.js:1332-1339), ' +
-                  'and the immediate sends build their command from boardConfigs[n].funcChar: sequence save (app.js:4773) - which then ' +
-                  'records the value in the baseline as saved (:4856-4861) - the debug toggles (:9500), the mesh poll (:13423) and more. ' +
-                  'The board, still on its old character, broadcasts each line as text to its ports and the mesh (WCB.ino:6063-6066)');
   await openWizard(page);
   await pullFake(page, 1, board(['SEQ,SAVE,hello,;S1hi']), { replies: { '?WDP,DUMP': DUMP } });
   await edit(page, '#g-funcchar', '!');

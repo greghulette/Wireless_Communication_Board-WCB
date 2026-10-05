@@ -221,8 +221,8 @@ def _w1_boots_noted(bench, test_id, run):
 @test("wizard.push_reboot_path", "A Wizard push that needs a reboot, on the shared port the first board gets: W1 reboots once (?HW with its own value, so nothing changes), the page stays connected and reads its boot, and a pull afterwards finds the config as it was", needs=["wcb1"])
 def push_reboot_path(bench):
     """WCB-WP21 row 1. The plan's WCBQ+1 edit needs no reboot (D28: ?WCBQ applies live), so the push is ?HW with the
-    board's own version - the reboot path with no config change. On this path the Wizard does not pull afterwards
-    (W-14, pinned by wizard.push_fake_shared_reboot_repull), so the spec pulls itself."""
+    board's own version - the reboot path with no config change. On this path the Wizard pulls 3 s after the boot
+    banner (W-14, guarded by wizard.push_fake_shared_reboot_repull); the spec pulls once more and compares."""
     with config_guard(bench, 1):
         _w1_boots_noted(bench, "wizard.push_reboot_path", lambda: run_wizard_test(bench, "wizard.push_reboot_path"))
 
@@ -239,8 +239,8 @@ def push_reboot_path_direct(bench):
 @test("wizard.push_all_relay", "Push All with W1 on USB as the relay for W2: W2's label in one session before W1's own push, W1's reboot last, W1 back and pulled, and both labels land (then put back)", needs=["wcb1", "wcb2"])
 def push_all_relay(bench):
     """WCB-WP21 row 2. The plan forced W1's reboot with a WCBQ edit, which reboots nothing (D28); ?HW with W1's own
-    version does. W1 is connected direct, because Push All's last stage cannot reboot a relay on the shared port
-    (W-15)."""
+    version does. W1 is connected direct, for Push All's close-and-reopen path; a relay on the shared port takes the
+    shared branch (W-15), which wizard.push_fake_all_shared_relay guards."""
     w2 = WCB(bench.dev("wcb2"))
     l1, l2 = marker("L"), marker("M")
     with config_guard(bench, 1, 2) as before:
@@ -260,11 +260,12 @@ def _serial_mapped(w, port):
     return any(re.search(rf"Serial{port[1]} ->", x) for x in w.run("?MAP,SERIAL,LIST"))
 
 
-@test("wizard.mapping_bidir_relay", "(should) The Wizard's mapping editor on W1 with W2 behind it: Save with bidir maps W1 S2 -> W2 S4 on W1 and the reverse on W2, lines flow both ways, and Remove clears both (W-21: W2's reverse stays)", needs=["wcb1", "wcb2"])
+@test("wizard.mapping_bidir_relay", "(should) The Wizard's mapping editor on W1 with W2 behind it: Save with bidir maps W1 S2 -> W2 S4 on W1 and the reverse on W2, lines flow both ways, and Remove clears both (W-21)", needs=["wcb1", "wcb2"])
 def mapping_bidir_relay(bench):
     """WCB-WP21 row 3, serial half. The spec proves both mappings with probe lines; this checks what Remove leaves.
     The remote PWM destination half is left to wizard.editors_fake_mappings (no board): on the bench it would cost two
-    PWM reboots of W1 for a clear the fake already shows is sent. W-21: removeMappingRow clears only the source."""
+    PWM reboots of W1 for a clear the fake already shows is sent. W-21: Remove on W1 also clears W2's reverse half,
+    through W1 (fixed 2026-10-04); this checks it on W2 itself."""
     s2, w2s4 = link(bench, 1, "S2"), link(bench, 2, "S4")
     w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
     if _serial_mapped(w, "S2") or _serial_mapped(w2, "S4"):
