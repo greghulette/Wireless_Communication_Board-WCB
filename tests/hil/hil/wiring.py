@@ -12,6 +12,9 @@ bench.json "wiring_plan" maps a WCB number to its probe, and "navicore" to the p
 (D-NC37, docs/HIL_TESTING.md §2). A WCB or probe it names that is not on the bench yet is drawn and listed as
 planned, so the wiring can be done before the board is plugged in; nothing else (discovery, tests) sees it.
 """
+import os
+import re
+
 from .links import NAVICORE_ID, NC_TAPS, nc_key
 from .probe import HEADERS
 from .runner import REGISTRY, describe_device, links_of
@@ -152,4 +155,80 @@ def nc_plan(bench):
         rows.append(dict(key=key, wcb=None, port=port, probe=probe, header=hdr, tap=tap, device="", how=how,
                          status=status, actual=repr(link) if link else "", unlocks=unlocks(key), link=link, nc=True,
                          planned=False))
+    return rows
+
+
+# ------------------------------------------------------------------ device wiring (a guide, not probed)
+# bench.json "device_links": the wires made by hand between devices - the SBUS controller's outputs, the Kyber, the
+# Maestros - which no probe sees, so auto-detect cannot find them. Each names its two ends ("W3S2", "navicore:SBUS_IN",
+# "kyber:MAESTRO"; "fixtures" titles and labels the pins of anything that is not a WCB port), the signal, how to wire
+# it, what to check when it misbehaves, and the tests that prove it ("proof"). Its status is the newest result of
+# those tests in results/*/report.md: the Wiring tab is the bench's troubleshooting guide for these wires.
+DEVICE_STATUS = ("connected", "failed", "not checked", "planned")
+
+
+def last_results(results_root, ids, limit=80):
+    """{test id: (PASS|FAIL|ERROR, run folder)} - the newest real result of each id in the last `limit` runs' reports.
+    A SKIP proves nothing either way, so it is passed over."""
+    want, found = set(ids), {}
+    if not want or not results_root or not os.path.isdir(results_root):
+        return found
+    runs = sorted((d for d in os.listdir(results_root) if d[:1].isdigit()), reverse=True)[:limit]
+    for d in runs:
+        try:
+            with open(os.path.join(results_root, d, "report.md"), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for m in re.finditer(r"^\| (PASS|FAIL|ERROR) \| ([\w.]+) \|", text, re.M):
+            if m.group(2) in want and m.group(2) not in found:
+                found[m.group(2)] = (m.group(1), d)
+        if len(found) == len(want):
+            break
+    return found
+
+
+def endpoint(ep):
+    """("wcb", n, port) for "W3S2"; (owner, None, pin) for "navicore:SBUS_IN", "sbus:S5", "kyber:MAESTRO"."""
+    m = re.match(r"^W(\d+)(S[1-5])$", ep)
+    if m:
+        return "wcb", int(m.group(1)), m.group(2)
+    owner, _, pin = ep.partition(":")
+    return owner, None, pin
+
+
+def endpoint_label(bench, ep):
+    kind, n, pin = endpoint(ep)
+    if kind == "wcb":
+        return f"WCB{n} {pin}"
+    fx = bench.cfg.get("fixtures", {}).get(kind, {})
+    title = fx.get("title") or {"navicore": "NaviCore", "sbus": "SBUS controller"}.get(kind, kind)
+    return f"{title} {fx.get('pins', {}).get(pin, pin.replace('_', ' '))}"
+
+
+def device_plan(bench):
+    """One row per bench.json device_links entry, for the Wiring tab's diagram and list."""
+    links = bench.cfg.get("device_links", [])
+    proofs = {p for l in links for p in l.get("proof", [])}
+    found = last_results(getattr(bench, "results_root", None), proofs)
+    later = set(planned_wcbs(bench))
+    rows = []
+    for l in links:
+        key = f"{l['from']}>{l['to']}"
+        ends = [endpoint(l["from"]), endpoint(l["to"])]
+        planned = any((k == "wcb" and n in later) or (k in ("navicore", "sbus") and not bench.has(k))
+                      for k, n, _ in ends)
+        results = sorted(((found[p][1], p, found[p][0]) for p in l.get("proof", []) if p in found), reverse=True)
+        if planned:
+            status = "planned"
+        elif results:
+            status = "connected" if results[0][2] == "PASS" else "failed"
+        else:
+            status = "not checked"
+        rows.append(dict(key=key, wcb=None, port=None, probe=None, header=None, tap=False, device="", link=None,
+                         nc=False, dev=True, planned=planned, status=status, unlocks=list(l.get("proof", [])),
+                         kind=l.get("kind", "serial"), label=l.get("label", key), a=l["from"], b=l["to"],
+                         a_label=endpoint_label(bench, l["from"]), b_label=endpoint_label(bench, l["to"]),
+                         signal=l.get("signal", ""), how=l.get("how", ""), check=l.get("check", ""),
+                         results=[(p, s, d) for d, p, s in results], actual=""))
     return rows

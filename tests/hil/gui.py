@@ -77,13 +77,14 @@ MONO = ("Consolas", 9)
 # so they stay legible on their own background (the light greens/reds vanish on dark).
 LIGHT = dict(bg="#f6f8fa", panel="#ffffff", card="#f6f8fa", edge="#d0d7de", fg="#1f2328", mute="#57606a",
              sel="#dbeafe", entry="#ffffff", logbg="#0d1117", logfg="#c9d1d9", probe="#fff8f0",
-             green="#1a7f37", amber="#bf8700", red="#cf222e", blue="#0969da", grey="#8c959f")
+             green="#1a7f37", amber="#bf8700", red="#cf222e", blue="#0969da", grey="#8c959f", purple="#8250df")
 DARK = dict(bg="#11161d", panel="#161b22", card="#1c232c", edge="#30363d", fg="#d7dee6", mute="#8b949e",
             sel="#243044", entry="#0d1117", logbg="#0d1117", logfg="#c9d1d9", probe="#241f16",
-            green="#3fb950", amber="#d29922", red="#f85149", blue="#58a6ff", grey="#8b949e")
+            green="#3fb950", amber="#d29922", red="#f85149", blue="#58a6ff", grey="#8b949e", purple="#bc8cff")
 THEME = DARK   # main() swaps in LIGHT for --light, before any widget is built
 
 GREEN, AMBER, RED, BLUE, GREY = THEME["green"], THEME["amber"], THEME["red"], THEME["blue"], THEME["grey"]
+PURPLE = THEME["purple"]   # SBUS wires between devices (the Wiring tab's device_links)
 STATUS_COLOR = {"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE, "RETRY": AMBER}
 
 
@@ -512,7 +513,9 @@ class App:
         ttk.Label(left, foreground=GREY, wraplength=600, justify="left",
                   text="green = verified   amber = found but not verified   dashed = listen-only tap   "
                        "dotted grey = planned, not wired yet   blue port = a real device   "
-                       "dashed box = in the wiring plan, not plugged in yet").pack(anchor="w", pady=(6, 0))
+                       "dashed box = in the wiring plan, not plugged in yet   "
+                       "left column = devices wired by hand: purple SBUS, blue serial, solid once their tests "
+                       "passed, dashed until then, red if they failed").pack(anchor="w", pady=(6, 0))
 
         ttk.Label(right, text="What to connect", font=BOLD).pack(anchor="w")
         plan_box = ttk.Frame(right)
@@ -526,7 +529,8 @@ class App:
         self.plan_tree.column("status", width=130)
         self.plan_tree.column("wire", width=150)
         self.plan_tree.column("unlocks", width=50, anchor="center")
-        for s, c in (("connected", GREEN), ("found, not verified", AMBER), ("to do", RED), ("device", BLUE)):
+        for s, c in (("connected", GREEN), ("found, not verified", AMBER), ("to do", RED), ("device", BLUE),
+                     ("not checked", AMBER), ("failed", RED), ("planned", GREY)):
             self.plan_tree.tag_configure(s, foreground=c)
         scrolled(self.plan_tree)
         self.plan_tree.bind("<<TreeviewSelect>>", self.on_plan_select)
@@ -599,10 +603,15 @@ class App:
             self.man_probe.set(probes[0])
         sel = self.selected_key
         self.plan_tree.delete(*self.plan_tree.get_children())
-        self.plan_rows = {r["key"]: r for r in wiring.plan(self.bench) + wiring.nc_plan(self.bench)}
+        self.plan_rows = {r["key"]: r for r in wiring.plan(self.bench) + wiring.nc_plan(self.bench)
+                          + wiring.device_plan(self.bench)}
         self.draw_wiring()
         for key, r in self.plan_rows.items():
             link = r["link"]
+            if r.get("dev"):
+                self.plan_tree.insert("", "end", iid=key, text=r["label"], values=(
+                    r["status"], f"{r['a_label']} -> {r['b_label']}", len(r["unlocks"])), tags=(r["status"],))
+                continue
             if link:
                 wire_to = f"{link.probe_name} {link.header}"
             elif r["device"]:
@@ -617,71 +626,120 @@ class App:
             self.show_plan(sel)
 
     def draw_wiring(self):
-        """WCBs, then NaviCore's own pins, on the left; probes on the right. A WCB or probe the wiring plan names that
-        is not plugged in yet is drawn dashed and cannot be clicked: its wires are listed so they can be made first."""
+        """Devices on the left (the SBUS controller and what bench.json "fixtures" names: wired by hand, drawn from
+        "device_links"), then WCBs and NaviCore's own pins, then probes. A WCB or probe the wiring plan names that is
+        not plugged in yet is drawn dashed and cannot be clicked: its wires are listed so they can be made first."""
         c = self.canvas
         c.delete("all")
         self.xy = {}
         b = self.bench
         rows = wiring.plan(b) + wiring.nc_plan(b)
+        drows = wiring.device_plan(b)
         later_wcbs, later_probes = wiring.planned_wcbs(b), wiring.planned_probes(b)
         nc_probe = wiring.navicore_probe(b)
-        box_h, pitch, box_w = 40 + 5 * 36, 30, 220
+        pitch, box_w, dev_w = 30, 220, 200
+        x_dev = 24
+        x_w = x_dev + dev_w + 110 if drows else 24
+        x_p = x_w + box_w + 230
         usb = b.usb_wcbs()
+        fixtures = b.cfg.get("fixtures", {})
+        dev_eps = {e for r in drows for e in (r["a"], r["b"])}
 
-        def box(x, y, title, sub, fill, planned):
-            c.create_rectangle(x, y, x + box_w, y + box_h, fill=THEME["bg"] if planned else fill,
+        def box(x, y, w, n_rows, title, sub, fill, planned):
+            h = 40 + n_rows * 36
+            c.create_rectangle(x, y, x + w, y + h, fill=THEME["bg"] if planned else fill,
                                outline=THEME["mute"] if planned else THEME["edge"], width=2,
                                dash=(6, 4) if planned else None)
             c.create_text(x + 12, y + 14, anchor="w", font=BOLD, text=title, fill=GREY if planned else THEME["fg"])
             if sub:
                 c.create_text(x + 12, y + 29, anchor="w", text=sub[:34], fill=GREY, font=(FONT[0], 8))
+            return h
 
-        def dot(px, py, key, tag, planned):
+        def dot(px, py, key, tag, planned, r=9):
             hl = not planned and key in (self.pending_port, self.selected_key)
-            c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=BLUE if hl else THEME["panel"], outline=THEME["mute"],
-                          width=2, dash=(2, 2) if planned else None, tags=() if planned else (tag, key))
+            c.create_oval(px - r, py - r, px + r, py + r, fill=BLUE if hl else THEME["panel"], outline=THEME["mute"],
+                          width=2, dash=(2, 2) if planned else None, tags=() if planned or not tag else (tag, key))
+
+        def dev_dot(px, py, ep):          # a hand-made device wire lands here: a small dot on the box's left edge
+            c.create_oval(px - 6, py - 6, px + 6, py + 6, fill=THEME["panel"], outline=PURPLE, width=2)
+            self.xy[("D", ep)] = (px, py)
 
         y = 16
         for w in b.wcb_numbers() + later_wcbs:
             planned = w in later_wcbs
-            x = 24
-            box(x, y, f"WCB{w}", "in the wiring plan, not plugged in yet" if planned else
-                ("USB" if w in usb else "mesh only"), THEME["card"], planned)
+            h = box(x_w, y, box_w, len(HEADERS), f"WCB{w}", "in the wiring plan, not plugged in yet" if planned else
+                    ("USB" if w in usb else "mesh only"), THEME["card"], planned)
             labels = {} if planned else self.port_labels(w)
             for k, port in enumerate(HEADERS):
-                py, px, key = y + 46 + k * 36, x + box_w, f"W{w}{port}"
+                py, px, key = y + 46 + k * 36, x_w + box_w, f"W{w}{port}"
                 dot(px, py, key, "wport", planned)
                 dev = b.port_devices().get(key)
                 if dev:
-                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {describe_device(dev)}"[:28], fill=BLUE)
+                    c.create_text(x_w + 14, py, anchor="w", text=f"{port}  {describe_device(dev)}"[:28], fill=BLUE)
                 else:
-                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26],
+                    c.create_text(x_w + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26],
                                   fill=GREY if planned else THEME["fg"])
                 self.xy[("W", key)] = (px, py)
-            y += box_h + pitch
+                if key in dev_eps:
+                    dev_dot(x_w, py, key)
+            y += h + pitch
         nc_rows = {r["port"]: r for r in rows if r["nc"]}
-        if nc_rows:
-            x = 24
-            box(x, y, "NaviCore", "its own pins (D-NC37)", THEME["card"], False)
-            for k, (port, _header, _what) in enumerate(wiring.NC_PLAN):
-                py, px, key = y + 46 + k * 36, x + box_w, nc_rows[port]["key"]
-                dot(px, py, key, "ncport", False)
-                c.create_text(x + 14, py, anchor="w", text=wiring.NC_LABEL[port], fill=THEME["fg"])
-                self.xy[("N", key)] = (px, py)
+        nc_dev = [e.split(":", 1)[1] for r in drows for e in (r["a"], r["b"]) if e.startswith("navicore:")]
+        pins = ([p for p, _h, _w in wiring.NC_PLAN] if nc_rows else []) + \
+            [p for p in dict.fromkeys(nc_dev) if not (nc_rows and p in nc_rows)]
+        if pins and b.has("navicore"):
+            box(x_w, y, box_w, len(pins), "NaviCore", "its own pins (D-NC37)" if nc_rows else "", THEME["card"], False)
+            nlabels = fixtures.get("navicore", {}).get("pins", {})
+            for k, port in enumerate(pins):
+                py = y + 46 + k * 36
+                c.create_text(x_w + 14, py, anchor="w", text=wiring.NC_LABEL.get(port) or nlabels.get(port, port),
+                              fill=THEME["fg"])
+                if port in nc_rows:
+                    key = nc_rows[port]["key"]
+                    dot(x_w + box_w, py, key, "ncport", False)
+                    self.xy[("N", key)] = (x_w + box_w, py)
+                if f"navicore:{port}" in dev_eps:
+                    dev_dot(x_w, py, f"navicore:{port}")
+        # The device column: the SBUS controller first, then each fixture in the order device_links names them.
+        owners = []
+        for r in drows:
+            for ep in (r["a"], r["b"]):
+                kind, _n, pin = wiring.endpoint(ep)
+                if kind not in ("wcb", "navicore") and kind not in owners:
+                    owners.append(kind)
+        owners.sort(key=lambda o: o != "sbus")
+        y = 16
+        for owner in owners:
+            fx = fixtures.get(owner, {})
+            opins = list(dict.fromkeys(ep.split(":", 1)[1] for r in drows for ep in (r["a"], r["b"])
+                                       if ep.startswith(owner + ":")))
+            if owner == "sbus":
+                planned = not b.has("sbus")
+                port = "" if planned else b.cfg["devices"]["sbus"].get("port", "?")
+                sub = "not on the bench" if planned else port.rsplit("/", 1)[-1].replace("cu.", "", 1)
+            else:
+                planned, sub = False, fx.get("note", "wired by hand")
+            h = box(x_dev, y, dev_w, len(opins), fx.get("title", owner), sub, THEME["probe"], planned)
+            for k, pin in enumerate(opins):
+                py, px = y + 46 + k * 36, x_dev + dev_w
+                c.create_text(x_dev + 14, py, anchor="w", text=fx.get("pins", {}).get(pin, pin.replace("_", " "))[:24],
+                              fill=GREY if planned else THEME["fg"])
+                c.create_oval(px - 6, py - 6, px + 6, py + 6, fill=THEME["panel"], outline=PURPLE, width=2)
+                self.xy[("D", f"{owner}:{pin}")] = (px, py)
+            y += h + pitch
         y = 16
         for pn in b.probe_names() + later_probes:
             planned = pn in later_probes
-            x = 470
             dev_port = "" if planned else b.cfg["devices"][pn].get("port", "?")
             sub = "not plugged in yet" if planned else dev_port.rsplit("/", 1)[-1].replace("cu.", "", 1)
-            box(x, y, pn + ("  · NaviCore" if pn == nc_probe else ""), sub, THEME["probe"], planned)
+            h = box(x_p, y, box_w, len(HEADERS), pn + ("  · NaviCore" if pn == nc_probe else ""), sub, THEME["probe"],
+                    planned)
             for k, header in enumerate(HEADERS):
-                py, px, key = y + 46 + k * 36, x, f"{pn}:{header}"
+                py, px, key = y + 46 + k * 36, x_p, f"{pn}:{header}"
                 dot(px, py, key, "pport", planned)
-                c.create_text(x + 24, py, anchor="w", text=f"header {header}", fill=GREY if planned else THEME["fg"])
+                c.create_text(x_p + 24, py, anchor="w", text=f"header {header}", fill=GREY if planned else THEME["fg"])
                 self.xy[("P", key)] = (px, py)
-            y += box_h + pitch
+            y += h + pitch
         for r in rows:
             if r["status"] == "to do" and r["probe"]:
                 a = self.xy.get(("N" if r["nc"] else "W", r["key"]))
@@ -699,6 +757,20 @@ class App:
             mx, my = (a[0] + e[0]) / 2, (a[1] + e[1]) / 2
             if link.swap:
                 c.create_text(mx, my - 9, text="straight-through", fill=GREY, font=(FONT[0], 8))
+        # Device wires: purple for SBUS, blue for serial; solid once their tests passed, dashed until then, red after a
+        # failure, grey dotted while an end is not on the bench yet. Two ends in the device column get an elbow.
+        for r in drows:
+            a, e = self.xy.get(("D", r["a"])), self.xy.get(("D", r["b"]))
+            if not a or not e:
+                continue
+            color = {"failed": RED, "planned": GREY}.get(r["status"], PURPLE if r["kind"] == "sbus" else BLUE)
+            dash = {"connected": None, "failed": None, "planned": (2, 4)}.get(r["status"], (6, 4))
+            width = 5 if self.selected_key == r["key"] else 3
+            if abs(a[0] - e[0]) < 1:
+                pts = (a[0], a[1], a[0] + 40, a[1], a[0] + 40, e[1], e[0], e[1])
+            else:
+                pts = (*a, *e)
+            c.create_line(*pts, fill=color, width=width, dash=dash, tags=("dlink", r["key"]))
         box_all = c.bbox("all")
         if box_all:
             c.configure(scrollregion=(0, 0, box_all[2] + 24, box_all[3] + 24))
@@ -736,7 +808,7 @@ class App:
                 w, port = runner.parse_key(key)
                 self.submit(f"wire {key} -> {pn} {header}", self.job_add_link, w, port, pn, header)
                 return
-            if "link" in tags:
+            if "link" in tags or "dlink" in tags:
                 self.select_key(tags[1])
                 return
         self.pending_port = None
@@ -746,13 +818,17 @@ class App:
         r = self.plan_rows.get(key) if key else None
         return bool(r and r["nc"])
 
+    def is_dev_key(self, key):
+        r = self.plan_rows.get(key) if key else None
+        return bool(r and r.get("dev"))
+
     def select_key(self, key):
         self.selected_key = key
         if key in self.plan_rows:
             self.plan_tree.selection_set(key)
             self.plan_tree.see(key)
             self.show_plan(key)
-        if not self.is_nc_key(key):
+        if not self.is_nc_key(key) and not self.is_dev_key(key):
             self.man_port.set(key)
             self.dev_port.set(key)
             self.fill_device_form(key)
@@ -765,6 +841,16 @@ class App:
 
     def show_plan(self, key):
         r = self.plan_rows[key]
+        if r.get("dev"):
+            proved = "; ".join(f"{p} {st} ({d})" for p, st, d in r["results"]) or "no result yet"
+            text = (f"{r['label']} — {r['status']}\n\nFrom: {r['a_label']}\nTo:   {r['b_label']}\n\n"
+                    f"Signal: {r['signal']}\n\nWiring: {r['how']}\n\nIf it misbehaves: {r['check']}\n\n"
+                    f"Proved by: {', '.join(r['unlocks']) or 'no test yet'}\nNewest results: {proved}\n\n"
+                    f"A hand-made wire between devices (bench.json device_links): no probe sees it, so auto-detect "
+                    f"cannot find it; its status is the newest result of the tests above.")
+            self.plan_text.delete("1.0", "end")
+            self.plan_text.insert("1.0", text)
+            return
         link = r["link"]
         text = f"{key} — {r['status']}\n\n{r['how']}\n\n{wiring.NC_PAD_ORDER if r['nc'] else wiring.PAD_ORDER}\n"
         if link:
@@ -788,6 +874,9 @@ class App:
         return link
 
     def verify_selected(self):
+        if self.is_dev_key(self.selected_key):
+            self.status("A wire between devices is proved by its tests (listed under it), not by Verify")
+            return
         link = self.selected_link()
         if link and getattr(link, "navicore", False):
             self.status(f"{link.key}: NaviCore's wires are confirmed by Auto-detect wires (NaviCore sends the "
@@ -796,6 +885,9 @@ class App:
             self.submit(f"verify {link.key}", self.job_verify, link.wcb, link.port)
 
     def remove_selected(self):
+        if self.is_dev_key(self.selected_key):
+            self.status("Wires between devices are listed in bench.json device_links; edit them there")
+            return
         link = self.selected_link()
         if link and getattr(link, "navicore", False):
             self.submit(f"remove {link.key}", self.job_remove_nc_link, link.port)
@@ -803,7 +895,9 @@ class App:
             self.submit(f"remove {link.key}", self.job_remove_link, link.wcb, link.port)
 
     def toggle_tap_selected(self):
-        if self.is_nc_key(self.selected_key):
+        if self.is_dev_key(self.selected_key):
+            self.status("A wire between devices has no probe on it to make listen-only")
+        elif self.is_nc_key(self.selected_key):
             self.status("NaviCore's SBUS OUT and Maestro bus are always listen-only; its S3-S5 are always duplex")
         elif self.selected_key:
             w, port = runner.parse_key(self.selected_key)
@@ -2043,10 +2137,11 @@ class App:
 
 
 def main():
-    global THEME, GREEN, AMBER, RED, BLUE, GREY, STATUS_COLOR
+    global THEME, GREEN, AMBER, RED, BLUE, GREY, PURPLE, STATUS_COLOR
     if "--light" in sys.argv[1:]:
         THEME = LIGHT
         GREEN, AMBER, RED, BLUE, GREY = (THEME[k] for k in ("green", "amber", "red", "blue", "grey"))
+        PURPLE = THEME["purple"]
         STATUS_COLOR.update({"PASS": GREEN, "FAIL": RED, "ERROR": RED, "SKIP": GREY, "RUNNING": BLUE, "RETRY": AMBER})
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
