@@ -818,13 +818,13 @@ the bench lacks its wiring).
 | `ncdev.hcr_level_same_both_ways` | OPT-IN (navicore_aux_tx): an HCR Trigger/Stimulate level of 2 or more sends the HCR the same bytes on NaviCore's own port as through a WCB | — (D-NC59) |
 | `ncdev.serial_action_paced` | A 95-character serial action to bit-banged S4 at 9600 is answered within 50 ms of a 1-character one: it does not hold `loop()` for its line | — (D-NC58) |
 | `ncdev.wled_forward_normalised` | A WLED action written without its `;` (`L1,ON`) reaches a WCB-hosted WLED as `{"on":true}`, and `L1,ON` is not printed out W2's broadcast ports | — (D-NC60) |
-| `intellex.settings_branch_dotdot` | POST /_api/branch refuses a branch name with a `..` path segment, as settings.py's own comment says | — (INTELLEX.md finding 12) |
-| `intellex.flash_update_partition_escalates` | Intellex's Update FW onto a board holding a different partition table escalates once to bootloader + table + app, NVS untouched, as the Wizard's flasher does; a matching table stays app-only | — (finding 5) |
-| `intellex.flash_esptool5_output` | With esptool 5.3.1, `/_api/flash-status` follows the write's progress, and the NaviCore flash puts no `Deprecated:` warnings in the log | — (findings 13, 14) |
-| `intellex.identify_direct_pong` | Only a direct PONG identifies a serial port as a NaviCore; a mesh-relayed one does not | — (finding 3) |
-| `intellex.wiki_code_verbatim` | A `[[wiki link]]` inside a code block or inline code is shown as written | — (finding 15) |
-| `intellex.ui_wizard_setup_images` | Every `../Images` file the Wizard references is bundled by Intellex, and the guided setup's identity and Maestro steps show their pictures | — (finding 2) |
-| `intellex.ui_latest_fw_version` | After the host flashes a WCB, the Wizard's own `latestFirmwareVersion` names the build written | — (finding 1) |
+| `intellex.settings_branch_dotdot` | POST /_api/branch refuses a branch name with a `..` path segment, as settings.py's own comment says | INTELLEX.md finding 12; fixed, Intellex `c6eefdd` |
+| `intellex.flash_update_partition_escalates` | Intellex's Update FW onto a board holding a different partition table escalates once to bootloader + table + app, NVS untouched, as the Wizard's flasher does; a matching table stays app-only | finding 5; fixed, Intellex `0699dbd` |
+| `intellex.flash_esptool5_output` | With esptool 5.3.1, `/_api/flash-status` follows the write's progress, and the NaviCore flash puts no `Deprecated:` warnings in the log | findings 13, 14; fixed, Intellex `41758c2` |
+| `intellex.identify_direct_pong` | Only a direct PONG identifies a serial port as a NaviCore; a mesh-relayed one does not | finding 3; fixed, Intellex `d9cdc8b` |
+| `intellex.wiki_code_verbatim` | A `[[wiki link]]` inside a code block or inline code is shown as written | finding 15; fixed, Intellex `4230c1c` |
+| `intellex.ui_wizard_setup_images` | Every `../Images` file the Wizard references is bundled by Intellex, and the guided setup's identity and Maestro steps show their pictures | finding 2; fixed, Intellex `a3297d0` |
+| `intellex.ui_latest_fw_version` | After the host flashes a WCB, the Wizard's own `latestFirmwareVersion` names the build written | finding 1; fixed, Intellex `e45f977` |
 | `wizard.app_fake_pending_funcchar` | A function identifier typed into General but not yet pushed is not used for the board's immediate commands (no board) | — (WCB.md W-13) |
 | `wizard.push_fake_shared_reboot_repull` | A push that reboots a board on the shared port pulls it again afterwards, as a USB push does (no board) | — (WCB.md W-14) |
 | `wizard.push_fake_all_shared_relay` | Push All with the relay on the shared port reboots it without reporting it lost, and its card stays connected (no board) | — (WCB.md W-15) |
@@ -837,11 +837,11 @@ the bench lacks its wiring).
 | `wizard.parser` (`unit/model.test.js` todo) | The same Kyber targets in another order are not a change (noted, not failed) | — (WCB.md W-20) |
 | `wizard.editors_fake_bidir_remove` | Removing a bidirectional serial mapping also clears its mirror on the destination board (no board) | — (WCB.md W-21) |
 | `wizard.mapping_bidir_relay` | On the bench: Remove on W1 clears W2's reverse mapping too (the harness clears what is left) | — (WCB.md W-21) |
-| `intellex.nc_via_usb_doorway` | The NaviCore config tool reached through W1 over USB is in Via WCB after every connect, a reload inside W1's relay window included, so "Update over USB (OTA)" cannot send `?OTALOCAL` to W1 | — (INTELLEX.md finding 4) |
+| `intellex.nc_via_usb_doorway` | The NaviCore config tool reached through W1 over USB is in Via WCB after every connect, a reload inside W1's relay window included, so "Update over USB (OTA)" cannot send `?OTALOCAL` to W1 | INTELLEX.md finding 4; fixed, Intellex `7d9014d` |
 | `intellex.wizard_reboot_w1_boots_app` | W1 restarted while the Wizard holds it through Intellex (the Wizard's DTR holding GPIO0 low) boots its app, not the ESP32 ROM loader | — (finding 16) |
-| `intellex.wizard_mesh_relay_slot_number` | A board Intellex's shim routes through W1 is filed under relay slot 1 as a number, so a W1 link drop clears and re-arms it | — (finding 17) |
-| `intellex.flash_refused_board_runs` | A WCB flash Intellex refuses after detecting the chip leaves the board running its app, answering on its own port with no reset from anyone (esptool's flash-id left it in the ROM loader) | — (finding 18) |
-| `intellex.link_drop_no_stall` | A WebSocket link whose far end vanishes is dropped without stalling the host: `/_api/status` never goes unanswered over 2.5 s and shows the loss within 3 s of the host's own verdict (its drop runs on the event loop and waits websockets' 10 s close_timeout) | — (finding 19) |
+| `intellex.wizard_mesh_relay_slot_number` | A board Intellex's shim routes through W1 is filed under relay slot 1 as a number, so a W1 link drop clears and re-arms it | finding 17; fixed, Intellex `8ffa98c` |
+| `intellex.flash_refused_board_runs` | A WCB flash Intellex refuses after detecting the chip leaves the board running its app, answering on its own port with no reset from anyone (esptool's flash-id left it in the ROM loader) | finding 18; fixed, Intellex `b2167a7` |
+| `intellex.link_drop_no_stall` | A WebSocket link whose far end vanishes is dropped without stalling the host: `/_api/status` never goes unanswered over 2.5 s and shows the loss within 3 s of the host's own verdict (its drop runs on the event loop and waits websockets' 10 s close_timeout) | finding 19; fixed, Intellex `e40ee12` |
 | `ncwifi.ws_line_trim` | OPT-IN (navicore_wifi): a line with a leading or trailing space or tab runs over NaviCore's WebSocket as it does over USB, which trims every line | — (NAVICORE.md D-NC61) |
 | `ncwifi.ws_stalled_client` | OPT-IN (navicore_wifi, navicore_reboot): a socket that stops reading for 15 s while NaviCore streams costs another client none of its replies and is not left open and deaf; NaviCore does not restart | — (D-NC62) |
 | `ncwifi.usb_editload_with_socket` | OPT-IN (navicore_wifi): with a socket connected, a `?REC,EDITLOAD` range of 600 events over USB comes back whole, as with none | — (D-NC63) |

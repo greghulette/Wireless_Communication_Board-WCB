@@ -60,6 +60,12 @@ def _setup(ctx):
     images = {f"WCB_{WCB_TAG}_ESP32.bin": _blob("wcb-app", 3000), f"WCB_{WCB_TAG}_ESP32_part.bin": _blob("part", 3072),
               f"WCB_{WCB_TAG}_ESP32_boot.bin": _blob("boot", 2000)}
     seed_cache(ctx, "wcb", BRANCH, images)
+    # What a read-flash of 0x8000 returns: the board's partition table, here the release's own, so an update stays
+    # app-only. Without it the fake reads 0xFF, and Intellex escalates to a full flash as flasher.js does (finding 5).
+    table = os.path.join(ctx.stage, "scratch", "board_part.bin")
+    with open(table, "wb") as f:
+        f.write(images[f"WCB_{WCB_TAG}_ESP32_part.bin"])
+    os.environ["FAKE_ESPTOOL_TABLE"] = table
     nc = {f"NaviCore_{NC_TAG}_ESP32S3.bin": _blob("nc-app", 4000)}
     seed_cache(ctx, "navicore", BRANCH, nc)
     settings = os.path.join(os.environ["LOCALAPPDATA"], "Intellex", "settings.json")
@@ -177,7 +183,8 @@ def _arg(argv, name):
     return argv[argv.index(name) + 1] if name in argv else None
 
 
-@case("an app-only WCB update: one claim, the port released, esptool asked, the cache written, the port handed back",
+@case("an app-only WCB update: one claim, the port released, esptool asked, the board's partition table read and "
+      "matched, the cache written, the port handed back",
       group="pipeline")
 def wcb_update(ctx):
     st = _setup(ctx)
@@ -196,7 +203,10 @@ def wcb_update(ctx):
                  f"offline - using the cached {BRANCH} copy of WCB_{WCB_TAG}_ESP32.bin", "Update: app only",
                  "Hash of data verified.", "Reattached.", f"board is running {WCB_TAG}"):
         check(any(want in x for x in log), f"the flash log has no line with {want!r} ({len(log)} lines)")
-    check([r["cmd"] for r in runs] == ["flash-id", "write-flash"], f"esptool runs: {[r['cmd'] for r in runs]}")
+    check([r["cmd"] for r in runs] == ["flash-id", "read-flash", "write-flash"], f"esptool runs: {[r['cmd'] for r in runs]}")
+    rf = runs[1]["argv"]
+    tail = [a for a in rf[rf.index(runs[1]["cmd"]) + 1:] if not a.startswith("-")]
+    check(tail[:1] and int(tail[0], 0) == 0x8000, f"read-flash read {tail[:2]}, expected the partition table at 0x8000")
     fid = runs[0]["argv"]
     for a, v in (("--chip", "auto"), ("--port", "COMFAKE"), ("--before", "default-reset"), ("--after", "no-reset")):
         check(_arg(fid, a) == v, f"flash-id argv {a} = {_arg(fid, a)!r}, expected {v!r}")

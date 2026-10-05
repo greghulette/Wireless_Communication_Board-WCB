@@ -271,6 +271,12 @@ A runtime contract spec (IX-WP4) that asserts every one of these catches a cross
 
 ### 1.6 Found while reading (verify, then fix or file)
 
+> **Status 2026-10-04: twelve are fixed on Intellex main** (`e9f95f2..7d9014d`, decision D75), one commit each,
+> and each `(should)` test passes on the bench (`20261004-202118`; the three shipped-bundle tests `20261004-211236`):
+> 1 `e45f977`, 2 `a3297d0`, 3 `d9cdc8b`, 4 `7d9014d`, 5 `0699dbd`, 12 `c6eefdd`, 13 and 14 `41758c2`, 15 `4230c1c`,
+> 17 `8ffa98c`, 18 `b2167a7`, 19 `e40ee12`. `intellex.wizard_reboot_w1_boots_app` (16) passes too. Findings 6-11 are
+> housekeeping, not tested; check each against main before acting on it. Finding 20 is open.
+
 1. **The shim cannot label a flashed board.**
    - `window.latestFirmwareVersion = st.version` (`intellex_shim.js:1390`) only creates a property on `window`.
    - The Wizard's `latestFirmwareVersion` is a top-level `let` (`Wizard/app.js:128`), and the shim's own comment
@@ -429,6 +435,10 @@ Found on the bench in IX-WP9 (run `20260929-202852`, Intellex `e9f95f2`):
       verdict, with the same verdict line and traceback as the bench.
     - Fix shape, for Intellex: drop the link off the event loop (`await asyncio.to_thread(bridge._drop)`), and close a
       link already judged dead with a short `close_timeout`.
+20. **The firmware cache takes a page's `ref` unchecked.** `settings.valid_branch` (finding 12) guards the stored
+    branch, but a `ref` the page passes to the GitHub proxy reaches the cache path as is: `fwcache.py:88-89` replaces
+    only `/` and `\`, so a `ref` of `..` files a listing one level up, at the cache root. Low impact (the local host's
+    own cache, one level, no path separators). Found by the 2026-10-04 fix agent; no test yet.
 
 ---
 
@@ -1367,3 +1377,4 @@ suites that follow are not affected (the F21 precedent).
 | 2026-09-29 | IX-WP9 and IX-WP10 on the bench (`20260929-202852`, `20260929-203453`): 5 WiFi and 4 flash tests pass, the two attended WiFi tests skip, `flash_refused_board_runs` fails as designed. Findings 13, 14 and 18 confirmed on the bench; finding 19 (dropping a dead WebSocket link stalls the host 10 s) found by `wifi_link_loss`, with a board-free `(should)` `intellex.link_drop_no_stall` (`hil/ws.py` `WsEndpoint`). `wifi_link_loss` reworked: a 30 s notice limit, `wlan.rejoin(reach=)` re-associating a stale association, the reattach timed from a proven connect (DX45, DX46). Commit `d402aba`. |
 | 2026-10-04 | Full run `20260929-203948`: the three W2 flashes failed - esptool's write never reached W2's ROM loader ("Wrong boot mode (0x17)") with probe2 bound to W2's ports; `s36` releases W2's probe channels before esptool resets it (`park_probes`) and the spec judges the flash before the re-pull (DX47). `wifi_link_loss` failed there as in `20260929-202852` (finding 19, the stale association; reworked in `d402aba`). Commit `_(pending)_`. |
 | 2026-10-04 | IX-WP9 and IX-WP10 bench-verified. `20261004-125412`: the three W2 flashes pass with the probes released, and `flash_navicore_app` passes; findings 18 and 19 and the other flash `(should)` tests fail as designed. `20261004-130438`: all six unattended WiFi tests pass, `wifi_link_loss` included (noticed at 21.8 s: Intellex's 15 s plus finding 19's stall). That needed the harness's NaviCore join to prove the link: `pc_on_ap(reach=)` takes a TCP connect after the lease, because in `-125412` three joins held a lease and carried nothing. The probe note no longer calls W2's GPIO4 a strapping pin (it is not: GPIO0, 2, 5, 12 and 15 are). |
+| 2026-10-04 | Findings 1-5, 12-15 and 17-19 fixed on Intellex main (`e9f95f2..7d9014d`, D75; status note in §1.6) and every `(should)` test bench-verified (`20261004-202118`: 77 pass, the attended three skip, and the three shipped-bundle tests failed only because a fresh worktree has no downloaded bundles - they pass with them, `20261004-211236`). `intellex.flash_pipeline_fake` gives the fake esptool the board's partition table, since Update FW now reads it (finding 5). Finding 20 added. |
