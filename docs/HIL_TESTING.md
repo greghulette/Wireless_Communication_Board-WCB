@@ -284,22 +284,26 @@ wire and test alone.
 | Maestro port | S2 | Kyber TX → W3 S2 RX, Kyber RX → W3 S2 TX, GND–GND | `?KYBER,LOCAL,S2`, then reboot it (the command says "Reboot required" and does not reboot) |
 | MarcDuino port | S5 | Kyber TX → W3 S5 RX, GND–GND | 9600, plain text: nothing to set |
 
-- **The Kyber's outputs are 5 V (Greg, 2026-10-05); WCB3's pins are 3.3 V with no level shifters and the S3 is not
-  5 V tolerant.** Both Kyber TX lines (Maestro → W3 S2 RX, MarcDuino → W3 S5 RX) go through a level shifter: a
-  4-channel BSS138 bidirectional module, LV side to W3's 3.3 V and GND, HV side to the Kyber's 5 V and GND, grounds
-  common; route W3 S2 TX → Kyber RX through it too, since 3.3 V is marginal for a 5 V input. Without a module, a divider
-  on each Kyber TX line works for those one-way lines: 1 kΩ in series from the Kyber TX, 2 kΩ from the W3 RX pin to
-  GND (~3.3 V).
-- **It moves real servos.** Kyber bytes are forwarded over the mesh to W2's real Maestro 2, and `--no-servos` cannot
-  stop that. W1's stand-in Maestro (probe on W1 S1) and a Kyber-local W1 in the `kyber.*` tests would also see its
-  traffic. Keep the Kyber powered off during runs until tests are written for it (opt-in).
+- **The Kyber's outputs are 5 V.** Greg wires 5 V devices straight to WCB RX pins and has never had a problem
+  (2026-10-05). That is above the ESP32-S3 datasheet's absolute maximum (VDD + 0.3 V), so a level shifter is the
+  conservative option: a BSS138 module (LV to W3's 3.3 V, HV to the Kyber's 5 V, grounds common), or a 1 kΩ / 2 kΩ
+  divider on each Kyber TX line.
+- **It moves real servos when it sends.** Kyber bytes are forwarded over the mesh to W2's real Maestro 2, and
+  `--no-servos` cannot stop that; W1's stand-in Maestro (probe on W1 S1) and a Kyber-local W1 in the `kyber.*` tests
+  would see that traffic too. **A dormant Kyber sends nothing** (Greg, 2026-10-05), so it can stay powered during runs
+  as long as nothing commands it; tests that drive it should be opt-in.
 - `W3S2` and `W3S5` are `port_devices` with no `port_stimulus`: the harness sends nothing there and auto-detect leaves
   them alone.
 
 **Bring-up order:** flash probe 3, probe 4 and WCB3 → wire (Wiring tab, *What to connect*) → plug in probe 3, *Find
 devices* → probe 4, *Find devices* → WCB3 (powered, Kyber off), *Find devices* → *Auto-detect wires* →
-`run.py --links` lists `W3S1`, `W3S3`, `W3S4` and `N20S3`-`N20SBO` verified. WCB3 can then stay on for runs (above);
-the Kyber stays off.
+`run.py --links` lists `W3S1`, `W3S3`, `W3S4` and `N20S3`-`N20SBO` verified. WCB3 can then stay on for runs (above),
+and so can a dormant Kyber.
+
+**Done 2026-10-05:** WCB3 flashed from the Mac with esptool (`Code/bin` 6.2.1 S3 build, 16 MB bootloader at 0x0,
+partitions 0x8000, app 0x10000, after `erase_flash`), set to `?WCB,3`, `?HW,32`, `?WCBQ,3`, and given W1's
+`?MAC,2`, `?MAC,3`, `?EPASS` and `?CONTROLLER`; W1 learned it by WDP (`HW=32`, online). It is in `bench.json`
+(`wcb3`), so `absent_wcbs` picks 4. Its USB-serial is a CH343 (`1a86:55d3`), not the S3's native USB.
 
 ---
 
