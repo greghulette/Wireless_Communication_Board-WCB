@@ -31,6 +31,12 @@
       "port": "COM15",
       "kind": "wcb",
       "wcb": 2
+    },
+    "wcb3": {
+      "port": "/dev/cu.wchusbserial5B7B0602571",
+      "kind": "wcb",
+      "wcb": 3,
+      "note": "HW 3.2 (ESP32-S3, 16 MB), CH343"
     }
   },
   "mesh_only_wcbs": [],
