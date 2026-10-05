@@ -203,7 +203,8 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 > `wizard.push_fake_shared_reboot_repull` (W-14) and `wizard.push_fake_general_wcbq` (W-16). Row 3's matcher table and the
 > W-4/W-9 cases were already `push_fake.spec.js`. All pass headless and each `(should)` spec fails on its defect. The plan
 > against the code: a WCBQ edit reboots nothing (D28), so the reboot cases change the hardware version; the WDP state
-> has no card field (its commands are the mesh panel's, WP41 row 4); the General modal has no WCBQ row (W-16); and Push
+> has no card field (its commands are the mesh panel's, WP41 row 4); the General modal has no WCBQ row (W-16, fixed
+> 2026-10-04); and Push
 > All's four stages hold, but a relay on the shared port - the connection the first board gets - is reported lost (W-15,
 > fixed 2026-10-04).
 
@@ -800,7 +801,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13 to W-15, W-19 and W-20 are fixed (each row says how); W-16 to W-18 and W-21 are not.
+> **Status 2026-10-04:** W-13 to W-16, W-19 and W-20 are fixed (each row says how); W-17, W-18 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -833,6 +834,10 @@ fix; per the conventions, each fix also needs its doc row.
   app.js:1555-1595), although every push writes the General WCBQ into the board (app.js:7933, :8340). A second board on
   another quantity opens no modal, and its next push - a label, say - silently sends `?WCBQ` with the first board's value.
   `wizard.push_fake_general_wcbq`.
+  **Fixed:** the quantity is a General field like the rest (`wcbQuantity` in GENERAL_FIELD_LABELS, extractGeneralFields
+  and applyGeneralFieldsToBoardConfig): the modal names it, Keep marks the second board for a push of the kept value,
+  and Use puts the new one into General (onWCBQuantityChange). That handler now keeps the General baseline in step, as
+  the others do, so a pushed quantity change reads back as no mismatch.
 - **W-17** A saved system file does not load back as it was saved. parseSystemFile raises the WCB quantity to the number
   of [WCB] sections, client slots and boards above the floor included (parser.js:1257-1260); loadSystemFileContent renders
   sections 1..that number (app.js:9270), adding default boards the file never held and none for a board above them; the

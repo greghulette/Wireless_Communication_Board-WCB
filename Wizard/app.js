@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.20:02.R.OCT.2026';
+const UI_VERSION = '04.20:05.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1282,6 +1282,7 @@ function onWCBQuantityChange() {
   }
   const qty = parseInt(sel.value) || 1;
   systemConfig.general.wcbQuantity = qty;
+  updateGeneralBaseline();   // as every General handler does: the next pull compares the quantity too (W-16)
   renderBoards(qty);
   // Update all existing board WCB-number dropdowns to reflect new range
   for (let n = 1; n <= qty; n++) {
@@ -1573,7 +1574,10 @@ function onNavicoreIdChange() {
 }
 
 // ─── General Settings Conflict Helpers ────────────────────────────
+// The WCB quantity is one of them: every push writes General's into the board (boardGo, boardGoRemote), so a second
+// board on another quantity was pushed the first board's with no word - a label edit sent ?WCBQ too (W-16).
 const GENERAL_FIELD_LABELS = {
+  wcbQuantity:    'WCB Quantity',
   meshChannel:    'Mesh Channel',
   espnowPassword: 'ESP-NOW Password',
   macOctet2:      'MAC Octet 2',
@@ -1595,6 +1599,7 @@ const GENERAL_FIELD_LABELS = {
 
 function extractGeneralFields(config) {
   return {
+    wcbQuantity:    config.wcbQuantity             ?? 1,
     meshChannel:    config.meshChannel             ?? 1,
     espnowPassword: config.espnowPassword          ?? '',
     macOctet2:      config.macOctet2               ?? '00',
@@ -1640,6 +1645,7 @@ function isDefaultNetworkSettings(fields) {
 function applyGeneralFieldsToBoardConfig(n, fields) {
   const cfg = boardConfigs[n];
   if (!cfg) return;
+  cfg.wcbQuantity    = fields.wcbQuantity;
   cfg.meshChannel    = fields.meshChannel;
   cfg.espnowPassword = fields.espnowPassword;
   cfg.macOctet2      = fields.macOctet2;
@@ -6594,6 +6600,13 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-etm-boot',    newFields.etmBoot);
     set('g-etm-count',   newFields.etmCount);
     set('g-etm-delay',   newFields.etmDelay);
+    // The quantity as syncGeneralFromConfig shows one: an option above the collapsed range needs the full list first.
+    const wcbqSel = document.getElementById('g-wcbq');
+    if (wcbqSel && newFields.wcbQuantity > WCB_SHOW_COLLAPSED) {
+      populateWCBDropdown(wcbqSel, Math.max(newFields.wcbQuantity, WCB_MAX), newFields.wcbQuantity, true);
+    }
+    set('g-wcbq', newFields.wcbQuantity);
+    onWCBQuantityChange();
     onGeneralPasswordChange();
     onGeneralMacChange();
     onMeshChannelChange();
@@ -9321,6 +9334,7 @@ function loadSystemFileContent(content) {
     generalBaseline = {
       sourceBoard: 'file',
       fields: extractGeneralFields({
+        wcbQuantity:    system.general.wcbQuantity,
         meshChannel:    system.general.meshChannel,
         espnowPassword: system.general.espnowPassword,
         macOctet2:      system.general.macOctet2,

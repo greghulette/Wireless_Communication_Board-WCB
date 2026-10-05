@@ -365,9 +365,6 @@ test('wizard.push_fake_planned_verbs the bench specs\' pre-flight (lib/wizard.js
 });
 
 test('wizard.push_fake_general_wcbq (should) a second board whose WCB quantity differs is named in the keep/use modal, like every other General field that goes into every board\'s push (W-16)', async ({ page }) => {
-  test.fail(true, 'W-16: extractGeneralFields and GENERAL_FIELD_LABELS (app.js:1555-1595) leave out wcbQuantity, although every push ' +
-                  'writes the General WCBQ into the board (app.js:7933): no modal opens, and WCB2\'s next push - a label, say - ' +
-                  'silently sends ?WCBQ with WCB1\'s value');
   await openWizard(page);
   await pullFake(page, 1, board([], { wcbq: 2 }));
   await pullFake(page, 2, board([], { wcb: 2, wcbq: 3 }));
