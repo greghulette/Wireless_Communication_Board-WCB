@@ -167,6 +167,7 @@ class App:
         self.identities = {}    # device name -> text
         self.pending_port = None
         self.selected_key = None
+        self.plan_rows = {}     # key (W1S3, N20S4) -> wiring.plan / nc_plan row, refilled by refresh_wiring
         self.last_report = None
         self.job = None          # (name, start) of the job the worker is running now
         self.last_job = None     # (name, seconds) of the last job that finished
@@ -401,6 +402,10 @@ class App:
             if name is None:
                 name = next((k for k in probes if "mac" not in devices[k]), None)
             if name is None:
+                name = next(iter(wiring.planned_probes(b)), None)    # the wiring plan's next name: probe3 first
+                if name:
+                    devices[name] = {"kind": "probe"}
+            if name is None:
                 i = 1
                 while f"probe{i}" in devices:
                     i += 1
@@ -477,6 +482,9 @@ class App:
 
         def wheel(ev):
             w = self.root.winfo_containing(ev.x_root, ev.y_root)
+            if w is self.canvas:
+                self.canvas.yview_scroll(wheel_steps(ev), "units")
+                return
             while w is not None and w is not side:
                 w = w.master
             if w is side:
@@ -485,13 +493,24 @@ class App:
 
         left = ttk.Frame(body)
         left.pack(side="left", fill="both", expand=True)
-        self.canvas = tk.Canvas(left, width=600, height=600, bg=THEME["panel"], highlightthickness=1,
+        # The diagram scrolls both ways: three WCBs, NaviCore and four probes are taller than any window.
+        cbox = ttk.Frame(left)
+        cbox.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(cbox, width=600, height=600, bg=THEME["panel"], highlightthickness=1,
                                 highlightbackground=THEME["edge"])
-        self.canvas.pack(fill="both", expand=True)
+        cys = ttk.Scrollbar(cbox, orient="vertical", command=self.canvas.yview)
+        cxs = ttk.Scrollbar(cbox, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=cys.set, xscrollcommand=cxs.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        cys.grid(row=0, column=1, sticky="ns")
+        cxs.grid(row=1, column=0, sticky="ew")
+        cbox.rowconfigure(0, weight=1)
+        cbox.columnconfigure(0, weight=1)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         ttk.Label(left, foreground=GREY, wraplength=600, justify="left",
                   text="green = verified   amber = found but not verified   dashed = listen-only tap   "
-                       "dotted grey = planned, not wired yet   blue port = a real device").pack(anchor="w", pady=(6, 0))
+                       "dotted grey = planned, not wired yet   blue port = a real device   "
+                       "dashed box = in the wiring plan, not plugged in yet").pack(anchor="w", pady=(6, 0))
 
         ttk.Label(right, text="What to connect", font=BOLD).pack(anchor="w")
         plan_box = ttk.Frame(right)
@@ -576,19 +595,19 @@ class App:
         self.man_probe_cb.configure(values=probes)
         if not self.man_probe.get() and probes:
             self.man_probe.set(probes[0])
-        self.draw_wiring()
         sel = self.selected_key
         self.plan_tree.delete(*self.plan_tree.get_children())
-        self.plan_rows = {r["key"]: r for r in wiring.plan(self.bench)}
+        self.plan_rows = {r["key"]: r for r in wiring.plan(self.bench) + wiring.nc_plan(self.bench)}
+        self.draw_wiring()
         for key, r in self.plan_rows.items():
-            link = self.bench.links.get(r["wcb"], r["port"], raw=True)
+            link = r["link"]
             if link:
                 wire_to = f"{link.probe_name} {link.header}"
             elif r["device"]:
                 wire_to = r["device"]
             else:
                 wire_to = f"{r['probe']} {r['header']}" if r["probe"] else "—"
-            label = key + ("  (tap)" if r["tap"] and not r["device"] else "")
+            label = key + ("  (tap)" if r["tap"] and not r["device"] else "") + ("  (planned)" if r["planned"] else "")
             self.plan_tree.insert("", "end", iid=key, text=label, values=(r["status"], wire_to, len(r["unlocks"])),
                                   tags=(r["status"],))
         if sel in self.plan_rows:
@@ -596,58 +615,91 @@ class App:
             self.show_plan(sel)
 
     def draw_wiring(self):
+        """WCBs, then NaviCore's own pins, on the left; probes on the right. A WCB or probe the wiring plan names that
+        is not plugged in yet is drawn dashed and cannot be clicked: its wires are listed so they can be made first."""
         c = self.canvas
         c.delete("all")
         self.xy = {}
-        wcbs = self.bench.wcb_numbers()
-        probes = self.bench.probe_names()
-        box_h, pitch = 40 + 5 * 36, 30
-        usb = self.bench.usb_wcbs()
-        for i, w in enumerate(wcbs):
-            x, y = 24, 16 + i * (box_h + pitch)
-            c.create_rectangle(x, y, x + 210, y + box_h, fill=THEME["card"], outline=THEME["edge"], width=2)
-            c.create_text(x + 12, y + 16, anchor="w", font=BOLD, text=f"WCB{w}  " + ("(USB)" if w in usb else "(mesh)"), fill=THEME["fg"])
-            labels = self.port_labels(w)
+        b = self.bench
+        rows = wiring.plan(b) + wiring.nc_plan(b)
+        later_wcbs, later_probes = wiring.planned_wcbs(b), wiring.planned_probes(b)
+        nc_probe = wiring.navicore_probe(b)
+        box_h, pitch, box_w = 40 + 5 * 36, 30, 220
+        usb = b.usb_wcbs()
+
+        def box(x, y, title, sub, fill, planned):
+            c.create_rectangle(x, y, x + box_w, y + box_h, fill=THEME["bg"] if planned else fill,
+                               outline=THEME["mute"] if planned else THEME["edge"], width=2,
+                               dash=(6, 4) if planned else None)
+            c.create_text(x + 12, y + 14, anchor="w", font=BOLD, text=title, fill=GREY if planned else THEME["fg"])
+            if sub:
+                c.create_text(x + 12, y + 29, anchor="w", text=sub[:34], fill=GREY, font=(FONT[0], 8))
+
+        def dot(px, py, key, tag, planned):
+            hl = not planned and key in (self.pending_port, self.selected_key)
+            c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=BLUE if hl else THEME["panel"], outline=THEME["mute"],
+                          width=2, dash=(2, 2) if planned else None, tags=() if planned else (tag, key))
+
+        y = 16
+        for w in b.wcb_numbers() + later_wcbs:
+            planned = w in later_wcbs
+            x = 24
+            box(x, y, f"WCB{w}", "in the wiring plan, not plugged in yet" if planned else
+                ("USB" if w in usb else "mesh only"), THEME["card"], planned)
+            labels = {} if planned else self.port_labels(w)
             for k, port in enumerate(HEADERS):
-                py = y + 46 + k * 36
-                px = x + 210
-                key = f"W{w}{port}"
-                hl = self.pending_port == key or self.selected_key == key
-                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=BLUE if hl else THEME["panel"], outline=THEME["mute"],
-                              width=2, tags=("wport", key))
-                dev = self.bench.port_devices().get(key)
+                py, px, key = y + 46 + k * 36, x + box_w, f"W{w}{port}"
+                dot(px, py, key, "wport", planned)
+                dev = b.port_devices().get(key)
                 if dev:
                     c.create_text(x + 14, py, anchor="w", text=f"{port}  {describe_device(dev)}"[:28], fill=BLUE)
                 else:
-                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26], fill=THEME["fg"])
+                    c.create_text(x + 14, py, anchor="w", text=f"{port}  {labels.get(port, '')}"[:26],
+                                  fill=GREY if planned else THEME["fg"])
                 self.xy[("W", key)] = (px, py)
-        for j, pn in enumerate(probes):
-            x, y = 460, 16 + j * (box_h + pitch)
-            c.create_rectangle(x, y, x + 210, y + box_h, fill=THEME["probe"], outline=THEME["edge"], width=2)
-            port = self.bench.cfg["devices"][pn].get("port", "?")
-            c.create_text(x + 24, y + 16, anchor="w", font=BOLD, text=f"{pn}  ({port})", fill=THEME["fg"])
+            y += box_h + pitch
+        nc_rows = {r["port"]: r for r in rows if r["nc"]}
+        if nc_rows:
+            x = 24
+            box(x, y, "NaviCore", "its own pins (D-NC37)", THEME["card"], False)
+            for k, (port, _header, _what) in enumerate(wiring.NC_PLAN):
+                py, px, key = y + 46 + k * 36, x + box_w, nc_rows[port]["key"]
+                dot(px, py, key, "ncport", False)
+                c.create_text(x + 14, py, anchor="w", text=wiring.NC_LABEL[port], fill=THEME["fg"])
+                self.xy[("N", key)] = (px, py)
+        y = 16
+        for pn in b.probe_names() + later_probes:
+            planned = pn in later_probes
+            x = 470
+            dev_port = "" if planned else b.cfg["devices"][pn].get("port", "?")
+            sub = "not plugged in yet" if planned else dev_port.rsplit("/", 1)[-1].replace("cu.", "", 1)
+            box(x, y, pn + ("  · NaviCore" if pn == nc_probe else ""), sub, THEME["probe"], planned)
             for k, header in enumerate(HEADERS):
-                py = y + 46 + k * 36
-                px = x
-                c.create_oval(px - 9, py - 9, px + 9, py + 9, fill=THEME["panel"], outline=THEME["mute"], width=2,
-                              tags=("pport", f"{pn}:{header}"))
-                c.create_text(x + 24, py, anchor="w", text=f"header {header}", fill=THEME["fg"])
-                self.xy[("P", f"{pn}:{header}")] = (px, py)
-        for r in wiring.plan(self.bench):
-            if r["status"] == "to do" and r["probe"] in probes:
-                a, b = self.xy[("W", r["key"])], self.xy[("P", f"{r['probe']}:{r['header']}")]
-                c.create_line(*a, *b, fill=THEME["edge"], width=2, dash=(2, 4))
-        for link in self.bench.links.all():
-            a = self.xy.get(("W", link.key))
-            b = self.xy.get(("P", f"{link.probe_name}:{link.header}"))
-            if not a or not b:
+                py, px, key = y + 46 + k * 36, x, f"{pn}:{header}"
+                dot(px, py, key, "pport", planned)
+                c.create_text(x + 24, py, anchor="w", text=f"header {header}", fill=GREY if planned else THEME["fg"])
+                self.xy[("P", key)] = (px, py)
+            y += box_h + pitch
+        for r in rows:
+            if r["status"] == "to do" and r["probe"]:
+                a = self.xy.get(("N" if r["nc"] else "W", r["key"]))
+                e = self.xy.get(("P", f"{r['probe']}:{r['header']}"))
+                if a and e:
+                    c.create_line(*a, *e, fill=THEME["edge"], width=2, dash=(2, 4))
+        for link in b.links.all() + b.links.nc_all():
+            a = self.xy.get(("N" if getattr(link, "navicore", False) else "W", link.key))
+            e = self.xy.get(("P", f"{link.probe_name}:{link.header}"))
+            if not a or not e:
                 continue
             color = GREEN if link.verified else AMBER
             width = 5 if self.selected_key == link.key else 3
-            c.create_line(*a, *b, fill=color, width=width, dash=(8, 5) if link.tap else None, tags=("link", link.key))
-            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            c.create_line(*a, *e, fill=color, width=width, dash=(8, 5) if link.tap else None, tags=("link", link.key))
+            mx, my = (a[0] + e[0]) / 2, (a[1] + e[1]) / 2
             if link.swap:
-                c.create_text(mx, my - 9, text="straight-through", fill=GREY, font=("Segoe UI", 8))
+                c.create_text(mx, my - 9, text="straight-through", fill=GREY, font=(FONT[0], 8))
+        box_all = c.bbox("all")
+        if box_all:
+            c.configure(scrollregion=(0, 0, box_all[2] + 24, box_all[3] + 24))
 
     def port_labels(self, wcb):
         labels = {}
@@ -658,10 +710,11 @@ class App:
         return labels
 
     def on_canvas_click(self, event):
-        items = self.canvas.find_overlapping(event.x - 4, event.y - 4, event.x + 4, event.y + 4)
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)   # the diagram scrolls
+        items = self.canvas.find_overlapping(x - 4, y - 4, x + 4, y + 4)
         for item in reversed(items):
             tags = self.canvas.gettags(item)
-            if "wport" in tags:
+            if "wport" in tags or "ncport" in tags:
                 key = tags[1]
                 self.pending_port = key
                 self.select_key(key)
@@ -670,10 +723,14 @@ class App:
             if "pport" in tags:
                 pn, header = tags[1].split(":")
                 if not self.pending_port:
-                    self.status("Click a WCB port first, then the probe header")
+                    self.status("Click a WCB port or a NaviCore pin first, then the probe header")
                     return
                 key = self.pending_port
                 self.pending_port = None
+                r = self.plan_rows.get(key)
+                if r and r["nc"]:
+                    self.submit(f"wire {key} -> {pn} {header}", self.job_add_nc_link, r["port"], pn, header)
+                    return
                 w, port = runner.parse_key(key)
                 self.submit(f"wire {key} -> {pn} {header}", self.job_add_link, w, port, pn, header)
                 return
@@ -683,15 +740,20 @@ class App:
         self.pending_port = None
         self.draw_wiring()
 
+    def is_nc_key(self, key):
+        r = self.plan_rows.get(key) if key else None
+        return bool(r and r["nc"])
+
     def select_key(self, key):
         self.selected_key = key
         if key in self.plan_rows:
             self.plan_tree.selection_set(key)
             self.plan_tree.see(key)
             self.show_plan(key)
-        self.man_port.set(key)
-        self.dev_port.set(key)
-        self.fill_device_form(key)
+        if not self.is_nc_key(key):
+            self.man_port.set(key)
+            self.dev_port.set(key)
+            self.fill_device_form(key)
         self.draw_wiring()
 
     def on_plan_select(self, _e):
@@ -701,8 +763,8 @@ class App:
 
     def show_plan(self, key):
         r = self.plan_rows[key]
-        link = self.bench.links.get(r["wcb"], r["port"], raw=True)
-        text = f"{key} — {r['status']}\n\n{r['how']}\n\n{wiring.PAD_ORDER}\n"
+        link = r["link"]
+        text = f"{key} — {r['status']}\n\n{r['how']}\n\n{wiring.NC_PAD_ORDER if r['nc'] else wiring.PAD_ORDER}\n"
         if link:
             text += f"\nFound: {link}\n"
         text += f"\nUnlocks {len(r['unlocks'])} test(s): " + (", ".join(r["unlocks"]) or "—")
@@ -713,24 +775,35 @@ class App:
         if not self.selected_key:
             self.status("Select a wire first")
             return None
-        w, port = runner.parse_key(self.selected_key)
-        link = self.bench.links.get(w, port, raw=True)
+        r = self.plan_rows.get(self.selected_key)
+        if r is not None:
+            link = r["link"]
+        else:
+            w, port = runner.parse_key(self.selected_key)
+            link = self.bench.links.get(w, port, raw=True)
         if not link:
             self.status(f"{self.selected_key} has no wire")
         return link
 
     def verify_selected(self):
         link = self.selected_link()
-        if link:
+        if link and getattr(link, "navicore", False):
+            self.status(f"{link.key}: NaviCore's wires are confirmed by Auto-detect wires (NaviCore sends the "
+                        f"stimulus), not by Verify")
+        elif link:
             self.submit(f"verify {link.key}", self.job_verify, link.wcb, link.port)
 
     def remove_selected(self):
         link = self.selected_link()
-        if link:
+        if link and getattr(link, "navicore", False):
+            self.submit(f"remove {link.key}", self.job_remove_nc_link, link.port)
+        elif link:
             self.submit(f"remove {link.key}", self.job_remove_link, link.wcb, link.port)
 
     def toggle_tap_selected(self):
-        if self.selected_key:
+        if self.is_nc_key(self.selected_key):
+            self.status("NaviCore's SBUS OUT and Maestro bus are always listen-only; its S3-S5 are always duplex")
+        elif self.selected_key:
             w, port = runner.parse_key(self.selected_key)
             self.submit(f"tap {self.selected_key}", self.job_toggle_tap, w, port)
 
@@ -1345,8 +1418,13 @@ class App:
                 report.append(f"{match} = {port} (mac {info['mac']}, v{info['version']})")
             else:
                 unassigned.append((port, info))
+        planned = wiring.planned_probes(b)   # named in the wiring plan, not in bench.json yet: probe3, then probe4
         for port, info in unassigned:
             free = next((n for n in probe_names if "mac" not in devices[n]), None)
+            if not free and planned:
+                free = planned.pop(0)
+                devices[free] = {"kind": "probe"}
+                probe_names.append(free)
             if free:
                 devices[free]["port"] = port
                 devices[free]["mac"] = info["mac"]
@@ -1436,6 +1514,17 @@ class App:
         self.bench.links.remove_link(wcb, port)
         self.emit("links_changed")
         self.emit("status", f"W{wcb}{port}: wire removed")
+
+    def job_add_nc_link(self, port, probe, header):
+        link = self.bench.links.set_nc_link(port, probe, header)
+        self.emit("links_changed")
+        self.emit("status", f"{link.key} -> {probe} {header}: added, not verified - Auto-detect wires confirms "
+                            f"NaviCore's wires by their bytes")
+
+    def job_remove_nc_link(self, port):
+        self.bench.links.remove_nc_link(port)
+        self.emit("links_changed")
+        self.emit("status", f"NaviCore {port}: wire removed")
 
     def job_toggle_tap(self, wcb, port):
         taps = self.bench.cfg.setdefault("taps", [])

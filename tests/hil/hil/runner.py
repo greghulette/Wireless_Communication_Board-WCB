@@ -20,6 +20,8 @@ import json
 import os
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -51,6 +53,7 @@ DEVICE_KINDS = {
     "dfp": ("DFPlayer", ""),
     "wled": ("WLED controller", "WLED id"),
     "wcb": ("Another WCB's port", "e.g. W2S3"),
+    "kyber": ("Kyber", "Maestro or MarcDuino port"),
     "other": ("Other device", "what it is"),
 }
 
@@ -429,11 +432,27 @@ def missing(bench, t):
     return miss
 
 
+_CAFFEINATE = None   # macOS: the `caffeinate -i` process holding idle sleep off while tests run
+
+
 def _keep_awake(on):
     """Stop Windows' idle sleep while tests run: on 2026-09-22 the host slept 44 min into a full run and every USB serial
     port vanished at once, which failed 12 tests. SetThreadExecutionState is per thread, so this is called on the thread
     that runs the tests (the GUI's worker, or the CLI's main thread). It cannot veto a lid close, the power button or a
-    critical-battery hibernate - _awake_s() and host_usb_loss() catch those after the fact."""
+    critical-battery hibernate - _awake_s() and host_usb_loss() catch those after the fact. On macOS a `caffeinate -i`
+    does the same; `-w` ends it with this process, so a killed run never leaves the Mac unable to sleep."""
+    global _CAFFEINATE
+    if sys.platform == "darwin":
+        try:
+            if on and (_CAFFEINATE is None or _CAFFEINATE.poll() is not None):
+                _CAFFEINATE = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())],
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif not on and _CAFFEINATE is not None:
+                _CAFFEINATE.terminate()
+                _CAFFEINATE = None
+        except OSError:
+            _CAFFEINATE = None
+        return
     if os.name != "nt":
         return
     try:
@@ -448,7 +467,10 @@ def _awake_s():
     """Seconds of time the host was AWAKE (Windows QueryUnbiasedInterruptTime excludes sleep and hibernate), or None
     off Windows. time.monotonic() counts a hibernate (QueryPerformanceCounter on this Python), so the difference across
     a test is how long the host slept inside it. host_usb_loss() alone missed the 2026-09-22 19:58 critical-battery
-    hibernate: after resume only W1's CH9102 port errored, and the rest survived."""
+    hibernate: after resume only W1's CH9102 port errored, and the rest survived. macOS: CLOCK_UPTIME_RAW, which stops
+    in sleep, against _host_s()'s CLOCK_MONOTONIC, which does not."""
+    if sys.platform == "darwin":
+        return _mac_clock(8)    # CLOCK_UPTIME_RAW
     if os.name != "nt":
         return None
     try:
@@ -460,8 +482,37 @@ def _awake_s():
         return None
 
 
+def _mac_clock(clock_id):
+    """Seconds on a macOS clock_gettime clock, or None. Through libSystem: the python.org 3.9 build has no
+    time.clock_gettime."""
+    try:
+        import ctypes
+        f = ctypes.CDLL("/usr/lib/libSystem.B.dylib").clock_gettime_nsec_np
+        f.restype, f.argtypes = ctypes.c_uint64, [ctypes.c_int]
+        return f(clock_id) / 1e9
+    except Exception:  # noqa: BLE001 - no detector is no worse than before
+        return None
+
+
+def _host_s():
+    """Seconds on a clock that keeps counting while the host sleeps, the other half of _awake_s(): time.monotonic() on
+    Windows (QueryPerformanceCounter). On macOS time.monotonic() is mach_absolute_time, which stops in sleep, so the
+    two would always agree: CLOCK_MONOTONIC instead."""
+    if sys.platform == "darwin":
+        t = _mac_clock(6)       # CLOCK_MONOTONIC
+        if t is not None:
+            return t
+    return time.monotonic()
+
+
 def _on_battery():
-    """True when Windows reports the host running on battery (GetSystemPowerStatus ACLineStatus == 0)."""
+    """True when the host runs on battery: Windows GetSystemPowerStatus ACLineStatus == 0, macOS `pmset -g batt`."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+            return "'Battery Power'" in out
+        except (OSError, subprocess.SubprocessError):
+            return False
     if os.name != "nt":
         return False
     try:
@@ -548,7 +599,7 @@ def _ports_back(bench, awake_s=120, abort=None):
 
 
 def _boundary():
-    return time.monotonic(), _awake_s()
+    return _host_s(), _awake_s()
 
 
 def _bench_unhealthy(bench, boundary):
@@ -562,7 +613,7 @@ def _bench_unhealthy(bench, boundary):
         mono0, awake0 = boundary
         awake1 = _awake_s()
         if awake0 is not None and awake1 is not None:
-            slept = (time.monotonic() - mono0) - (awake1 - awake0)
+            slept = (_host_s() - mono0) - (awake1 - awake0)
             if slept > 5:
                 return f"the host was asleep for {slept:.0f}s since the last test ended"
     return None

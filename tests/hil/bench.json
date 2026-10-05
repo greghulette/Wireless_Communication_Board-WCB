@@ -36,13 +36,20 @@
   "mesh_only_wcbs": [],
   "wiring_plan": {
     "1": "probe1",
-    "2": "probe2"
+    "2": "probe2",
+    "3": "probe4",
+    "navicore": "probe3"
   },
   "taps": [
     {
       "wcb": 2,
       "port": "S1",
       "why": "Real Maestro 2 is on this port — the probe only listens, so the Maestro keeps working."
+    },
+    {
+      "wcb": 3,
+      "port": "S2",
+      "why": "A real Kyber's Maestro port (115200, ?KYBER,LOCAL,S2): the probe only listens to what W3 sends back to it."
     }
   ],
   "port_stimulus": {
@@ -63,6 +70,14 @@
   "port_devices": {
     "W2S1": {
       "kind": "maestro"
+    },
+    "W3S2": {
+      "kind": "kyber",
+      "detail": "Maestro port"
+    },
+    "W3S5": {
+      "kind": "kyber",
+      "detail": "MarcDuino port"
     }
   },
   "opt_in": [
