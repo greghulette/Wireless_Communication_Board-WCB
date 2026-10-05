@@ -35,6 +35,8 @@ FLAG_CH17, FLAG_CH18, FLAG_LOST, FLAG_FAILSAFE = 0x01, 0x02, 0x04, 0x08
 # "save":false; sendTestReply; sendGlitch). Every reply starts {"e":"test","t":"<verb>".
 TEST_REPLY = r'^\{"e":"test","t":"%s"'
 GLITCHES = ("truncate", "garbage", "double", "gap", "dip")    # sendGlitch's kinds; the controller checks each n
+# The "route" verb (SBUSController branch kyber-sbus): the controls on output A (S5, NaviCore), B (S4, a Kyber) or both.
+ROUTES = ("navicore", "kyber", "both")
 
 
 # ------------------------------------------------------------------ the frame codec
@@ -442,15 +444,32 @@ class SbusCtl:
         """A raw value (0-2047) on SBUS channel c (1-24), until a control writes that channel again."""
         return self.test_verb({"t": "ch", "c": c, "v": v})
 
+    def has_route(self):
+        """Whether the image has the second SBUS output and its "route" verb (SBUSController branch kyber-sbus): every
+        test reply then names the route. Probes the verbs first when this instance has not."""
+        st = self.verbs if self.verbs is not None else self.test_state()
+        return bool(st) and "route" in st
+
+    def route(self, to):
+        """Which output carries the controls: "navicore" (output A, S5 - what a reset gives), "kyber" (output B, S4) or
+        "both". One not routed gets no input: A carries the rest frame it took at boot (NaviCore stays linked and still),
+        B sends nothing (the Kyber sees no radio). The flags, stream and glitch verbs act on the routed outputs."""
+        if to not in ROUTES:
+            raise ValueError(f"unknown route {to!r} (one of {', '.join(ROUTES)})")
+        return self.test_verb({"t": "route", "to": to})
+
     def clear_faults(self):
         """Put the INF8 test state back to what a reset gives - flags 0, the stream on with no budget, the saved frame
-        format - with no reset -> what it changed, as short strings ([] when nothing was off, or the image has no verbs:
-        then only the probe went out). A "ch" value is not its business: it lasts until a control writes that channel
-        (center_all, reassert_switches); a frame format put back resets the channels anyway."""
+        format, the controls routed to NaviCore - with no reset -> what it changed, as short strings ([] when nothing was
+        off, or the image has no verbs: then only the probe went out). A "ch" value is not its business: it lasts until a
+        control writes that channel (center_all, reassert_switches); a frame format put back resets the channels anyway."""
         st = self.test_state()
         if st is None:
             return []
         done = []
+        if st.get("route", "navicore") != "navicore":
+            self.route("navicore")
+            done.append(f"the controls routed back to NaviCore (were {st['route']})")
         if st.get("flags"):
             self.flags(0)
             done.append(f"flags {st['flags']:#04x} -> 0")

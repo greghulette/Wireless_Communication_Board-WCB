@@ -1049,19 +1049,23 @@ class FakeInf8:
     """The SBUS controller's JSON verbs as SBUSController.ino (branch hil-week) handles them: ping, getcfg, and the INF8
     test verbs flags, stream, ch, glitch and mode with "save":false, each checked as processCommandJson checks it and
     answered with sendTestReply's line. verbs=False is an older image: the test verbs fall through with no answer,
-    and a "mode" - with or without "save":false - saves (recorded in `saved`)."""
+    and a "mode" - with or without "save":false - saves (recorded in `saved`). route=True is the kyber-sbus image: the
+    "route" verb, and every reply naming the route."""
     GLITCH_N = {"truncate": (1, 35), "garbage": (1, 64), "double": (2, 4), "gap": (2, 50), "dip": (1, 24)}
 
-    def __init__(self, verbs=True, cfg=None):
+    def __init__(self, verbs=True, cfg=None, route=False):
         self.verbs, self.saved = verbs, []
         self.st = {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True}
+        if route:
+            self.st["route"] = "navicore"
         self.cfg = cfg or {"e": "cfg", "fwver": "sbus-9.9", "sbus24": True, "rx": 1, "ry": 2, "ly": 3, "lx": 4,
                            "sw": [{"c": 5, "pos": 2}, {"c": 17, "pos": 0}], "btn": [], "tr": []}
 
     def reply(self, t, ok, extra=""):
         s = self.st
         return (f'{{"e":"test","t":"{t}","ok":{json.dumps(ok)},"flags":{s["flags"]},"stream":{json.dumps(s["stream"])},'
-                f'"budget":{s["budget"]},"sbus24":{json.dumps(s["sbus24"])},"saved24":{json.dumps(s["saved24"])}{extra}}}')
+                f'"budget":{s["budget"]},"sbus24":{json.dumps(s["sbus24"])},"saved24":{json.dumps(s["saved24"])}'
+                + (f',"route":"{s["route"]}"' if "route" in s else "") + f'{extra}}}')
 
     @staticmethod
     def _int(o, k):
@@ -1109,6 +1113,12 @@ class FakeInf8:
             if ok and k == "garbage":
                 extra += ',"hex":"' + "A5" * n + '"'
             return [self.reply("glitch", ok, extra)]
+        if t == "route" and "route" in self.st:
+            to = o.get("to", "")
+            ok = not to or to in ("navicore", "kyber", "both")
+            if to and ok:
+                self.st["route"] = to
+            return [self.reply("route", ok)]
         return []
 
     def script(self, text, n):
@@ -5006,7 +5016,7 @@ def t_sbusfault_old_image_skips(tmp):
             setattr(mod, name, value)
     b.close()
     res = {r["id"]: r for r in ck.data["results"]}
-    assert len(mine) == len(res) == 12, (len(mine), sorted(res))
+    assert len(mine) == len(res) == 13, (len(mine), sorted(res))
     bad = {tid: (r["status"], r["detail"][:160]) for tid, r in res.items()
            if r["status"] != "SKIP" or "no INF8 test verbs" not in r["detail"] or "sbus-9.9" not in r["detail"]}
     assert not bad, bad
@@ -10791,7 +10801,8 @@ class SbusWorld(FakeInf8):
                "btn": [{"l": f"S{i + 1}", "c": 0, "v": 1811} for i in range(6)] + [{"l": "SK", "c": 7, "v": 1074},
                                                                                   {"l": "SL", "c": 7, "v": 1033}],
                "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
-        super().__init__(verbs=True, cfg=cfg)
+        super().__init__(verbs=True, cfg=cfg, route=True)
+        self.rest = list(self.channels)        # output A's frame while the controls are routed away from it
         fixed, loose = _reader_classes()
         self.reader = (fixed if "fixed_reader" in self.mut else loose if "loose_reader" in self.mut
                        else SB.ReaderModel)(24)
@@ -10802,8 +10813,14 @@ class SbusWorld(FakeInf8):
         self.times = collections.deque(t0 - k / self.FPS for k in range(self.FPS, 0, -1))   # a second at full rate
 
     # ------------------------------------------------------------ the wire
+    def a_live(self):
+        """Whether output A - NaviCore's - carries the controls ("route"); 'route_leaks' is an image where it always does."""
+        return "route_leaks" in self.mut or self.st.get("route", "navicore") in ("navicore", "both")
+
     def frame(self):
         n = 24 if self.st["sbus24"] else 16
+        if not self.a_live():                  # routed away: the rest frame taken at boot, flags clear, every slot
+            return self.SB.encode([max(0, min(2047, v)) for v in self.rest[:n]], 0, n)
         return self.SB.encode([max(0, min(2047, v)) for v in self.channels[:n]], self.st["flags"], n)
 
     def _decoded(self, raw, when):
@@ -10830,7 +10847,7 @@ class SbusWorld(FakeInf8):
         """The frames the running stream sent since the last look: through the reader, or - once it is locked on them and
         idle, after the first few - straight to the count, which is what the reader would do with each."""
         now = time.monotonic()
-        if self.st["stream"] and self.st["budget"] == -1:
+        if (self.st["stream"] and self.st["budget"] == -1) or not self.a_live():
             n = int((now - self.t) * self.FPS)
             if n > 0:
                 f = self.frame()
@@ -10879,7 +10896,7 @@ class SbusWorld(FakeInf8):
             elif t == "mode" and self.st["sbus24"] != was24:
                 for c in range(1, 25):
                     self.channels[c - 1] = self.controls.get(c, self.SB.SBUS_CENTER)
-            elif t == "glitch" and ok:
+            elif t == "glitch" and ok and self.a_live():      # a burst goes to the routed output only
                 reply = json.loads(out[0])
                 bursts = self.SB.glitch_bursts(o["kind"], o["n"], self.frame(), reply.get("hex"))
                 for b in bursts * (2 if o["kind"] == "dip" and "dip_two" in self.mut else 1):
@@ -10889,7 +10906,7 @@ class SbusWorld(FakeInf8):
                     if "no_budget" in self.mut:
                         self.st["budget"] = -1
                     else:
-                        for _ in range(o["frames"]):
+                        for _ in range(o["frames"] if self.a_live() else 0):
                             self._feed(self.frame(), now)
                         self.st["stream"], self.st["budget"] = False, 0
                 self.t = now
@@ -11207,7 +11224,8 @@ SBUSFAULT_WANT = {"sbus.test_verbs": "PASS", "sbus.sbus16_autodetect": "PASS", "
                   "sbus.sbus24_return_no_prefix_decode": "FAIL", "sbus.truncated_frame_no_phantom": "FAIL",
                   "sbus.failsafe_flag_freeze": "PASS", "sbus.lost_frame_flag_no_gate": "PASS",
                   "sbus.failsafe_deferred_tap": "FAIL", "sbus.frame_stop_held_press": "FAIL",
-                  "sbus.prefix_ambiguity_raw": "PASS", "sbus.one_frame_dip": "PASS", "sbus.test_verbs_ram_only": "SKIP"}
+                  "sbus.prefix_ambiguity_raw": "PASS", "sbus.one_frame_dip": "PASS", "sbus.test_verbs_ram_only": "SKIP",
+                  "sbus.route_isolates": "PASS"}
 
 
 def _run_sbusfault_suite(tmp, ids=None, mut=()):
@@ -11261,13 +11279,14 @@ def t_sbusfault_suite_against_model(tmp):
     res, world, model, log = _run_sbusfault_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {SBUSFAULT_WANT.get(tid)}) {r['detail'][:400]}"
            for tid, r in res.items() if r["status"] != SBUSFAULT_WANT.get(tid)]
-    assert len(res) == len(SBUSFAULT_WANT) == 12, sorted(res)
+    assert len(res) == len(SBUSFAULT_WANT) == 13, sorted(res)
     assert not bad, "\n".join(bad)
     assert "(should, D-NC72)" in res["sbus.truncated_frame_no_phantom"]["detail"], res["sbus.truncated_frame_no_phantom"]
     assert "(should, D-NC73)" in res["sbus.sbus24_return_no_prefix_decode"]["detail"]
     for tid in ("sbus.failsafe_deferred_tap", "sbus.frame_stop_held_press"):
         assert res[tid]["detail"].startswith("(should, D-NC21)"), (tid, res[tid]["detail"][:300])
-    assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True} and not world.saved, \
+    assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True,
+                        "route": "navicore"} and not world.saved, \
         (world.st, world.saved)
     assert model.text() == model.flash, "NaviCore's config was not left as found"
     assert not any(s in log for s in SECRETS), "a credential reached session.log"
@@ -11288,6 +11307,7 @@ SBUSFAULT_MUTATIONS = (
     ("sbus.failsafe_flag_freeze", "failsafe_keeps_armed", "FAIL", "held across the failsafe"),
     ("sbus.lost_frame_flag_no_gate", "lost_gates", "FAIL", "with lost frames flagged"),
     ("sbus.one_frame_dip", "release_debounce_2", "FAIL", "matrixDebounceFrames 1"),
+    ("sbus.route_isolates", "route_leaks", "FAIL", "routed to the Kyber"),
 )
 
 

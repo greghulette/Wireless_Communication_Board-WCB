@@ -292,6 +292,15 @@ wire and test alone.
   `--no-servos` cannot stop that; W1's stand-in Maestro (probe on W1 S1) and a Kyber-local W1 in the `kyber.*` tests
   would see that traffic too. **A dormant Kyber sends nothing** (Greg, 2026-10-05), so it can stay powered during runs
   as long as nothing commands it; tests that drive it should be opt-in.
+- **Its radio input comes from the SBUS controller's output B** (SBUSController branch `kyber-sbus`, from `hil-week`;
+  flashed 2026-10-05, `fwver` `20261005-eb0517a-hil`): controller **S4 TX (GPIO17)** → the Kyber's SBUS input signal,
+  plus GND; the same 100 kbaud 8E2 inverted SBUS-24 as output A (S5 → NaviCore). RC PWM is down to three outputs (S1-S3).
+  The RAM-only verb `{"t":"route","to":"navicore"|"kyber"|"both"}` (hil/sbus.py `SbusCtl.route`) picks which output
+  carries the controls; a reset gives `navicore`. Output A not routed carries its boot-time rest frame (NaviCore stays
+  linked, nothing moves); output B not routed is silent, so the Kyber sees no radio, as before. `sbus.route_isolates`
+  checks output A's half. A Kyber pad button is the Button PAD channel held at that button's value (the standard ladder:
+  Released 172, buttons 1-15 at 274-1702 in steps of 102, matched ±50); the controller rests most channels at 992,
+  within ±50 of button 8, so a test sets the pad channel to 172 before routing to the Kyber.
 - **Kyber settings that matter here** (its docs: https://nhutchison.github.io/KyberEditor/docs/, read 2026-10-05):
   - *Expert → Maestro* baud rate and frame format must be **115200 8N1**: a Kyber-local WCB port is fixed at 115200.
   - *General → Startup Scripts*: a non-zero Maestro 1/2 script runs **at the Kyber's boot**, so powering it on moves

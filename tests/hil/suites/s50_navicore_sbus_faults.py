@@ -368,6 +368,56 @@ def test_verbs(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("sbus.route_isolates", "The SBUS controller's route verb (output B, S4, for a Kyber): routed to the Kyber, a raw "
+      "value never reaches NaviCore, which keeps a full-rate stream at rest with no flag; a stopped stream and the "
+      "failsafe flag there leave NaviCore's untouched; routed to both, and back to NaviCore, it reads the value (the rx "
+      "stick's channel, bound to nothing)", needs=["sbus", "navicore"], links=[])
+def route_isolates(bench):
+    """The second SBUS output (SBUSController branch kyber-sbus, "route"): the controls go to output A (S5, NaviCore),
+    output B (S4, a Kyber) or both, and an output not routed gets no input - A carries the rest frame the controller
+    took at boot, so NaviCore stays linked and nothing it reads moves. Only output A is seen here, through NaviCore's
+    #L09: output B is checked by the Kyber tests once it is wired. The stream and flags verbs act on the routed output
+    only, so with the controls on the Kyber they must not reach NaviCore. Every reply names the route; clear_faults
+    puts it back to NaviCore, and _put_back runs it."""
+    ctl, nc, cfg, ncfg = _setup(bench)
+    if not ctl.has_route():
+        raise Skip("the SBUS controller has no second SBUS output: flash SBUSController's kyber-sbus image, app only")
+    ch = _stick(nc, cfg, ncfg, "rx")
+    found = nc.sbus_dump()["channels"]
+    rest = found[ch - 1]
+    v = 400 if abs(rest - 400) > 300 else 1600
+    problems = []
+    try:
+        if ctl.test_state().get("route") != "navicore":
+            problems.append(f"the controller did not start routed to NaviCore: {ctl.verbs}")
+        ctl.route("kyber")
+        ctl.channel(ch, v)
+        ctl.flags(FLAG_FAILSAFE)
+        ctl.stream(False)
+        time.sleep(0.5)
+        d = nc.sbus_full_rate()
+        if d["channels"][ch - 1] != rest:
+            problems.append(f"routed to the Kyber, NaviCore read CH{ch} {d['channels'][ch - 1]}, not its rest {rest}")
+        if d["fps"] < SBUS_FULL_FPS or (d["lost"], d["failsafe"]) != ("no", "no"):
+            problems.append(f"routed to the Kyber with the stream off and failsafe on there, NaviCore's own stream read "
+                            f"fps {d['fps']} lost={d['lost']} failsafe={d['failsafe']}")
+        ctl.flags(0)
+        ctl.stream(True)
+        for to in ("both", "navicore"):
+            st = ctl.route(to)
+            if st.get("route") != to:
+                problems.append(f"route {to}: the reply says {st.get('route')}")
+            time.sleep(0.4)
+            got = nc.sbus_dump()["channels"][ch - 1]
+            if got != v:
+                problems.append(f"routed to {to}, NaviCore read CH{ch} {got}, not the raw {v}")
+        if ctl.test_verb({"t": "route", "to": "elsewhere"}, check=False).get("ok"):
+            problems.append('{"t":"route","to":"elsewhere"} was accepted')
+    finally:
+        _put_back(ctl, nc, cfg, found, problems)
+    assert not problems, "; ".join(problems)
+
+
 # ============================================================ the flags byte
 @test("sbus.failsafe_flag_freeze", "With the failsafe flag (0x08) on every frame NaviCore freezes: a knob sends no frame, "
       "a switch fires no tier, a matrix press dispatches nothing, #L09 reads failsafe=YES at full rate and rc_hb "

@@ -202,6 +202,8 @@ SERVO_TESTS = {
     # its CH17-24 switches and knobs (the dome's RS and J2), whose restore can re-send J2's and RS's current position.
     "sbus.test_verbs": "sets the flags byte, stops the stream, lets 5 frames through, puts a raw 700 and a one-frame "
                        "dip on the rx stick's channel (CH1): all re-emitted on SBUS OUT, RC PWM 1 follows CH1",
+    "sbus.route_isolates": "puts a raw value on the rx stick's channel (CH1) routed to both outputs and to NaviCore: "
+                           "re-emitted on SBUS OUT, RC PWM 1 follows CH1, and a Kyber on output B would see it too",
     "sbus.failsafe_flag_freeze": "failsafe-flagged frames on SBUS OUT for several seconds; moves the rx and ry sticks "
                                  "and presses a matrix button",
     "sbus.lost_frame_flag_no_gate": "lost-frame-flagged frames on SBUS OUT; moves the rx and ry sticks and presses a "
