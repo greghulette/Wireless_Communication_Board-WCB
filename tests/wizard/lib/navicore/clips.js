@@ -185,7 +185,8 @@ const methods = {
     if (S === 'EDITLOAD') return this._recEditLoad(name, out, relayed);
     if (S === 'EDITBEGIN') {
       if (r.state !== 'idle') return out('[CLIPUL:BEGIN,ERR,busy]');
-      r.events = []; r.loadedName = ''; r.state = 'editing';          // _mode is left as it was (D-NC33)
+      r.events = []; r.loadedName = ''; r.state = 'editing';
+      if (/^[1-3]$/.test(name)) r.mode = +name;                       // EDITBEGIN,<mode> sets the resident mode (D-NC33)
       return out('[CLIPUL:BEGIN,OK]');
     }
     if (S === 'EDITEV') {

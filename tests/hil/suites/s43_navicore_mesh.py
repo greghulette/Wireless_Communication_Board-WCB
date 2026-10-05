@@ -885,7 +885,10 @@ def fragment_reassembly_edges(bench):
            ncmesh.envelope(1, one["of"], 0, one["s"])]
     case("five malformed envelopes", t, lambda: send_fragments(w1, bad, target=nid), 0, wait=1.5)
     tags = [marker(f"P{i}") for i in range(4)]
-    sess = [envs_for(x, pad=150) for x in tags]
+    sids = set()
+    while len(sids) < 4:          # four distinct ids: two equal ones share a session, so the fourth needs no slot and no
+        sids.add(_fsid())         # 'pool exhausted' line is due (run 20261004-231308 drew one twice)
+    sess = [envs_for(x, pad=150, sid=sid) for x, sid in zip(tags, sorted(sids))]
     pm, nm, wm = l12.mark(), nc.dev.mark(), w1.dev.mark()
     send_fragments(w1, [s[0] for s in sess], target=nid)                     # three open sessions, then a fourth
     send_fragments(w1, [x for s in sess[:3] for x in s[1:]], target=nid)     # the three complete

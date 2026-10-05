@@ -356,8 +356,9 @@ def _ram_state_after(nc):
     lines = _flushed(nc, m, settle=0.6)
     if any(x.startswith("[DISPATCH]") for x in lines):
         out.append("the probe action still printed a [DISPATCH] line: a debug flag survived the restart")
-    if not ack.get("ok"):
-        out.append(f"the probe TEST_ACTION was answered {ack}")
+    # A verb no Maestro knows: TEST_ACTION skips it and says why (D-NC20); an answer at all shows NaviCore is up
+    if ack.get("of") != "TEST_ACTION" or ack.get("ok") is not False or not ack.get("msg"):
+        out.append(f"the probe TEST_ACTION was answered {ack}, not ok:false with its msg (D-NC20)")
     return out
 
 

@@ -16,8 +16,6 @@ test.describe('direct USB', () => {
   test.use({ emuOptions: { config: BENCH } });
 
   test('nctool.pong_epoch_slow_direct (should) a direct board whose PONG comes 3.5 s late is still taken for a direct link, not "switched to Via WCB"', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect: the PONG handler stamps _pongSeenEpoch with the epoch CURRENT when the reply lands ' +
-                    '(index.html:9515-9517), so a late direct PONG satisfies the Via-WCB probe; a direct PONG carries no sys/id and could be told apart');
     emu.delay.PING = 3500;
     await T.openTool(page);
     await T.connectUsb(page, emu, { handshake: false });        // ends when the tool itself has finished its handshake
@@ -164,9 +162,6 @@ test.describe('via a WCB', () => {
   // with neither '?' nor ';' as a broadcast out of its ports and onto the mesh (handleSingleCommand, WCB.ino:6153-6164),
   // so on a Via-WCB link every line must be ;w20,-wrapped.
   test('nctool.via_wcb_nothing_bare (should) connecting Via a WCB writes only ;w20,-wrapped lines to the WCB; today the first status poll goes out bare, before the tool has set its Via-WCB flag (D-NC71)', async ({ page, emu }) => {
-    test.fail(true, "known tool defect D-NC71: connectSharedPort sets sharedActive (index.html:4715) and waits for the hub's port " +
-                    '(:4717), whose state event runs onSharedState -> setConnected(true) (:4672-4674) -> startWcbStatusPoll, which sends ' +
-                    'GET_WCB_STATUS at once (:5091) while viaWcbActive is still false (set at :4743), so sendJSON writes it unwrapped (:5618-5620)');
     await T.openTool(page);
     await T.connectViaWcb(page);
     const bare = emu.rx.filter((r) => !/^;w\d+,/i.test(r.line)).map((r) => (/"type"\s*:\s*"(\w+)"/.exec(r.line) || [, r.line[0]])[1]);
@@ -196,8 +191,6 @@ test.describe('a WCB doorway', () => {
   test.use({ emuOptions: { config: BENCH, mode: 'doorway' } });
 
   test('nctool.doorway_pong_misdetect (should) a PONG relayed through a WCB ({"sys":1,...,"id":20}) is not taken for a direct link: Via WCB, and USB OTA disabled (D-NC30)', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect D-NC30: any PONG satisfies the direct probe (index.html:9515-9517); Intellex works ' +
-                    'around it by calling onViaWcbToggle(true) itself (intellex_shim.js:411-437)');
     await T.openTool(page);
     await T.connectUsb(page, emu, { handshake: false });
     expect((await T.state(page)).viaWcbActive, 'transport through a doorway').toBe(true);

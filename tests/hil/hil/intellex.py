@@ -162,7 +162,9 @@ def seed_bundles(bench, src_dir, tools="worktree"):
     if tools != "worktree":
         raise ValueError(f"tools must be worktree, shipped or none, not {tools!r}")
     lists = _bundle_lists(idir)
-    nav = os.path.join(GITHUB, "NaviCore")
+    # The sibling NaviCore checkout, or NAVICORE_REPO as tests/wizard/lib/navicore/paths.js reads it, so one setting
+    # points the config tool's specs and Intellex's staged copy of the tool at the same tree.
+    nav = os.environ.get("NAVICORE_REPO") or os.path.join(GITHUB, "NaviCore")
     web = os.path.join(src_dir, "webui")
     for f in lists["ROOT_FILES"]:
         _copy(os.path.join(nav, "config_tool", f), os.path.join(web, f))

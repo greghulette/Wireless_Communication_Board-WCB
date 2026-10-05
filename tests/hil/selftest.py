@@ -5865,7 +5865,10 @@ class NaviModel:
     RESET_DEFAULTS does not, REBOOT reloads the flash copy) and a boot-time copy of the mesh identity, so the RTERM
     split (D-NC17) shows. W1's console (w1_script) relays ;W20 JSON and CLI lines and lists NaviCore's advertised port
     labels in its ?WDP,DUMP. What it does not model it answers with silence, and a forbidden command (#L2, #L20, #L21,
-    ?FORGET,ALL, ?REC,START...) fails the selftest outright."""
+    ?FORGET,ALL, ?REC,START...) fails the selftest outright. Two fixes of the 2026-10-04 campaign are ported, because
+    normal tests now assert them: RESET_DEFAULTS keeps the network identity (D-NC16, rcConfigResetKeepIdentity) and
+    TEST_ACTION answers a skipped action ok:false with its reason (D-NC20, dskip); every other (should) test still
+    fails against it by design."""
     FW = "v0.2.0_102105QSEP26"
     FACTORY_PW = "DomeNet"
     BAND = [b for b in [("B1", 1799, 1823), ("B2", 1758, 1782), ("B3", 1718, 1742), ("B4", 1676, 1700),
@@ -6390,9 +6393,19 @@ class NaviModel:
     def dlog(self, bit, text):
         return [text] if self.flags & bit else []
 
+    MAE_VERBS = ("goHome", "stopScript", "setTarget", "setSpeed", "setAccel", "setSpeedAccel", "setEasing",
+                 "applyProfile", "snappy", "restartScript", "subParam")      # executeMaestroCmd, NaviCore.ino:1393-1487
+
+    def skip(self, bit, text):
+        """dskip (NaviCore.ino:545): the reason is kept for TEST_ACTION's msg whatever the flags; the line is gated."""
+        self.last_skip = text[11:] if text.startswith("[DISPATCH] ") else text
+        return self.dlog(bit, text)
+
     def dispatch(self, a):
-        """rcExecuteActionNow (NaviCore.ino:2035-2112) -> its console lines; W1 gets a unicast to board 1."""
+        """rcExecuteActionNow (NaviCore.ino:2160-2240) -> its console lines; W1 gets a unicast to board 1. A skip keeps
+        its reason in last_skip (D-NC20), which TEST_ACTION answers as ok:false with msg."""
         t, out = a["type"], []
+        self.last_skip = None
         if t == "wcb_unicast":
             b = int(a["target"]) if a["target"].isdigit() else 0
             if 1 <= b <= 20:
@@ -6403,31 +6416,38 @@ class NaviModel:
             out += self.dlog(0x02, f"[DISPATCH] WCB broadcast  {a['cmd']}")
         elif t == "maestro":
             i = int(a["target"]) if a["target"].isdigit() else 0
-            out += [f"WARN: Maestro action with invalid ID {i} (target='{a['target']}')"] if not 1 <= i <= 8 else \
-                self.dlog(0x01, f"[DISPATCH] Maestro {i}  {a['cmd']}")
+            if not 1 <= i <= 8:
+                out += [f"WARN: Maestro action with invalid ID {i} (target='{a['target']}')"]
+                self.last_skip = f"Maestro action with invalid ID {i}"
+            else:
+                out += self.dlog(0x01, f"[DISPATCH] Maestro {i}  {a['cmd']}")
+                verb = a["cmd"].split(",")[0].strip()
+                if verb not in self.MAE_VERBS:
+                    self.last_skip = f"Maestro {i}: unknown verb '{verb}'"      # noteDispatchSkip: writes nothing
         elif t == "serial":
-            lab = {"S3": "Serial 1", "S4": "Serial 2", "S5": "Serial 3"}.get(a["target"], a["target"])
-            out += self.dlog(0x20, f"[DISPATCH] Serial TX [{lab}]  {a['cmd']}")
+            lab = {"S3": "Serial 1", "S4": "Serial 2", "S5": "Serial 3"}.get(a["target"])
+            out += self.dlog(0x20, f"[DISPATCH] Serial TX [{lab}]  {a['cmd']}") if lab else \
+                self.skip(0x20, f"[DISPATCH] Serial port '{a['target']}' is not S3/S4/S5 — skipped")
         elif t == "hcr":
             d = self.c["hcrDest"]
             if d["transport"] == 2:
-                out += self.dlog(0x08, "[DISPATCH] HCR is disabled in config — action skipped")
+                out += self.skip(0x08, "[DISPATCH] HCR is disabled in config — action skipped")
             elif not _nm_hcr_ok(a["fn"], a["chan"], a["track"]):
-                out += self.dlog(0x08, f"[DISPATCH] HCR-{'WCB' if d['transport'] == 1 else 'Serial'}: bad/unsupported "
+                out += self.skip(0x08, f"[DISPATCH] HCR-{'WCB' if d['transport'] == 1 else 'Serial'}: bad/unsupported "
                                        f"fn={a['fn']} chan={a['chan']} track={a['track']} — skipped")
         elif t in ("mp3", "dfplayer"):
             d = self.c["mp3Dest" if t == "mp3" else "dfpDest"]
             name, top = ("MP3", 8) if t == "mp3" else ("DFP", 18)
             if d["transport"] == 2:
-                out += self.dlog(0x10 if t == "mp3" else 0x40, "[DISPATCH] MP3 Trigger is disabled in config — action "
+                out += self.skip(0x10 if t == "mp3" else 0x40, "[DISPATCH] MP3 Trigger is disabled in config — action "
                                  "skipped" if t == "mp3" else "[DISPATCH] DFPlayer is disabled in config — action skipped")
             elif not 1 <= a["fn"] <= top:
-                out += self.dlog(0x10 if t == "mp3" else 0x40, f"[DISPATCH] {name}: bad fn={a['fn']} — skipped")
+                out += self.skip(0x10 if t == "mp3" else 0x40, f"[DISPATCH] {name}: bad fn={a['fn']} — skipped")
         elif t == "wled":
             s = a["cmd"].lstrip(" \t")
             s = s[1:] if s.startswith(";") else s
             if not s[:1] in ("L", "l"):
-                out += self.dlog(0x04, f"[DISPATCH] WLED: '{a['cmd']}' is not a ;L command — skipped")
+                out += self.skip(0x04, f"[DISPATCH] WLED: '{a['cmd']}' is not a ;L command — skipped")
         return out
 
     def script(self, text, n):
@@ -6583,14 +6603,21 @@ class NaviModel:
         if t == "CALIB":
             self.calib = _nm_pick(obj, "on", False)
             return [f"[CALIB] action dispatch {'SUPPRESSED (calibrating)' if self.calib else 'resumed'}", ack]
-        if t == "RESET_DEFAULTS":
+        if t == "RESET_DEFAULTS":                 # rcConfigResetKeepIdentity: the network identity stays (D-NC16)
+            keep = {k: json.loads(json.dumps(self.c[k])) for k in ("wcbNetwork", "wcbProfiles", "boardType",
+                                                                  "wifiEnabled", "wifiSsid", "wifiPassword") if k in self.c}
             self.c = self.defaults()
+            self.c.update(keep)
             return [ack]
         if t == "TEST_ACTION":
             a = self.action_from(obj.get("action")) if isinstance(obj.get("action"), dict) else None
             if a is None or (a["type"] == "wcb_unicast" and not (a["target"].isdigit() and 1 <= int(a["target"]) <= 20)):
                 return ['{"type":"ACK","of":"TEST_ACTION","ok":false}']
-            return self.dispatch(a) + ['{"type":"ACK","of":"TEST_ACTION","ok":true}']
+            lines = self.dispatch(a)
+            if self.last_skip:                     # D-NC20: a skipped action is not ok, and says why
+                return lines + [json.dumps({"type": "ACK", "of": "TEST_ACTION", "ok": False, "msg": self.last_skip},
+                                           ensure_ascii=False, separators=(",", ":"))]
+            return lines + ['{"type":"ACK","of":"TEST_ACTION","ok":true}']
         if t == "REBOOT":
             self.monitor = self.calib = False
             self.flags = 0
@@ -6688,8 +6715,11 @@ class NaviModel:
 
 
 INFO_LINE = '{"type":"INFO","msg":"boardType changed — reboot to apply the new pin profile"}'
-NCCFG_SHOULD = {"nccfg.string_truncation_utf8", "nccfg.hold_exceeds_tap_window", "nccfg.dest_null_hazard",
-                "nccfg.mesh_creds_live_split", "nccfg.reset_defaults_keeps_identity"}
+NCCFG_SHOULD = {"nccfg.string_truncation_utf8", "nccfg.hold_exceeds_tap_window", "nccfg.dest_null_hazard"}
+# reset_defaults_keeps_identity passes: NaviModel ports D-NC16. mesh_creds_live_split skips for the same reason - the
+# reset keeps the saved password, so no split is left to show (D-NC17's fix stands on the code; showing it would need a
+# throwaway mesh password, which the bench never sets).
+NCCFG_SKIP = {"nccfg.mesh_creds_live_split"}
 
 
 def t_nccfg_suite_against_model(tmp):
@@ -6731,7 +6761,7 @@ def t_nccfg_suite_against_model(tmp):
     res = {r["id"]: r for r in ck.data["results"]}
     bad = []
     for tid, r in res.items():
-        want = "SKIP" if "hook_" in tid else "FAIL" if tid in NCCFG_SHOULD else "PASS"
+        want = "SKIP" if "hook_" in tid or tid in NCCFG_SKIP else "FAIL" if tid in NCCFG_SHOULD else "PASS"
         if r["status"] != want:
             bad.append(f"{tid}: {r['status']} (expected {want}) {r['detail'][:300]}")
     assert len(res) == len(mine) >= 35, (len(res), len(mine))
@@ -11337,7 +11367,9 @@ def t_nctool_spec_ids(tmp):
     checks for the Wizard: every nctool.* id suites/s49_navicore_tool.py registers (but nctool.static and nctool.unit,
     which run node tests) has one spec titled with it in tests/wizard/specs/navicore, every nctool spec title there is
     registered once, and a spec that expects to fail (test.fail: a (should) spec) is registered with a title that starts
-    '(should)'. run_wizard_test finds a spec by --grep on its id, so a typo otherwise shows only on the bench."""
+    '(should)'. Not the reverse: a (should) test whose defect is fixed keeps its title and loses its test.fail, and then
+    guards the fix (docs/HIL_TESTING.md, "(should) tests"). run_wizard_test finds a spec by --grep on its id, so a typo
+    otherwise shows only on the bench."""
     specs_dir = os.path.normpath(os.path.join(HERE, "..", "wizard", "specs", "navicore"))
     titles, fails = [], set()
     for name in sorted(os.listdir(specs_dir)):
@@ -11370,9 +11402,7 @@ def t_nctool_spec_ids(tmp):
     assert not no_spec, f"s49 registers nctool tests no spec is titled with: {no_spec}"
     assert not no_test, f"NaviCore specs titled with ids no suite registers (the harness never runs them): {no_test}"
     unmarked = sorted(t for t, title in reg if t in fails and not title.startswith("(should)"))
-    marked = sorted(t for t, title in reg if title.startswith("(should)") and t not in fails)
     assert not unmarked, f"test.fail specs registered without '(should)' at the start of their title: {unmarked}"
-    assert not marked, f"'(should)' titles whose spec does not expect to fail (test.fail): {marked}"
     n_titles = len(titles)
     assert n_titles >= 70, f"only {n_titles} nctool spec titles read: the title pattern no longer matches the specs"
 
@@ -12010,6 +12040,26 @@ def main():
         runner.REGISTRY[:] = registry
     print(f"\n{len(TESTS) - failed} of {len(TESTS)} passed")
     return 1 if failed else 0
+
+
+def t_mismatch_scalar_secret(tmp):
+    """s40's _mismatch never quotes a credential or the SoftAP name held as a plain value: GET_CONFIG's wifiPassword and
+    wifiSsid against their empty defaults show only as hashes (nccfg.reset_defaults_ram printed both, 2026-10-04),
+    and any other scalar still reads 'key: want -> got'."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s40_navicore_config as S40
+    finally:
+        runner.REGISTRY[:] = saved
+    lines = [S40._mismatch("wifiPassword", "sekrit99", ""), S40._mismatch("wifiSsid", "DomeNet", ""),
+             S40._mismatch("wcbNetwork", {"password": "hunter2", "channel": 6}, {"password": "", "channel": 1})]
+    assert all(lines) and not any(s in x for s in SECRETS for x in lines), lines
+    assert lines[0].startswith("wifiPassword: \"\" -> <redacted:"), lines[0]
+    assert S40._mismatch("tapWindowMs", 600, 500) == "tapWindowMs: 500 -> 600", S40._mismatch("tapWindowMs", 600, 500)
+    assert S40._mismatch("tapWindowMs", 500, 500) is None
+
+
+TESTS.append(t_mismatch_scalar_secret)
 
 
 if __name__ == "__main__":

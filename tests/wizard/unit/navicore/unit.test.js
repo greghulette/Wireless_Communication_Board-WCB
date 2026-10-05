@@ -111,11 +111,10 @@ test('nctool.unit: _fragChunks — every envelope fits 187 B and the parts join 
 });
 
 // _fragChunks's own comment says a lone surrogate (JSON escapes it to 6 bytes, _fragEscBytes counts 3) is carried
-// into the next chunk, "never dropped". Its LAST flush() carries the overflow into `cur` and returns, and nothing
-// flushes it again, so the input's tail is lost (index.html:5556-5594). Latent today: its callers (sendJSON,
-// _pushBudgetInfo) only pass JSON.stringify output, which escapes every lone surrogate (the next test pins that).
-test('nctool.unit: _fragChunks keeps the tail of an input that holds lone surrogates', { skip,
-  todo: 'known tool defect: the final flush drops the carried remainder (index.html:5556-5594); latent, see the next test' }, () => {
+// into the next chunk, "never dropped". Its last flush() used to carry the overflow into `cur` and return, so the
+// input's tail was lost (NaviCore 2316d28 flushes it). Latent even then: its callers (sendJSON, _pushBudgetInfo) only
+// pass JSON.stringify output, which escapes every lone surrogate (the next test pins that).
+test('nctool.unit: _fragChunks keeps the tail of an input that holds lone surrogates', { skip }, () => {
   const { _fragChunks } = sandbox(['FRAG_MAX_ENV_BYTES', 'FRAG_ENV_TARGET_BYTES', 'FRAG_ENV_OVERHEAD', '_fragEscBytes', '_fragChunks']);
   for (const s of ['\uD800x'.repeat(200), 'y\uDC00'.repeat(200), '\uD800𐀀'.repeat(80)]) {
     assert.equal(_fragChunks(s).join('').length, s.length, 'the parts do not join back to the input');

@@ -52,9 +52,6 @@ test.describe('two tabs on one WCB', () => {
   });
 
   test('nctool.multi_tab_save (should) with two tabs on one WCB, one tab\'s save ACK does not confirm the other tab\'s save (D-NC35)', async ({ context, page, emu }) => {
-    test.fail(true, 'known defect D-NC35: every tab numbers its saves from 1 (_saveSeq, index.html:17006, :16948) and the ACK handler matches the ' +
-                    'saveId alone (:9598, :9616), so a tab takes another tab\'s ACK for its own save; its edit is then in its baseline, ' +
-                    'not on the board, and the next Save does not send it. (Both tabs also number fragment sessions from 1, :5508)');
     await T.openTool(page);
     await T.connectViaWcb(page);
     const b = await secondTab(context);

@@ -26,6 +26,16 @@ function num(text, re, what) {
   return Number(m[1]);
 }
 
+// The firmware as a release build compiles it, which is what the tool meets: every `#ifdef NAVICORE_HIL_HOOKS` block
+// dropped and its #else branch kept (NaviCore 703a0e7: the HIL hooks add a debug bit, DBG_WIRE, and give the overflow
+// guard in rcConfigToJSON one `if (...) {` per branch, which a brace count would otherwise read as two).
+function releaseOnly(src) {
+  return src.replace(/^[ \t]*#ifdef NAVICORE_HIL_HOOKS\b[^\n]*\n([\s\S]*?)^[ \t]*#endif\b[^\n]*(?:\n|$)/gm, (m, body) => {
+    const e = /^[ \t]*#else\b[^\n]*\n/m.exec(body);
+    return e ? body.slice(e.index + e[0].length) : '';
+  });
+}
+
 // The body of a C++ function, by brace matching that skips strings, char literals and comments.
 function cBody(src, signature) {
   const at = src.indexOf(signature);
@@ -97,7 +107,7 @@ test('nctool.static: the firmware/tool constant pairs agree (CONFIG_SCHEMA.md §
 });
 
 test('nctool.static: the debug chips, knob and switch tables match the firmware', { skip }, () => {
-  const ino = read('NaviCore.ino'), cfg = read('rc_config.h');
+  const ino = releaseOnly(read('NaviCore.ino')), cfg = read('rc_config.h');
   // DBG_* bits (NaviCore.ino) vs DEBUG_CATEGORIES (the chips send their bitmask in SET_DEBUG_FLAGS).
   const fwBits = {};
   for (const m of ino.matchAll(/^#define\s+DBG_([A-Z0-9]+)\s+\(1u\s*<<\s*(\d+)\)/gm)) fwBits[m[1].toLowerCase()] = 1 << Number(m[2]);
@@ -128,7 +138,7 @@ test('nctool.static: the bulk-transfer constants match WCB_Client', { skip }, (t
 });
 
 test('nctool.static: every top-level key rcConfigToJSON writes is read by applyConfig', { skip }, () => {
-  const body = cBody(read('rc_config.h'), 'String rcConfigToJSON()');
+  const body = cBody(releaseOnly(read('rc_config.h')), 'String rcConfigToJSON()');
   const fwKeys = new Set([...body.matchAll(/\bdoc\["(\w+)"\]\s*=/g), ...body.matchAll(/\bdoc\.createNested(?:Object|Array)\("(\w+)"\)/g)].map((m) => m[1]));
   assert.ok(fwKeys.size >= 30, `found only ${fwKeys.size} top-level keys in rcConfigToJSON`);
   const applied = new Set([...lift('applyConfig').matchAll(/\bdata\.(\w+)/g)].map((m) => m[1]));

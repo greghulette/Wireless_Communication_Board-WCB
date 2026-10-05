@@ -280,7 +280,7 @@ OPT_INS = {
     "intellex_flash_navicore": {
         "title": "NaviCore app re-flashed through Intellex",
         "what": "The NaviCore config tool's Update Firmware inside Intellex, on NaviCore's own COM port: esptool writes the "
-                "bench image NaviCore already runs (results/builds/navicore-hil1) into app0 and erases otadata, so "
+                "bench image NaviCore already runs (results/builds/<ncflash.BENCH_IMAGE>) into app0 and erases otadata, so "
                 "NaviCore restarts on app0; its bootloader, partition table, NVS, config and clips are never written. "
                 "The mesh and SBUS OUT lose NaviCore for about a minute. Runs inside nc_guard; a FLASHED.md row records "
                 "the flash.",

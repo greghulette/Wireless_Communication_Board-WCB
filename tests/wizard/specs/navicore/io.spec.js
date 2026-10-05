@@ -81,10 +81,6 @@ test.describe('the bench config over USB', () => {
   });
 
   test('nctool.csv_roundtrip (should) the legacy CSV export, imported straight back, leaves nothing for Save to send', async ({ page, emu }) => {
-    test.fail(true, 'suspected tool defect: the CSV importer rebuilds every button band as center +-10 (index.html:19432-19433) where the tool\'s own defaults ' +
-                    'and the firmware\'s are +-12 (defaultThresholds :20600-20605; the firmware default table rc_config.h:831-850, loaded at :861-866), relabels the physical buttons with ' +
-                    'getBtnLabel (:19431), and turns exclusive:false into an absent key (:18914, :19438); a Save after the round trip ' +
-                    'narrows every band on the board by 2 us each side. The export has no button any more, but Import still reads old CSVs');
     const dialogs = T.answerDialogs(page);
     const files = T.captureDownloads(page);
     await T.openTool(page);

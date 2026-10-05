@@ -80,8 +80,6 @@ test('nctool.board_via_wcb through W1\'s port the tool connects Via a WCB to the
 // (:8494-8545, :8560-8563). So every probe PING reaches whatever serial device sits on those ports. The harness bound
 // the W1 ports that its own bare marker line reached, so the spec only has to look.
 test('nctool.board_usb_probe_no_broadcast (should) Connect via USB on a tethered WCB puts nothing out of that WCB\'s serial ports while it probes for a direct NaviCore; today the probe\'s bare JSON PINGs are broadcast (D-NC70)', async ({ page, device, hilCtx }) => {
-  test.fail(true, 'known tool behaviour D-NC70: the direct probe writes bare JSON PINGs (openPortAndStart, index.html:4568-4578), and ' +
-                  'a WCB broadcasts an unprefixed console line to its serial ports and the mesh (WCB.ino:6153-6164, :8494-8563)');
   test.setTimeout(120_000);
   const wires = hilCtx.args.wires.map((w) => ({ ...w, h: hil.wire(w.wcb, w.port) }));
   await T.openTool(page);

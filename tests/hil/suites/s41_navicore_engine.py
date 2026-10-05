@@ -527,7 +527,7 @@ def _action_cases(cfg, slot, tag):
              ("maestro channel 32", {"type": "maestro", "target": str(slot), "cmd": "setTarget,32,6000"}, False,
               f"[DISPATCH] Maestro {slot}: channel 32 out of range (0-31) — skipped"),
              ("serial to S9", {"type": "serial", "port": "S9", "cmd": f"{tag}S"}, False,
-              f"[DISPATCH] Serial TX [S9]  {tag}S")]
+              "[DISPATCH] Serial port 'S9' is not S3/S4/S5 — skipped")]
     if (cfg.get("mp3Dest") or {}).get("transport") == "off":
         cases.append(("mp3 with mp3Dest off", {"type": "mp3", "fn": 1, "track": 1}, False,
                       "[DISPATCH] MP3 Trigger is disabled in config — action skipped"))
@@ -561,7 +561,7 @@ def test_action_matrix(bench):
     Whether a skipped action answers ok is ncengine.test_action_skipped_not_ok's question (D-NC20); here the ok values
     are only noted. The remote slot is one nobody hosts (slot 4 on this bench): its frame reaches W1 S1 through W1's
     Maestro_Remote forward and moves nothing. The serial case names port S9, which matches no aux port, so no byte is
-    written, although the trace line is printed first (NaviCore.ino:2093-2100)."""
+    written and the executor prints its skip line (NaviCore.ino:2227; until D-NC45's fix it printed the send trace)."""
     l11, l12 = link(bench, 1, "S1"), link(bench, 1, "S2")
     nc = _nc(bench)
     cfg = nc.config()

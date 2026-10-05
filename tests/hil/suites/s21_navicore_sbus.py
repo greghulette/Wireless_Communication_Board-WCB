@@ -16,6 +16,7 @@ Built from the verified navicore_sbus specs. Rules from the specs:
   (hil.sbus.matrix_button, sbus.trim_exact), which emits rc_trig and runs nothing.
 The NaviCore and controller helpers live in hil/navicore.py and hil/sbus.py (docs/hil_plan/NAVICORE.md INF1, INF2).
 """
+import json
 import re
 import threading
 import time
@@ -723,12 +724,17 @@ def test_action_usb(bench):
 def test_action_rejects(bench):
     s12 = link(bench, 1, "S2")
     nc = _nc(bench)
-    no = '{"type":"ACK","of":"TEST_ACTION","ok":false}'
     bad = []
     with nc.debug(DBG_WCB):
         for obj in ({"type": "TEST_ACTION"}, {"type": "TEST_ACTION", "action": {"type": "smooth"}}):
-            if nc.ack_line(obj) != no:
-                bad.append(f"{obj} was accepted")
+            line = nc.ack_line(obj)
+            try:
+                ack = json.loads(line)
+            except (TypeError, ValueError):
+                ack = {}
+            # ok:false, with or without the reason D-NC20 added ("msg"); the line used to be compared whole
+            if ack.get("of") != "TEST_ACTION" or ack.get("ok") is not False:
+                bad.append(f"{obj} was answered {line!r}, not ok:false")
         watch, nm = Watch(s12), nc.dev.mark()
         for target in ("25", "abc"):
             nc.ack_line({"type": "TEST_ACTION", "action": {"type": "wcb_unicast", "target": target, "cmd": f";S2HILZ{nonce()}"}})

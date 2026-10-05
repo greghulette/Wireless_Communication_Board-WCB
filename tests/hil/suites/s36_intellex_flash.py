@@ -23,7 +23,7 @@ lines. A W2 that does not answer afterwards gets an EN reset, then the same imag
 Intellex's own API (the plan's first recovery); the last resort is `arduino-cli upload`, which needs Greg.
 
 NaviCore (intellex_flash_navicore) is flashed through its config tool's Update Firmware, app0 alone, from the bench
-image it runs (results/builds/navicore-hil1), inside nc_guard, recovered by ncflash's ladder. The Factory Reset
+image it runs (results/builds/<ncflash.BENCH_IMAGE>), inside nc_guard, recovered by ncflash's ladder. The Factory Reset
 (intellex_flash_factory, attended) erases W2's NVS and restores it from its own chain (suites/s31_password_erase.py).
 Nothing here moves a servo but NaviCore's restart (hil/servos.py): a WCB restart writes nothing to a Maestro.
 """

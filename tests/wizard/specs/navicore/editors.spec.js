@@ -23,8 +23,6 @@ test.describe('the bench config', () => {
   test.use({ emuOptions: { config: BENCH } });
 
   test('nctool.noop_apply_every_editor (should) opening every button, switch and knob editor and applying it unchanged changes nothing, so Save sends nothing (D-NC32)', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect D-NC32: read-back rewrites skipRunning true as 1 (readActionFromFid, index.html:15425-15459) ' +
-                    'and saveKnobModal adds smoothProfile/easeSwitchOverride/midClosed/releaseIdleMs defaults (:16127-16170)');
     await T.openTool(page);
     await T.connectUsb(page, emu);
     const diff = await page.evaluate(() => {
@@ -44,17 +42,16 @@ test.describe('the bench config', () => {
   });
 
   test('nctool.skip_running_saved (should) Apply on a mapping whose action has "skip if running" keeps the gate on the board (the tool sends skipRunning:1, which ArduinoJson 7 reads as false)', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect: readActionFromFid writes skipRunning: 1 (index.html:15433, :15446, :15458; _cmdlibUse :14166); rcConfigFromJSON reads it with ' +
-                    '`obj["skipRunning"] | false`, and ArduinoJson 7.4.3 returns the default unless the value IS a boolean ' +
-                    '(VariantOperators.hpp:34-40, ConverterImpl.hpp:124-127) — the hidden checkbox exists only so a saved value round-trips');
     await T.openTool(page);
     await T.connectUsb(page, emu);
     expect(BENCH.mappings['102'].t1[0].skipRunning).toBe(true);
     await page.locator('#assignment-list > div').nth(1).click();   // button 2, mode 1: the mapping with the gate
     await expect(page.locator('#modal')).toHaveClass(/open/);
+    await page.locator('#note-1-0').fill('hil gate');              // an unchanged Apply sends nothing (D-NC32)
     await modalApply(page);
     const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
     expect(Object.keys(sent.data.mappings)).toEqual(['102']);
+    expect(sent.data.mappings['102'].t1[0].skipRunning).toBe(true);
     await expect.poll(() => page.evaluate(() => !!_pendingSaveBaseline)).toBe(false);
     await page.locator('#btn-refresh').click();
     await T.waitRequests(emu, 'GET_CONFIG', 2);
@@ -128,8 +125,6 @@ test.describe('the bench config', () => {
   });
 
   test('nctool.test_action_refusal_shown (should) a TEST_ACTION the board refuses (ok:false) is reported to the user, not only echoed raw in the closed terminal (D-NC20)', async ({ page, emu }) => {
-    test.fail(true, 'known tool gap D-NC20: the ACK handler acts only on SET_CONFIG ACKs (index.html:9591-9627); a TEST_ACTION ' +
-                    'refusal reaches only the raw terminal echo');
     emu.override.TEST_ACTION = () => '{"type":"ACK","of":"TEST_ACTION","ok":false,"msg":"destination disabled"}';
     await T.openTool(page);
     await T.connectUsb(page, emu);
@@ -175,9 +170,6 @@ test.describe('the bench config', () => {
   });
 
   test('nctool.command_view_cap_on_open (should) an action stored with a ;W<n>;S<p> prefix opens with the prefix already reserved in the field cap', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect: _appendCommandView runs sync() and refreshLenWarn() while the row is still detached, so ' +
-                    'document.getElementById(fid + "-destsel") is null and the cap is set to the full 95 (index.html:15108-15123, reached from sync() at :15192 and the render-time call at :15235); ' +
-                    'the first keystroke re-applies it, and the render-time "already over-length" flag never fires');
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await page.evaluate(() => openSwitchModal('SI'));

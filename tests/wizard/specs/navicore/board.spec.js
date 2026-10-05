@@ -180,7 +180,8 @@ test("nctool.board_clips_list the Clips panel lists the real NaviCore's clips as
   await expect(page.locator('#clips-storage')).toBeVisible({ visible: storage });
   await page.evaluate(() => closeClipsModal());
   await disconnectPiped(page, device);
-  expect([...new Set(device.sentCli)], 'CLI verbs the tool sent').toEqual(['?REC,LS']);
+  // '?REC' is the connect's identify probe (D-NC70: the first line on a fresh port), '?REC,LS' the panel's only verb
+  expect([...new Set(device.sentCli)], 'CLI verbs the tool sent').toEqual(['?REC', '?REC,LS']);
   expect(device.errors, 'bridge errors').toEqual([]);
   T.expectNoPageErrors(page);
 });

@@ -105,9 +105,6 @@ test.describe('the Clips panel over Direct USB', () => {
   });
 
   test('nctool.clip_record_refused (should) a Record the board refuses because it is busy replaying does not arm Stop & Save, whose SAVE would store the replayed clip under the typed name', async ({ page, emu }) => {
-    test.fail(true, 'suspected tool/firmware contract gap: clipRecordToggle waits for a [CLIPUL:REC,...] marker (index.html:6469-6475) that no ' +
-                    'NaviCore prints — ?REC,START answers "[REC] recording…" or "[REC] busy / no buffer" (NaviCore.ino:3451) — so a refused ' +
-                    'START times out, is assumed to have worked, and the Stop & Save that follows SAVEs the RAM buffer: the clip just replayed');
     // A minute-long clip, so the replay is certainly still running when START arrives.
     emu.clips.set('minute', { mode: 1, events: [{ t: 0, k: 1, slot: 1, ch: 0, pos: 6000 }, { t: 60_000, k: 1, slot: 1, ch: 0, pos: 7000 }] });
     await T.openTool(page);
@@ -270,9 +267,6 @@ test.describe('the Clips panel over Direct USB', () => {
   });
 
   test('nctool.clip_restore_mode (should) a restored clip keeps the mode it was recorded in, not whichever clip was loaded last (D-NC33)', async ({ page, emu }) => {
-    test.fail(true, 'known defect D-NC33: clipRestoreOne sends EDITBEGIN / EDITEV / EDITEND and never the clip\'s mode (index.html:6834-6869), and ' +
-                    'editBegin leaves _mode as it was (navicore_record.h:883-888) — saveClip stores whatever was resident. The fix needs both halves ' +
-                    '(an EDITBEGIN argument and the firmware reading it); lib/navicore/clips.js follows the firmware and must learn the argument with it');
     const dialogs = T.answerDialogs(page, [null]);
     await T.openTool(page);
     await T.connectUsb(page, emu);

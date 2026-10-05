@@ -156,8 +156,6 @@ test.describe('esptool-js flash (GitHub and the CDNs mocked)', () => {
   });
 
   test('nctool.fw_refused_flash_keeps_session (should) an Update refused before anything is written (here: an incomplete firmware set on GitHub) leaves the live session connected', async ({ page, emu }) => {
-    test.fail(true, 'suspected tool defect: runFirmwareFlash disconnects first (index.html:17908-17917) and reconnects only on success ' +
-                    '(:17966-17970; the catch at :17984-17989 does not); a download failure or a refused set leaves the user disconnected from an untouched board');
     await F.mockFirmware(page, SET, { omit: ['part'] });
     await T.openTool(page);
     await T.connectUsb(page, emu);
@@ -207,9 +205,6 @@ test.describe('Full Wipe & Flash (not connected; the port was granted earlier)',
   });
 
   test('nctool.fw_wipe_text (should) nothing the Full Wipe shows the user promises the saved configuration is erased, since the flasher never writes the config LittleFS (D-NC34)', async ({ page }) => {
-    test.fail(true, 'known tool defect D-NC34: the wipe texts say the saved configuration is erased (index.html:3250, :3266-3269, :17957, ' +
-                    ':18057, :18124-18127), but flasher.js erases only NVS 0x9000 and otadata 0xE000 (:363-370); /config.json lives in LittleFS at ' +
-                    '0x3D0000 (partitions.csv:19, rc_config.h:2018-2030) and the board loads it first at boot (NaviCore.ino:4565-4583)');
     await F.mockFirmware(page, SET);
     const dialogs = T.answerDialogs(page, [true]);
     await T.openTool(page);
@@ -325,9 +320,6 @@ test.describe('OTA over USB (?OTALOCAL)', () => {
   });
 
   test('nctool.ota_usb_lost_chunk (should) a lost DATA line is resent once the chunks behind it are NAKed, not after the 10 s stall timeout', async ({ page, emu }) => {
-    test.fail(true, 'suspected tool defect: otaUpdateOverUsb rewinds after WINDOW (8) cursor-stuck markers (index.html:17535), but one lost ' +
-                    'chunk leaves only WINDOW - 1 chunks behind it to NAK, so every loss waits out the 10 s _otaAwaitMarker timeout (:17514-17523); ' +
-                    'otaUpdateOverWcb counts to WINDOW - 1 (:17808)');
     await F.mockFirmware(page, SET);
     await T.openTool(page);
     await T.connectUsb(page, emu);

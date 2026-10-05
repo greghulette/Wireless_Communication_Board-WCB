@@ -106,6 +106,8 @@ DEFAULTS = {"txModel": 0, "threeAxisGimbals": False, "sbusOutEnabled": False, "w
             "statsReport": {"enabled": False, "wcb": 0},
             "smoothProfiles": [{"name": "Default", "entries": []}] + [{"name": "", "entries": []}] * 5}
 DEFAULT_NET = {"macOct2": 0, "macOct3": 0, "quantity": 4, "deviceId": 20, "channel": 1}   # + the compile-time password
+# What RESET_DEFAULTS keeps, on both transports (D-NC16, rcConfigResetKeepIdentity): the network identity.
+IDENTITY = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword")
 
 SAVED = re.compile(r"^RC config saved to LittleFS \((\d+) bytes\)\.")                  # rc_config.h:2079
 REOPEN = re.compile(r"^\[(?:AUX\] S[345]|Serial2\] Local Maestro) re-open @")         # NaviCore.ino:3245-3270
@@ -125,13 +127,15 @@ def _changed(a, b):
 
 
 def _mismatch(label, got, want):
-    """None when `got` equals `want`; else one problem line with the key paths (credentials only as hashes)."""
+    """None when `got` equals `want`; else one problem line with the key paths (credentials only as hashes). `label`
+    is the config key, so a scalar goes through redacted_diff under it too, where checkpoint.SHOWN_AS_HASH turns a
+    password or wifiSsid into its hash: formatted bare, nccfg.reset_defaults_ram quoted the bench's SoftAP name and
+    password in its failure line (2026-10-04)."""
     if got == want:
         return None
     if isinstance(got, (dict, list)) and isinstance(want, (dict, list)):
         return f"{label}: {'; '.join(redacted_diff(want, got, limit=8))}"
-    show = lambda v: redact_text(json.dumps(v, ensure_ascii=False))[:80]     # noqa: E731
-    return f"{label}: {show(got)}, expected {show(want)}"
+    return "; ".join(redacted_diff({label: want}, {label: got}, limit=8))
 
 
 def _save(nc, data, save_id=None, check=True):
@@ -1399,7 +1403,8 @@ FLAG_ACTIONS = ((DBG_MAESTRO, "Maestro", {"type": "maestro", "target": "4", "cmd
 def debug_flag_bits(bench):
     """dlog(bit, ...) prints only when the bit is set in g_dbgFlags (NaviCore.ino:489-503), through the non-blocking
     writer. Each bit is exercised by a TEST_ACTION (FLAG_ACTIONS) that dispatches nothing, except DBG_WCB's, which sends
-    W1 one ';S0,' echo. RAM only, and back to 0 at the end (the flags also clear at boot)."""
+    W1 one ';S0,' echo. A skipped action answers ok:false with the skip line in msg whatever the flags (dskip,
+    NaviCore.ino:545; D-NC20), DBG_WCB's ok:true. RAM only, and back to 0 at the end (the flags also clear at boot)."""
     nc = _nc(bench)
     problems = []
     try:
@@ -1410,8 +1415,10 @@ def debug_flag_bits(bench):
                 ack = nc.test_action(action)
                 lines = _flushed(nc, m, settle=0.2)
                 hit = [x for x in lines if x.startswith(f"[DISPATCH] {family}")]
-                if not ack.get("ok"):
+                if family == "WCB" and ack.get("ok") is not True:
                     problems.append(f"{family}: TEST_ACTION ACK {ack}")
+                elif family != "WCB" and (ack.get("ok") is not False or not ack.get("msg")):
+                    problems.append(f"{family}: a skipped action answered {ack}, not ok:false with its msg (D-NC20)")
                 if bool(hit) != want:
                     problems.append(f"{family} with flags 0x{flags:02X}: {'no' if want else 'a'} [DISPATCH] {family} line")
     finally:
@@ -1657,25 +1664,30 @@ def persist_reboot(bench):
     assert not problems, "; ".join(problems)
 
 
-def _defaults_problems(cfg):
-    """How GET_CONFIG `cfg` departs from rcConfigLoadDefaults (DEFAULTS, DEFAULT_NET); the password is not checked."""
-    p = [x for x in (_mismatch(k, cfg.get(k), v) for k, v in DEFAULTS.items()) if x]
+def _defaults_problems(cfg, keep=None):
+    """How GET_CONFIG `cfg` departs from rcConfigLoadDefaults (DEFAULTS, DEFAULT_NET); the password is not checked.
+    keep: the config before a RESET_DEFAULTS, which keeps IDENTITY (D-NC16): those keys must read as in `keep`, every
+    other key as its default. Without it (a boot on defaults) the identity is checked against the defaults too."""
+    p = [x for x in (_mismatch(k, cfg.get(k), v) for k, v in DEFAULTS.items() if not (keep and k in IDENTITY)) if x]
     if "serialLabels" in cfg:
         p.append("serialLabels printed (defaults set none)")
+    if keep is not None:
+        return p + [x for x in (_mismatch(k, cfg.get(k), keep.get(k)) for k in IDENTITY) if x]
     net = {k: v for k, v in (cfg.get("wcbNetwork") or {}).items() if k != "password"}
     if net != DEFAULT_NET:
         p.append(_mismatch("wcbNetwork (password aside)", net, DEFAULT_NET))
     return p
 
 
-@test("nccfg.reset_defaults_ram", "RESET_DEFAULTS over USB loads every factory default into RAM (the password only "
-      "compared, never read from wcb_config.h) and saves nothing: a REBOOT brings the saved config back byte-identical "
-      "(NaviCore restarts)", needs=["navicore"], links=[], opt_in="navicore_reboot")
+@test("nccfg.reset_defaults_ram", "RESET_DEFAULTS over USB loads every factory default but the network identity into "
+      "RAM and saves nothing: a REBOOT brings the saved config back byte-identical (NaviCore restarts)",
+      needs=["navicore"], links=[], opt_in="navicore_reboot")
 def reset_defaults_ram(bench):
-    """NaviCore.ino:3989-3992: rcConfigLoadDefaults (rc_config.h:801-968) and resetMaestroReleaseState, then ACK; no
-    save, and over USB no applyConfigSideEffects, so no port is re-opened - noted, not asserted, because D-NC16 wants
-    the USB path to run them like the mesh one (ncmesh.bridged_reset_defaults). Until the restart the droid runs on
-    defaults (no mappings, no knob outputs: nothing moves) and on the compile-time mesh password in RAM (D-NC17). The
+    """rcConfigResetKeepIdentity (rc_config.h:1003-1030) and resetMaestroReleaseState, then ACK; no save. It keeps
+    IDENTITY - wcbNetwork with its password, wcbProfiles, boardType, the wifi fields - and loads every other default
+    (D-NC16), so that part is checked against the config before it. The side effects the USB path now runs (re-opened
+    ports, SBUS OUT) are noted, not asserted. Until the restart the droid runs on defaults (no mappings, no knob
+    outputs: nothing moves) with its own network identity. The
     REBOOT is the restore: nothing is written, and the guard then finds the config as it was. A button or mode the
     defaults decode from the live SBUS input meanwhile dies with the restart (tap and mode state are RAM), which is
     why these tests, unlike nccfg.mesh_creds_live_split, need no _defaults_live_effects check."""
@@ -1688,7 +1700,7 @@ def reset_defaults_ram(bench):
         lines = [x.rstrip() for x in nc.dev.since(m)]
         if ack != {"type": "ACK", "ok": True}:
             problems.append(f"RESET_DEFAULTS ACK {ack}")
-        problems += _defaults_problems(cfg)
+        problems += _defaults_problems(cfg, keep=g.before)
         same_pw = cfg["wcbNetwork"]["password"] == g.before["wcbNetwork"]["password"]
         reopened = [x for x in lines if REOPEN.match(x) or SBUS_OUT.match(x)]
         if any(SAVED.match(x) for x in lines):
@@ -1710,7 +1722,7 @@ def reset_defaults_keeps_identity(bench):
     quantity 4, boardType 0 and WiFi off included (rc_config.h:801-968), and the next successful SET_CONFIG, for
     anything at all, persists it; the tool's Restore Defaults only re-pulls (index.html:17009-17041). The identity is
     what a user never means to reset with 'factory defaults'. Restored by REBOOT, which loads the untouched save."""
-    keys = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword")
+    keys = IDENTITY
     with nc_guard(bench) as g:
         g.nc.reset_defaults()
         cfg = g.nc.config()

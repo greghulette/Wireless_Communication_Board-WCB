@@ -101,7 +101,7 @@ test.describe(() => {
     await fill(page, '#holdms-input', 620);                     // below tapWindow + 100: the tool clamps as rcConfigFromJSON does
     await page.locator('#btn-hwsetup-save').click();
     const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
-    expect(sent).toEqual({ sys: 1, type: 'SET_CONFIG', data: { tapWindowMs: 600, holdMs: 850 }, saveId: 1 });
+    expect(sent).toEqual({ sys: 1, type: 'SET_CONFIG', data: { tapWindowMs: 600, holdMs: 850 }, saveId: await page.evaluate(() => _saveWireId(1)) });
     await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Config saved to NaviCore'));
     expect(await page.evaluate(() => [_configBaseline.tapWindowMs, _configBaseline.holdMs, !!_pendingSaveBaseline])).toEqual([600, 850, false]);
     expect([emu.config.toJSON().tapWindowMs, emu.config.toJSON().holdMs], 'the board holds exactly what was sent').toEqual([600, 850]);
@@ -142,7 +142,7 @@ test.describe(() => {
     // 4. The next save (saveId 3) is in flight when the timed-out one's ACK (saveId 2) finally lands: ignored.
     await setSbus(false);
     const ids = emu.requests('SET_CONFIG').map((m) => m.saveId);
-    expect(ids).toEqual([1, 2, 3]);
+    expect(ids).toEqual(await page.evaluate(() => [1, 2, 3].map(_saveWireId)));   // a per-tab base plus the count (D-NC35)
     emu.held.shift().fn();                                        // the stale ACK, saveId 2
     await page.waitForTimeout(300);
     expect(await page.evaluate(() => [!!_pendingSaveBaseline, _configBaseline.sbusOutEnabled]), 'a stale ACK must not advance the baseline').toEqual([true, true]);
@@ -195,7 +195,6 @@ test.describe(() => {
   });
 
   test('nctool.refresh_overwrites_edits (should) Refresh with unsaved edits asks first; declined, the edit stays and nothing is re-read (D-NC31)', async ({ page, emu }) => {
-    test.fail(true, 'known tool behaviour D-NC31: Refresh sends GET_CONFIG at once (index.html:16483) and applyConfig replaces the unsaved edit without asking');
     const dialogs = T.answerDialogs(page, [false]);
     await T.openTool(page);
     await T.connectUsb(page, emu);

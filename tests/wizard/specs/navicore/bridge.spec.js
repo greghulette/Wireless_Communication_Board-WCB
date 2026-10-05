@@ -90,8 +90,6 @@ test.describe('via a WCB', () => {
   });
 
   test('nctool.push_refused_not_pending (should) a bridged Save over the 192-fragment cap is refused before a byte is sent, and the tool says so instead of waiting 12 s for an ACK that cannot come', async ({ page, emu }) => {
-    test.fail(true, 'known tool defect: sendJSON returns normally after its "Send aborted" (index.html:5663-5668), so ' +
-                    'saveConfigToBoard has already latched _pendingSaveBaseline and shows "Saving to NaviCore…" until the 12 s watchdog');
     await T.openTool(page);
     await T.connectViaWcb(page);
     await bigEdit(page, 50, ';S2HILTOOLARGE' + 'x'.repeat(60));   // well past 192 fragments
