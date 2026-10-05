@@ -1,6 +1,7 @@
 """Test registry, the Bench (devices + wires), and the runner — shared by run.py (CLI) and gui.py.
 
-Tests register with @test(id, title, needs=[device names], links=[port keys], opt_in=<key>). A test passes by
+Tests register with @test(id, title, needs=[device names], links=[port keys], opt_in=<key>); a port key is a WCB
+port ('W1S3') or one of NaviCore's own pins ('N20S3', 'N20MAE', 'N20SBO': hil/links.py NC_PORTS). A test passes by
 returning, fails by raising AssertionError (ExpectTimeout included), and is skipped by raising
 Skip — or automatically when a device or wire it needs is not on the bench, when it moves a servo in a no-servos run
 (hil/servos.py), or when its opt-in (hil/optin.py) is not in bench.json "opt_in". When `links` is not
@@ -160,7 +161,8 @@ def list_lines(tests, cfg=None, history=None, no_servos=False):
 
 
 def links_of(t):
-    """Port keys a test needs; 'W1S3|W1S4' means any one of them."""
+    """Port keys a test needs; 'W1S3|W1S4' means any one of them. NaviCore's pins ('N20S3') are never inferred from the
+    source: a test that needs one declares it in links=[...]."""
     if t["links"] is None:
         t["links"] = _infer_links(t["fn"])
     return t["links"]
@@ -324,7 +326,7 @@ class Bench:
         if name in self.probes:
             if release:
                 try:
-                    for link in self.links.all():
+                    for link in self.links.all() + self.links.nc_all():
                         if link.probe_name == name:
                             self.links.release(link)
                 except Exception:
@@ -378,10 +380,13 @@ def missing(bench, t):
     devices = bench.port_devices()
     for key in links_of(t):
         alts = key.split("|")
-        if not any(bench.links.get(*parse_key(a)) for a in alts):   # get() hides a device port with no port_stimulus
+        if not any(bench.links.get_key(a) for a in alts):   # get() hides a device port with no port_stimulus
             held = [f"{a} has {describe_device(devices[a])} on it" +
                     ("" if bench.links.device_only(*parse_key(a)) else ", so only a listen-only tap can go there")
                     for a in alts if a in devices]
+            nav = [a for a in alts if a.startswith("N")]
+            if nav and not held:
+                held = ["NaviCore's own pin: probe 3, wired as docs/hil_plan/NAVICORE.md D-NC37 has it, then --discover"]
             miss.append(f"a probe wire on {key}" + (f" ({'; '.join(held)})" if held else ""))
     for key in drives_of(bench, t):
         if bench.links.device_only(*parse_key(key)):
@@ -676,8 +681,10 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                     status, detail = "FAIL", f"{incident}\n{own}"
             # A baud a test pinned with listen(<baud>) must not outlive it: config_guard's resync only re-binds
             # auto-baud wires, so one pinned W1S2 at 115200 once garbled every later injection into that 9600 port.
-            for link in bench.links.all():
-                if link.channel is not None and not link.auto_baud:
+            # A wire on NaviCore's own pins is released whatever its baud: nothing re-binds it between tests, and a
+            # channel left on SBUS OUT would log ~111 probe lines a second for the rest of the run.
+            for link in bench.links.all() + bench.links.nc_all():
+                if link.channel is not None and (not link.auto_baud or link.navicore):
                     try:
                         bench.links.release(link)
                     except Exception as e:  # noqa: BLE001 — a probe that went away; the next bind reports it

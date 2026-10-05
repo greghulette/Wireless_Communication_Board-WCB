@@ -26,7 +26,8 @@ def plan(bench):
     devices = bench.cfg.get("port_devices", {})
     probe_for = bench.cfg.get("wiring_plan", {})
     probes = bench.probe_names()
-    used = {(l.probe_name, l.header) for l in bench.links.all()}
+    # A header wired to one of NaviCore's own pins (hil/links.py NcLink) is taken too, though the plan has no row for it.
+    used = {(l.probe_name, l.header) for l in bench.links.all() + bench.links.nc_all()}
     rows = []
     for wcb in bench.wcb_numbers():
         planned_probe = probe_for.get(str(wcb)) or (probes[0] if probes else None)

@@ -164,6 +164,10 @@ SERVO_TESTS = {
     "ncwifi.refuse_short_password": "restarts NaviCore twice: SBUS OUT stops for a few seconds each time",
     "ncwifi.ws_stalled_client": "listed on doubt: a stalled socket can crash NaviCore (D-NC62), which restarts it: SBUS "
                                 "OUT stops for a few seconds",
+    # suites/s51_navicore_wire.py (NC-WP14): the one ncwire test that can restart NaviCore. The rest read NaviCore's own
+    # pins, write text out S3-S5 or HCR frames out S4, or send Maestro reads; none stalls loop() past the SBUS buffer.
+    "ncwire.s3_console_quiet": "with navicore_reboot ticked too it restarts NaviCore: SBUS OUT stops for a few seconds; a "
+                               "mode set before it is sent back",
     # suites/s49_navicore_tool.py, the config tool with the board (NC-WP13). The other L2 specs read, save a port label,
     # or fire a marker at W1 S2; these four move an SBUS channel or restart NaviCore.
     "nctool.board_live_grid": "moves the controller's rx stick (CH1) through the bridge's /sbus route: NaviCore re-emits "

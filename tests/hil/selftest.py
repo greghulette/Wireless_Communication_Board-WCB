@@ -52,7 +52,11 @@ controller's INF8 test verbs (NAVICORE.md INF8, NC-WP11): SbusCtl against a scri
 probe), the resume's clean-up on both, hil/sbus.py ReaderModel against the real bench frame (the lock, the eager and
 silence flushes, the 40-byte drop, the misaligned windows D-NC72 and D-NC73 pin), NaviCore.sbus_dump on an SBUS-16 and
 an unlocked #L09, s50's pure helpers, and every s50 test run whole against an image without the verbs: each skips,
-sending the controller nothing but the probe and NaviCore nothing at all.
+sending the controller nothing but the probe and NaviCore nothing at all. NaviCore's own pins (NAVICORE.md NC-WP14,
+suites/s51_navicore_wire.py): hil/links.py's NaviCore wires (keys, links.json, one wire per header, the runner's missing()
+and its release after a test), discover() against a fake probe 3 wired as D-NC37 has it (WireWorld, WireProbe), and every
+ncwire test run whole against NaviWireModel - each passing, the (should) one failing as today's firmware does, each
+skipping on its gates, and each catching the break it exists for.
 
 The real suites are never run: runner.REGISTRY holds fake tests while this runs (t_pull_over_limit_policy imports s03
 and s21 for their helpers and undoes their registrations), and the rest of the resume checks (resume.check_bench,
@@ -2330,6 +2334,11 @@ GATED = {
     "intellex.flash_navicore_app": ("intellex_flash_navicore", "rewrites NaviCore's app0 through Intellex's esptool "
                                                                "path and restarts it; SBUS OUT stops for about a "
                                                                "minute"),
+    # NC-WP14 (suites/s51_navicore_wire.py), 2026-10-05: tx_interleave also needs navicore_aux_tx, checked in its body
+    **{f"ncwire.{n}": ("navicore_wire", "needs probe 3 wired to NaviCore's own pins as docs/hil_plan/NAVICORE.md D-NC37 "
+                                        "has it")
+       for n in ("aux_bytes", "soft_tx_integrity", "s3_console_quiet", "tx_interleave", "rx_monitor_bcast_in",
+                 "sbus_out_tee", "maestro_bus_tap")},
 }
 
 
@@ -11996,6 +12005,694 @@ def t_ws_endpoint_drop_stall(tmp):
     assert len(probs) == 1 and not probs[0].startswith("(should)") and "never printed" in probs[0], probs
 
 
+# ---------------------------------------------------------------------------- NC-WP14: NaviCore's own pins (s51)
+class WireWorld:
+    """Probe 3 wired to NaviCore's own pins as D-NC37 has it (and, for discover(), probe 1 to a WCB port), for the s51
+    suite and hil/links.py's NaviCore discovery. `wiring` maps (probe, header) -> (pin, straight): pin is 'S3'-'S5',
+    'MAE', 'SBO' or ('W', wcb, port); straight=True is a straight-through cable, so the device's TX lands on the header's
+    TX pin (the probe listens there with SWAP). write(pin, data) is a device putting a block on its TX line; the probe
+    channel that listens on that line reads it, at the line's own settings only (pin_params: the model's applied bauds,
+    SBUS OUT's 100000 8E2 inverted). A probe's TX on a duplex channel reaches the device's RX (model.port_rx)."""
+
+    def __init__(self, model, wiring):
+        self.model, self.wiring, self.probes = model, dict(wiring), {}
+
+    def pin_params(self, pin):
+        if pin == "SBO":
+            return 100000, "8E2", True
+        if pin == "MAE":
+            return self.model.applied["mae"], "8N1", False
+        if pin in ("S3", "S4", "S5"):
+            return self.model.applied["aux"][int(pin[1]) - 3], "8N1", False
+        return 9600, "8N1", False
+
+    def write(self, pin, data, errs=0):
+        for (probe, header), (p, straight) in list(self.wiring.items()):
+            if p == pin and probe in self.probes:
+                self.probes[probe].line(header, "tx" if straight else "rx", pin, bytes(data), errs)
+
+    def probe_tx(self, probe, chan, data):
+        hit = self.wiring.get((probe, chan["header"]))
+        if hit is None or chan["swap"] != hit[1]:
+            return                                     # the probe's TX pin faces nothing (or the device's own TX)
+        pin = hit[0]
+        if (chan["baud"], chan["fmt"], chan["inv"]) == self.pin_params(pin) and isinstance(pin, str):
+            self.model.port_rx(pin, data)
+
+
+class WireProbe(FakeProbeDev):
+    """FakeProbeDev on a WireWorld: BIND remembers each channel's baud, format, inversion, SWAP and RXONLY; a block the
+    world puts on a wired pin reaches the channel listening there as 'RX <ch> <ms> <hex>' lines of at most 192 bytes
+    (probe_main.cpp flushChannel), or as garbage and an RXERR FRAME when the channel's settings are not the line's; TX
+    on a duplex channel reaches the device's RX; EDGES counts what a free pin sees."""
+    HEADERS = ("S1", "S2", "S3", "S4", "S5")
+
+    def __init__(self, world, name, mac="AA:BB:CC:DD:EE:03"):
+        super().__init__(name)
+        self.port, self.world, self.mac = f"COM{name}", world, mac
+        self.chans, self.edges, self.t0, self.lk = {}, None, time.monotonic(), threading.RLock()
+        world.probes[name] = self
+
+    def _rx(self, text):
+        with self.lk:
+            self.lines.append((time.monotonic(), text))
+
+    def mark(self):
+        with self.lk:
+            return len(self.lines)
+
+    def since(self, mark):
+        with self.lk:
+            return [t for _, t in self.lines[mark:]]
+
+    def _held(self, header, which):
+        return any((header, which.upper()) in pins for pins in self.pins.values())
+
+    def send(self, text, eol="\n"):
+        tok = text.split()
+        verb = tok[0].upper() if tok else ""
+        typed = None
+        with self.lk:
+            if verb == "HELLO":
+                self.sent.append(text)
+                self._rx(f"HELLO wcb_probe 7 mac={self.mac} mesh=0")
+            elif verb == "BIND":
+                self.sent.append(text)
+                answer = self._bind(tok)
+                if answer.startswith("OK"):
+                    fmt = next((t.split("=", 1)[1].upper() for t in tok if t.upper().startswith("FMT=")), "8N1")
+                    self.chans[tok[1]] = {"header": tok[2], "baud": int(tok[3]), "fmt": fmt, "inv": "INV" in tok,
+                                          "swap": "SWAP" in tok, "rx_only": "RXONLY" in tok}
+                self._rx(answer)
+            elif verb == "UNBIND":
+                self.chans.pop(tok[1], None)
+                super().send(text, eol)
+            elif verb == "RESET":
+                self.chans.clear()
+                self.edges = None
+                super().send(text, eol)
+            elif verb == "TX":
+                self.sent.append(text)
+                c = self.chans.get(tok[1])
+                if c is None:
+                    self._rx("ERR channel not bound")
+                elif c["rx_only"]:
+                    self._rx("ERR channel is RXONLY")
+                else:
+                    self._rx(f"OK TX {tok[1]}")
+                    typed = (dict(c), bytes.fromhex(tok[2]))
+            elif verb == "EDGES":
+                self.sent.append(text)
+                sub = tok[1].upper()
+                if sub == "START":
+                    self.edges = {(h, w): 0 for h in self.HEADERS for w in ("tx", "rx")}
+                    self._rx("OK EDGES START")
+                elif sub == "STOP":
+                    self.edges = None
+                    self._rx("OK EDGES STOP")
+                else:
+                    out = "EDGES"
+                    for h in self.HEADERS:
+                        for w in ("tx", "rx"):
+                            v = "busy" if self._held(h, w) or self.edges is None else self.edges[(h, w)]
+                            out += f" {h}" if w == "tx" else ""
+                            out += f" {w}={v}"
+                            if self.edges is not None:
+                                self.edges[(h, w)] = 0
+                    self._rx(out)
+            else:
+                super().send(text, eol)
+        if typed is not None:            # outside the probe's lock: NaviCore's side takes its own (no lock-order cycle)
+            self.world.probe_tx(self.name, *typed)
+
+    def line(self, header, which, pin, data, errs=0):
+        """A device put `data` on the line wired to this header's `which` pin."""
+        with self.lk:
+            if self.edges is not None and not self._held(header, which):
+                self.edges[(header, which)] += max(6, 5 * len(data))
+                return
+            ms = int((time.monotonic() - self.t0) * 1000)
+            for ch, c in list(self.chans.items()):
+                if c["header"] != header or ("tx" if c["swap"] else "rx") != which:
+                    continue
+                if (c["baud"], c["fmt"], c["inv"]) != self.world.pin_params(pin):
+                    self._rx(f"RX {ch} {ms} {bytes(0xFF - b for b in data[:3]).hex().upper()}")
+                    self._rx(f"RXERR {ch} {ms} FRAME n=1")
+                    return
+                for i in range(0, len(data), 192):
+                    self._rx(f"RX {ch} {ms} {data[i:i + 192].hex().upper()}")
+                if errs and ch in "AB":
+                    self._rx(f"RXERR {ch} {ms} FRAME n={errs}")
+
+
+# D-NC37's wiring on probe 3: header -> (NaviCore pin, straight-through). S4 is wired straight (the probe listens with
+# SWAP), the rest crossed.
+NC_WIRING = {"S1": ("SBO", False), "S2": ("S3", False), "S3": ("S4", True), "S4": ("S5", False), "S5": ("MAE", False)}
+
+
+class NaviWireModel(NaviDevModel):
+    """NaviDevModel brought to the NaviCore main tree NC-WP14 was written against (639e2e7), with probe 3 on its own pins
+    (WireWorld): a serial action and a mesh ;W20,;s<n> forward share one paced transmitter per port (queueSerialAction,
+    auxTxPump :2151-2164, :5216-5300) - S3, a hardware UART, takes a line at once, S4 and S5 one byte a pass - and
+    print '[DISPATCH] Serial TX' when done; a device write (#L20/#L21, an HCR action, a fade step) goes straight to the
+    port, so it lands inside a line in flight (nc.aux.tx_interleave, today); SBUS OUT re-emits the controller's frame
+    every 9 ms while sbusOutEnabled is on, and #L13 dumps it; a local ?MAE query writes its Pololu frame to the Maestro
+    bus; a line the probe types into S3-S5 goes through the RX monitor (auxRxPollPort, auxRxLine :3942-3988), and with
+    serialBcast in to the mesh - where every WCB port that takes broadcasts gets it (self.bcast_ports) - and out the other
+    out ports. `mut` breaks it one way, or applies a fix, by name (NCWIRE_MUTATIONS)."""
+    PUMP_TICK = 0.002
+    SBUS_PERIOD = 0.009
+
+    def __init__(self, mut=()):
+        self.world, self.hooks_on = None, "no_hooks" not in set(mut)
+        self.txq = {p: [] for p in ("S3", "S4", "S5")}
+        self.tx = {p: None for p in ("S3", "S4", "S5")}
+        self.after = {p: [] for p in ("S3", "S4", "S5")}
+        self.rxbuf = {p: {"buf": "", "cut": False, "last": 0.0} for p in ("S3", "S4", "S5")}
+        self.bcast_ports, self.lines_out = [], 0
+        super().__init__(mut=mut)
+        threading.Thread(target=self._pump_loop, daemon=True).start()
+        threading.Thread(target=self._sbus_loop, daemon=True).start()
+
+    # ------------------------------------------------------------ the pins
+    def wire(self, port, data, paced=False):
+        """Every block NaviCore hands S3, S4, S5 or Serial2: onto the world's line (Serial2 is the Maestro bus), and as
+        DBG_WIRE lines on a hook image. With the 'tx_arbitrated' fix a device write waits for the line in flight."""
+        data = bytes(data)
+        if not data:
+            return []
+        if (not paced and port in self.tx and self.tx[port] is not None and "tx_arbitrated" in self.mut):
+            self.after[port].append(data)
+            return []
+        if self.world is not None:
+            self.world.write("MAE" if port == "Serial2" else port, data)
+            if port == "S4" and "s4_crosstalk" in self.mut:
+                self.world.write("S5", data)
+        return NaviDevModel.wire(self, port, data) if self.hooks_on else []
+
+    def serial_action(self, a):
+        """RA_SERIAL (NaviCore.ino:2220-2240): queued for the paced transmitter, which drainSerialFwd starts in the same
+        loop() pass (:2159-2164, :5279-5300) - so its first byte is out before the ACK; the trace line when it is done."""
+        port = a["target"]
+        if port not in ("S3", "S4", "S5"):
+            return self.skip(0x20, f"[DISPATCH] Serial port '{port}' is not S3/S4/S5 — skipped")
+        self.txq[port].append(a["cmd"])
+        return self._pump_step(port) if self.tx[port] is None else []
+
+    def forward(self, fw, text):
+        self.txq[f"S{fw}"].append(text)
+
+    def _pump_step(self, port):
+        """One auxTxPump pass for `port` (:5253-5276) -> console lines: S3, a hardware UART, takes the line at once, S4 and
+        S5 one byte."""
+        out, cur = [], self.tx[port]
+        if cur is None and self.txq[port]:
+            text = self.txq[port].pop(0)
+            cur = self.tx[port] = {"text": text, "data": text.encode() + b"\r", "sent": 0}
+            self.lines_out += 1
+        if cur is None:
+            return out
+        n = len(cur["data"]) if port == "S3" else 1
+        chunk = cur["data"][cur["sent"]:cur["sent"] + n]
+        errs = 0
+        if "soft_tx_glitch" in self.mut and port == "S4" and self.lines_out % 3 == 0 and cur["sent"] == 5:
+            chunk, errs = bytes([chunk[0] ^ 0x10]), 1
+        cur["sent"] += len(chunk)
+        if errs and self.world is not None:
+            self.world.write(port, chunk, errs)
+            out += NaviDevModel.wire(self, port, chunk) if self.hooks_on else []
+        else:
+            out += self.wire(port, chunk, paced=True)
+        if cur["sent"] >= len(cur["data"]):
+            out += self.dlog(0x20, f"[DISPATCH] Serial TX [{self.label(port)}]  {cur['text']}")
+            self.tx[port] = None
+            for held in self.after[port]:
+                out += self.wire(port, held, paced=True)
+            self.after[port] = []
+        return out
+
+    def _pump_loop(self):
+        while self.alive:
+            time.sleep(self.PUMP_TICK)
+            with self.lock:
+                out = []
+                for port in ("S3", "S4", "S5"):
+                    out += self._pump_step(port)
+                    st = self.rxbuf[port]
+                    if st["buf"] and time.monotonic() - st["last"] > 0.06:     # the 60 ms idle flush: a fragment
+                        out += self.rx_line(port, st["buf"], False)
+                        st["buf"], st["cut"] = "", True
+                if out and self.nav is not None:
+                    self.nav._append(*out)
+
+    def sbus_frame(self):
+        from hil.sbus import encode
+        return encode(self.channels, 0, 24)
+
+    def _sbus_loop(self):
+        """The controller's 9 ms stream teed to SBUS OUT, on a deadline so the average period is exact."""
+        n, due = 0, time.monotonic()
+        while self.alive:
+            due += self.SBUS_PERIOD * (2 if "tee_half_rate" in self.mut else 1)
+            time.sleep(max(0.0, due - time.monotonic()))
+            on = self.c["sbusOutEnabled"] or "sbus_out_leaky" in self.mut
+            if not on or self.world is None:
+                continue
+            frame = self.sbus_frame()
+            n += 1
+            if "tee_drops_byte" in self.mut and n % 25 == 0:
+                frame = frame[:7] + frame[8:]
+            self.world.write("SBO", frame)
+
+    # ------------------------------------------------------------ what the probe types in
+    def port_rx(self, port, data):
+        """auxRxPollPort (:3965-3979): CR/LF ends a line, 127 characters cut one, a byte outside 32-126 shows as '.'."""
+        with self.lock:
+            st, out = self.rxbuf[port], []
+            for b in data:
+                if b in (10, 13):
+                    if st["buf"]:
+                        out += self.rx_line(port, st["buf"], not st["cut"])
+                        st["buf"] = ""
+                    st["cut"] = False
+                else:
+                    if len(st["buf"]) >= 127:
+                        out += self.rx_line(port, st["buf"], False)
+                        st["buf"], st["cut"] = "", True
+                    st["buf"] += chr(b) if 32 <= b < 127 or "rx_no_dot" in self.mut else "."
+            st["last"] = time.monotonic()
+            if out and self.nav is not None:
+                self.nav._append(*out)
+
+    def rx_line(self, port, text, terminated):
+        """auxRxLine (:3942-3958)."""
+        out = self.dlog(0x20, f"[DISPATCH] Serial RX [{self.label(port)}]  {text}")
+        i = int(port[1]) - 3
+        if (not terminated and "fragment_broadcast" not in self.mut) or not self.c["bcastIn"][i] or self.device_on(port):
+            return out
+        for link in self.bcast_ports:
+            link.write(text.encode() + b"\r")
+        for j, p in enumerate(("S3", "S4", "S5")):
+            if (p != port or "bcast_echo_back" in self.mut) and self.c["bcastOut"][j] and not self.device_on(p):
+                self.txq[p].append(text)
+        return out + self.dlog(0x20, f"[DISPATCH] Serial RX [{self.label(port)}] → mesh broadcast")
+
+    # ------------------------------------------------------------ the console
+    def script(self, text, n):
+        lines = super().script(text, n)
+        if "idf_error_leak" in self.mut or "idf_error_quiet" in self.mut:
+            if text == "?WDP,DUMP":
+                idf = "E (123456) wifi:CCMP replay detected: A1=e2:72:a1:d6:ff:90 PN=0"
+                lines = [idf] + lines
+                if "idf_error_leak" in self.mut and self.world is not None:
+                    self.world.write("S3", idf.encode() + b"\r\n")
+        if "console_on_s3" in self.mut and self.world is not None and lines:
+            self.world.write("S3", "\r\n".join(lines).encode() + b"\r\n")
+        return lines
+
+    def json_line(self, line):
+        obj, err = self.parse_header(line)
+        t = obj.get("type") if isinstance(obj, dict) else None
+        if t == "GET_MESH_STATS":
+            return ['{"type":"MESH_STATS","pg":0,"self":20,"upMs":123456,"agg":{"sent":0,"ackd":0,"rty":0,"fail":0,'
+                    '"ung":0,"bcast":0,"recv":0},"peers":[],"last":1}']
+        return super().json_line(line)
+
+    def hash_cmd(self, text):
+        m = re.match(r"^#[Ll](\d+)", text)
+        fn = int(m.group(1)) if m else -1
+        if fn == 90 and not self.hooks_on:
+            return ["Unknown #L code 90. Valid: 1,2,9,10,11,12,13,20,21"]
+        if fn == 13:
+            f = self.sbus_frame()
+            rows = [f"  [{i:2d}] " + " ".join(f"{b:02X}" for b in f[i:i + 8]) + " " for i in range(0, len(f), 8)]
+            return [f"---- SBUS RAW ---- ({len(f)} bytes, SBUS-24)"] + rows + \
+                ["  byte 0       = header (expect 0F)", "  bytes 1-22   = CH1-16 data",
+                 "  bytes 23-33  = CH17-24 data  ← check these", "  byte 34      = flags", "  byte 35      = footer (expect 00)"]
+        return super().hash_cmd(text)
+
+    def cli(self, text):
+        p = [x.strip() for x in text[5:].split(",")] if text[:5].upper() == "?MAE," else []
+        verb = p[0].upper() if p else ""
+        if verb in ("GET", "MOVING", "ERR") and len(p) >= 2:
+            slot = _nm_toint(p[1]) & 0xFF
+            if 1 <= slot <= 8 and self.c["maestros"][slot - 1]["type"] == 1:
+                q = {"GET": "pos", "MOVING": "mov", "ERR": "err"}[verb]
+                ch = _nm_toint(p[2]) & 0xFF if verb == "GET" and len(p) > 2 else 0
+                dev = self.c["maestros"][slot - 1]["device"]
+                out = self.wire("Serial2", bytes([0xAA, dev & 0x7F, {"pos": 0x10, "mov": 0x13, "err": 0x21}[q]]))
+                if q == "pos":
+                    out += self.wire("Serial2", bytes([ch]))
+                if "mae_extra_byte" in self.mut:
+                    out += self.wire("Serial2", b"\x00")
+                val = self.mae1.pos(ch) if q == "pos" else self.mae1.moving() if q == "mov" else self.mae1.read_err()
+                return out + [self.marker(slot, q, ch, val)]
+        return super().cli(text)
+
+    def _fade_loop(self):
+        """NaviDevModel's fade tick on a 5 ms clock (the firmware ticks every loop() pass): steps 150 ms apart."""
+        while getattr(self, "alive", True):
+            time.sleep(0.005)
+            if not hasattr(self, "fades"):
+                continue
+            with self.lock:
+                if self.c["hcrDest"]["transport"] != 0:
+                    self.fades.clear()
+                lines, now = [], time.monotonic()
+                for ch, f in list(self.fades.items()):
+                    el = now - f["t0"]
+                    if el >= f["dur"]:
+                        lines += self.wire(f["port"], self.hcr.fmt(17, ch, f["to"]).encode())
+                        del self.fades[ch]
+                    elif now >= f["next"]:
+                        f["next"] = now + (0.1 if "fade_fast" in self.mut else 0.15)
+                        v = f["from"] + int((f["to"] - f["from"]) * el / f["dur"])
+                        if v != f["last"]:
+                            f["last"] = v
+                            lines += self.wire(f["port"], self.hcr.fmt(17, ch, v).encode())
+                if lines and self.nav is not None:
+                    self.nav._append(*lines)
+
+
+def _ncwire_bench(tmp, model, wired=None, opt_in=None):
+    """A bench for s51: NaviWireModel behind NaviCore and W1, probe 3 (a WireProbe) wired to it, and the N20 wires set
+    (all of NC_WIRING, or the ports in `wired`) -> (bench, probe)."""
+    world = WireWorld(model, {("probe3", h): v for h, v in NC_WIRING.items()})
+    model.world = world
+    probe = WireProbe(world, "probe3")
+    stale = os.path.join(tmp.results, "links.json")       # a bench made earlier in the same case saved its wires there
+    if os.path.exists(stale):
+        os.remove(stale)
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "navicore": {"port": "COMNAV", "kind": "navicore"},
+                   "probe3": {"port": "COMprobe3", "kind": "probe", "mac": "AA:BB:CC:DD:EE:03"}})
+    b.cfg["opt_in"] = list(optin.OPT_INS) if opt_in is None else list(opt_in)
+    nav, w1 = FakeNaviDev(model.script, "navicore"), FakeNaviDev(model.w1_script, "wcb1")
+    model.nav, model.w1 = nav, w1
+    nav.log = w1.log = b.log
+    b.dev = lambda name: {"navicore": nav, "wcb1": w1, "probe3": probe}[name]
+    for h, (pin, straight) in NC_WIRING.items():
+        if wired is None or pin in wired:
+            b.links.set_nc_link(pin, "probe3", h, swap=straight)
+    return b, probe
+
+
+NCWIRE_FAST = {"SETTLE_S": 0.05, "QUIET_S": 0.3, "SBUS_WINDOW_S": 0.6, "LINE_PAIRS": 6, "PING_EVERY_S": 0.05,
+               "FADE_WAIT_S": 1.6, "MESH_WAIT_S": 0.4, "TYPED_S": 0.25, "FRAGMENT_S": 0.3}
+NCWIRE_SHOULD = {"ncwire.tx_interleave": "nc.aux.tx_interleave"}
+
+
+def _run_wire_suite(tmp, ids=None, mut=(), opt_in=None, wired=None, keep_links=False):
+    """The s51 tests named in `ids` (default all), whole, through the runner, against a fresh NaviWireModel(mut) with
+    probe 3 wired as D-NC37 has it -> (results by id, the model, facts: the config text before, session.log, the
+    count). The W-port alternative of rx_monitor_bcast_in is dropped from its links (the model's DevLinks stand for the
+    WCB ports, through a patched _bcast_ports) unless `keep_links`; every other N20 link the test declares stays, so a
+    wire left out by `wired` skips it as the runner would."""
+    model = NaviWireModel(mut=mut)
+    orig = model.text()
+    b, probe = _ncwire_bench(tmp, model, wired=wired, opt_in=opt_in)
+    model.bcast_ports = [model.links["W2S3"], model.links["W2S4"]]
+    saved_reg = list(runner.REGISTRY)
+    try:
+        runner.REGISTRY[:] = []
+        sys.modules.pop("suites.s51_navicore_wire", None)
+        import suites.s51_navicore_wire as S51
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncwire.") and (ids is None or t["id"] in ids)]
+    finally:
+        runner.REGISTRY[:] = saved_reg
+    for t in mine:
+        if not keep_links:
+            t["links"] = [k for k in t["links"] if not k.startswith("W")]
+        t["drives"], t["_drives"] = [], set()
+    expected = {"W2S3": (model.links["W2S3"], True), "W2S4": (model.links["W2S4"], True),
+                "W1S1": (model.links["W1S1"], False)}
+    patches = [(S51, "_bcast_ports", lambda bench: expected)] + [(S51, k, v) for k, v in NCWIRE_FAST.items()]
+    saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
+    for mod, name, value in patches:
+        setattr(mod, name, value)
+    saved_g = _fast_guard()
+    try:
+        ck = new_run(b, mine)
+    finally:
+        _slow_guard(saved_g)
+        for mod, name, value in saved:
+            setattr(mod, name, value)
+        model.alive = False
+    log = read(os.path.join(ck.out_dir, "session.log"))
+    b.close()
+    return {r["id"]: r for r in ck.data["results"]}, model, dict(orig=orig, log=log, count=len(mine), probe=probe)
+
+
+def t_ncwire_links(tmp):
+    """hil/links.py's NaviCore wires (NC-WP14): an NcLink's key, tap and default format; get_key for W and N keys;
+    nc_require's Skip naming D-NC37; links.json round-trips them under "navicore_links" and writes nothing new for a
+    bench without one; one wire per probe header across both kinds; a probe reset forgets an NcLink's channel; the
+    runner's missing() resolves N keys and says what an absent one needs; the runner releases a NaviCore wire after a
+    test even when it followed the default baud; nc_bauds reads GET_CONFIG's auxBaud and keeps the defaults for what
+    it lacks; sbus_run finds back-to-back frames and not a header byte inside one."""
+    from hil import links as L
+    model = NaviWireModel()
+    try:
+        b, probe = _ncwire_bench(tmp, model, wired={"S3", "SBO"})
+        s3, sbo = b.links.nc_get("S3"), b.links.nc_get("SBO")
+        assert (s3.key, s3.tap, sbo.key, sbo.tap) == ("N20S3", False, "N20SBO", True), (s3, sbo)
+        assert repr(sbo) == "N20SBO -> probe3 S1 (tap)" and repr(b.links.nc_get("S3")) == "N20S3 -> probe3 S2 (duplex)"
+        assert b.links.get_key("N20S3") is s3 and b.links.get_key("N21S3") is None and b.links.get_key("W1S3") is None
+        assert b.links.get_key("N20MAE") is None and b.links.all() == [] and len(b.links.nc_all()) == 2
+        e = _raises(lambda: b.links.nc_require("MAE"), runner.Skip)
+        assert "N20MAE" in str(e) and "D-NC37" in str(e), e
+        on_disk = json.loads(read(b.links.path))
+        assert sorted(r["port"] for r in on_disk["navicore_links"]) == ["S3", "SBO"] and on_disk["links"] == [], on_disk
+        b2 = runner.Bench(b.bench_path, b.results_root)
+        assert sorted(l.key for l in b2.links.nc_all()) == ["N20S3", "N20SBO"]
+        assert b2.links.nc_get("SBO").tap and b2.links.nc_get("S3").header == "S2"
+        # the default format: SBUS OUT binds 8E2 inverted at 100000, S3 8N1 at the baud given
+        sbo.listen(hw=True)
+        assert probe.sent[-1] == "BIND A S1 100000 FMT=8E2 INV RXONLY", probe.sent[-1]
+        s3.listen(115200)
+        assert probe.sent[-1] == "BIND B S2 115200 FMT=8N1", probe.sent[-1]
+        b.links.forget_probe("probe3")
+        assert s3.channel is None and sbo.channel is None
+        # one wire per header: a WCB port wired to S2 takes it from N20S3
+        b.links.set_link(1, "S2", "probe3", "S2")
+        assert b.links.nc_get("S3") is None and b.links.get(1, "S2") is not None
+        b.links.remove_link(1, "S2")
+        # runner.missing on N keys, and the post-test release of a NaviCore wire (auto baud included)
+        t_ok = fake("ncwire.x")
+        t_ok["links"] = ["N20SBO"]
+        t_no = fake("ncwire.y")
+        t_no["links"] = ["N20MAE"]
+        assert runner.missing(b, t_ok) == [] and "NaviCore's own pin" in runner.missing(b, t_no)[0], runner.missing(b, t_no)
+
+        def binds(bench):
+            bench.links.nc_get("SBO").listen()          # no baud: the default, 100000
+        held = {}
+
+        def after(bench):
+            held["sbo"] = bench.links.nc_get("SBO").channel
+        ck = new_run(b, [fake("ncwire.bind", binds), fake("ncwire.after", after)])
+        assert ck.state == "done" and held == {"sbo": None}, held
+        assert any(s.startswith("UNBIND ") for s in probe.sent), "the runner did not release the NaviCore wire"
+        # a bench with no NaviCore wire writes no navicore_links key
+        b.links.remove_nc_link("SBO")
+        assert "navicore_links" not in json.loads(read(b.links.path))
+        b.close()
+    finally:
+        model.alive = False
+    assert L.nc_bauds({"auxBaud": {"S3": 57600, "S4": True, "S5": -1, "maestro": 115200}}) == \
+        {"S3": 57600, "S4": 9600, "S5": 9600, "MAE": 115200, "SBO": 100000}
+    assert L.nc_bauds({}) == L.NC_DEFAULT_BAUD and L.nc_bauds(None) == L.NC_DEFAULT_BAUD
+    from hil.sbus import encode
+    f = bytearray(encode([992] * 24))
+    f[32] = 0x0F                                  # a header byte inside the frame, as on this bench (HIL_TESTING §6)
+    f = bytes(f)
+    stream = b"\x01\x02" + f[20:] + f * 4 + f[:9]
+    assert L.sbus_run(stream) == (36, 2 + 16, 4), L.sbus_run(stream)
+    assert L.sbus_run(b"") == (0, 0, 0) and L.sbus_run(f[:30]) == (0, 0, 0)
+
+
+def t_ncwire_helpers(tmp):
+    """s51's pure parts: line_tally counts whole lines and the bytes nothing accounts for; interleave_problem passes
+    either order, and names a write inside the line (after which byte), a byte-by-byte mix, and a missing part;
+    frame_walk reads back-to-back copies with a partial frame at each edge, and names a differing copy and stray
+    bytes; frame_times places frames inside bursts; fade_steps reads '<PVA<n>>' frames with their burst times;
+    query_frame builds the three ?MAE frames; console_text finds text runs and not noise; the IDF line pattern."""
+    saved = list(runner.REGISTRY)
+    try:
+        import suites.s51_navicore_wire as S
+    finally:
+        runner.REGISTRY[:] = saved
+    lines = ["AAA", "BBB", "CCC"]
+    assert S.line_tally(b"AAA\rBBB\rCCC\r", lines) == (3, [], 0)
+    assert S.line_tally(b"AAA\rBxB\rCCC\r", lines) == (2, [1], 4)
+    assert S.line_tally(b"AAA\rCCC\r", lines) == (2, [1], 0)
+    line, dev = b"0123456789\r", b"<OH>\n"
+    assert S.interleave_problem(line + dev, line, dev) is None and S.interleave_problem(dev + line, line, dev) is None
+    assert S.interleave_problem(line[:4] + dev + line[4:], line, dev) == "its 5 bytes landed inside the line, after " \
+        "byte 4 of 11"
+    mixed = b"0<1O2H3>\n456789\r"
+    assert S.interleave_problem(mixed, line, dev) == "its bytes and the line's arrived mixed together"
+    assert S.interleave_problem(line, line, dev).startswith("the device bytes never arrived whole")
+    assert S.interleave_problem(dev, line, dev).startswith("the line never arrived whole")
+    from hil.sbus import encode
+    f = encode(list(range(100, 124)))
+    assert S.frame_walk(f[10:] + f * 3 + f[:5], f) == (26, 3, None)
+    assert S.frame_walk(f * 2, f) == (0, 2, None)
+    bad = bytearray(f)
+    bad[7] ^= 1
+    assert S.frame_walk(f + bytes(bad) + f, f)[2] == f"frame 2 differs from #L13's at byte 7 (0x{bad[7]:02X}, #L13 " \
+        f"0x{f[7]:02X}), after 1 whole copies"
+    assert S.frame_walk(b"\x55" * 40 + f, f)[2] == "40 bytes before the first copy are not the end of a frame"
+    assert S.frame_walk(f + b"\x99", f)[2] == "the 1 bytes after the last copy are not the start of a frame"
+    assert S.frame_walk(b"\x00" * 50, f) == (-1, 0, "no whole copy of #L13's frame in the window")
+    assert S.frame_times([(100, f), (109, f), (118, f[:10]), (120, f[10:])], 0, 36, 3) == [100, 109, 118]
+    assert S.frame_times([(100, f + f)], 0, 36, 2) == [100, 100 + 36 * S.SBUS_BYTE_MS]
+    assert S.fade_steps([(0, b"<PVA0>\n"), (150, b"<PVA9>\n<PVB2>\n"), (301, b"<PVA18>\n")]) == [(0, 0), (150, 9),
+                                                                                                 (301, 18)]
+    assert S.query_frame("pos", 1, 5) == bytes.fromhex("AA 01 10 05") and S.query_frame("mov", 2) == b"\xaa\x02\x13"
+    assert S.query_frame("err", 1) == b"\xaa\x01\x21"
+    assert S.console_text(b"\x00\xffE (12) wifi:x\x00ok") == [b"E (12) wifi:x"] and S.console_text(b"\x00\xfe") == []
+    assert S.IDF_LINE.match("E (123456) wifi:CCMP replay detected") and not S.IDF_LINE.match("[WCB] E (1) x:")
+
+
+def t_ncwire_discover(tmp):
+    """discover() with probe 3 on NaviCore's pins (NC_WIRING, one cable straight-through) and probe 1 on W1 S2: the WCB
+    half finds W1 S2 as it always did, and notes SBUS OUT's busy pin once, not once per port; the NaviCore half finds
+    N20S3, N20S4 (SWAP), N20S5, N20MAE and N20SBO (both taps), each verified, from serial actions of 'U', a ?MAE,GET read
+    and SBUS frames, and saves them under "navicore_links". A NaviCore that does not answer keeps them; a bench whose
+    probe headers all serve WCB ports sends NaviCore nothing."""
+    model = NaviWireModel()
+    try:
+        world = WireWorld(model, {("probe3", h): v for h, v in NC_WIRING.items()})
+        world.wiring[("probe1", "S2")] = (("W", 1, "S2"), False)
+        model.world = world
+        p1, p3 = WireProbe(world, "probe1", mac="AA:BB:CC:DD:EE:01"), WireProbe(world, "probe3")
+        b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                       "probe1": {"port": "COMprobe1", "kind": "probe", "mac": "AA:BB:CC:DD:EE:01"},
+                       "probe3": {"port": "COMprobe3", "kind": "probe", "mac": "AA:BB:CC:DD:EE:03"},
+                       "navicore": {"port": "COMNAV", "kind": "navicore"}})
+
+        def w1_script(text, n):
+            m = re.match(r"^;S([1-5])(.*)$", text)
+            if m:
+                world.write(("W", 1, f"S{m.group(1)}"), m.group(2).encode() + b"\r")
+            return []
+        nav, w1 = FakeNaviDev(model.script, "navicore"), FakeNaviDev(w1_script, "wcb1")
+        model.nav, model.w1 = nav, w1
+        b.dev = lambda name: {"navicore": nav, "wcb1": w1, "probe1": p1, "probe3": p3}[name]
+        b.port_baud = lambda w, p: 9600
+        out = []
+        found = b.links.discover(log=out.append)
+        keys = {l.key: l for l in found}
+        assert set(keys) == {"W1S2", "N20S3", "N20S4", "N20S5", "N20MAE", "N20SBO"}, (sorted(keys), out)
+        assert all(l.verified for l in found), [(l.key, l.verified) for l in found]
+        want = {"N20SBO": ("S1", False, True), "N20S3": ("S2", False, False), "N20S4": ("S3", True, False),
+                "N20S5": ("S4", False, False), "N20MAE": ("S5", False, True)}
+        got = {k: (keys[k].header, keys[k].swap, keys[k].tap) for k in want}
+        assert got == want, got
+        assert (keys["W1S2"].probe_name, keys["W1S2"].header, keys["W1S2"].swap) == ("probe1", "S2", False)
+        noisy = [x for x in out if "probe3 S1.rx noisy" in x]
+        assert len(noisy) == 1, out
+        assert sorted(r["port"] for r in json.loads(read(b.links.path))["navicore_links"]) == \
+            ["MAE", "S3", "S4", "S5", "SBO"]
+        sent = list(nav.sent)
+        assert any('"type":"TEST_ACTION"' in s and '"port":"S4"' in s for s in sent) and "?MAE,GET,1,0" in sent
+        # NaviCore silent: its wires found before are kept, with a note
+        silent = FakeNaviDev(lambda text, n: [], "navicore")
+        b.dev = lambda name: {"navicore": silent, "wcb1": w1, "probe1": p1, "probe3": p3}[name]
+        out2 = []
+        b.links.discover(log=out2.append)
+        assert sorted(l.key for l in b.links.nc_all()) == sorted(want), b.links.nc_all()
+        assert any("NaviCore did not answer" in x for x in out2), out2
+        # every probe header serves a WCB port: NaviCore is never asked anything
+        world.wiring = {("probe1", f"S{i}"): (("W", 1, f"S{i}"), False) for i in range(1, 6)}
+        b3 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                        "probe1": {"port": "COMprobe1", "kind": "probe", "mac": "AA:BB:CC:DD:EE:01"},
+                        "navicore": {"port": "COMNAV", "kind": "navicore"}})
+        nav3 = FakeNaviDev(model.script, "navicore")
+        b3.dev = lambda name: {"navicore": nav3, "wcb1": w1, "probe1": p1}[name]
+        b3.port_baud = lambda w, p: 9600
+        out3 = []
+        found3 = b3.links.discover(log=out3.append)
+        assert sorted(l.key for l in found3) == [f"W1S{i}" for i in range(1, 6)], [l.key for l in found3]
+        assert nav3.sent == [] and any("every probe header serves a WCB port" in x for x in out3), (nav3.sent, out3)
+        b.close()
+        b3.close()
+    finally:
+        model.alive = False
+
+
+def t_ncwire_suite_against_model(tmp):
+    """Every ncwire test run whole, through the runner, against NaviWireModel - NaviCore main 639e2e7 with probe 3 on its
+    pins - with every opt-in on: aux_bytes, soft_tx_integrity, s3_console_quiet, rx_monitor_bcast_in, sbus_out_tee and
+    maestro_bus_tap pass; tx_interleave, the (should) test for a defect the firmware has today, fails naming its row
+    (the model's soft TX and console are clean: D-NC24 and the UART0 leak are what the bench measures). NaviCore's
+    config ends as it began, in RAM and saved; every probe channel is released; no credential reaches session.log."""
+    res, model, x = _run_wire_suite(tmp)
+    bad = [f"{tid}: {r['status']} {r['detail'][:400]}" for tid, r in res.items()
+           if r["status"] != ("FAIL" if tid in NCWIRE_SHOULD else "PASS")]
+    assert x["count"] == len(res) == 7, (x["count"], len(res))
+    assert not bad, "\n".join(bad)
+    for tid, row in NCWIRE_SHOULD.items():
+        assert f"(should, {row})" in res[tid]["detail"], res[tid]["detail"][:300]
+    assert "landed inside the line" in res["ncwire.tx_interleave"]["detail"], res["ncwire.tx_interleave"]["detail"]
+    assert model.text() == x["orig"] and model.flash == x["orig"], "the model's config was not left as found"
+    assert x["probe"].held == {}, f"probe 3 still holds {x['probe'].held}"
+    assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
+    assert "1 IDF log line" not in x["log"] and "the IDF half was not exercised" in x["log"]
+
+
+def t_ncwire_skips(tmp):
+    """The gates: with navicore_wire off every ncwire test is skipped before it starts with exactly that opt-in's
+    message, and NaviCore is sent nothing; with it on and probe 3's wires missing each skips naming the N20 wire it
+    needs; tx_interleave skips on navicore_aux_tx alone, sending nothing."""
+    res, model, x = _run_wire_suite(tmp, opt_in=[k for k in optin.OPT_INS if k != "navicore_wire"])
+    assert all(r["status"] == "SKIP" and r["detail"] == optin.skip_reason("navicore_wire") for r in res.values()), res
+    assert model.nav.sent == [], model.nav.sent[:5]
+    res, model, x = _run_wire_suite(tmp, wired=set())
+    for tid, r in res.items():
+        assert r["status"] == "SKIP" and r["detail"].startswith("needs a probe wire on N20"), (tid, r["detail"])
+    res, model, x = _run_wire_suite(tmp, ids={"ncwire.tx_interleave"},
+                                    opt_in=[k for k in optin.OPT_INS if k != "navicore_aux_tx"])
+    r = res["ncwire.tx_interleave"]
+    assert r["status"] == "SKIP" and r["detail"] == optin.skip_reason("navicore_aux_tx"), r
+    assert model.nav.sent == [], model.nav.sent[:5]
+
+
+# (test, model mutation, the status it must then get, a piece of its detail): a break of the behaviour each test exists
+# to catch, and the fix its (should) test asks for.
+NCWIRE_MUTATIONS = (
+    ("ncwire.aux_bytes", "s4_crosstalk", "FAIL", "S5 got its text too"),
+    ("ncwire.aux_bytes", "fade_fast", "FAIL", "HcrFade steps every 150 ms"),
+    ("ncwire.aux_bytes", "no_hooks", "PASS", ""),
+    ("ncwire.soft_tx_integrity", "soft_tx_glitch", "FAIL", "(should, D-NC24)"),
+    ("ncwire.s3_console_quiet", "console_on_s3", "FAIL", "NaviCore's own console"),
+    ("ncwire.s3_console_quiet", "idf_error_leak", "FAIL", "1 IDF log line(s) also went out S3"),
+    ("ncwire.s3_console_quiet", "idf_error_quiet", "PASS", ""),
+    ("ncwire.tx_interleave", "tx_arbitrated", "PASS", ""),
+    ("ncwire.rx_monitor_bcast_in", "bcast_echo_back", "FAIL", "back out S4"),
+    ("ncwire.rx_monitor_bcast_in", "fragment_broadcast", "FAIL", "a fragment on S4 was broadcast"),
+    ("ncwire.rx_monitor_bcast_in", "rx_no_dot", "FAIL", "did not show as '.'"),
+    ("ncwire.sbus_out_tee", "tee_drops_byte", "FAIL", "differs from #L13's"),
+    ("ncwire.sbus_out_tee", "tee_half_rate", "FAIL", "ms apart on the probe's clock"),
+    ("ncwire.maestro_bus_tap", "mae_extra_byte", "FAIL", "expected aa 01 10 00"),
+)
+
+
+def t_ncwire_mutations(tmp):
+    """The s51 tests catch what they exist to catch: against a NaviWireModel broken one way each - S4's bytes also on
+    S5, a fade stepping every 100 ms, a glitched bit-banged byte with its framing error, the console or an IDF error on
+    S3, a line broadcast back out its own port, a fragment broadcast, non-printables passed through, a byte dropped
+    from SBUS OUT, SBUS OUT at half rate, an extra byte on the Maestro bus - the test fails and says why; with the
+    arbitration fix tx_interleave passes; an image without the hooks, and an IDF error kept off S3, still pass. Each
+    runs alone on a fresh model."""
+    for tid, mut, want, why in NCWIRE_MUTATIONS:
+        res, _, _ = _run_wire_suite(tmp, ids={tid}, mut={mut})
+        r = res[tid]
+        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+
+
+TESTS += [t_ncwire_links, t_ncwire_helpers, t_ncwire_discover, t_ncwire_suite_against_model, t_ncwire_skips,  # NC-WP14
+          t_ncwire_mutations]                                                                         # (s51)
 TESTS += [t_bridge_hooks, t_intellex_wifi_flash_helpers]      # IX-WP9/10 (suites/s35, s36)
 TESTS += [t_ws_endpoint_drop_stall]      # INTELLEX.md finding 19 (suites/s32)
 ORIG = {}   # the real functions main() patches, for a test that needs one

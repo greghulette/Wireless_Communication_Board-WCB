@@ -322,7 +322,7 @@ def probe_in_mesh(bench, probe_name, device_id, forget=True, **overrides):
         raise Skip(f"mesh id {device_id} is a persisted learned peer on W1")
     params = {**mesh_params(bench), **overrides}
     probe = bench.probe(probe_name)
-    for l in bench.links.all():
+    for l in bench.links.all() + bench.links.nc_all():
         if l.probe_name == probe_name:
             bench.links.release(l)
     probe.mesh_join(device_id, params["oct2"], params["oct3"], params["password"], params["quantity"],
