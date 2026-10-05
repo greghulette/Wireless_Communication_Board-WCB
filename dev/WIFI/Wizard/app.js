@@ -42,8 +42,9 @@ let systemConfig   = null;
 let boardConnections = {};      // { boardIndex: BoardConnection }
 let boardConfigs     = {};      // { boardIndex: BoardConfig } — current UI state
 let boardBaselines   = {};      // { boardIndex: BoardConfig } — last pulled from board
-let boardBootChars   = {};      // { boardIndex: {funcChar,delimiter,cmdChar} } — sniffed from boot messages
-                                //   before a full pull has succeeded; used as fallback for backup requests
+let boardBootChars   = {};      // { boardIndex: {funcChar,delimiter,cmdChar,over} } — the characters a board was
+                                //   seen to switch to outside a pull: its boot banner, or a push's character switch
+                                //   (boardGo); `over` is the baseline then held. Read through _liveChar.
 let boardFlashMode          = {};   // { boardIndex: 'configure'|'update'|'flash'|'factory' }
 const _boardFlashing        = {};   // { boardIndex: true } — set while esptool flash is in progress
 let boardAutoPushAfterFlash = {};   // always true — kept for compatibility, always auto-push after flash/erase
@@ -73,16 +74,26 @@ function _slotForWcbNumber(wcbNum) {
 // map the wizard could not tell "pushed and ACKed" from "aborted before sending a byte", and
 // reported a green "Done" for both. { ok, aborted, reason }.
 const boardPushOutcome = {};
-// The funcChar to prefix a command sent TO A RELAY BOARD over USB. Must come from the relay’s
-// BASELINE (what the board last reported), never from boardConfigs[relayN]: onGeneralCmdCharChange
-// is wired oninput and rewrites funcChar in EVERY boardConfigs entry the instant the user types a
-// new character — including the relay’s — while the relay board itself still speaks the old one.
-// Using the config value there means the relay never recognises `?MGMT,`, so instead of forwarding
-// the config it splits the line and sprays the fragments out its serial ports and over the mesh.
-// No baseline yet: what the board itself printed at boot, else the factory '?'.
-function _relayFuncChar(relayN) {
-  return boardBaselines[relayN]?.funcChar || boardBootChars[relayN]?.funcChar || '?';
+// The character board n speaks NOW, for a command sent to it at once rather than in a push: an editor's save or
+// remove, a toggle, Identify, the mesh poll, a relay hop, a relay's reboot. Never boardConfigs[n]:
+// onGeneralCmdCharChange is wired oninput and rewrites the characters in EVERY boardConfigs entry the instant the
+// user types one, before any push, while each board still speaks the old ones (W-13). A line the board does not
+// recognise is broadcast as text to its serial ports and over the mesh (WCB.ino handleSingleCommand, step 3) - a
+// relay that does not recognise `?MGMT,` sprays the config it was asked to forward.
+// A push needs none of this: boardGo switches the board's characters first (_pushCharPlan), behind its live ones.
+// The source is what the board was last seen to speak: a switch seen since its baseline was stored (boardBootChars,
+// recorded with the baseline it was seen over: a boot banner, or a push's character switch, which the verify pull
+// replaces only after a reboot and a reconnect), else its baseline (what it last reported), else its boot banner,
+// else the factory default.
+function _liveChar(n, field, dflt) {
+  const seen = boardBootChars[n];
+  if (seen?.[field] && seen.over === boardBaselines[n]) return seen[field];
+  return boardBaselines[n]?.[field] || seen?.[field] || dflt;
 }
+function _liveFuncChar(n) { return _liveChar(n, 'funcChar', '?'); }
+function _liveCmdChar(n)  { return _liveChar(n, 'cmdChar', ';'); }
+// The relay hops' name for it: a relay is a board like any other.
+function _relayFuncChar(relayN) { return _liveFuncChar(relayN); }
 const _pushingBoards = new Set(); // boards with an active boardGo push in flight. The mesh
                                   // discovery poll must not inject ?WDP,DUMP into that stream:
                                   // a dump line can satisfy a pending read and fake an ACK for
@@ -113,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '28.13:28.R.SEP.2026';
+const UI_VERSION = '04.20:18.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1209,10 +1220,20 @@ function _notifyBoardChanged(n) {
   showToast(`Changes pending — push to WCB ${wcbNum} to apply`, 'info', 3000);
 }
 
+// A first pull and a file load show values a board already holds, through the same General handlers a user's edit runs
+// (syncGeneralFromConfig). Nothing is pending then: run them with the change notice held, so no "push to all boards"
+// toast and no amber Push All after every first connect (W-19). The handlers still copy the values into systemConfig,
+// every boardConfigs entry and the General baseline.
+let _mirroringGeneral = false;
 function _notifyGeneralChanged() {
+  if (_mirroringGeneral) return;
   generalSettingsDirty = true;
   updatePushAllButton();
   showToast('Changes pending — push to all boards to apply', 'info', 3000);
+}
+function _mirrorGeneral(fn) {
+  _mirroringGeneral = true;
+  try { fn(); } finally { _mirroringGeneral = false; }
 }
 
 // ─── WCB Dropdown Helpers ──────────────────────────────────────────
@@ -1261,13 +1282,15 @@ function onWCBQuantityChange() {
   }
   const qty = parseInt(sel.value) || 1;
   systemConfig.general.wcbQuantity = qty;
+  updateGeneralBaseline();   // as every General handler does: the next pull compares the quantity too (W-16)
   renderBoards(qty);
-  // Update all existing board WCB-number dropdowns to reflect new range
+  // Update all existing board WCB-number dropdowns to reflect new range - never below a board's own number, which can
+  // sit above the quantity (WDP joins boards there): clamped, the dropdown showed a number the config did not hold (W-18).
   for (let n = 1; n <= qty; n++) {
     const numSel = document.getElementById(`b${n}-wcb-number`);
     if (numSel) {
-      const cur = parseInt(numSel.value) || n;
-      populateWCBDropdown(numSel, qty, Math.min(cur, qty), true);
+      const cur = boardConfigs[n]?.wcbNumber || parseInt(numSel.value) || n;
+      populateWCBDropdown(numSel, Math.max(qty, cur), cur, true);
     }
   }
 }
@@ -1552,7 +1575,10 @@ function onNavicoreIdChange() {
 }
 
 // ─── General Settings Conflict Helpers ────────────────────────────
+// The WCB quantity is one of them: every push writes General's into the board (boardGo, boardGoRemote), so a second
+// board on another quantity was pushed the first board's with no word - a label edit sent ?WCBQ too (W-16).
 const GENERAL_FIELD_LABELS = {
+  wcbQuantity:    'WCB Quantity',
   meshChannel:    'Mesh Channel',
   espnowPassword: 'ESP-NOW Password',
   macOctet2:      'MAC Octet 2',
@@ -1574,6 +1600,7 @@ const GENERAL_FIELD_LABELS = {
 
 function extractGeneralFields(config) {
   return {
+    wcbQuantity:    config.wcbQuantity             ?? 1,
     meshChannel:    config.meshChannel             ?? 1,
     espnowPassword: config.espnowPassword          ?? '',
     macOctet2:      config.macOctet2               ?? '00',
@@ -1619,6 +1646,7 @@ function isDefaultNetworkSettings(fields) {
 function applyGeneralFieldsToBoardConfig(n, fields) {
   const cfg = boardConfigs[n];
   if (!cfg) return;
+  cfg.wcbQuantity    = fields.wcbQuantity;
   cfg.meshChannel    = fields.meshChannel;
   cfg.espnowPassword = fields.espnowPassword;
   cfg.macOctet2      = fields.macOctet2;
@@ -1698,7 +1726,7 @@ async function boardOtaSerial(n) {
   if (!conn?.isConnected())   { showToast('Connect the board via USB first', 'error'); return; }
 
   const btn = document.getElementById(`b${n}-btn-ota-serial`);
-  const fc  = boardConfigs[n]?.funcChar ?? boardBootChars[n]?.funcChar ?? '?';
+  const fc  = _liveFuncChar(n);
   const cmd = (s) => `${fc}OTALOCAL,${s}`;
   let bumped = false;   // did we raise the serial baud for the transfer? (restore on error)
 
@@ -2077,8 +2105,10 @@ function onWCBNumberChange(n) {
   const sel = document.getElementById(`b${n}-wcb-number`);
   if (!sel) return;
   const val = parseInt(sel.value);
-  const qty = systemConfig?.general?.wcbQuantity || WCB_MAX;
-  if (boardConfigs[n] && val >= 1 && val <= qty) boardConfigs[n].wcbNumber = val;
+  // Any number the firmware takes (1..MAX_WCB_COUNT, updateWCBNumber in WCB.ino), not just up to the quantity: the
+  // dropdown offers up to the quantity or the board's own number, whichever is higher (populateUIFromConfig), since WDP
+  // joins boards above the quantity - and a pick above the quantity showed in the dropdown and was dropped (W-18).
+  if (boardConfigs[n] && val >= 1 && val <= WCB_MAX) boardConfigs[n].wcbNumber = val;
   updateBoardAliasUI(n);   // header reads "WCB {wcbNumber} (Alias)"
   onBoardFieldChange(n);
 }
@@ -3132,7 +3162,7 @@ function updateWLEDSectionUI(n) {
 // Fire a runtime ;L<id>,<action> to the selected WLED. Reuses the sequence-Test
 // routing so it works on a direct USB board and a remote board via its relay.
 async function wledSend(n, action) {
-  const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
+  const cmdChar = _liveCmdChar(n);
   const id  = document.getElementById(`b${n}-wled-target`)?.value || '';
   const cmd = `${cmdChar}L${id},${action}`;
   const relayN = remoteRelayForBoard[n];
@@ -3940,6 +3970,9 @@ async function removeMappingRow(rowId, n) {
   // Capture mapping info before removing from DOM
   const type = document.getElementById(`${rowId}-type`)?.value;
   const src  = parseInt(document.getElementById(`${rowId}-src`)?.value);
+  // A bidirectional serial mapping goes with its reverse halves, found now, while the row's destinations are on the page.
+  const reverses = (type === 'Serial' && src && document.getElementById(`${rowId}-bidir`)?.checked)
+    ? _bidirReverseHalves(rowId, n, src) : [];
 
   // Remove any bidir reverse-mapping rows that were created by this row
   _removeBidirRows(rowId);
@@ -3951,31 +3984,88 @@ async function removeMappingRow(rowId, n) {
 
   // Send clear command to the board
   if (!type || !src) return;
-  const config = boardConfigs[n];
-  const lfi    = config?.funcChar || '?';
-  const cmd    = `${lfi}MAP,${type.toUpperCase()},CLEAR,S${src}`;
+  if (await _sendMapCommand(n, `MAP,${type.toUpperCase()},CLEAR,S${src}`)) {
+    showToast(`Mapping cleared on WCB ${boardConfigs[n]?.wcbNumber || n}`, 'success');
+    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(boardConfigs[n]?.mappings || []));
+  }
+  // ...and off each destination board. Dropping the mirrored row from the page alone (_removeBidirRows) left the
+  // reverse mapping running there, and no push clears it: a removed mapping builds nothing (W-21).
+  for (const r of reverses) await _removeReverseHalf(r);
+}
+
+// Send one ?MAP command (its body, without the function identifier) to board n at once: direct, or as a one-chunk MGMT
+// session through its relay. True when it went; a board out of reach is toasted and keeps the mapping until it is
+// cleared by hand.
+async function _sendMapCommand(n, body) {
+  const cmd    = `${_liveFuncChar(n)}${body}`;
   const relayN = remoteRelayForBoard[n];
   try {
     if (relayN) {
       const relayConn = boardConnections[relayN];
-      if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return; }
+      if (!relayConn?.isConnected()) { showToast('Relay not connected — mapping removed locally only', 'warning'); return false; }
       const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-      const relayFc   = _relayFuncChar(relayN);
       const mgmtTargetWCB = boardConfigs[n]?.wcbNumber || n;
-      const mgmtCmd = `${relayFc}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`;
-      await sendMgmtReliable(relayConn, mgmtCmd, relayN);
+      await sendMgmtReliable(relayConn, `${_relayFuncChar(relayN)}MGMT,FRAG,${mgmtTargetWCB},${sessionId},0,1,${cmd}`, relayN);
     } else {
       const conn = boardConnections[n];
-      if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return; }
+      if (!conn?.isConnected()) { showToast('Board not connected — mapping removed locally only', 'info'); return false; }
       await conn.send(cmd + '\r');
       termLog(n, cmd, 'in');
     }
-    showToast(`Mapping cleared on WCB ${config?.wcbNumber || n}`, 'success');
-    if (boardBaselines[n]) boardBaselines[n].mappings = JSON.parse(JSON.stringify(config?.mappings || []));
+    return true;
   } catch (err) {
     console.error('[removeMappingRow] send failed:', err);
     showToast('Failed to clear mapping on board', 'error');
+    return false;
   }
+}
+
+// Is mapping m the reverse half of S<src> on board srcWcb: a serial mapping from `port` back to W<srcWcb>S<src>?
+function _isReverseOf(m, port, srcWcb, src) {
+  return String(m.type).toUpperCase() === 'SERIAL' && m.sourcePort === port &&
+         (m.destinations ?? []).some(d => d.wcbNumber === srcWcb && d.port === src);
+}
+
+// The reverse halves of the bidirectional serial mapping on row rowId (board n, source port src): for each remote
+// destination W<d>S<p>, the mapping S<p> -> W<n>S<src> that board d holds - by its baseline, what was sent to it.
+// Found by config, not by the page's bidir link (data-bidir-from): a pull draws a board's cards again under new ids
+// and the link is gone, while detectBidirMappings ticks the box again from the configs alone.
+function _bidirReverseHalves(rowId, n, src) {
+  const srcWcb = boardConfigs[n]?.wcbNumber || n;
+  const out = [];
+  document.getElementById(`${rowId}-destinations`)?.querySelectorAll('[id^="map-dest-"]').forEach(destRow => {
+    const wcb  = parseInt(destRow.querySelector('[id$="-wcb"]')?.value) || 0;
+    const port = parseInt(destRow.querySelector('[id$="-port"]')?.value);
+    const slot = wcb > 0 && wcb !== srcWcb ? _slotForWcbNumber(wcb) : null;
+    if (slot === null || slot === n || Number.isNaN(port)) return;
+    const held = boardBaselines[slot]?.mappings?.find(m => _isReverseOf(m, port, srcWcb, src));
+    if (held) out.push({ slot, port, srcWcb, src, held: JSON.parse(JSON.stringify(held)) });
+  });
+  return out;
+}
+
+// Take a reverse half off its board: ?MAP,SERIAL,CLEAR when it was that port's only destination, else the mapping again
+// without it. The board's config and baseline lose it too, and its cards are drawn again if they still showed it.
+async function _removeReverseHalf({ slot, port, srcWcb, src, held }) {
+  const back = (d) => d.wcbNumber === srcWcb && d.port === src;
+  const rest = held.destinations.filter(d => !back(d));
+  const body = rest.length
+    ? `MAP,SERIAL,S${port}${held.rawMode ? ',R' : ''}` + rest.map(d => (d.wcbNumber === 0 ? `,S${d.port}` : `,W${d.wcbNumber}S${d.port}`)).join('')
+    : `MAP,SERIAL,CLEAR,S${port}`;
+  const drop = (list) => {               // the reverse destination, and the mapping once nothing is left of it
+    const i = (list ?? []).findIndex(m => _isReverseOf(m, port, srcWcb, src));
+    if (i < 0) return false;
+    list[i].destinations = list[i].destinations.filter(d => !back(d));
+    if (!list[i].destinations.length) list.splice(i, 1);
+    return true;
+  };
+  if (drop(boardConfigs[slot]?.mappings)) {
+    populateMappingsFromConfig(slot, boardConfigs[slot]);
+    detectBidirMappings(slot);
+  }
+  if (!(await _sendMapCommand(slot, body))) return;
+  drop(boardBaselines[slot]?.mappings);
+  showToast(`Reverse mapping cleared on WCB ${boardConfigs[slot]?.wcbNumber || slot}`, 'success');
 }
 
 function _removeBidirRows(sourceRowId) {
@@ -4164,7 +4254,7 @@ async function saveMappingRow(rowId, n) {
     if (port || port === 0) destinations.push({ wcbNumber: wcb, port });
   });
 
-  const lfi = config.funcChar || '?';
+  const lfi = _liveFuncChar(n);
   let cmd = `${lfi}MAP,${type.toUpperCase()},S${src}`;
   if (type === 'Serial' && raw) cmd += ',R';
   for (const dest of destinations) {
@@ -4233,7 +4323,7 @@ async function saveMappingRow(rowId, n) {
           ?? removed.wcbNumber
         );
         const removedCfg    = boardConfigs[removedSlot];
-        const removedLfi    = removedCfg?.funcChar || '?';
+        const removedLfi    = _liveFuncChar(removedSlot);
         const clearCmd      = `${removedLfi}MAP,PWM,CLEAR,OUT,S${removed.port}`;
         // Fall back to the source board's relay if the removed board has no own relay/connection —
         // it's in the same ESP-NOW network so the same relay can reach it.
@@ -4244,7 +4334,7 @@ async function saveMappingRow(rowId, n) {
           let sentClear = false;
           if (removedRelayN && boardConnections[removedRelayN]?.isConnected()) {
             const sid      = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-            const relayFc  = boardConfigs[removedRelayN]?.funcChar || '?';
+            const relayFc  = _liveFuncChar(removedRelayN);
             const mgmt = `${relayFc}MGMT,FRAG,${removedWCBNum},${sid},0,1,${clearCmd}`;
             await sendMgmtReliable(boardConnections[removedRelayN], mgmt, removedRelayN);
             sentClear = true;
@@ -4291,7 +4381,7 @@ async function saveMappingRow(rowId, n) {
           }
 
           // Build the reverse command using the destination board's funcChar
-          const destLfi   = destCfg.funcChar || '?';
+          const destLfi   = _liveFuncChar(destSlot);
           let   reverseCmd = `${destLfi}MAP,SERIAL,S${dest.port}`;
           if (raw) reverseCmd += ',R';
           reverseCmd += `,W${srcWcb}S${src}`;
@@ -4302,7 +4392,7 @@ async function saveMappingRow(rowId, n) {
           try {
             if (destRelayN && boardConnections[destRelayN]?.isConnected()) {
               const sid         = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-              const destRelayFc = boardConfigs[destRelayN]?.funcChar || '?';
+              const destRelayFc = _liveFuncChar(destRelayN);
               const destWCBNum  = boardConfigs[destWcb]?.wcbNumber || destWcb;
               const mgmt = `${destRelayFc}MGMT,FRAG,${destWCBNum},${sid},0,1,${reverseCmd}`;
               await sendMgmtReliable(boardConnections[destRelayN], mgmt, destRelayN);
@@ -4633,7 +4723,7 @@ async function removeSequenceRow(n, rowId) {
   if (!key) return;   // no key — nothing to tell the board
 
   // Send ?SEQ,CLEAR,key immediately so the board doesn't wait for a full push
-  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const funcChar = _liveFuncChar(n);
   const cmd = `${funcChar}SEQ,CLEAR,${key}`;
   const relayN = remoteRelayForBoard[n];
 
@@ -4732,7 +4822,7 @@ async function playSequence(n, rowId) {
   const delim = boardConfigs[n]?.delimiter ?? '^';
   if (!validateSequenceValue(seqTextareaToValue(ta?.value ?? '', delim))) return;
 
-  const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
+  const cmdChar = _liveCmdChar(n);
   // TEST defaults to this ONE board (,L = local-only) so validating a single row doesn't
   // fire the whole mesh. The "Test mesh-wide" checkbox drops the ,L so you can exercise the
   // real mesh-wide fan-out — every board that has this key runs its own copy.
@@ -4770,7 +4860,7 @@ async function updateSequence(n, rowId) {
   const ta = row.querySelector('.seq-val-textarea');
 
   const delim    = boardConfigs[n]?.delimiter ?? '^';
-  const funcChar = boardConfigs[n]?.funcChar  ?? '?';
+  const funcChar = _liveFuncChar(n);
   const value    = ta ? _seqRowValue(row, ta, delim) : '';
   if (!value) { showToast('Sequence value is empty', 'error'); return; }
   // Firmware rejects IF embedded in ;t / ;w payloads — abort the save
@@ -4975,7 +5065,7 @@ async function updateTempVariable(n, rowId) {
   }
   const value = parseInt(row.querySelector('.var-value-input')?.value, 10);
   if (!Number.isInteger(value)) { showToast('Variable value must be an integer', 'error'); return; }
-  const cmdChar = boardConfigs[n]?.cmdChar ?? ';';
+  const cmdChar = _liveCmdChar(n);
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;
   try {
@@ -5003,7 +5093,7 @@ async function clearVariableRow(n, rowId) {
   const name = (nameInput?.dataset?.originalName || nameInput?.value || '').trim();
   row.remove();
   if (!name) return;   // never set — nothing on the board
-  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const funcChar = _liveFuncChar(n);
   try {
     const sent = await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${name}`);
     if (sent) showToast(`Variable "${name}" cleared on WCB ${n}`, 'info');
@@ -5069,7 +5159,7 @@ async function updateVariable(n, rowId) {
   const value = parseInt(row.querySelector('.var-value-input')?.value, 10);
   if (!Number.isInteger(value)) { showToast('Variable value must be an integer', 'error'); return; }
 
-  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const funcChar = _liveFuncChar(n);
   const renamed  = originalName && originalName !== name;
   const btn = document.getElementById(`${rowId}-update`);
   if (btn) btn.disabled = true;
@@ -5129,7 +5219,7 @@ async function removeVariableRow(n, rowId) {
   if (!name) return;   // never saved — nothing to tell the board
 
   // Send ?VAR,CLEAR,name immediately so the board doesn't wait for a full push
-  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const funcChar = _liveFuncChar(n);
   try {
     const sent = await sendVariableCommand(n, `${funcChar}VAR,CLEAR,${name}`);
     if (sent) showToast(`Variable "${name}" removed from WCB ${n}`, 'info');
@@ -5163,7 +5253,7 @@ function parseVarList(lines) {
 // the (unwrapped) response lines; finishes early on the "N/100 used"/"(none)" footer.
 function collectVarList(n, timeoutMs = 3500) {
   const relayN = remoteRelayForBoard[n];
-  const fc = boardConfigs[n]?.funcChar ?? '?';
+  const fc = _liveFuncChar(n);
   return new Promise((resolve, reject) => {
     let conn, extract, sendPromise;
     if (relayN !== undefined) {
@@ -5759,6 +5849,7 @@ class BoardConnection {
       updateBoardSwVersionDisplay(n);
     }
     if (charDetected) {
+      boardBootChars[n].over = boardBaselines[n];   // seen after this baseline: newer than it (_liveChar)
       // Also keep the general DOM fields and systemConfig in sync so
       // subsequent buildCommandString calls use the right chars.
       const fc = boardConfigs[n].funcChar;
@@ -6488,7 +6579,7 @@ async function startRemoteTermSession(relayN, targetN) {
     const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
     const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
     const relayFc    = _relayFuncChar(relayN);
-    const targetFc   = boardConfigs[targetN]?.funcChar  || '?';
+    const targetFc   = _liveFuncChar(targetN);
     const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
     await sendMgmtReliable(relayConn, rtermStartCmd, null, 3, 250);   // 3× for reliable arming — see note above
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
@@ -6502,7 +6593,7 @@ async function stopRemoteTermSession(relayN, targetN) {
   try {
     const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
     const stopRelayFc  = _relayFuncChar(relayN);
-    const stopTargetFc = boardConfigs[targetN]?.funcChar || '?';
+    const stopTargetFc = _liveFuncChar(targetN);
     const stopWCBNum   = boardConfigs[targetN]?.wcbNumber || targetN;
     const rtermStopCmd = `${stopRelayFc}MGMT,FRAG,${stopWCBNum},${sessionId},0,1,${stopTargetFc}RTERM,STOP`;
     await sendMgmtReliable(relayConn, rtermStopCmd, null);
@@ -6572,6 +6663,13 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-etm-boot',    newFields.etmBoot);
     set('g-etm-count',   newFields.etmCount);
     set('g-etm-delay',   newFields.etmDelay);
+    // The quantity as syncGeneralFromConfig shows one: an option above the collapsed range needs the full list first.
+    const wcbqSel = document.getElementById('g-wcbq');
+    if (wcbqSel && newFields.wcbQuantity > WCB_SHOW_COLLAPSED) {
+      populateWCBDropdown(wcbqSel, Math.max(newFields.wcbQuantity, WCB_MAX), newFields.wcbQuantity, true);
+    }
+    set('g-wcbq', newFields.wcbQuantity);
+    onWCBQuantityChange();
     onGeneralPasswordChange();
     onGeneralMacChange();
     onMeshChannelChange();
@@ -7175,7 +7273,7 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
         // Always try the fixed bootstrap command first — works regardless of the
         // board's configured funcChar (new firmware).  Then also send the
         // funcChar-prefixed form as a fallback for pre-bootstrap firmware.
-        const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
+        const pullFuncChar = _liveFuncChar(n);
         try {
           await conn.send('WCB_WEBTOOL_CONFIG_PULL\r');
           await sleep(200);
@@ -7238,7 +7336,7 @@ async function boardPull(n, opts = {}) {
   termLog(n, BOOTSTRAP_CMD, 'in');
   let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000);
   if (!raw.includes('End of Backup')) {
-    const pullFuncChar = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
+    const pullFuncChar = _liveFuncChar(n);
     termLog(n, `${pullFuncChar}backup`, 'in');
     raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
   }
@@ -7420,7 +7518,7 @@ async function fetchBoardVersion(n) {
   if (!conn?.isConnected()) return;
   try {
     // Use the board's known funcChar — ?version is ignored if funcChar ≠ '?'
-    const fc    = boardConfigs[n]?.funcChar || boardBaselines[n]?.funcChar || boardBootChars[n]?.funcChar || '?';
+    const fc    = _liveFuncChar(n);
     const raw   = await conn.sendAndCollect(`${fc}version`, 3000, 'End of Version');
     const match = raw.match(/Software Version:\s*(\S+)/i);
     if (match) {
@@ -7467,6 +7565,35 @@ async function _reshareAfterFlash(conn, n) {
 // and only the board's own characters say what order works.
 function _pushCharPlan(config, baseline) {
   return WCBParser.planCommandCharChange(baseline ?? null, config);
+}
+
+// The verify pull after a reboot on the shared port, which the direct path gets from its reconnect (W-14). Call it as
+// soon as `?reboot` is sent. The hub holds the port open through the reboot (a UART-bridge WCB keeps USB up through a
+// software restart), so nothing closes or reopens to say when the board is back: its own lines do. The firmware
+// answers `Reboot queued` and restarts once its command queue has been quiet for 4 s (PWM_REBOOT_QUIET_MS, WCB.ino;
+// 20 s at the latest); older firmware said `Rebooting in 2 seconds`. Then it boots and prints its banner. The pull runs
+// 3 s after the banner's `Software Version:` line - as the direct path pulls 3 s after it reopens the port, which is
+// when that board starts booting - and on the bench the banner came 9-10 s after `?reboot`, so no fixed wait fits.
+// Without a banner: 30 s after a restart was announced (the 20 s cap, a boot, a margin), or 4 s after `?reboot` when
+// none was - a board that said nothing about a restart is asked at once, and the pull says whether it answers.
+function _pullAfterSharedReboot(n, conn) {
+  let timer = null, announced = false;
+  const done = () => { clearTimeout(timer); conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine); };
+  const pullIn = (ms) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      done();
+      if (boardConnections[n] !== conn || !conn.isConnected()) return;   // disconnected, or the slot changed hands
+      termLog(n, 'Auto-pulling config…', 'sys');
+      boardPull(n);
+    }, ms);
+  };
+  const onLine = (line) => {
+    if (/^Software Version:/.test(line)) pullIn(3000);
+    else if (!announced && /^(Reboot queued|Rebooting)/.test(line)) { announced = true; pullIn(30000); }
+  };
+  conn._dataCallbacks.push(onLine);
+  pullIn(4000);
 }
 
 async function boardGo(n, opts = {}) {
@@ -7805,7 +7932,7 @@ async function boardGo(n, opts = {}) {
     const preEraseConfigSnapshot  = boardConfigs[n] ? JSON.parse(JSON.stringify(boardConfigs[n])) : null;
     const preEraseGeneralSnapshot = captureGeneralDOMSnapshot();
 
-    const eraseFc = boardConfigs[n]?.funcChar || '?';
+    const eraseFc = _liveFuncChar(n);
     termLog(n, `${eraseFc}ERASE,NVS`, 'in');
     try {
       await conn.send(`${eraseFc}ERASE,NVS\r`);
@@ -7968,6 +8095,7 @@ async function boardGo(n, opts = {}) {
     // leave the board on the old char while the rest of the push went out with '?' —
     // unrecognised, so the board sprayed every command to its serial ports and over the mesh.
     if (charPlan.commands.length) {
+      let switched = true;
       for (const cmd of charPlan.commands) {
         termLog(n, cmd, 'in');
         // These char-change commands gate every command that follows, so a
@@ -7976,8 +8104,16 @@ async function boardGo(n, opts = {}) {
         if (!r.ok) {
           termLog(n, `No response to "${cmd}" — retrying`, 'sys');
           r = await conn.sendAndAwaitIdle(cmd, { quietMs: 250, hardTimeoutMs: 4000 });
-          if (!r.ok) termLog(n, `Still no response to "${cmd}" — board may not have applied it`, 'err');
+          if (!r.ok) { switched = false; termLog(n, `Still no response to "${cmd}" — board may not have applied it`, 'err'); }
         }
+      }
+      // The board speaks the new characters from here on, but its baseline keeps the old ones until the verify pull
+      // replaces it - after a reboot and a reconnect, on a push that reboots. Record the switch for the commands sent
+      // to it at once meanwhile (_liveChar): Push All's relay reboot, the mesh poll. Never into the baseline, which the
+      // next push diffs against. An unanswered switch leaves the board's characters unknown, so the baseline's stand.
+      if (switched) {
+        boardBootChars[n] = { funcChar: config.funcChar, delimiter: config.delimiter, cmdChar: config.cmdChar,
+                              over: boardBaselines[n] };
       }
     }
 
@@ -8043,6 +8179,10 @@ async function boardGo(n, opts = {}) {
           // (this.port===null) and falsely report "did not come back". Stay Connected.
           conn._rebootManaged = false;
           termLog(n, 'Board rebooting on the shared port…', 'sys');
+          // The verify pull the direct path runs after its reconnect - without it the baseline kept the values from
+          // before this push, and the next push sent every change again and rebooted the board again (W-14).
+          // The wizard does its own (wizardWatchForConnect), as on the direct path.
+          if (!_wizardOpen) _pullAfterSharedReboot(n, conn);
         } else {
           await conn.closeForReconnect();
           updateConnectionUI(n, false);
@@ -8968,9 +9108,11 @@ function syncGeneralFromConfig(config) {
   // oninput/onchange, so systemConfig.general would otherwise stay at its defaults.
   if (systemConfig?.general) systemConfig.general.wcbQuantity = config.wcbQuantity;
   if (systemConfig?.general) systemConfig.general.meshChannel = config.meshChannel ?? 1;
-  onGeneralPasswordChange();
-  onGeneralMacChange();
-  onGeneralCmdCharChange();
+  _mirrorGeneral(() => {          // the board's own values: nothing pending (W-19)
+    onGeneralPasswordChange();
+    onGeneralMacChange();
+    onGeneralCmdCharChange();
+  });
 
   const etmEl = document.getElementById('g-etm-enabled');
   if (etmEl) etmEl.checked = config.etm.enabled;
@@ -9194,12 +9336,22 @@ async function boardGoAll() {
     const conn = boardConnections[n];
     if (!conn?.isConnected()) continue;
     await sleep(300);
-    const relayFuncChar = boardConfigs[n]?.funcChar || '?';
+    const relayFuncChar = _liveFuncChar(n);
     conn._rebootManaged = true;   // prevent _startReading race on fast USB disconnect
     await conn.send(`${relayFuncChar}reboot\r`);
     termLog(n, `${relayFuncChar}reboot`, 'in');
     showToast(`WCB ${n} rebooting…`, 'success');
     updateBoardStatusBadge(n, 'configured');
+    if (conn._shared) {
+      // A relay on the shared port - the connection the first board of a page gets - has no port of its own to close
+      // and reopen: reconnect() returned false at once, the page said it "did not come back" and greyed its card while
+      // the hub still held the port (W-15). The hub keeps the port through the reboot, as boardGo's shared path knows:
+      // stay connected, and pull the relay again once it is back.
+      conn._rebootManaged = false;
+      termLog(n, 'Board rebooting on the shared port…', 'sys');
+      _pullAfterSharedReboot(n, conn);
+      continue;
+    }
     await conn.closeForReconnect();
     updateConnectionUI(n, false);
     termLog(n, 'Board disconnected — attempting reconnect…', 'sys');
@@ -9245,6 +9397,7 @@ function loadSystemFileContent(content) {
     generalBaseline = {
       sourceBoard: 'file',
       fields: extractGeneralFields({
+        wcbQuantity:    system.general.wcbQuantity,
         meshChannel:    system.general.meshChannel,
         espnowPassword: system.general.espnowPassword,
         macOctet2:      system.general.macOctet2,
@@ -9268,6 +9421,11 @@ function loadSystemFileContent(content) {
     }));
 
     renderBoards(system.general.wcbQuantity);
+    // A board above the quantity (one WDP joined) and a client slot get sections of their own, as the export wrote
+    // them: the floor alone left them with none, so the next export wrote them from a missing card, with no labels,
+    // sequences or variables (W-17). The same numbers populateUIFromConfig fills below.
+    addDiscoveredBoards(system.boards.map((b, i) => b.wcbNumber || (i + 1))
+                                     .filter((n) => n > system.general.wcbQuantity));
     for (let i = 0; i < system.boards.length; i++) {
       const board = system.boards[i];
       const n = board.wcbNumber || (i + 1);
@@ -9497,7 +9655,7 @@ async function toggleDebug(n, modeKey) {
   state[modeKey] = !state[modeKey];
   const onOff    = state[modeKey] ? 'ON' : 'OFF';
 
-  const funcChar = boardConfigs[n]?.funcChar ?? '?';
+  const funcChar = _liveFuncChar(n);
   const modeInfo = DEBUG_MODES.find(m => m.key === modeKey);
   if (!modeInfo) return;
 
@@ -9981,7 +10139,7 @@ async function boardIdentify(n) {
     try {
       const sessionId    = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
       const idRelayFc    = _relayFuncChar(relayN);
-      const idTargetFc   = boardConfigs[n]?.funcChar      || '?';
+      const idTargetFc   = _liveFuncChar(n);
       const idTargetWCB  = boardConfigs[n]?.wcbNumber     || n;
       const cmd = `${idRelayFc}MGMT,FRAG,${idTargetWCB},${sessionId},0,1,${idTargetFc}IDENTIFY`;
       termLog(relayN, cmd, 'in');
@@ -9997,7 +10155,7 @@ async function boardIdentify(n) {
   const conn = boardConnections[n];
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
   try {
-    const idFc = boardConfigs[n]?.funcChar || '?';
+    const idFc = _liveFuncChar(n);
     await conn.send(`${idFc}IDENTIFY\r`);
     termLog(n, `${idFc}IDENTIFY`, 'in');
     showToast(`WCB ${n} identifying — watch the LED`, 'info', 5500);
@@ -10048,7 +10206,7 @@ async function doFactoryResetEraseOnly() {
   if (!conn?.isConnected()) { showToast('Board not connected', 'error'); return; }
 
   // ── Erase-only path ──────────────────────────────────────────────
-  const eraseOnlyFc = boardConfigs[n]?.funcChar || '?';
+  const eraseOnlyFc = _liveFuncChar(n);
   termLog(n, `${eraseOnlyFc}ERASE,NVS`, 'in');
   try {
     await conn.send(`${eraseOnlyFc}ERASE,NVS\r`);
@@ -12834,7 +12992,7 @@ async function fetchHCRStatus() {
       : 'Board not connected.';
     return;
   }
-  const fc = boardConfigs[n]?.funcChar || '?';
+  const fc = _liveFuncChar(n);
   // Helper: drop the result if the user closed the modal or switched to a
   // different board / a different stats view while sendAndCollect was awaiting.
   // Otherwise a late HCR response would overwrite the freshly-opened view.
@@ -12872,7 +13030,7 @@ async function fetchStatsData() {
 
   const isEtm  = type === 'etm';
   const config = boardConfigs[n];
-  const lfi    = config?.funcChar || '?';
+  const lfi    = _liveFuncChar(n);
   const cmd    = isEtm ? `${lfi}ETM,CHAR` : `${lfi}STATS`;
   const output = document.getElementById('stats-modal-output');
   if (!output) return;
@@ -13420,7 +13578,7 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
 function _wdpMeshConn() {
   for (const [k, c] of Object.entries(boardConnections)) {
     if (c && c.isConnected()) {
-      const fc = boardConfigs[k]?.funcChar || boardBootChars[k]?.funcChar || '?';
+      const fc = _liveFuncChar(k);
       return { slot: k, conn: c, fc, wcbNum: boardConfigs[k]?.wcbNumber || k };
     }
   }
@@ -13482,7 +13640,7 @@ function wdpForgetDevice(btn) {
   if (!t) return;
   const sub = `DA,FORGET,S${s},${type}`;
   if (n === +t.wcbNum) { _wdpMeshCommand(sub); return; }
-  const targetFc  = Object.values(boardConfigs).find(c => +c?.wcbNumber === n)?.funcChar || '?';
+  const targetFc  = _liveFuncChar(_slotForWcbNumber(n));
   const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
   sendMgmtReliable(t.conn, `${t.fc}MGMT,FRAG,${n},${sessionId},0,1,${targetFc}WDP,${sub}`, t.slot)
     .catch(() => {})
