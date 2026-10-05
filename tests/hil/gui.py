@@ -757,15 +757,16 @@ class App:
                     kind, _n, _p = wiring.endpoint(other)
                     return fixtures.get(kind, {}).get("title") or wiring.endpoint_label(b, other)
             dev = b.port_devices().get(ep)
-            return describe_device(dev) if dev else {"navicore:SBO": "SBUS OUT", "navicore:MAE": "Maestro bus"}.get(ep)
+            return describe_device(dev) if dev else None
 
         def header_note(nc, wcb_or_pin, port, tap, prefix=""):
             ep = f"navicore:{port}" if nc else f"W{wcb_or_pin}{port}"
             where = f"NaviCore {NC_SHORT.get(port, port)}" if nc else f"W{wcb_or_pin} {port}"
             note = f"→ {where}"
             if tap:
+                # A tap listens to the board's TX line only: what it sends to the device there, never the replies.
                 name = line_name(ep)
-                note += f", taps {name}" if name else ", listen-only"
+                note += f" TX, to {name}" if name else " TX, listen-only"
             return (prefix + " " if prefix else "") + note
 
         probe_note = {}
