@@ -9,6 +9,7 @@ number the checkpoint recorded at the start (usb_fingerprint): a second board an
 plugged in at home - is never adopted as the bench's without asking.
 """
 import re
+import sys
 import time
 
 from serial.tools import list_ports
@@ -106,9 +107,27 @@ def identify_port(port, wcb_home=False):
         return {"kind": "error", "error": str(e).splitlines()[0]}
 
 
+# macOS lists a USB serial chip once per driver that claims it: Apple's own (cu.usbserial-*, cu.usbmodem*) and the
+# vendor's when it is installed (cu.SLAB_USBtoUART*, cu.wchusbserial*). Both nodes open the same board, so Find devices
+# identified each board twice and a resume saw one USB serial on two ports. The vendor's node is the one kept.
+_VENDOR_NODES = ("/dev/cu.SLAB_USBtoUART", "/dev/cu.wchusbserial")
+
+
+def comports():
+    """list_ports.comports() with each board once. Windows and Linux already list one port per board. On macOS a port
+    is dropped when a vendor-driver node has the same vid, pid, USB serial and location; a dual-UART chip's ports share
+    those too, but each driver lists all of them, so the vendor's set is still complete."""
+    ports = list(list_ports.comports())
+    if sys.platform != "darwin":
+        return ports
+    vendor = {(p.vid, p.pid, p.serial_number, p.location) for p in ports if p.device.startswith(_VENDOR_NODES)}
+    return [p for p in ports if p.vid is None or p.device.startswith(_VENDOR_NODES)
+            or (p.vid, p.pid, p.serial_number, p.location) not in vendor]
+
+
 def usb_ports():
     """{COM name: ListPortInfo} for every ESP32-type USB serial port. Enumerates only - opens nothing."""
-    return {p.device: p for p in list_ports.comports() if p.vid in ESP_VIDS}
+    return {p.device: p for p in comports() if p.vid in ESP_VIDS}
 
 
 def usb_fingerprint(port, ports=None):

@@ -12775,5 +12775,43 @@ def t_unmatched_selectors(tmp):
 TESTS.append(t_unmatched_selectors)
 
 
+def t_comports_one_per_board(tmp):
+    """identify.comports keeps one port per board. On macOS Apple's driver and the vendor's both list a CP210x or CH34x,
+    and the vendor's node is the one kept: as captured on Greg's Mac, two CP2102N, a CH9102 and a CH343. Espressif's
+    native USB has no vendor driver and stays, a dual-UART chip keeps both ports, and off macOS nothing is dropped."""
+    from types import SimpleNamespace as P
+    from hil import identify
+    ports = [P(device="/dev/cu.Bluetooth-Incoming-Port", vid=None, pid=None, serial_number=None, location=None),
+             P(device="/dev/cu.usbserial-144230", vid=0x10C4, pid=0xEA60, serial_number="f431", location="20-4.2.3"),
+             P(device="/dev/cu.SLAB_USBtoUART", vid=0x10C4, pid=0xEA60, serial_number="f431", location="20-4.2.3"),
+             P(device="/dev/cu.usbserial-144210", vid=0x10C4, pid=0xEA60, serial_number="f244", location="20-4.2.1"),
+             P(device="/dev/cu.SLAB_USBtoUART9", vid=0x10C4, pid=0xEA60, serial_number="f244", location="20-4.2.1"),
+             P(device="/dev/cu.wchusbserial52D20606051", vid=0x1A86, pid=0x55D4, serial_number="52D2", location="20-4.3.2"),
+             P(device="/dev/cu.usbserial-52D20606051", vid=0x1A86, pid=0x55D4, serial_number="52D2", location="20-4.3.2"),
+             P(device="/dev/cu.wchusbserial5B7B0602571", vid=0x1A86, pid=0x55D3, serial_number="5B7B", location="20-3.3.2"),
+             P(device="/dev/cu.usbmodem5B7B0602571", vid=0x1A86, pid=0x55D3, serial_number="5B7B", location="20-3.3.2"),
+             P(device="/dev/cu.usbmodem144101", vid=0x303A, pid=0x1001, serial_number="E0:72", location="20-4.1"),
+             P(device="/dev/cu.usbserial-1450", vid=0x1A86, pid=0x55D2, serial_number="DUAL", location="20-5"),
+             P(device="/dev/cu.usbserial-1451", vid=0x1A86, pid=0x55D2, serial_number="DUAL", location="20-5"),
+             P(device="/dev/cu.wchusbserial1450", vid=0x1A86, pid=0x55D2, serial_number="DUAL", location="20-5"),
+             P(device="/dev/cu.wchusbserial1451", vid=0x1A86, pid=0x55D2, serial_number="DUAL", location="20-5")]
+    saved = (identify.list_ports.comports, identify.sys)
+    try:
+        identify.list_ports.comports = lambda: list(ports)
+        identify.sys = P(platform="darwin")      # not the real sys: nothing else in the process sees it
+        got = [p.device for p in identify.comports()]
+        assert got == ["/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.SLAB_USBtoUART", "/dev/cu.SLAB_USBtoUART9",
+                       "/dev/cu.wchusbserial52D20606051", "/dev/cu.wchusbserial5B7B0602571", "/dev/cu.usbmodem144101",
+                       "/dev/cu.wchusbserial1450", "/dev/cu.wchusbserial1451"], got
+        assert "/dev/cu.Bluetooth-Incoming-Port" not in identify.usb_ports() and len(identify.usb_ports()) == 7
+        identify.sys = P(platform="win32")
+        assert [p.device for p in identify.comports()] == [p.device for p in ports]
+    finally:
+        identify.list_ports.comports, identify.sys = saved
+
+
+TESTS.append(t_comports_one_per_board)
+
+
 if __name__ == "__main__":
     sys.exit(main())

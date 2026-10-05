@@ -49,7 +49,7 @@ except ImportError:
 
 from hil import checkpoint, durations, optin, runner, servos, wiring, wizard  # noqa: E402
 from hil.checkpoint import CheckpointError, RunBusy  # noqa: E402
-from hil.identify import ESP_VIDS, identify_port, usb_fingerprint  # noqa: E402
+from hil.identify import ESP_VIDS, comports, identify_port, usb_fingerprint  # noqa: E402
 from hil.navicore import NaviCore  # noqa: E402
 from hil.resume import ResumeAborted, ResumeBlocked  # noqa: E402
 from hil.sbus import SbusCtl  # noqa: E402
@@ -286,7 +286,7 @@ class App:
             w.destroy()
         # USB serial ports only. Every bench device is a USB board; a Bluetooth SPP port (no VID) blocks writes
         # indefinitely when nothing is paired, and on 2026-09-22 sbus ended up on COM19 that way and hung a run.
-        ports = sorted(p.device for p in list_ports.comports() if p.vid is not None)
+        ports = sorted(p.device for p in comports() if p.vid is not None)
         self.add_port_cb.configure(values=ports)
         for col, h in enumerate(("Device", "Kind", "COM port", "Status", "", "")):
             ttk.Label(self.dev_grid, text=h, font=BOLD).grid(row=0, column=col, sticky="w", padx=8, pady=4)
@@ -1280,7 +1280,7 @@ class App:
         b = self.bench
         b.close()
         before = {n: d.get("port") for n, d in b.cfg["devices"].items()}
-        ports = [p for p in list_ports.comports() if p.vid in ESP_VIDS]
+        ports = [p for p in comports() if p.vid in ESP_VIDS]
         self.emit("status", f"Scanning {len(ports)} ESP32 port(s)…")
         found = {}
         for p in ports:
