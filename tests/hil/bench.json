@@ -37,6 +37,18 @@
       "kind": "wcb",
       "wcb": 3,
       "note": "HW 3.2 (ESP32-S3, 16 MB), CH343"
+    },
+    "probe3": {
+      "port": "/dev/cu.SLAB_USBtoUART18",
+      "kind": "probe",
+      "note": "V2.4 board on NaviCore's own pins (D-NC37), formerly a WCB 6.2.0; wcb_probe 7",
+      "mac": "0C:8B:95:B4:02:04"
+    },
+    "probe4": {
+      "port": "/dev/cu.SLAB_USBtoUART20",
+      "kind": "probe",
+      "note": "V2.4 board on WCB3's ports; wcb_probe 7",
+      "mac": "14:2B:2F:AE:21:E8"
     }
   },
   "mesh_only_wcbs": [],

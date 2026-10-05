@@ -2349,6 +2349,17 @@ def main():
             else:
                 app.status("--resume: no paused or interrupted run to resume")
         root.after(1500, start_resume)
+    # gui.py --find-devices and/or --discover open and press those buttons, in that order (the worker runs them one
+    # after the other): bench setup started from a script can be watched in the Devices and Wiring tabs and the Log.
+    if "--find-devices" in sys.argv[1:]:
+        root.after(1500, lambda: app.submit("find devices", app.job_find_devices, app.paused_path()))
+    if "--discover" in sys.argv[1:]:
+        def start_discover():
+            for tab in app.nb.tabs():
+                if "Wiring" in app.nb.tab(tab, "text"):
+                    app.nb.select(tab)
+            app.submit("auto-detect wires", app.job_discover)
+        root.after(1600, start_discover)
     root.mainloop()
 
 
