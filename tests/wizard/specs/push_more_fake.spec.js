@@ -182,19 +182,19 @@ test('wizard.push_fake_all_staged Push All runs remote boards first with the reb
 });
 
 test('wizard.push_fake_all_shared_relay (should) Push All with the relay on the shared port reboots it without reporting it lost: no "did not come back", and its card stays connected (W-15)', async ({ page }) => {
-  test.fail(true, 'W-15: boardGoAll stage 4 closes and reconnects every relay (app.js:9193-9218) with no shared-port branch; ' +
-                  'a shared connection has no port of its own, so reconnect() returns false at once (app.js:5393) - the page ' +
-                  'says the relay did not come back and greys its card, while the hub still holds the port');
   await threeBoards(page, { sharedRelay: true });
+  // A card shows its connection by its Connect button (updateConnectionUI; no card has a b<n>-conn-label, as
+  // board_more.spec.js notes), and the fake connects without the page's connect path: show WCB1 connected first.
+  await page.evaluate(() => updateConnectionUI(1, true));
   await page.evaluate(() => boardGoAll());
   await page.waitForTimeout(4500);
   const r = await page.evaluate(() => ({
     sent: __fake.sent(1), toasts: __fake.toastText(),
-    label: document.getElementById('b1-conn-label')?.textContent, go: document.getElementById('b1-btn-go')?.disabled,
+    connect: document.getElementById('b1-btn-connect')?.textContent, go: document.getElementById('b1-btn-go')?.disabled,
   }));
   expect(r.sent).toContain('?reboot');
   expect(r.toasts).not.toContain('did not come back');
-  expect([r.label, r.go], 'the shared relay still shown connected, Push enabled').toEqual(['Connected', false]);
+  expect([r.connect, r.go], 'the shared relay still shown connected, Push enabled').toEqual(['Disconnect', false]);
 });
 
 test('wizard.push_fake_reboot_path a USB push that needs a reboot sends ?reboot 1.5 s after the last ACK, closes and reopens the port, and pulls 3 s after the reconnect', async ({ page }) => {

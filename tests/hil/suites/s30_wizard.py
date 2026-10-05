@@ -239,8 +239,8 @@ def push_reboot_path_direct(bench):
 @test("wizard.push_all_relay", "Push All with W1 on USB as the relay for W2: W2's label in one session before W1's own push, W1's reboot last, W1 back and pulled, and both labels land (then put back)", needs=["wcb1", "wcb2"])
 def push_all_relay(bench):
     """WCB-WP21 row 2. The plan forced W1's reboot with a WCBQ edit, which reboots nothing (D28); ?HW with W1's own
-    version does. W1 is connected direct, because Push All's last stage cannot reboot a relay on the shared port
-    (W-15)."""
+    version does. W1 is connected direct, for Push All's close-and-reopen path; a relay on the shared port takes the
+    shared branch (W-15), which wizard.push_fake_all_shared_relay guards."""
     w2 = WCB(bench.dev("wcb2"))
     l1, l2 = marker("L"), marker("M")
     with config_guard(bench, 1, 2) as before:

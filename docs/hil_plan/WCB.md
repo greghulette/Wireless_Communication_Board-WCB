@@ -204,7 +204,8 @@ send and sendAndAwaitIdle record the command and resolve `{ok:true}`. Register i
 > W-4/W-9 cases were already `push_fake.spec.js`. All pass headless and each `(should)` spec fails on its defect. The plan
 > against the code: a WCBQ edit reboots nothing (D28), so the reboot cases change the hardware version; the WDP state
 > has no card field (its commands are the mesh panel's, WP41 row 4); the General modal has no WCBQ row (W-16); and Push
-> All's four stages hold, but a relay on the shared port - the connection the first board gets - is reported lost (W-15).
+> All's four stages hold, but a relay on the shared port - the connection the first board gets - is reported lost (W-15,
+> fixed 2026-10-04).
 
 | Gap id(s) | Behaviour | Where | How: steps and check | Risk |
 |---|---|---|---|---|
@@ -235,7 +236,7 @@ New specs next to remote_pull.spec.js, run as `wizard.*` from s30_wizard.py. **U
 > the reconnect pulses DTR and resets the board again by design (app.js:5437-5445), so that variant notes the count; on
 > the shared port the Wizard pulls 3 s after the boot banner (W-14, fixed 2026-10-04), and the spec pulls once more to
 > compare; Push All runs with W1 direct
-> (W-15); "W1 and W2 on USB" is impossible with one grant per Chrome profile, so W2 is managed through W1; row 5 uses W2 S4
+> (the close-and-reopen path; a shared relay's branch, W-15, is `wizard.push_fake_all_shared_relay`'s); "W1 and W2 on USB" is impossible with one grant per Chrome profile, so W2 is managed through W1; row 5 uses W2 S4
 > (s12's unlabelled WDP-DA port), not S3; "Manage all" exists only on a MgmtRelay card, which the bench does not have
 > (`wizard.app_fake_relay_card`). Each skips, saying why, when the bench cannot run it: W1 reports no hardware version
 > the Wizard sends (the reboot pushes), W1 S2 is claimed by a device or either port already has a serial mapping
@@ -799,7 +800,7 @@ fix; per the conventions, each fix also needs its doc row.
 > **2026-09-29, from the WCB-WP20/21/40/41 tests:** nine more, W-13 to W-21, found against `Wizard/` at `08aaeb6`.
 > Each is pinned by a `(should)` test. While the defect stands, the test is `test.fail` in Playwright (CI stays green,
 > the harness reports FAIL) or a node `todo` in `unit/model.test.js`; the fix removes the marker, so the test guards it.
-> **Status 2026-10-04:** W-13, W-14, W-19 and W-20 are fixed (each row says how); W-15 to W-18 and W-21 are not.
+> **Status 2026-10-04:** W-13 to W-15, W-19 and W-20 are fixed (each row says how); W-16 to W-18 and W-21 are not.
 - **W-13** A function identifier typed into General but not yet pushed is used at once for the board's immediate
   commands. onGeneralCmdCharChange writes it into every boardConfigs entry (app.js:1332-1339), and the immediate sends
   read boardConfigs[n].funcChar: sequence save and remove (app.js:4773, :4636; the save then records the value in the
@@ -824,6 +825,10 @@ fix; per the conventions, each fix also needs its doc row.
 - **W-15** Push All's last stage closes and reconnects every relay (app.js:9193-9218) with no shared-port branch. A shared
   relay has no port of its own, so reconnect() returns false at once (app.js:5393): "did not come back — reconnect
   manually", and the card goes Not connected while the hub still holds the port. `wizard.push_fake_all_shared_relay`.
+  **Fixed:** stage 4 has the shared branch boardGo has: a relay on the shared port is rebooted with its card left
+  connected, and `_pullAfterSharedReboot` (W-14) pulls it once it is back. The spec read a `b1-conn-label` no card has,
+  so its check could never pass; it reads the card's Connect button instead, as `board_more.spec.js` does, after showing
+  WCB1 connected.
 - **W-16** The General conflict check leaves out the WCB quantity (extractGeneralFields, GENERAL_FIELD_LABELS,
   app.js:1555-1595), although every push writes the General WCBQ into the board (app.js:7933, :8340). A second board on
   another quantity opens no modal, and its next push - a label, say - silently sends `?WCBQ` with the first board's value.

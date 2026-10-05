@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.19:59.R.OCT.2026';
+const UI_VERSION = '04.20:02.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -9266,6 +9266,16 @@ async function boardGoAll() {
     termLog(n, `${relayFuncChar}reboot`, 'in');
     showToast(`WCB ${n} rebooting…`, 'success');
     updateBoardStatusBadge(n, 'configured');
+    if (conn._shared) {
+      // A relay on the shared port - the connection the first board of a page gets - has no port of its own to close
+      // and reopen: reconnect() returned false at once, the page said it "did not come back" and greyed its card while
+      // the hub still held the port (W-15). The hub keeps the port through the reboot, as boardGo's shared path knows:
+      // stay connected, and pull the relay again once it is back.
+      conn._rebootManaged = false;
+      termLog(n, 'Board rebooting on the shared port…', 'sys');
+      _pullAfterSharedReboot(n, conn);
+      continue;
+    }
     await conn.closeForReconnect();
     updateConnectionUI(n, false);
     termLog(n, 'Board disconnected — attempting reconnect…', 'sys');

@@ -106,7 +106,7 @@ test('wizard.push_reboot_path_direct a push that needs a reboot, on a direct con
 test('wizard.push_all_relay Push All with W1 on USB as the relay for W2: W2\'s label goes in one session before W1\'s own push, W1\'s reboot comes last, W1 comes back and is pulled, and both labels land (the harness checks and undoes them)', async ({ page, hilCtx }) => {
   const a = hilCtx.args;
   await openWizard(page);
-  // Direct: Push All's last stage closes and reopens a relay, which a shared one cannot do (W-15).
+  // Direct: Push All's last stage closes and reopens a direct relay (a shared one's branch, W-15, is the fake's).
   const n = await connectBoardDirect(page, hilCtx);
   expect(await manageRemote(page, n, a.target), `W${a.target} pulled through W${n}`).toBe(true);
   await watchToasts(page);
