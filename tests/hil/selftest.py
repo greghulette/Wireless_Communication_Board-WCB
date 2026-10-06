@@ -12195,11 +12195,13 @@ NC_WIRING = {"S1": ("SBO", False), "S2": ("S3", False), "S3": ("S4", True), "S4"
 
 
 class NaviWireModel(NaviDevModel):
-    """NaviDevModel brought to the NaviCore main tree NC-WP14 was written against (639e2e7), with probe 3 on its own pins
-    (WireWorld): a serial action and a mesh ;W20,;s<n> forward share one paced transmitter per port (queueSerialAction,
-    auxTxPump :2151-2164, :5216-5300) - S3, a hardware UART, takes a line at once, S4 and S5 one byte a pass - and
-    print '[DISPATCH] Serial TX' when done; a device write (#L20/#L21, an HCR action, a fade step) goes straight to the
-    port, so it lands inside a line in flight (nc.aux.tx_interleave, today); SBUS OUT re-emits the controller's frame
+    """NaviDevModel brought to the NaviCore main tree NC-WP14 was written against (639e2e7) and its aux-port fixes of
+    2026-10-06 (c454c66), with probe 3 on its own pins (WireWorld): a serial action and a mesh ;W20,;s<n> forward share
+    one paced transmitter per port (queueSerialAction, auxTxPump :2151-2164, :5216-5300) - S3, a hardware UART, takes a
+    line at once, S4 and S5 one byte a pass - and print '[DISPATCH] Serial TX' when done; a device write (#L20/#L21, an
+    HCR action, a fade step) waits for the line in flight on its port (auxDev's hold buffer, NaviCore 50078c9; the
+    'tx_unarbitrated' mutation puts back 639e2e7's direct write, which lands inside the line); SBUS OUT re-emits the
+    controller's frame
     every 9 ms while sbusOutEnabled is on, and #L13 dumps it; a local ?MAE query writes its Pololu frame to the Maestro
     bus; a line the probe types into S3-S5 goes through the RX monitor (auxRxPollPort, auxRxLine :3942-3988), and with
     serialBcast in to the mesh - where every WCB port that takes broadcasts gets it (self.bcast_ports) - and out the other
@@ -12221,11 +12223,12 @@ class NaviWireModel(NaviDevModel):
     # ------------------------------------------------------------ the pins
     def wire(self, port, data, paced=False):
         """Every block NaviCore hands S3, S4, S5 or Serial2: onto the world's line (Serial2 is the Maestro bus), and as
-        DBG_WIRE lines on a hook image. With the 'tx_arbitrated' fix a device write waits for the line in flight."""
+        DBG_WIRE lines on a hook image. A device write waits for the line in flight (NaviCore 50078c9); with
+        'tx_unarbitrated' it goes straight out, as in 639e2e7."""
         data = bytes(data)
         if not data:
             return []
-        if (not paced and port in self.tx and self.tx[port] is not None and "tx_arbitrated" in self.mut):
+        if (not paced and port in self.tx and self.tx[port] is not None and "tx_unarbitrated" not in self.mut):
             self.after[port].append(data)
             return []
         if self.world is not None:
@@ -12442,7 +12445,8 @@ def _ncwire_bench(tmp, model, wired=None, opt_in=None):
 
 NCWIRE_FAST = {"SETTLE_S": 0.05, "QUIET_S": 0.3, "SBUS_WINDOW_S": 0.6, "LINE_PAIRS": 6, "PING_EVERY_S": 0.05,
                "FADE_WAIT_S": 1.6, "MESH_WAIT_S": 0.4, "TYPED_S": 0.25, "FRAGMENT_S": 0.3}
-NCWIRE_SHOULD = {"ncwire.tx_interleave": "nc.aux.tx_interleave"}
+# The (should) tests the model fails today: none since NaviCore 50078c9 (the mutations put each defect back).
+NCWIRE_SHOULD = {}
 
 
 def _run_wire_suite(tmp, ids=None, mut=(), opt_in=None, wired=None, keep_links=False):
@@ -12669,11 +12673,11 @@ def t_ncwire_discover(tmp):
 
 
 def t_ncwire_suite_against_model(tmp):
-    """Every ncwire test run whole, through the runner, against NaviWireModel - NaviCore main 639e2e7 with probe 3 on its
-    pins - with every opt-in on: aux_bytes, soft_tx_integrity, s3_console_quiet, rx_monitor_bcast_in, sbus_out_tee and
-    maestro_bus_tap pass; tx_interleave, the (should) test for a defect the firmware has today, fails naming its row
-    (the model's soft TX and console are clean: D-NC24 and the UART0 leak are what the bench measures). NaviCore's
-    config ends as it began, in RAM and saved; every probe channel is released; no credential reaches session.log."""
+    """Every ncwire test run whole, through the runner, against NaviWireModel - NaviCore main with its aux-port fixes
+    (c454c66) and probe 3 on its pins - with every opt-in on: all seven pass, tx_interleave's device write after the
+    line (NCWIRE_SHOULD lists any (should) test the model fails; none since 50078c9, and the mutations put each defect
+    back). NaviCore's config ends as it began, in RAM and saved; every probe channel is released; no credential reaches
+    session.log."""
     res, model, x = _run_wire_suite(tmp)
     bad = [f"{tid}: {r['status']} {r['detail'][:400]}" for tid, r in res.items()
            if r["status"] != ("FAIL" if tid in NCWIRE_SHOULD else "PASS")]
@@ -12681,7 +12685,6 @@ def t_ncwire_suite_against_model(tmp):
     assert not bad, "\n".join(bad)
     for tid, row in NCWIRE_SHOULD.items():
         assert f"(should, {row})" in res[tid]["detail"], res[tid]["detail"][:300]
-    assert "landed inside the line" in res["ncwire.tx_interleave"]["detail"], res["ncwire.tx_interleave"]["detail"]
     assert model.text() == x["orig"] and model.flash == x["orig"], "the model's config was not left as found"
     assert x["probe"].held == {}, f"probe 3 still holds {x['probe'].held}"
     assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
@@ -12715,7 +12718,7 @@ NCWIRE_MUTATIONS = (
     ("ncwire.s3_console_quiet", "console_on_s3", "FAIL", "NaviCore's own console"),
     ("ncwire.s3_console_quiet", "idf_error_leak", "FAIL", "1 IDF log line(s) also went out S3"),
     ("ncwire.s3_console_quiet", "idf_error_quiet", "PASS", ""),
-    ("ncwire.tx_interleave", "tx_arbitrated", "PASS", ""),
+    ("ncwire.tx_interleave", "tx_unarbitrated", "FAIL", "landed inside the line"),
     ("ncwire.rx_monitor_bcast_in", "bcast_echo_back", "FAIL", "back out S4"),
     ("ncwire.rx_monitor_bcast_in", "fragment_broadcast", "FAIL", "a fragment on S4 was broadcast"),
     ("ncwire.rx_monitor_bcast_in", "rx_no_dot", "FAIL", "did not show as '.'"),
@@ -12729,9 +12732,9 @@ def t_ncwire_mutations(tmp):
     """The s51 tests catch what they exist to catch: against a NaviWireModel broken one way each - S4's bytes also on
     S5, a fade stepping every 100 ms, a glitched bit-banged byte with its framing error, the console or an IDF error on
     S3, a line broadcast back out its own port, a fragment broadcast, non-printables passed through, a byte dropped
-    from SBUS OUT, SBUS OUT at half rate, an extra byte on the Maestro bus - the test fails and says why; with the
-    arbitration fix tx_interleave passes; an image without the hooks, and an IDF error kept off S3, still pass. Each
-    runs alone on a fresh model."""
+    from SBUS OUT, SBUS OUT at half rate, an extra byte on the Maestro bus, a device write straight into a line in flight
+    (639e2e7's, before the arbitration) - the test fails and says why; an image without the hooks, and an IDF error kept
+    off S3, still pass. Each runs alone on a fresh model."""
     for tid, mut, want, why in NCWIRE_MUTATIONS:
         res, _, _ = _run_wire_suite(tmp, ids={tid}, mut={mut})
         r = res[tid]

@@ -4,11 +4,15 @@ local Maestro bus, read - and S3-S5 also driven - by a third probe wired as D-NC
 Every test is opt-in navicore_wire (hil/optin.py) and names the wires it needs in links=[...]: N20S3, N20S4 and N20S5
 (the aux ports, duplex), N20SBO (SBUS OUT) and N20MAE (the Maestro bus), the last two listen-only taps (hil/links.py
 NcLink; docs/HIL_TESTING.md §2 "NaviCore's own pins"). So each one skips, saying why, until probe 3 is wired, run.py
---discover has found those wires and the opt-in is ticked. Nothing here has run on the bench yet (written 2026-10-05,
-before the probe was wired).
+--discover has found those wires and the opt-in is ticked. Written 2026-10-05, before the probe was wired; first run
+on the bench that evening.
 
 Line numbers are NaviCore main 639e2e7 (with the D-NC fixes of 2026-10-05, NAVICORE.md §7.2), WcbCmd 0.9.1 and the stock
-EspSoftwareSerial 8.1.0 that NaviCore compiles from the Arduino-Code sketchbook.
+EspSoftwareSerial 8.1.0 that NaviCore compiles from the Arduino-Code sketchbook. The first bench run with probe 3
+(20261005-221308) found what the three (should) tests and rx_monitor_bcast_in predicted; NaviCore main fixed them on
+2026-10-06 (NAVICORE.md §7.2): S4/S5 transmit through RMT and receive at GPIO-ISR level 3 (2c698c6, D-NC24), a device
+write waits behind a paced line (50078c9), and the console stays off UART0 (b247a91). The descriptions below are the
+639e2e7 tree each test was written against; each test's docstring says what changed.
 
 Where the bytes come from:
 - S3 is the hardware UART0 on the NaviCore v2 profile; S4 and S5 are bit-banged EspSoftwareSerial (NaviCore.ino:242-269,
@@ -367,10 +371,11 @@ def _fade_on_wire(bench, l, notes):
     return problems
 
 
-@test("ncwire.soft_tx_integrity", "(should) NaviCore's bit-banged S4 and S5 transmit byte-exact under load: 200 "
+@test("ncwire.soft_tx_integrity", "(should) NaviCore's soft-serial S4 and S5 transmit byte-exact under load: 200 "
       "95-character lines, 100 to each port through the paced transmitter while SBUS streams at full rate and W1 pings "
       "NaviCore over the mesh, reach two hardware UARTs on probe 3 with no framing error and no wrong byte (D-NC24: "
-      "EspSoftwareSerial 8.1.0 transmits with interrupts on)", needs=["navicore", "wcb1"], links=["N20S4", "N20S5"],
+      "EspSoftwareSerial 8.1.0 bit-banged them with interrupts on; RMT since NaviCore 2c698c6)",
+      needs=["navicore", "wcb1"], links=["N20S4", "N20S5"],
       opt_in="navicore_wire")
 def soft_tx_integrity(bench):
     """NAVICORE.md D-NC24 (the map's nc.aux.soft_tx_interrupts). S4 and S5 are EspSoftwareSerial (NaviCore.ino:264-269,
@@ -385,7 +390,9 @@ def soft_tx_integrity(bench):
     wires, so the 4-deep queue never fills and loop() never waits on it (queueSerialAction :2159-2164). Both wires on a
     hardware channel at GET_CONFIG's baud, which reports a mis-timed bit as a FRAME error (RXERR). Pass: each wire got
     exactly its 100 lines, each with its CR, in order, and no RXERR. A failing run is D-NC24's evidence: the fix is RMT TX,
-    as the WCB's (rule 13)."""
+    as the WCB's (rule 13). Measured before it: S4 23/100 exact, S5 96/100 (run 20261005-221308); NaviCore 2c698c6
+    moved S4/S5 TX to RMT (NcSoftSerial, navicore_softserial.h). A port that cannot get an RMT channel falls back to
+    bit-banging and says '[AUX] TX GPIO<n>: no RMT channel' at boot."""
     nc, w1 = _nc(bench), usb_wcb(bench)
     cfg = nc.config()
     _ports_free(cfg, "S4", "S5")
@@ -445,8 +452,9 @@ def soft_tx_integrity(bench):
             problems.append(tally[-1] + (f", first damaged line {missing[0] + 1}" if missing else ""))
     bench.note(f"soft_tx_integrity at {bauds['S4']}/{bauds['S5']} baud: {'; '.join(tally)}; SBUS {st['fps']} fps "
                f"before, {after['fps']} after; {len(pings)} bridged PINGs, {pongs} PONGs back on W1")
-    assert not problems, (f"(should, D-NC24) bit-banged TX lost bytes under load: {'; '.join(problems)}. "
-                          f"EspSoftwareSerial transmits with interrupts on; RMT TX, as the WCB's (rule 13), is the fix")
+    assert not problems, (f"(should, D-NC24) soft TX lost bytes under load: {'; '.join(problems)}. NaviCore transmits "
+                          f"S4/S5 through RMT since 2c698c6 - a port that fell back to bit-banging (interrupts stretch "
+                          f"its bits) says '[AUX] TX GPIO<n>: no RMT channel' at boot")
 
 
 @test("ncwire.s3_console_quiet", "(should) NaviCore's console never reaches S3's TX, the pins it gives UART0, which the "
@@ -471,7 +479,10 @@ def s3_console_quiet(bench):
     of 4 or more printable characters
     (console_text) - and anything else read then is noted as line noise. (3) Every IDF line NaviCore printed on USB in
     those windows is counted and must not be on the wire. With none printed the IDF half of the finding was not
-    exercised, and the note says so. Skips while a device or serialBcast out is on S3 (both write it)."""
+    exercised, and the note says so. Skips while a device or serialBcast out is on S3 (both write it).
+    Run 20261005-221308 caught the ROM banner across the restart (260 bytes, 'ESP-ROM:esp32s3-20210327' to 'entry ...'):
+    a CPU reset keeps the GPIO matrix, so UART0's TX was still on S3's pin. NaviCore b247a91 (consoleOffUart0) sends
+    IDF logs and ROM printf to USB and turns the ROM log off for software restarts."""
     nc = _nc(bench)
     cfg = nc.config()
     _ports_free(cfg, "S3")
@@ -541,7 +552,9 @@ def tx_interleave(bench):
     ends. Two cases, a 95-character serial action each: (1) #L21 on NaviCore's USB (no config change); (2) inside
     nc_guard, hcrDest local on S4, an HCR SetEmotion(H, 50) action (<OH50,QEH>, s44 HCR_CASES). Pass: the wire is the
     line and the device bytes one after the other, either order, each whole. Device-protocol bytes out NaviCore's own S4
-    (J5): navicore_aux_tx must be ticked too (checked here, as s40 _reboot_opted does for restarts)."""
+    (J5): navicore_aux_tx must be ticked too (checked here, as s40 _reboot_opted does for restarts). Run
+    20261005-221308 found #L21's 11 bytes inside the line; NaviCore 50078c9 holds a device write behind the line in
+    flight (auxDev, a 512-byte hold buffer per port the pump sends after the line's CR), so the line comes first."""
     _aux_tx_opted(bench)
     nc = _nc(bench)
     cfg = nc.config()
@@ -596,7 +609,10 @@ def rx_monitor_bcast_in(bench):
     :3154-3163). Every WCB writes a plain broadcast out each port its ?BCAST,OUT flags open (s21 _expected_ports): each
     such probe-wired port must get it once. The broadcast is unacknowledged, so a line that reached no WCB port at all is
     typed once more before it counts. serialBcast is saved only inside nc_guard; the test skips while any port already
-    has a flag on (it sets its own) or a device is routed to S3-S5."""
+    has a flag on (it sets its own) or a device is routed to S3-S5. Its first bench run (20261005-221308) failed on
+    NaviCore's soft serial, not on the monitor: '...S5' typed into S5 printed as '...S4' (bit 0 of the last character
+    lost to a late RX edge), and the line fanned out to S5 lost a byte (D-NC24's bit-banged TX). NaviCore 2c698c6 moved
+    S4/S5 TX to RMT and installs the GPIO ISR service at level 3."""
     nc = _nc(bench)
     cfg = nc.config()
     _ports_free(cfg, "S3", "S4", "S5")
