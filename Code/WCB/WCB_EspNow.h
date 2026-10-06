@@ -16,7 +16,8 @@
 //  - The WiFi task never waits (CLAUDE.md rule 11): the send callbacks that free a slot run on that
 //    same task. It sends the ETM ACKs from the receive callback, and anything it prints while an
 //    ?RTERM session mirrors the console. It may go on to ESPNOW_INFLIGHT_MAX (20), then drops.
-// A frame given up is counted (?STATS) and reported by loop(), at most one line a second.
+// A frame given up is counted (?STATS) and reported by loop(), at most one line a second. Frames given up while none
+// has been accepted or completed for 5 s are a stall, reported with the heap figures, as is the recovery from one.
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
@@ -26,4 +27,4 @@ void      wcbEspNowSendDone();       // espNowSendCallback, once per frame sent 
 void      wcbEspNowNoteWifiTask();   // espNowReceiveCallback, first thing: learns the WiFi task
 uint32_t  wcbEspNowDropped();        // frames given up since boot or the last ?STATS reset
 void      wcbEspNowResetStats();     // resetESPNowStats()
-void      wcbEspNowReportDrops();    // loop(): one line a second while frames are being given up
+void      wcbEspNowReportDrops();    // loop(): one line a second while frames are being given up, and stalls

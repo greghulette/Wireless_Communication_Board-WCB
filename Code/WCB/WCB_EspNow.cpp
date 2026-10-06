@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <atomic>
 #include <esp_now.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -28,6 +29,18 @@ static std::atomic<uint32_t> s_dropped{0};
 static TaskHandle_t          s_wifiTask = nullptr;
 static uint32_t              s_reportedDrops = 0;   // loop() only
 static uint32_t              s_lastReportMs  = 0;   // loop() only
+
+// A stall: frames are being given up and none has been accepted or completed for ESPNOW_STALL_REPORT_MS. In HIL full
+// run 20261006-122850 one board's driver refused every frame - its heartbeats too, so its peers called it offline - for
+// 2 min after an ETM load, until a reboot, and nothing said what state it was in; it has not happened again on demand.
+// wcbEspNowReportDrops() says when one starts (with the heap the WiFi driver's buffers come from), every
+// ESPNOW_STALL_REPEAT_MS while it lasts, and when frames go out again. An idle board gives nothing up and never counts.
+static constexpr uint32_t ESPNOW_STALL_REPORT_MS = 5000;
+static constexpr uint32_t ESPNOW_STALL_REPEAT_MS = 30000;
+static uint32_t              s_dropsSeen      = 0;  // loop() only: the drop count at the last pass
+static uint32_t              s_lastDropMs     = 0;  // loop() only: when a frame was last given up
+static uint32_t              s_stallSinceMs   = 0;  // loop() only: 0 = not stalled
+static uint32_t              s_stallReportMs  = 0;  // loop() only
 
 // Give a slot back, never below zero: a stall reset may have zeroed the count under a frame still
 // in the air, whose completion then arrives.
@@ -80,8 +93,30 @@ uint32_t wcbEspNowDropped() { return s_dropped.load(); }
 
 void wcbEspNowResetStats() { s_dropped.store(0); }
 
+static void watchStall(uint32_t d, uint32_t now) {
+  if (d != s_dropsSeen) { s_dropsSeen = d; s_lastDropMs = now; }
+  const uint32_t idle     = now - s_progressMs.load();
+  const bool     dropping = s_lastDropMs && (uint32_t)(now - s_lastDropMs) < ESPNOW_STALL_REPORT_MS;
+  if (dropping && idle >= ESPNOW_STALL_REPORT_MS) {
+    if (!s_stallSinceMs) { s_stallSinceMs = now - idle; s_stallReportMs = 0; }
+    if (!s_stallReportMs || (uint32_t)(now - s_stallReportMs) >= ESPNOW_STALL_REPEAT_MS) {
+      s_stallReportMs = now;
+      Serial.printf("[MESH] ESP-NOW transmit stalled %lus: no frame accepted or completed while frames are given up "
+                    "(in flight %d, internal heap free %u, largest block %u, min since boot %u)\n",
+                    (unsigned long)((now - s_stallSinceMs) / 1000), s_inFlight.load(),
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+    }
+  } else if (s_stallSinceMs && idle < ESPNOW_STALL_REPORT_MS) {
+    Serial.printf("[MESH] ESP-NOW transmit recovered after %lus\n", (unsigned long)((now - s_stallSinceMs) / 1000));
+    s_stallSinceMs = 0;
+  }
+}
+
 void wcbEspNowReportDrops() {
   const uint32_t d = s_dropped.load();
+  watchStall(d, millis());
   if (d < s_reportedDrops) s_reportedDrops = d;          // the stats were reset
   if (d == s_reportedDrops) return;
   const uint32_t now = millis();
