@@ -2327,7 +2327,7 @@ between the check and the enqueue stays open to another task filling the queue m
 
 | | |
 |---|---|
-| **Status** | FIXED 2026-10-06 (WIFI, _(pending)_) |
+| **Status** | FIXED 2026-10-06 (WIFI `d59cac1`) |
 | **Owner** | `WCB_firmware` (`WCB.ino`, `sendResultFrags`) |
 | **Effort** | S |
 | **Tests** | `ncmesh.mgmt_etm_char` (it now asks again when the reply never comes), `inv.dedup` |
