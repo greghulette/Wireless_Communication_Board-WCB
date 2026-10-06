@@ -29,7 +29,7 @@ import time
 
 from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
-from hil.wcb import WCB, chain_crc, parse_pull_line
+from hil.wcb import WCB, chain_crc, group_tokens, parse_pull_line
 from suites.common import Console, config_guard, link, marker, nonce, padded, prime, snapshot, token, usb_wcb
 from suites.s12_serial_input import _da_forget, _da_scrub, _da_types
 from suites.s18_etm_config_wdp import _chains, _live_chars, _sent
@@ -53,10 +53,11 @@ def _replayable(tokens):
 
 
 def _replay(w, tokens):
-    """Send each chain line on its own, in chain order (?CHK and the read-only ?PEERSLIVE left out). Returns the
-    refused lines, redacted, so the caller can report them without quoting a credential."""
+    """Send each chain line on its own, in chain order (?CHK and the read-only ?PEERSLIVE left out), a multi-step
+    sequence's value whole (group_tokens: a raw '^' split saved its first step alone and ran the rest as commands).
+    Returns the refused lines, redacted, so the caller can report them without quoting a credential."""
     bad = []
-    for t in tokens:
+    for t in group_tokens(tokens):
         if t.upper().startswith(("?CHK", "?PEERSLIVE")):
             continue
         out = w.run(t, timeout=8)

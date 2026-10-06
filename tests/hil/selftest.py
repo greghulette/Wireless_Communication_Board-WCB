@@ -2909,6 +2909,78 @@ class FakeNetsh:
         return ""
 
 
+def t_ncflash_arduino15(tmp):
+    """hil/ncflash.py default_arduino15, arduino-cli's own default data folder per OS - the fallback when HIL_ARDUINO15
+    is unset and the CLI cannot answer `config get` (the Mac IDE's 0.35.3): ~/Arduino15 is not where a Mac keeps it,
+    and ncota.recovery_esptool found no boot_app0.bin (run 20261006-122850)."""
+    from hil import ncflash
+    j = os.path.join
+    assert ncflash.default_arduino15("nt", "win32", {"LOCALAPPDATA": "LAD"}, "HOME") == j("LAD", "Arduino15")
+    assert ncflash.default_arduino15("nt", "win32", {}, "HOME") == j("HOME", "Arduino15")
+    assert ncflash.default_arduino15("posix", "darwin", {}, "HOME") == j("HOME", "Library", "Arduino15")
+    assert ncflash.default_arduino15("posix", "linux", {}, "HOME") == j("HOME", ".arduino15")
+
+
+def t_group_tokens(tmp):
+    """hil/wcb.py group_tokens, the firmware's chain rule (WCB.ino parseCommandsNoChecksum): a ?SEQ,SAVE, ?CS or
+    ?MGMT, value runs to the next '^?', so a multi-step sequence (steps joined by '^') comes back whole from a naive
+    split - the factory-flash restore replayed its pieces (run 20261006-122850) - every other token ends at its '^',
+    a grouped list groups to itself, and s31's _replay sends the whole value."""
+    from hil.wcb import group_tokens
+    chain = ("?WCB,2^?SEQ,SAVE,Testing,;w2;s3test^?SEQ,SAVE,Test to 1,;w1;s5,testing^;t2000^;w1;s5testing^"
+             "?CSkey,a^;b^?MGMT,PULL,2^x^?LABEL,S1,Maestro 2")
+    got = group_tokens(chain.split("^"))
+    assert got == ["?WCB,2", "?SEQ,SAVE,Testing,;w2;s3test", "?SEQ,SAVE,Test to 1,;w1;s5,testing^;t2000^;w1;s5testing",
+                   "?CSkey,a^;b", "?MGMT,PULL,2^x", "?LABEL,S1,Maestro 2"], got
+    assert group_tokens(got) == got
+    assert group_tokens(["?seq,save,k,;a", ";b"]) == ["?seq,save,k,;a^;b"]           # the verb in any case
+    assert group_tokens([";a", "?WCB,1"]) == [";a", "?WCB,1"]                          # nothing to join onto
+    saved = list(runner.REGISTRY)
+    try:
+        from suites.s31_password_erase import _replay
+    finally:
+        runner.REGISTRY[:] = saved
+
+    class W:
+        def __init__(self):
+            self.sent = []
+
+        def run(self, t, timeout=5.0):
+            self.sent.append(t)
+            return []
+    w = W()
+    assert _replay(w, chain.split("^") + ["?PEERSLIVE,2", "?CHK0000ABCD"]) == []
+    assert w.sent == got, w.sent
+
+
+def t_inv_dedup_verdict(tmp):
+    """s17 dedup_verdict, inv.dedup's judgment: with W2's own lines the rule is judged on what W2 answered, and a reply
+    W2 sent that W1 never printed is counted as lost on the air (run 20261006-122850's +300 ms HILSA), never failed;
+    W2 answering otherwise than the rule, or W1 printing more than W2 sent, fails; without W2's lines W1's replies
+    must equal the rule's."""
+    saved = list(runner.REGISTRY)
+    try:
+        from suites.s17_seq_inventory import dedup_verdict
+    finally:
+        runner.REGISTRY[:] = saved
+    rule = ["HILSA", "HILSB", "HILSA"]
+    assert dedup_verdict(rule, ["HILSA", "HILSB", "HILSA"], rule) == (None, 0)
+    assert dedup_verdict(rule, ["HILSA", "HILSB"], rule) == (None, 1)               # 20261006-122850
+    assert dedup_verdict(rule, [], rule) == (None, 3)
+    got, n = dedup_verdict(["HILSA", "HILSB"], ["HILSA", "HILSB"], rule)            # the +300 ms HILSA dropped
+    assert got == "W2 answered ['HILSA', 'HILSB'], the rule answers ['HILSA', 'HILSB', 'HILSA']" and n == 0, got
+    got, _ = dedup_verdict(rule + ["HILSA"], rule + ["HILSA"], rule)                 # the +800 ms repeat answered
+    assert got.startswith("W2 answered"), got
+    got, _ = dedup_verdict(rule, rule + ["HILSB"], rule)
+    assert got == ("W1 printed ['HILSA', 'HILSB', 'HILSA', 'HILSB'], more than W2 answered "
+                   "(['HILSA', 'HILSB', 'HILSA'])"), got
+    assert dedup_verdict(["SEQ"], [], ["SEQ"]) == (None, 1)
+    assert dedup_verdict(None, ["HILSA", "HILSB", "HILSA"], rule) == (None, 0)      # no W2 cable: W1 alone
+    assert dedup_verdict(None, ["HILSB", "HILSA", "HILSA"], rule) == (None, 0)
+    got, _ = dedup_verdict(None, ["HILSA", "HILSB"], rule)
+    assert got == "W1 printed ['HILSA', 'HILSB'], the rule answers ['HILSA', 'HILSB', 'HILSA']", got
+
+
 def t_wlan_pc_on_ap(tmp):
     """hil/wlan.py (NAVICORE.md INF5, moved out of s28 unchanged): netsh's interface and network listings parsed from
     captured text; choose_adapter's order (bench.json's adapter, then a spare, then the only one); profile_xml escaping
@@ -11603,7 +11675,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations,
-         t_wlan_pc_on_ap, t_wlan_prejoined, t_ncws_line_device, t_ncwifi_helpers]
+         t_wlan_pc_on_ap, t_wlan_prejoined, t_ncws_line_device, t_ncwifi_helpers, t_inv_dedup_verdict,
+         t_group_tokens, t_ncflash_arduino15]
 
 
 def t_wizard_spec_ids(tmp):

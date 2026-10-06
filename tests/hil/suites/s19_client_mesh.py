@@ -25,10 +25,11 @@ from suites.common import (Console, Watch, config_guard, link, marker, mesh_para
 # only receive, only sendRaw (no sequence numbers), only send unensured JSON (never in the ring) or never reach a WCB
 # (auth) may share. rejoin reboots W1 before it starts. The WCB-WP14 tests at the end reuse ids: their JSON-only and
 # sendRaw-only ones share as above, and the three that send ensured commands push a stale ring out first
-# (_burn_ring_of).
+# (_burn_ring_of). No id may be a bench WCB's own: var_sets had 3 until WCB3 joined the bench (2026-10-06), and then
+# skipped ('mesh id 3 is already in W1's WDP table', run 20261006-122850); 6 is used nowhere else.
 MESH_IDS = {"adopt": 18, "unicast": 17, "raw": 16, "broadcast": 13, "json": 12, "frag": 11, "whoami": 10,
             "checksum": 8, "auth": 7, "rejoin": 18, "leave": 15, "maestro_return": 16, "bcast_ports": 5,
-            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 3, "seq_fanout": 4, "seq_body": 7,
+            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 6, "seq_fanout": 4, "seq_body": 7,
             "json_flood": 12, "timer_origin": 17, "timer_queue": 11, "whoami_escape": 10, "nvs_tx": 16}
 
 

@@ -19,7 +19,7 @@ import time
 
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
-from hil.wcb import PULL_SPACING_S, PullCollector, PullRefused, chain_crc, pull_config
+from hil.wcb import PULL_SPACING_S, WCB, PullCollector, PullRefused, chain_crc, pull_config
 from suites.common import Console, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 from suites.s03_wcb import backup_chain_problems
 
@@ -963,9 +963,10 @@ RELAY_SPACING_S = 2.0   # the target ignores a repeat for 1500 ms after it ANSWE
 
 def _relay(w, cmd, pattern, space_key, timeout=3.0, tries=3):
     """Send a relay request at least RELAY_SPACING_S after the last one with the same dedup key; return every matching
-    W1 line of the answered try (first match plus 0.5 s). The answer comes back as unacknowledged broadcast frags sent
-    ONCE (sendResultFrags; only the request is sent 3x), so one lost frag means no line and no error, and the requester
-    is expected to retry (docs/SEQUENCE_INVENTORY.md §3a; inv.mgmt_seq_remote missed one on 2026-09-23, tracker #77)."""
+    W1 line of the answered try (first match plus 0.5 s). The answer comes back as unacknowledged broadcast frags, in
+    two passes since 2026-10-06 (sendResultFrags, HIL_FIX_TRACKER #109; once before), so only a frag lost from both
+    passes means no line and no error, and the requester is expected to retry (docs/SEQUENCE_INVENTORY.md §3a;
+    inv.mgmt_seq_remote missed one on 2026-09-23, tracker #77)."""
     for attempt in range(1, tries + 1):
         last = _LAST_REQ.get(space_key)
         if last is not None:
@@ -1053,48 +1054,117 @@ def client_no_hash(bench):
     assert not any(x.startswith("  Sequences") for x in detail), "the client DETAIL block has a Sequences line"
 
 
+VALUE_ASKED = re.compile(r"^\[MGMT\] Sequence-value request '([^']*)' from WCB(\d+) \(")   # WCB.ino handleSeqValReqPacket
+NAMES_ASKED = re.compile(r"^\[MGMT\] Sequence-names request from WCB(\d+)$")              # WCB.ino handleSeqReqPacket
+
+
+def dedup_verdict(answered, printed, want):
+    """inv.dedup's judgment of one window -> (problem or None, how many replies were lost on the air). `answered`: the
+    keys W2 says it answered, in order (its ?DEBUG,MGMT lines), or None when W2 has no USB cable here; `printed`: the
+    keys W1 printed replies for; `want`: the keys the dedup rule answers. With W2's lines, the rule is judged on them
+    alone, and a key W2 answered that W1 never printed is a reply lost on the air (unacknowledged broadcast frames,
+    sendResultFrags), counted, not failed; W1 printing a reply W2 did not send fails. Without them,
+    W1's replies are the only witness and must equal `want`."""
+    if answered is None:
+        return (None if sorted(printed) == sorted(want) else f"W1 printed {printed}, the rule answers {want}"), 0
+    if answered != want:
+        return f"W2 answered {answered}, the rule answers {want}", 0
+    left = list(answered)
+    for k in printed:
+        if k not in left:
+            return f"W1 printed {printed}, more than W2 answered ({answered})", 0
+        left.remove(k)
+    return None, len(left)
+
+
 @test("inv.dedup", "Relay dedup: one SEQ_REQ answer per requester per 1.5 s; SEQVAL dedup remembers only the last (requester, key) — timing-sensitive", needs=["wcb1"], links=[])
 def dedup(bench):
+    """WCB.ino handleSeqReqPacket and handleSeqValReqPacket: W1 broadcasts each request 3 times, and W2 answers a
+    requester's SEQ once per 1.5 s and a SEQGET once per 1.5 s per (requester, key) - only the last key is kept, so
+    HILSA, HILSB, HILSA 150 ms apart is answered three times and a fourth HILSA 500 ms later is dropped. When W2 has
+    its own USB cable, its ?DEBUG,MGMT lines (RAM only) say what it answered: the rule is judged on those, and a reply
+    W2 sent that W1 never printed is lost on the air - noted, and one such loss allowed per run. Run 20261006-122850
+    lost the +300 ms HILSA reply that way, then sent once as one unacknowledged broadcast frame; replies have gone in
+    two passes since (sendResultFrags, HIL_FIX_TRACKER #109). Without W2's lines that read as a dedup failure."""
     w = usb_wcb(bench)
+    w2 = WCB(bench.dev("wcb2")) if bench.has("wcb2") else None
+    me = str(bench.usb_wcb_number())
     a, b = marker("a"), marker("b")
+    sa, sb = f"[MGMT:SEQVAL,2]HILSA,OK,{a}", f"[MGMT:SEQVAL,2]HILSB,OK,{b}"
 
     def lines_since(m, prefix):
         return [x.rstrip() for x in w.dev.since(m) if x.startswith(prefix)]
 
+    def asked(m2, rx):
+        """What W2 says it answered since mark m2 (requests from this W1 only), or None without W2's USB."""
+        if w2 is None:
+            return None
+        out = []
+        for x in w2.dev.since(m2):
+            g = rx.match(x.strip())
+            if g and g.groups()[-1] == me:
+                out.append(g.group(1) if g.re is VALUE_ASKED else "SEQ")
+        return out
+
+    def mark2():
+        return w2.dev.mark() if w2 is not None else None
+
     with config_guard(bench, 2):
         try:
+            if w2 is not None:
+                assert _has(w2.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled"), "W2 did not turn MGMT debugging on"
             w.send(f";W2,?SEQ,SAVE,HILSA,{a}")
             w.send(f";W2,?SEQ,SAVE,HILSB,{b}")
             time.sleep(2.5)
-            m = w.dev.mark()
+            m, m2 = w.dev.mark(), mark2()
             w.send("?MGMT,SEQ,2")
             time.sleep(0.3)
             w.send("?MGMT,SEQ,2")
             time.sleep(2.7)
-            first = lines_since(m, "[MGMT:SEQ,2]")
-            m = w.dev.mark()
+            first, first_w2 = lines_since(m, "[MGMT:SEQ,2]"), asked(m2, NAMES_ASKED)
+            m, m2 = w.dev.mark(), mark2()
             w.send("?MGMT,SEQ,2")
             time.sleep(3)
-            second = lines_since(m, "[MGMT:SEQ,2]")
-            m = w.dev.mark()
+            second, second_w2 = lines_since(m, "[MGMT:SEQ,2]"), asked(m2, NAMES_ASKED)
+            m, m2 = w.dev.mark(), mark2()
             for delay, key in ((0, "HILSA"), (0.15, "HILSB"), (0.15, "HILSA"), (0.5, "HILSA")):   # t2 +0, +150, +300, +800 ms
                 time.sleep(delay)
                 w.send(f"?MGMT,SEQGET,2,{key}")
             time.sleep(3.2)                                                                    # past t2+3.5 s
-            window = lines_since(m, "[MGMT:SEQVAL,2]")
-            m = w.dev.mark()
+            window, window_w2 = lines_since(m, "[MGMT:SEQVAL,2]"), asked(m2, VALUE_ASKED)
+            m, m2 = w.dev.mark(), mark2()
             w.send("?MGMT,SEQGET,2,HILSA")
             time.sleep(3)
-            last = lines_since(m, "[MGMT:SEQVAL,2]")
+            last, last_w2 = lines_since(m, "[MGMT:SEQVAL,2]"), asked(m2, VALUE_ASKED)
         finally:
+            if w2 is not None:
+                w2.run("?DEBUG,MGMT,OFF")
             w.send(";W2,?SEQ,CLEAR,HILSA")
             w.send(";W2,?SEQ,CLEAR,HILSB")
             time.sleep(1.5)
-    sa, sb = f"[MGMT:SEQVAL,2]HILSA,OK,{a}", f"[MGMT:SEQVAL,2]HILSB,OK,{b}"
-    assert len(first) == 1, f"two SEQ requests 300 ms apart answered {len(first)} times"
-    assert len(second) == 1, "the spaced SEQ request was not answered"
-    assert window.count(sa) == 2 and window.count(sb) == 1, f"SEQGET window {window} (the +800 ms HILSA repeat must drop)"
-    assert last == [sa], f"the spaced HILSA request got {last}"
+    key = {sa: "HILSA", sb: "HILSB"}
+    for got in (window, last):
+        stray = [x for x in got if x not in key]
+        assert not stray, f"W1 printed SEQVAL lines that are neither stored value: {stray}"
+    problems, lost, nlost = [], [], 0
+    for what, answered, printed, want in (
+            ("two SEQ requests 300 ms apart", first_w2, ["SEQ"] * len(first), ["SEQ"]),
+            ("the spaced SEQ request", second_w2, ["SEQ"] * len(second), ["SEQ"]),
+            ("the SEQGET window (the +800 ms HILSA repeat must drop)", window_w2, [key[x] for x in window],
+             ["HILSA", "HILSB", "HILSA"]),
+            ("the spaced HILSA request", last_w2, [key[x] for x in last], ["HILSA"])):
+        problem, n = dedup_verdict(answered, printed, want)
+        if problem:
+            problems.append(f"{what}: {problem}")
+        if n:
+            nlost += n
+            lost.append(f"{what}: {n} of W2's replies never reached W1")
+    if lost:
+        bench.note("inv.dedup: replies lost on the air (W2 sent them, W1 never printed them): " + "; ".join(lost))
+    if nlost > 1:
+        problems.append(f"{nlost} replies lost on the air ({'; '.join(lost)}): more than one in a run is not the odd "
+                        f"lost frame")
+    assert not problems, "; ".join(problems)
 
 
 @test("inv.relay_arg_errors", "?MGMT,SEQ / SEQGET argument errors: key length ungated; target and format errors debug-only; absent or self targets silent", needs=["wcb1"], links=[])
@@ -1254,9 +1324,9 @@ def seqget_largest(bench):
                 wm = w.dev.mark()
                 if n + len(key) + 4 <= RELAY_MAX_PAYLOAD:
                     want, got = f"[MGMT:SEQVAL,1]{key},OK,{value}", None
-                    # W1 answers in ceil((n + 9) / 182) broadcast frags sent ONCE, unACKed (sendResultFrags; only the
-                    # config pull sends a second pass), and W2 prints nothing until every frag is in: one lost frame
-                    # is a silent miss by design, and the requester retries. 3 s a try clears W1's 1.5 s (requester,
+                    # W1 answers in ceil((n + 9) / 182) broadcast frags, unACKed, in two passes (sendResultFrags,
+                    # HIL_FIX_TRACKER #109), and W2 prints nothing until every frag is in: a frame lost from both
+                    # passes is a silent miss by design, and the requester retries. 3 s a try clears W1's 1.5 s (requester,
                     # key) dedup (handleSeqValReqPacket). ?DEBUG,MGMT is RAM-only, so config_guard never sees it; its
                     # lines tell a lost request from lost frags when every try misses.
                     try:

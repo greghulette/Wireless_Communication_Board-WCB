@@ -690,7 +690,10 @@ def came_online_outside_backup(bench):
     20260924-234056) - and inside a line on the WebSocket and RTERM tees. It now goes through statusQueueOut and is
     printed by drainStatusOut beside drainMgmtOut (WCB.ino), between commands, so a whole ?backup runs in one loop()
     pass with none inside it. W2's reboot sends three boot announces about 1.2 s apart (a line each on W1, marked
-    '(boot)'); W1 prints ?backup the whole time."""
+    '(boot)'); W1 prints ?backup the whole time. A came-ONLINE line without '(boot)' is whole too: W1 prints one when it
+    had W2 marked offline and hears it again (WCB.ino boardMarkSeen), as in run 20261006-122850, where W2's mesh
+    transmit had stalled during the test before (etm.char_per_board_clamp) and W1 had called it offline; it is noted.
+    Only a line that is neither form - cut, or run into another - fails as not whole."""
     from suites.s03_wcb import CHK_LINE, backup_chain_lines
     from hil.wcb import chain_crc
     own = bench.usb_wcbs().get(2)
@@ -698,6 +701,7 @@ def came_online_outside_backup(bench):
         raise Skip("W2 has no USB console here to restart it from")
     w, w2 = usb_wcb(bench), WCB(bench.dev(own))
     boot = re.compile(r"^\[ETM\] WCB2 came ONLINE \(boot\) \(src MAC: [0-9A-F]{2}(:[0-9A-F]{2}){5}\)$")
+    any_form = re.compile(r"^\[ETM\] WCB2 came ONLINE (?:\(boot\) )?\(src MAC: [0-9A-F]{2}(:[0-9A-F]{2}){5}\)$")
     problems, inside, backups, broken = [], 0, 0, 0
     m2 = w2.dev.mark()
     w2.dev.send("?reboot")
@@ -722,15 +726,18 @@ def came_online_outside_backup(bench):
             break
     seen = [x.strip() for x in w.dev.since(m1) if "came ONLINE" in x]
     whole = [x for x in seen if boot.match(x)]
+    plain = [x for x in seen if any_form.match(x) and not boot.match(x)]
     w2.wait_boot(m2)
     bench.note(f"etm.came_online_outside_backup: {backups} backups on W1, {len(seen)} came-ONLINE line(s) "
-               f"({len(whole)} whole boot lines), {inside} inside a backup, {broken} broken chain(s)")
+               f"({len(whole)} whole boot lines, {len(plain)} without '(boot)': W1 had W2 marked offline), {inside} "
+               f"inside a backup, {broken} broken chain(s)")
     if not whole:
         problems.append("W1 printed none of W2's boot announces as a whole '[ETM] WCB2 came ONLINE (boot)' line")
     if inside:
         problems.append(f"{inside} came-ONLINE line(s) printed inside a ?backup output")
     if broken:
         problems.append(f"{broken} chain(s) failed their CRC")
-    if len(whole) != len(seen):
-        problems.append(f"{len(seen) - len(whole)} came-ONLINE line(s) not whole: {[x[:60] for x in seen if not boot.match(x)][:2]}")
+    cut = [x for x in seen if not any_form.match(x)]
+    if cut:
+        problems.append(f"{len(cut)} came-ONLINE line(s) not whole: {[x[:60] for x in cut][:2]}")
     assert not problems, "; ".join(problems)

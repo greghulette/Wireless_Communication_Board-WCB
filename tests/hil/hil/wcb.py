@@ -18,12 +18,18 @@ def chain_crc(chain):
     return "%08X" % (zlib.crc32(chain.encode()) & 0xFFFFFFFF)
 
 
+VALUE_VERBS = ("SEQ,SAVE,", "CS", "MGMT,")   # WCB.ino chainCarriesValueVerb: values closed only by '^<LFI>'
+
+
 def group_tokens(tokens, lfi="?"):
-    """Re-join a ?SEQ,SAVE value that contained '^'. Restore treats everything up to the next
-    '^<LFI>' as the value (WCB.ino:2326-2349), so a naive '^' split breaks those apart."""
+    """Re-join the value of a ?SEQ,SAVE, ?CS or ?MGMT, token that contained '^'. The firmware reads everything up to
+    the next '^<LFI>' as such a value (WCB.ino parseCommandsNoChecksum), and a multi-step sequence is stored as steps
+    joined by '^' (';w1;s5,a^;t2000^;w1;s5b'), so a naive '^' split breaks it apart - and a replay of the pieces saves
+    the first step alone and runs the rest as live commands (intellex.flash_w2_factory, run 20261006-122850)."""
     out = []
+    heads = tuple(lfi + v for v in VALUE_VERBS)
     for t in tokens:
-        if out and out[-1].upper().startswith(lfi + "SEQ,SAVE,") and not t.startswith(lfi):
+        if out and out[-1].upper().startswith(heads) and not t.startswith(lfi):
             out[-1] += "^" + t
         else:
             out.append(t)

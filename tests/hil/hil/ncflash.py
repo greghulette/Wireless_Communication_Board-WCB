@@ -180,10 +180,21 @@ def sketchbook_dir(github=None):
     return _cli_config("directories.user") or os.path.join(github or github_root(), "Arduino-Code")
 
 
+def default_arduino15(osname=os.name, platform=sys.platform, env=os.environ, home=os.path.expanduser("~")):
+    """arduino-cli's own default data folder on this OS: %LOCALAPPDATA%\\Arduino15 on Windows, ~/Library/Arduino15 on a
+    Mac, ~/.arduino15 elsewhere. ~/Arduino15, the old fallback off Windows, does not exist on the Mac bench, so
+    ncota.recovery_esptool found no boot_app0.bin there (run 20261006-122850)."""
+    if osname == "nt":
+        return os.path.join(env.get("LOCALAPPDATA", home), "Arduino15")
+    if platform == "darwin":
+        return os.path.join(home, "Library", "Arduino15")
+    return os.path.join(home, ".arduino15")
+
+
 def arduino15():
-    """The arduino-cli data folder that holds the esp32 core and its tools."""
-    return (os.environ.get("HIL_ARDUINO15") or _cli_config("directories.data")
-            or os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Arduino15"))
+    """The arduino-cli data folder that holds the esp32 core and its tools: HIL_ARDUINO15, arduino-cli's
+    directories.data, else default_arduino15() - an IDE's older arduino-cli has no `config get` (0.35.3 on the Mac)."""
+    return os.environ.get("HIL_ARDUINO15") or _cli_config("directories.data") or default_arduino15()
 
 
 def esptool_path():
