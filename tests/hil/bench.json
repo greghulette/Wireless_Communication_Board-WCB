@@ -129,7 +129,15 @@
     "navicore_wifi",
     "navicore_clip_write",
     "intellex_flash",
-    "intellex_flash_navicore"
+    "intellex_flash_navicore",
+    "navicore_ota_relay_full",
+    "navicore_esptool",
+    "navicore_identity",
+    "navicore_aux_tx",
+    "navicore_wire",
+    "navicore_webserial",
+    "intellex_flash_factory",
+    "intellex_wifi_join"
   ],
   "navicore_repo": "C:/Users/ghulette/.claude-worktrees/NaviCore/hil-week",
   "fixtures": {
@@ -202,7 +210,7 @@
       "label": "Kyber Maestro port to WCB3 S2",
       "tag": "115200 8N1",
       "signal": "Pololu Maestro protocol, 115200 8N1 (Kyber Expert > Maestro must be 115200). The Kyber's TX is 5 V; WCB3's pins are 3.3 V (run direct on this bench; a BSS138 shifter or 1k/2k divider is the conservative option).",
-      "how": "Kyber Maestro TX to WCB3 S2 RX (GPIO7), Kyber Maestro RX to WCB3 S2 TX (GPIO6), GND to GND. On WCB3: ?KYBER,LOCAL,S2 then ?reboot (the command does not reboot). Probe 4 header S2 may tap WCB3 S2's TX line (listen only).",
+      "how": "Kyber Maestro TX to WCB3 S2 RX (GPIO7), Kyber Maestro RX to WCB3 S2 TX (GPIO6), GND to GND. On WCB3: ?KYBER,LOCAL (broadcast mode, which takes S2 and sets it to 115200 with its broadcasts off), then ?reboot - the command does not reboot. Set 2026-10-05. Probe 4 header S2 may tap WCB3 S2's TX line (listen only).",
       "check": "On WCB3's console: ?KYBER,LIST shows Kyber local on S2; ?DEBUG,KYBER,ON dumps every bridged frame - press a Kyber Maestro button (CH7 176 = Maestro 1-1) and a frame must print. None: TX/RX swapped (swap them), GND, the Kyber's Maestro baud, WCB3 not rebooted after ?KYBER,LOCAL. Frames print but no servo moves: W1/W2 must be in Maestro-remote mode (?MAESTRO,REMOTE) and Maestro 2 wired (its own connection).",
       "proof": []
     },
