@@ -93,6 +93,34 @@ def _wait_status(host, pred, timeout, step=0.25):
         time.sleep(step)
 
 
+def _dead_lines(host):
+    return sum(1 for x in host.lines if "link is dead" in x)       # host.py reconnect_loop's verdict
+
+
+def _wait_notice(host, dead0, timeout, step=0.25):
+    """The host noticing a lost link -> (the last /_api/status, seconds, how): the status turning detached ('status'),
+    or a 'link is dead' line beyond the `dead0` it had printed before ('line'). Off Windows the spare adapter rejoins
+    by itself within seconds of the access point coming back, so the host can drop the link and attach again between
+    two status polls: run 20261006-172611's reattached 48 ms after its verdict. (last status, None, None) after
+    `timeout`."""
+    t0 = time.monotonic()
+    last = {}
+    while True:
+        try:
+            st, body = host.json("GET", "/_api/status", timeout=5)
+            if st == 200 and isinstance(body, dict):
+                last = body
+                if not body.get("attached"):
+                    return body, time.monotonic() - t0, "status"
+        except OSError:
+            pass
+        if _dead_lines(host) > dead0:
+            return last, time.monotonic() - t0, "line"
+        if time.monotonic() - t0 >= timeout:
+            return last, None, None
+        time.sleep(step)
+
+
 def rterm_starts(lines, relay):
     """How many '[RTERM] Session started -> relay WCB<relay>' lines a WCB console printed: one for every
     ?RTERM,START,<relay> it ran, a re-arm of the running session included (WCB.ino, the ?RTERM handler)."""
@@ -360,15 +388,17 @@ def wifi_link_loss(bench):
                 a.send(PING)
                 a.wait_for(PONG, 6)
                 m = g.nc.dev.mark()
+                dead0 = _dead_lines(host)
                 t_cmd = time.monotonic()
                 a.send('{"type":"REBOOT"}\n')
-                st, took = _wait_status(host, lambda s: not s.get("attached"), NOTICE_LIMIT_S)
+                st, took, how = _wait_notice(host, dead0, NOTICE_LIMIT_S)
                 if took is None:
-                    problems.append(f"the host still called the link attached {NOTICE_LIMIT_S} s after the REBOOT")
+                    problems.append(f"the host still called the link attached {NOTICE_LIMIT_S} s after the REBOOT, and "
+                                    f"printed no 'link is dead'")
                 else:
                     facts["noticed_s"] = round(took, 1)
-                    dead = next((x for x in host.lines if "link is dead" in x), None)
-                    facts["verdict"] = dead is not None     # the probe's line (host.py reconnect_loop)
+                    facts["noticed_by"] = how       # 'line': it reattached before a status poll saw the gap
+                    facts["verdict"] = _dead_lines(host) > dead0     # the probe's line (host.py reconnect_loop)
                     if took > NOTICE_S:
                         facts["over_notice"] = (f"{took - NOTICE_S:.1f} s over Intellex's own {NOTICE_S} s: its close "
                                                 f"stall (INTELLEX.md finding 19, intellex.link_drop_no_stall)")

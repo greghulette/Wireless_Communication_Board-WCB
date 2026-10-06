@@ -28,6 +28,7 @@ ifconfig's, route's and netstat's the layout parse_ifconfig, parse_route_get and
 selftest feeds each parser text captured in that form.
 """
 import contextlib
+import json
 import os
 import re
 import socket
@@ -111,14 +112,18 @@ def pick_adapter(bench):
     carries the default route. Off Windows (where s45's _spare_adapter once ran netsh: FileNotFoundError, three ERRORs
     in run 20261005-221308) the spare adapter already on a 192.168.4.x network, as {'name', 'state'}, which the harness
     leaves where it is (_prejoined); Skip(PREJOIN_SKIP) when there is none."""
-    global _spare_seen
     if not ON_WINDOWS:
         spare = spare_leases()
-        if not spare:
+        if spare:
+            _remember_spare(spare[0][0])
+            return {"name": spare[0][0], "state": "connected"}, ("off Windows: the spare adapter already on a "
+                                                                 "192.168.4.x network, never the one carrying the "
+                                                                 "default route")
+        known = remembered_spare()
+        if known is None or known == internet_adapter():
             raise Skip(PREJOIN_SKIP)
-        _spare_seen = spare[0][0]
-        return {"name": spare[0][0], "state": "connected"}, ("off Windows: the spare adapter already on a 192.168.4.x "
-                                                             "network, never the one carrying the default route")
+        return {"name": known, "state": "disconnected"}, ("off Windows: the spare adapter found before, with no "
+                                                          "192.168.4.x address now (its access point restarting)")
     ifaces = wlan_interfaces()
     want = bench.cfg.get("wifi_test_interface")
     return choose_adapter(ifaces, want, None if want else internet_adapter())
@@ -418,6 +423,31 @@ PREJOIN_SKIP = ("off Windows the harness joins no network itself (netsh drives t
                 "route holds a 192.168.4.x address - join a spare adapter to the access point with its own utility and "
                 "leave it there")
 _spare_seen = None        # the spare adapter last found off Windows, waited for when a restart took its address away
+# ... and remembered for the next run on this computer (untracked, beside ports.json): a run whose first WiFi test
+# came right after a NaviCore restart found no lease, knew no adapter, and skipped every test (run 20261006-172611).
+SPARE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "wifi_spare.json")
+
+
+def _remember_spare(name):
+    global _spare_seen
+    _spare_seen = name
+    try:
+        with open(SPARE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"adapter": name}, f)
+    except OSError:
+        pass
+
+
+def remembered_spare():
+    """The spare adapter found last, in this run or an earlier one on this computer, or None."""
+    if _spare_seen:
+        return _spare_seen
+    try:
+        with open(SPARE_FILE, encoding="utf-8") as f:
+            name = json.load(f).get("adapter")
+        return name if isinstance(name, str) and name else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def _run(args):
@@ -478,9 +508,9 @@ def _prejoined(bench, whose, reach, identify, wait_s=None):
     be read here, so `identify(name)` proves whose it is: None when it is `whose`, else what answered instead; without
     one this Skips. A spare adapter holding a 192.168.4.x address that carries a connect to `reach` (AP_REACH when
     None; one try) is identified at once, and one that proves to be another's raises. One that carries nothing yet, or
-    the one last found when a restart has taken its address away, is waited for up to `wait_s`: it comes back by itself
-    or not at all (wait_s None: PREJOIN_WAIT_S). No spare adapter at all Skips (PREJOIN_SKIP)."""
-    global _spare_seen
+    the one last found (remembered_spare: this run, or an earlier one on this computer) when a restart has taken its
+    address away, is waited for up to `wait_s`: it comes back by itself or not at all (wait_s None: PREJOIN_WAIT_S). No
+    spare adapter at all Skips (PREJOIN_SKIP)."""
     wait_s = PREJOIN_WAIT_S if wait_s is None else wait_s
     if identify is None:
         raise Skip(f"{NOT_WINDOWS_SKIP}; off Windows a spare adapter already on an access point is used only where the "
@@ -498,15 +528,16 @@ def _prejoined(bench, whose, reach, identify, wait_s=None):
             if other is not None:
                 raise AssertionError(f"{name}, the spare adapter holding {addr}, did not prove to be on {whose} access "
                                      f"point: {other}")
-            _spare_seen = name
+            _remember_spare(name)
             bench.note(f"adapter {name}: off Windows the harness joins nothing, and this spare adapter is already on "
                        f"{whose} access point ({addr}, proved {time.monotonic() - t0:.1f} s after asking); it stays "
                        f"there")
             return name
         if not leases:
-            if _spare_seen is None:
+            known = remembered_spare()
+            if known is None:
                 raise Skip(PREJOIN_SKIP)
-            state[_spare_seen] = "holds no 192.168.4.x address"
+            state[known] = "holds no 192.168.4.x address"
         if time.monotonic() - t0 >= wait_s:
             raise AssertionError(f"no spare adapter was back on {whose} access point within {wait_s:.0f} s, and off "
                                  f"Windows the harness re-associates nothing: "

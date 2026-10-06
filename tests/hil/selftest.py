@@ -3164,11 +3164,13 @@ def t_wlan_prejoined(tmp):
     def reach(host, port=80, timeout=wlan.REACH_WAIT_S, step=1.0):
         assert (host, port, timeout) == ("192.168.4.1", 80, 0), (host, port, timeout)
         return st["reach"].pop(0) if st["reach"] else 0.1
-    keys = ("ON_WINDOWS", "netsh", "_run", "reach_wait", "_spare_seen", "PREJOIN_WAIT_S", "PREJOIN_STEP_S")
+    keys = ("ON_WINDOWS", "netsh", "_run", "reach_wait", "_spare_seen", "PREJOIN_WAIT_S", "PREJOIN_STEP_S",
+            "SPARE_FILE")
     saved = {k: getattr(wlan, k) for k in keys}
     try:
         wlan.ON_WINDOWS, wlan.netsh, wlan._run, wlan.reach_wait = False, no_netsh, run, reach
         wlan._spare_seen, wlan.PREJOIN_WAIT_S, wlan.PREJOIN_STEP_S = None, 0.3, 0.01
+        wlan.SPARE_FILE = os.path.join(tmp.root, "wifi_spare.json")      # never this computer's own
         assert wlan.internet_adapter() == "en0" and wlan.ipv4("en6") == ["192.168.4.2"] and wlan.ipv4("en9") == []
         assert wlan.default_routes() == ["en0|10.0.0.1", "utun9|link#33"]
         assert wlan.spare_leases() == [("en6", "192.168.4.2")]
@@ -3240,8 +3242,20 @@ def t_wlan_prejoined(tmp):
         except AssertionError as e:
             assert str(e).startswith("en6 was not back on NaviCore's access point by itself within 0 s") and \
                 "holds no 192.168.4.x address" in str(e), e
-        # no spare adapter ever seen in this run: Skip, with what to do
+        # a new run (nothing seen in this process) that starts while the adapter has no address: the one an earlier
+        # run proved is waited for, not skipped (run 20261006-172611 skipped every test right after a NaviCore restart)
+        assert json.load(open(wlan.SPARE_FILE)) == {"adapter": "en6"}
         wlan._spare_seen = None
+        assert wlan.pick_adapter(B()) == ({"name": "en6", "state": "disconnected"}, "off Windows: the spare adapter "
+                                          "found before, with no 192.168.4.x address now (its access point restarting)")
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None):
+                raise AssertionError("an adapter with no address was used")
+        except AssertionError as e:
+            assert "en6 holds no 192.168.4.x address" in str(e), e
+        # no spare adapter ever seen on this computer: Skip, with what to do
+        wlan._spare_seen = None
+        os.remove(wlan.SPARE_FILE)
         for enter in (lambda: wlan.pick_adapter(B()),
                       lambda: wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None).__enter__()):
             try:

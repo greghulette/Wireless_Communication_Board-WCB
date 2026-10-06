@@ -25,11 +25,13 @@ from suites.common import (Console, Watch, config_guard, link, marker, mesh_para
 # only receive, only sendRaw (no sequence numbers), only send unensured JSON (never in the ring) or never reach a WCB
 # (auth) may share. rejoin reboots W1 before it starts. The WCB-WP14 tests at the end reuse ids: their JSON-only and
 # sendRaw-only ones share as above, and the three that send ensured commands push a stale ring out first
-# (_burn_ring_of). No id may be a bench WCB's own: var_sets had 3 until WCB3 joined the bench (2026-10-06), and then
-# skipped ('mesh id 3 is already in W1's WDP table', run 20261006-122850); 6 is used nowhere else.
+# (_burn_ring_of). No id may be a bench WCB's own or in FORBIDDEN_MESH_IDS: var_sets had 3 until WCB3 joined the bench
+# (2026-10-06) and skipped ('mesh id 3 is already in W1's WDP table', run 20261006-122850). With 1-3, the learned peers
+# 6 and 9, 19 and 20 taken, no id is left to itself, so it shares unicast's 17 and burns W1's and W2's rings first, as
+# timer_origin (17, after it) does.
 MESH_IDS = {"adopt": 18, "unicast": 17, "raw": 16, "broadcast": 13, "json": 12, "frag": 11, "whoami": 10,
             "checksum": 8, "auth": 7, "rejoin": 18, "leave": 15, "maestro_return": 16, "bcast_ports": 5,
-            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 6, "seq_fanout": 4, "seq_body": 7,
+            "tx_integrity": 15, "core0": 16, "raw_bounds": 16, "var_sets": 17, "seq_fanout": 4, "seq_body": 7,
             "json_flood": 12, "timer_origin": 17, "timer_queue": 11, "whoami_escape": 10, "nvs_tx": 16}
 
 
@@ -673,6 +675,8 @@ def mesh_client_sets(bench):
         _crun(c2, "?VAR,CLEAR,hilbv")
         try:
             with _client(bench, "probe1", "var_sets") as (probe, _, _):
+                _burn_ring_of(w, probe, 1)            # 17 is client_mesh.unicast's id too (MESH_IDS)
+                _burn_ring_of(c2, probe, 2)           # the broadcast ;V must not meet a stale ring on W2 either
                 probe.mesh_broadcast(";V,hilbv,1")
                 time.sleep(2)
                 on_w1 = _vget(w, "hilbv")
@@ -757,7 +761,8 @@ def peer_body_broadcasts(bench):
 # free; a W2 wire rides probe2 and is bound before any mesh traffic starts.
 def _burn_ring_of(w, probe, target):
     """Push a stale duplicate ring for this probe id out of W<target>: 17 no-op commands, then a marker W<target>
-    prints on its own console `w` (s22's _burn_ring, which is not imported: a suite importing one that sorts after it
+    prints on its console `w` - a WCB, or a Console, whose relayed lines carry a [TERM:<n>] prefix, so the marker is
+    matched at the end of its line (s22's _burn_ring, which is not imported: a suite importing one that sorts after it
     would register that suite's tests ahead of its own). The ring holds ETM_SEQ_HISTORY = 16 seqs per sender
     (WCB.ino:748), and the clear on a client's boot announce (:5290-5300) needs the client to be a peer already, which
     a temporary client is only after its second advert."""
@@ -767,7 +772,7 @@ def _burn_ring_of(w, probe, target):
     ready = marker("RDY")
     m = w.dev.mark()
     probe.mesh_send(target, f";S0,{ready}")
-    w.dev.expect(rf"^{ready}$", timeout=5, since=m)
+    w.dev.expect(rf"{ready}$", timeout=5, since=m)
     time.sleep(1.0)                  # let the last ACKs land: WCB_Client holds 10 ensured sends in flight at most
 
 
