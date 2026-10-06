@@ -12749,21 +12749,27 @@ TESTS += [t_ws_endpoint_drop_stall]      # INTELLEX.md finding 19 (suites/s32)
 
 def t_kyber_device_helpers(tmp):
     """suites/s52_kyber_device.py's readers of the bench Kyber's config: kyber_config() takes the device's own table
-    (tests/hil/kyber/bench_kyber_live.json, its GET) over Greg's pasted file; the pad on CH7 with Released 991 and the
-    standard ladder 274..1702; buttons 3 and 7 as the WCB port commands ';w3;s3track1' for W3 S3 and ';w2;s4:PP100' for
-    W2 S4 (MDF3/7, their \\r expanded), and button 8 (988) left out beside Released; button 1 as Maestro 1 script 1 and
+    (tests/hil/kyber/bench_kyber_live.json, its GET) over the pasted file, and since Greg's config was loaded onto the
+    Kyber (2026-10-06) the two agree on every key the file has; the pad on CH7 with Released 991 and buttons 1-10 at
+    176-788; buttons 3, 7 and 8 as the WCB port commands ';w3;s3track1' for W3 S3 and ';w2;s4:PP100' and ';w2;s4:PH'
+    for W2 S4 (MDF3/7/8, their \\r expanded); a button beside Released left out; button 1 as Maestro 1 script 1 and
     button 2 as Maestro 2 script 1; and script_frames finding both Pololu restartScript forms for one device among
     setTargets, never another device's."""
     import suites.s52_kyber_device as K
     cfg = K.kyber_config()
     with open(K.KYBER_LIVE, encoding="utf-8") as f:
         assert cfg == json.load(f), "kyber_config() did not read the live table"
+    with open(K.KYBER_CFG, encoding="utf-8") as f:
+        pasted = json.load(f)
+    assert {k: cfg.get(k) for k in pasted} == pasted, [k for k in pasted if cfg.get(k) != pasted[k]][:5]
     ch, released, values = K.pad_ladder(cfg)
-    assert (ch, released) == (7, 991) and [values[n] for n in (1, 7, 8, 15)] == [274, 886, 988, 1702], (ch, released,
-                                                                                                       values)
+    assert (ch, released) == (7, 991) and [values[n] for n in (1, 7, 8, 10)] == [176, 584, 651, 788], (ch, released,
+                                                                                                    values)
     cases = K.port_cmd_cases(cfg)
-    assert cases == [(3, 478, ";w3;s3track1", 3, "S3", "track1"), (7, 886, ";w2;s4:PP100", 2, "S4", ":PP100")], cases
-    assert K.marcduino_cmds(cfg)[8] == ";w2;s4:PH\r", K.marcduino_cmds(cfg)[8]
+    assert cases == [(3, 310, ";w3;s3track1", 3, "S3", "track1"), (7, 584, ";w2;s4:PP100", 2, "S4", ":PP100"),
+                     (8, 651, ";w2;s4:PH", 2, "S4", ":PH")], cases
+    beside = dict(cfg, B8PWM=released - 3)                   # the standard ladder's 988 beside Released 991
+    assert [c[0] for c in K.port_cmd_cases(beside)] == [3, 7], K.port_cmd_cases(beside)
     assert K.maestro_script_buttons(cfg) == {1: (1, 1), 2: (2, 1)}, K.maestro_script_buttons(cfg)
     data = (bytes.fromhex("AA 01 04 00 70 2E") + bytes.fromhex("AA 01 27 01") + bytes.fromhex("AA 02 27 05")
             + bytes.fromhex("AA 01 28 02 10 00"))

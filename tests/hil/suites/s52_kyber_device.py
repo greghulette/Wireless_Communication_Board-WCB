@@ -13,12 +13,14 @@ keeps NaviCore on the rest frame it took at boot, so NaviCore's matrix sees none
 channel goes to Released before the route, so the Kyber never starts on a button, and every press is a hold of
 PRESS_S, then Released: the Kyber smooths each channel (`filter7` 0.08, an exponential average), so a short hold never
 settles inside a window - 0.4 s holds were missed whenever the value was more than ~20 from a button's. A button within
-RELEASED_GAP of Released cannot be told from it (on this bench button 8, 988, beside Released 991) and is left out.
+RELEASED_GAP of Released cannot be told from it (the standard ladder's button 8, 988, beside Released 991) and is
+left out.
 
-Which config. The Kyber runs the table its own `GET` returns, saved as kyber/bench_kyber_live.json (read 2026-10-06:
-the standard KyberPad ladder 274..1702 in steps of 102, Released 991). Greg's kyber/bench_kyber_config.json, pasted
-2026-10-05, has another ladder (176..788) and was never written to this Kyber; the MarcDuino commands and Maestro
-scripts are the same in both. kyber_config() reads the live file when it is there.
+Which config. The Kyber runs the table its own `GET` returns, saved as kyber/bench_kyber_live.json. Until 2026-10-06
+that was the standard KyberPad ladder (274..1702 in steps of 102), not Greg's kyber/bench_kyber_config.json (pasted
+2026-10-05: 176..788); that day Greg's config was loaded onto it over the host link (`SETM` of the 35 keys that
+differed, then `COMMIT`; a reboot showed every key kept) and the live file read again, so the two agree. Both have
+Released 991. kyber_config() reads the live file when it is there: it is what the device runs, whatever was pasted.
 
 What else the Kyber does while it hears a radio: RC channels 1-3 pass through to Maestro channels (`Channel1-3` /
 `MChannel1-3`), so it streams setTargets at their rest (992: centre) the whole time - W2's real Maestro 2 may centre a
@@ -202,8 +204,8 @@ def _pad_rest(bench, ch):
 # ------------------------------------------------------------------ the tests
 @test("kyber.device_pad_serial", "The real Kyber's pad buttons, pressed through the SBUS controller's output B, send "
       "their MarcDuino commands into W3 S5 and WCB3 runs them: each button whose command is a WCB port command (on this "
-      "bench 3 ';w3;s3track1' and 7 ';w2;s4:PP100'; 8 sits beside Released) puts exactly its text and a CR out that "
-      "port, once, and nothing comes with the pad released", needs=["sbus", "wcb3", "wcb2"], links=["W2S4|W3S3"])
+      "bench 3 ';w3;s3track1', 7 ';w2;s4:PP100' and 8 ';w2;s4:PH') puts exactly its text and a CR out that port, once, "
+      "and nothing comes with the pad released", needs=["sbus", "wcb3", "wcb2"], links=["W2S4|W3S3"])
 def device_pad_serial(bench):
     """The proof of two bench wires at once: the controller's output B into the Kyber (it read the pad) and the Kyber's
     MarcDuino port into W3 S5 (WCB3 read its line). A WCB runs a line that starts with its command character as
