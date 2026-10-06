@@ -1772,9 +1772,21 @@ class App:
 
     def job_discover(self):
         self.emit("status", "Auto-detecting wires — each WCB port transmits in turn…")
-        links = self.bench.links.discover(log=lambda s: self.emit("log", s))
+        lines = [f"Auto-detect {time.strftime('%Y-%m-%d %H:%M:%S')}"]
+
+        def log(s):
+            lines.append(s)
+            self.emit("log", s)
+        links = self.bench.links.discover(log=log)
         self.emit("links_changed")
         good = sum(1 for l in links if l.verified)
+        lines.append(f"{len(links)} wire(s) found, {good} verified")
+        # The notes (a noisy pin, a skipped port) are what explain a missing wire: kept past the Log tab, overwritten
+        # by the next auto-detect.
+        try:
+            checkpoint.atomic_write_text(os.path.join(RESULTS, "last_discover.log"), "\n".join(lines) + "\n")
+        except OSError:
+            pass
         self.emit("status", f"Auto-detect: {len(links)} wire(s) found, {good} verified")
 
     def device_note(self, wcb, port):
