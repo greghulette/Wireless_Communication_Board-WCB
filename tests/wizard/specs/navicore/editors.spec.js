@@ -65,10 +65,12 @@ test.describe('the bench config', () => {
     await T.openTool(page);
     await T.connectUsb(page, emu);
     const zone = page.locator('g.btn-zone[data-btn="3"]:visible').first();
+    // ControlOrMeta: the tool takes Cmd for Ctrl (ctrlKey || metaKey, config_tool/index.html ~12106), and in Chrome on
+    // macOS a Control-click is a right-click that never reaches the zone's click handler.
     await zone.click({ modifiers: ['Shift'] });
-    await zone.click({ modifiers: ['Shift', 'Control'] });
+    await zone.click({ modifiers: ['Shift', 'ControlOrMeta'] });
     await zone.click({ modifiers: ['Shift', 'Alt'] });
-    await zone.click({ modifiers: ['Shift', 'Control', 'Alt'] });
+    await zone.click({ modifiers: ['Shift', 'ControlOrMeta', 'Alt'] });
     const trig = (await T.waitRequests(emu, 'TRIGGER', 4)).map((m) => [m.mode, m.btn, m.tap]);
     expect(trig).toEqual([[1, 3, 1], [1, 3, 2], [1, 3, 3], [1, 3, 4]]);
     await expect(page.locator('#modal')).not.toHaveClass(/open/);  // a Shift-click never opens the editor
