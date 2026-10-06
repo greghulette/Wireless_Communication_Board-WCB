@@ -1105,6 +1105,43 @@ def softserial_tx_rmt(bench):
     assert not problems, "; ".join(problems)
 
 
+
+@test("input.softserial_idle_high_after_boot", "S3-S5 idle HIGH from the moment a WCB boots, and the first line each sends after it arrives exact (an ESP32-S3's RMT line sat LOW until its first write; 1 reboot per WCB with its own USB)", needs=["wcb1"], links=[])
+def softserial_idle_high_after_boot(bench):
+    """WcbSoftSerial::primeIdleHigh (WCB_SoftSerial.cpp): an ESP32-S3 RMT TX channel does not drive init_level onto the pin
+    until its first transaction ends, so every HW 3.x board's S3-S5 sat LOW from boot and the first line each port sent
+    began out of frame - the receiver lost its first 6-7 bytes (run 20261005-221308, link.out on W3 S3 and S4: "HIL5F0ADF"
+    arrived as 2A 8A "ADF"). The classic ESP32 was already HIGH. Each WCB with its own USB cable restarts once; before
+    anything is written, every soft port with a wire must read HIGH on its probe header, then one line from each arrives
+    byte-exact. A board whose soft ports have no wire is passed over."""
+    problems, checked = [], []
+    for n, name in sorted(bench.usb_wcbs().items()):
+        ports = [p for p in ("S3", "S4", "S5") if bench.links.get(n, p)]
+        if not ports:
+            continue
+        w = WCB(bench.dev(name))
+        w.reboot()
+        for p in ports:                       # before the first write: nothing has made the line move yet
+            level = bench.links.get(n, p).line_level()
+            if level != 1:
+                problems.append(f"W{n} {p} read {level} before its first write after the boot, not idle HIGH")
+        for p in ports:
+            l = link(bench, n, p)
+            l.listen()
+            text = marker(f"B{n}{p}")
+            m = l.mark()
+            w.dev.send(f";{p}{text}")
+            try:
+                l.expect(text.encode() + b"\r", timeout=3, since=m)
+            except AssertionError:
+                problems.append(f"W{n} {p}: the first line after the boot arrived as {l.received(m)!r}, not {text!r}")
+            l.release()
+        checked.append(f"W{n} {','.join(ports)}")
+    if not checked:
+        raise Skip("no WCB with its own USB cable has a wire on S3-S5")
+    bench.note("checked after a reboot: " + "; ".join(checked))
+    assert not problems, "; ".join(problems)
+
 # ============================================================ soft-port TX rates, line buffers and live ?BAUD (WCB-WP32)
 # Every rate ?BAUD takes for a soft port: updateBaudRate (WCB_Storage.cpp:196-213) has no 4800, refuses 128000 and 256000
 # on S3-S5, and warns about INPUT only at 57600 and 115200. The RMT encoder clocks at 1 MHz below 4800 baud and at 10 MHz

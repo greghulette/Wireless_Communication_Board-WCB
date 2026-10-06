@@ -63,6 +63,7 @@ private:
                          rmt_symbol_word_t *out, bool *done, void *arg);
   int  byteHalves(uint8_t b, uint16_t *dur, uint8_t *lvl) const;
   bool startRmt(uint32_t baud, int8_t txPin);
+  void primeIdleHigh();
   void stopRmt();
 
   uint8_t              _port;

@@ -168,6 +168,11 @@ changing before editing.**
       busy-waiting. It sends in chunks sized to fit the channel memory, so a transmission never
       waits on the RMT refill ISR. That ISR isn't IRAM-safe and is held off during every NVS
       write; a starved channel would put stale symbols on the wire.
+    - **Idle HIGH from `begin()`:** on the ESP32-S3 a new TX channel doesn't drive `init_level` onto
+      the pin until its first transaction ends. The line sat LOW from boot, so every port's first
+      line after a reboot lost its first 6-7 bytes (HIL, WCB3 HW 3.2). `startRmt()` ends with
+      `primeIdleHigh()`, one all-high symbol with no start bit. Keep it; HIL
+      `input.softserial_idle_high_after_boot` checks the line level and the first line after a reboot.
     - **Channel budget:** ESP32 has 8 TX-capable RMT channels, ESP32-S3 has 4. The status LED
       (NeoPixel) takes one and S3-S5 one each, which **fills the S3 exactly**. Anything else that
       wants RMT on the S3 makes a soft port fall back to bit-banged TX. It prints

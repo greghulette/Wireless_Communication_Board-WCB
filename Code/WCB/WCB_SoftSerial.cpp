@@ -43,7 +43,7 @@ bool WcbSoftSerial::startRmt(uint32_t baud, int8_t txPin) {
   cc.resolution_hz     = res;
   cc.mem_block_symbols = SOC_RMT_MEM_WORDS_PER_CHANNEL;   // one block: 64 (ESP32) / 48 (S3)
   cc.trans_queue_depth = 2;
-  cc.flags.init_level  = 1;                               // UART idle is HIGH from the first instant
+  cc.flags.init_level  = 1;                               // UART idle HIGH - not until a first transaction on the S3: primeIdleHigh()
   if (rmt_new_tx_channel(&cc, &_ch) != ESP_OK) { _ch = nullptr; return false; }
 
   rmt_simple_encoder_config_t ec = {};
@@ -71,7 +71,31 @@ bool WcbSoftSerial::startRmt(uint32_t baud, int8_t txPin) {
   if (_chunk < 1) _chunk = 1;
   if (!_lock) _lock = xSemaphoreCreateMutex();
   _borrowed = false;
+  primeIdleHigh();
   return true;
+}
+
+// On the ESP32-S3 a new TX channel does not drive init_level onto the pin until its first transaction
+// ends: the line sat LOW from boot, so the first line a port sent after every reboot began out of frame
+// and a receiver lost its first 6-7 bytes (HIL, WCB3 HW 3.2: S3/S4 read 0 until the first write and
+// "BOOT0S3ABCDEFGH" arrived as A8 EA 05 "ABCDEFGH"; the classic ESP32 reads 1 from boot). One symbol
+// that is high for two bit times ends with the line held at eot_level - idle HIGH - from begin(). No
+// start bit, so no receiver sees a byte; where the line was already high nothing changes at all.
+void WcbSoftSerial::primeIdleHigh() {
+  rmt_copy_encoder_config_t cfg = {};
+  rmt_encoder_handle_t copy = nullptr;
+  if (rmt_new_copy_encoder(&cfg, &copy) != ESP_OK) return;
+  rmt_symbol_word_t idle = {};
+  idle.duration0 = (uint16_t)_edge[1];
+  idle.level0    = 1;
+  idle.duration1 = (uint16_t)_edge[1];
+  idle.level1    = 1;
+  rmt_transmit_config_t tc = {};
+  tc.loop_count      = 0;
+  tc.flags.eot_level = 1;
+  if (rmt_transmit(_ch, copy, &idle, sizeof(idle), &tc) == ESP_OK)
+    rmt_tx_wait_all_done(_ch, 100);
+  rmt_del_encoder(copy);
 }
 
 void WcbSoftSerial::stopRmt() {
