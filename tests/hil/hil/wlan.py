@@ -30,6 +30,8 @@ import time
 from .checkpoint import redact_text
 from .runner import Skip
 
+NOT_WINDOWS_SKIP = "netsh (Windows) drives the PC's WiFi here"
+
 
 def netsh(*args, timeout=30):
     r = subprocess.run(["netsh", "wlan", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -95,7 +97,11 @@ def choose_adapter(ifaces, want, inet):
 
 def pick_adapter(bench):
     """(adapter, why): choose_adapter over this PC's adapters, bench.json "wifi_test_interface" and the adapter that
-    carries the default route."""
+    carries the default route. Skip anywhere but Windows: every caller goes on to drive the adapter with netsh (s45's
+    _spare_adapter checks before pc_on_ap, and ran netsh on the Mac: FileNotFoundError, three ERRORs in run
+    20261005-221308)."""
+    if os.name != "nt":
+        raise Skip(NOT_WINDOWS_SKIP)
     ifaces = wlan_interfaces()
     want = bench.cfg.get("wifi_test_interface")
     return choose_adapter(ifaces, want, None if want else internet_adapter())
@@ -189,9 +195,7 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None):
     must also carry a TCP connect there (_carries), as rejoin's must. In run 20261004-125412 three NaviCore joins held a
     lease and carried nothing (a connect to NaviCore timed out) while two others worked; in 20261004-130438, with this
     check, all fifteen carried a connect at once. The cause is not known; the check costs nothing when the link works."""
-    if os.name != "nt":
-        raise Skip("netsh (Windows) drives the PC's WiFi here")
-    adapter, why = pick_adapter(bench)
+    adapter, why = pick_adapter(bench)                  # Skip anywhere but Windows
     if not adapter:
         raise Skip("this PC has no WiFi adapter" if not why else "bench.json wifi_test_interface names no WiFi adapter here")
     name = adapter["name"]

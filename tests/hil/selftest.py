@@ -2939,8 +2939,6 @@ def t_wlan_pc_on_ap(tmp):
     assert "<name>HIL-A&lt;b</name>" in xml and "<keyMaterial>p&amp;w&gt;d</keyMaterial>" in xml, xml
     assert wlan.scrub("Profile HIL-Droid AP is added; Droid AP", "HIL-Droid AP", "Droid AP", None) == \
         "Profile <network> is added; <network>"
-    if os.name != "nt":
-        return                                                   # pc_on_ap refuses to run anywhere but Windows
 
     class B:
         def __init__(self, cfg=None):
@@ -2948,6 +2946,18 @@ def t_wlan_pc_on_ap(tmp):
 
         def note(self, text):
             self.notes.append(text)
+    if os.name != "nt":
+        # netsh is Windows-only: no adapter is picked, so every caller skips (s45's _spare_adapter ran netsh on the Mac)
+        from hil.runner import Skip
+        for enter in (lambda: wlan.pick_adapter(B()),
+                      lambda: wlan.pc_on_ap(B(), [], "W1 AP", "x" * 8, "W1's").__enter__()):
+            try:
+                enter()
+            except Skip as e:
+                assert str(e) == wlan.NOT_WINDOWS_SKIP, e
+                continue
+            raise AssertionError("a WiFi adapter was picked off Windows")
+        return
     saved = {k: getattr(wlan, k) for k in ("netsh", "internet_adapter", "address_wait", "wait")}
     try:
         wlan.internet_adapter = lambda: "Wi-Fi"
