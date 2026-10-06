@@ -492,6 +492,61 @@ def get_config_shape(bench):
                                                                    if len(problems) > 12 else ""))
 
 
+HOLD_S = (0.3, 1.0)      # long_reply_host_stall: past HWCDC's 50 ms TX timeout, and well past it
+
+
+@test("nccfg.long_reply_host_stall", "(should) GET_CONFIG's ~14 KB and GET_CMDLIB's ~19 KB reply lines arrive whole and "
+      "byte-identical to an unstalled read when the host stops reading for 0.3 s and for 1 s just after asking: NaviCore "
+      "waits for room in its USB TX ring instead of the USB core dropping the middle of the line (D-NC75; read only)",
+      needs=["navicore"], links=[])
+def long_reply_host_stall(bench):
+    """NAVICORE.md D-NC75. NaviCore printed GET_CONFIG's line as one Serial.print of ~14 KB (and GET_CMDLIB's ~19 KB)
+    into an 8 KB USB TX ring. The esp32 core's HWCDC::write waits for room in 1 ms steps; after its 50 ms TX timeout
+    with no progress it marks the host gone and returns the rest unsent, and the next writes (the closing '}') take its
+    not-connected path, which pops the OLDEST queued bytes to make room - so a host that stopped reading for 50 ms got
+    the line with a hole in its middle (intellex.ws_transport_navicore on the Mac, 20261006-094314: '"cmd":";A,P' then
+    'clusive":false'). The harness's reader holds its reads (SerialDevice.hold_reads) right after sending the request,
+    so the OS buffer and then NaviCore's ring fill, then reads again: each reply must equal an unstalled read of the
+    same request, byte for byte. Nothing quotes either line (the config holds the mesh and AP passwords): lengths only.
+    Fixed in NaviCore 0657025 (printLong: the lines go out paced into the ring, waiting up to 1 s for a stalled host).
+    On the Mac this passes before the fix as well (20261006-113323): macOS's USB driver keeps reading into its own
+    buffer while the harness pauses, and a whole 19 KB reply fits there, so the stall never reaches NaviCore. It can
+    catch the defect where the host buffers less - Windows, where a 9,575-character CONFIG was seen (20261004-231308)."""
+    nc = _nc(bench)
+    if not hasattr(nc.dev, "hold_reads"):
+        raise Skip("this device driver cannot hold its reads")
+    problems, notes = [], []
+    for verb, pattern in (("GET_CONFIG", r'^\{"type":"CONFIG","data":'), ("GET_CMDLIB", r'^\{"type":"CMDLIB",')):
+        ref = nc.json_cmd({"type": verb}, pattern, timeout=10.0).string
+        try:
+            json.loads(ref)
+        except ValueError:
+            raise AssertionError(f"{verb}: the unstalled reference read ({len(ref)} chars) is not whole JSON itself")
+        for hold in HOLD_S:
+            m = nc.dev.mark()
+            nc.dev.send(json.dumps({"type": verb}, separators=(",", ":")))
+            nc.dev.hold_reads(hold)
+            try:
+                got = nc.dev.expect(pattern, timeout=hold + 10.0, since=m).string
+            except AssertionError:
+                problems.append(f"{verb} with the host holding its reads {hold:g} s: no reply line")
+                continue
+            whole = got == ref
+            notes.append(f"{verb} after a {hold:g} s hold: {len(got)} of {len(ref)} chars, "
+                         f"{'byte-identical' if whole else 'different'}")
+            if not whole:
+                try:
+                    json.loads(got)
+                    how = "valid JSON, but not the same bytes"
+                except ValueError:
+                    how = "not JSON"
+                problems.append(f"{verb} with the host holding its reads {hold:g} s: {len(got)} chars where an unstalled "
+                                f"read gives {len(ref)} ({how})")
+            time.sleep(0.5)
+    bench.note("long_reply_host_stall: " + "; ".join(notes))
+    assert not problems, "(should, D-NC75) a long reply lost bytes while the host stalled: " + "; ".join(problems)
+
+
 # ============================================================ SET_CONFIG: replies and merge semantics
 @test("nccfg.set_ack_shapes", "SET_CONFIG's replies: ok:true echoes the saveId (0 when absent) after 'RC config saved "
       "to LittleFS (N bytes)' with N the GET_CONFIG length; no data gets ok:false 'missing data' with the saveId; a "

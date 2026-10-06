@@ -42,6 +42,7 @@ class SerialDevice:
         self._thread = None
         self._wlock = threading.Lock()   # one writer at a time; also held while the handle is swapped
         self.last_error_at = None        # monotonic time the port last failed - runner.host_usb_loss() compares these
+        self._hold_until = 0.0           # hold_reads(): the reader reads nothing until this monotonic time
 
     # ------------------------------------------------------------ lifecycle
     def _open_port(self):
@@ -108,8 +109,17 @@ class SerialDevice:
     def __exit__(self, *exc):
         self.close()
 
+    def hold_reads(self, seconds):
+        """Read nothing from the port for `seconds`: a host that stalls, so the OS buffer and then the device's own TX
+        buffer fill - for a test of what the device does then (NAVICORE.md D-NC75). Nothing is lost on this side: the
+        bytes wait in the port until the reader resumes."""
+        self._hold_until = time.monotonic() + seconds
+
     def _reader(self):
         while not self._stop:
+            if self._hold_until > time.monotonic():
+                time.sleep(0.01)
+                continue
             try:
                 chunk = self._ser.read(4096)
             except (serial.SerialException, OSError, AttributeError) as e:
