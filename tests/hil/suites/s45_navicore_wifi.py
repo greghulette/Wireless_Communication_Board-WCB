@@ -8,6 +8,11 @@ tests run only on a spare adapter, so the PC stays online; a PC whose only WiFi 
 them. Three also need navicore_reboot, checked in the body: ap_boot_lines and refuse_short_password restart NaviCore,
 and ws_stalled_client may, if D-NC62's out-of-bounds write crashes it.
 
+Off Windows (the Mac) the harness joins nothing: the spare adapter must already be on NaviCore's access point, and each
+test first proves it is NaviCore's (_navicore_ap: its socket's PONG is the one NaviCore gives over USB), since every
+board's access point is 192.168.4.1 and the SSID cannot be read there. After a restart the adapter has to come back by
+itself. refuse_short_password skips there: its scan and its join attempt are the PC's own.
+
 What the endpoint is (navicore_wsserver.h; hil/ncws.py's docstring has the detail): a second mouth for the command
 surface USB speaks (processInputLine), and a CONSOLE MIRROR - everything the loop core prints while a client is
 connected goes to every client, replies to USB and to other sockets included, and NaviCore's USB sees the replies to
@@ -40,7 +45,7 @@ import string
 import time
 from contextlib import contextmanager
 
-from hil import ncflash, optin
+from hil import ncflash, optin, wlan
 from hil.checkpoint import redact_text, redact_tokens
 from hil.intellex import handed_over
 from hil.nc_guard import nc_guard
@@ -48,7 +53,8 @@ from hil.navicore import DBG_WCB, SBUS_FULL_FPS, NaviCore, parse_mae, parse_pwm_
 from hil.ncws import NcWs
 from hil.runner import Skip, test
 from hil.wcb import PULL_MAX, WCB, pull_config
-from hil.wlan import SPARE_ONLY_SKIP, default_routes, internet_adapter, networks, pc_on_ap, pick_adapter
+from hil.wlan import (NOT_WINDOWS_SKIP, SPARE_ONLY_SKIP, default_routes, internet_adapter, networks, pc_on_ap,
+                      pick_adapter)
 from suites.common import Console, link, marker, usb_wcb
 from suites.s02_navicore import _bench_wcb_ids
 from suites.s03_wcb import _factory_reply, _reply_problems
@@ -134,7 +140,7 @@ def route_problems(before, during, name):
     (hil/wlan.py default_routes): none on the adapter on NaviCore's access point, and every other adapter's as before.
     Messages give next hops on the joined adapter and counts elsewhere: another adapter's routes are the PC's."""
     if before is None or during is None:
-        return ["Get-NetRoute could not be read"]
+        return ["the PC's default routes could not be read (hil/wlan.py default_routes)"]
     mine = [r for r in during if r.startswith(name + "|")]
     others = [r for r in during if not r.startswith(name + "|")]
     was = [r for r in before if not r.startswith(name + "|")]
@@ -303,8 +309,32 @@ def _on_ap(bench, problems):
     if ap is None:
         raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
     ssid, pw = ap
-    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, reach=(NC_AP_IP, 80)) as name:
+    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, reach=(NC_AP_IP, 80),
+                  identify=_navicore_ap(bench)) as name:
         yield nc, cfg, name
+
+
+def _navicore_ap(bench, version=None):
+    """pc_on_ap's identify off Windows (hil/wlan.py _prejoined), where the spare adapter is already on an access point
+    the harness cannot name: None when ws://192.168.4.1/ws, reached through it, answers PING with NaviCore's own PONG -
+    `version`, or what NaviCore's USB answers now - else what it answered instead. The socket open is retried for 10 s
+    (_open): a restarted NaviCore takes a TCP connect a moment before its endpoint answers."""
+    def identify(name):
+        want = version or _nc(bench).ping()
+        try:
+            ws = _open(bench, name="ncws-id", wait=10.0)
+        except AssertionError as e:
+            return _line1(e)
+        try:
+            m = ws.mark()
+            ws.send(PING_LINE)
+            got = ws.expect(PONG.pattern, timeout=4, since=m).group(1)
+        except AssertionError:
+            return f"ws://{NC_AP_IP}/ws answered no NaviCore PONG within 4 s"
+        finally:
+            ws.close()
+        return None if got == want else f"its PONG names {got}, NaviCore's over USB {want}"
+    return identify
 
 
 def _spare_adapter(bench):
@@ -1225,7 +1255,7 @@ def _join_and_ping(bench, problems, cfg, version, label):
     -> seconds from the call to the PONG. A problem is added, not raised, when the socket does not answer."""
     ssid, pw = ap_of(cfg)
     t0 = time.monotonic()
-    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True):
+    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, identify=_navicore_ap(bench, version)):
         ws = _open(bench, wait=20.0)
         try:
             m = ws.mark()
@@ -1292,7 +1322,12 @@ def refuse_short_password(bench):
     no longer hears in its list for a while). The proof the access point is down is the join: with the real password
     it must fail to associate. Then the snapshot is written back (SET_CONFIG of the exact text) and NaviCore restarts
     onto it however the body ended, and ap_block and a join prove the access point back. nc_guard proves the config
-    byte-identical afterwards."""
+    byte-identical afterwards. Skipped off Windows, where the harness joins nothing (hil/wlan.py _prejoined): the scan
+    and the join attempt with the real password are the PC's own, and a spare adapter that merely stays off a refused
+    access point cannot tell refused from open."""
+    if not wlan.ON_WINDOWS:
+        raise Skip(f"{NOT_WINDOWS_SKIP}: this test's fresh scan and its join attempt are the PC's own, and off Windows "
+                   f"the harness joins nothing")
     _reboot_too(bench)
     adapter = _spare_adapter(bench)
     nc = _nc(bench)

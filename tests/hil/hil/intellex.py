@@ -655,6 +655,9 @@ def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none"
         report = None
     for n in (report or {}).get("notes") or []:
         bench.note(f"{test_id}: {n}")
+    if report is not None:
+        for name, msg in py_outcome(report)[1]:          # a case skipped beside others that passed shows only here
+            bench.note(f"{test_id}: case skipped: {name}: {msg}")
     judge_py(test_id, report, rc, [x for x in text.splitlines() if x.strip()][-12:])
     return report
 

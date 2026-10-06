@@ -4,6 +4,8 @@ For each test the PC's spare WiFi adapter joins NaviCore's access point (suites/
 pc_on_ap under a temporary HIL- profile, the SSID and password read from NaviCore's GET_CONFIG over USB; a spare adapter
 only, D-NC14) and goes back to its own network afterwards. On this bench the spare adapter's own network IS NaviCore's
 access point, so the join is a re-association under the temporary profile and the way back returns it to Windows' own.
+Off Windows (the Mac) the harness joins nothing: the spare adapter is already on NaviCore's access point and stays there
+(hil/wlan.py _prejoined), so the AP hop and the bounce skip there.
 A staged, leashed Intellex host (no COM port at all, offline, no discovery host) is then attached the way Intellex's
 chooser attaches a droid it identified: POST /_api/attach {kind: ws, host: 192.168.4.1, role: navicore}.
 
@@ -423,7 +425,10 @@ def wifi_ap_hop_reidentify(bench):
     on whatever the adapter joined since, and the role must be corrected BEFORE the attach, which the page reads at
     once (CLAUDE.md rule 10: a WCB doorway taken for a direct NaviCore sends ?OTALOCAL to the WCB). The spec asks the
     harness to move the adapter (hooks hop and hop_back: s28 _pc_on_w1_ap nested inside _on_ap, so hop_back returns it
-    to NaviCore's temporary profile); the host's lines are read with both network names taken out."""
+    to NaviCore's temporary profile); the host's lines are read with both network names taken out. Skipped off Windows,
+    where the harness moves no adapter (hil/wlan.py _prejoined)."""
+    if not wlan.ON_WINDOWS:
+        raise Skip(f"{wlan.NOT_WINDOWS_SKIP}: the hop moves the PC's spare adapter to W1's access point and back")
     from suites.s28_wifi import _pc_on_w1_ap, _status as _w1_wifi, _wifi_token
     _free_of_others(bench)
     _, mode, w1_ssid, w1_pw = _wifi_token(bench.config_tokens(1, refresh=True))
@@ -523,7 +528,10 @@ def wifi_bounce_scoped(bench):
     'netsh wlan disconnect' drops every adapter - and it reconnects through the profile Windows keeps under the
     network's own name (no password needed). Run from its venv (tests/intellex/py/wifi_units.py group bounce), the SSID
     in its environment only, inside _on_ap so the adapter goes back to its own network afterwards whatever the bounce
-    did."""
+    did. Skipped off Windows: the adapter watch and the way back read and drive netsh, and Intellex's macOS bounce
+    (_wifi_bounce_macos) cycles a network service instead, which nothing here watches yet."""
+    if not wlan.ON_WINDOWS:
+        raise Skip(f"{wlan.NOT_WINDOWS_SKIP}: the adapter watch and the way back are netsh's")
     _free_of_others(bench)
     inet = wlan.internet_adapter()
     if not inet:

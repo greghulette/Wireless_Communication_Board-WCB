@@ -2946,20 +2946,9 @@ def t_wlan_pc_on_ap(tmp):
 
         def note(self, text):
             self.notes.append(text)
-    if os.name != "nt":
-        # netsh is Windows-only: no adapter is picked, so every caller skips (s45's _spare_adapter ran netsh on the Mac)
-        from hil.runner import Skip
-        for enter in (lambda: wlan.pick_adapter(B()),
-                      lambda: wlan.pc_on_ap(B(), [], "W1 AP", "x" * 8, "W1's").__enter__()):
-            try:
-                enter()
-            except Skip as e:
-                assert str(e) == wlan.NOT_WINDOWS_SKIP, e
-                continue
-            raise AssertionError("a WiFi adapter was picked off Windows")
-        return
-    saved = {k: getattr(wlan, k) for k in ("netsh", "internet_adapter", "address_wait", "wait")}
+    saved = {k: getattr(wlan, k) for k in ("netsh", "internet_adapter", "address_wait", "wait", "ON_WINDOWS")}
     try:
+        wlan.ON_WINDOWS = True              # the Windows path on any OS: netsh is faked (t_wlan_prejoined: the other)
         wlan.internet_adapter = lambda: "Wi-Fi"
         wlan.address_wait = lambda name, subnet="192.168.4.": ("192.168.4.2", 1.2, "")
         wlan.wait = lambda pred, timeout, step=1.0: pred()
@@ -3011,6 +3000,186 @@ def t_wlan_pc_on_ap(tmp):
                 raise AssertionError("an unknown adapter was used")
         except runner.Skip as e:
             assert "wifi_test_interface names no WiFi adapter" in str(e), e
+    finally:
+        for k, v in saved.items():
+            setattr(wlan, k, v)
+
+
+# Captured on the Mac bench (macOS 15), addresses and MACs made up: the USB TP-Link is en6 on NaviCore's access point,
+# en0 the built-in Wi-Fi carrying the default route, utun9 a VPN with an interface-scoped default.
+IFCONFIG_MAC = """lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	options=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+	inet 127.0.0.1 netmask 0xff000000
+	inet6 ::1 prefixlen 128 
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	options=6460<TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>
+	ether 02:00:00:00:00:0a
+	inet6 fe80::10:1%en0 prefixlen 64 secured scopeid 0xf 
+	inet 10.0.0.104 netmask 0xffffff00 broadcast 10.0.0.255
+	media: autoselect
+	status: active
+utun9: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280
+	inet 100.65.73.109 --> 100.65.73.109 netmask 0xffffffff
+en10: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	ether 02:00:00:00:00:0b
+	media: autoselect (none)
+	status: inactive
+en6: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	options=400<CHANNEL_IO>
+	ether 02:00:00:00:00:06
+	inet 192.168.4.2 netmask 0xffffff00 broadcast 192.168.4.255
+	media: autoselect
+	status: active
+"""
+ROUTE_GET_MAC = """   route to: default
+destination: default
+       mask: default
+    gateway: 10.0.0.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500         0 
+"""
+NETSTAT_MAC = """Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            10.0.0.1           UGScg                 en0       
+default            link#33            UCSIg               utun9       
+10/24              link#15            UCS                   en0      !
+127                127.0.0.1          UCS                   lo0       
+192.168.4          link#26            UCS                   en6      !
+192.168.4.1        02:00:00:00:00:01  UHLWIi                en6   1127
+"""
+
+
+def t_wlan_prejoined(tmp):
+    """hil/wlan.py off Windows (the Mac): ifconfig, route and netstat parsed from captured text; pick_adapter finds the
+    spare adapter already on a 192.168.4.x network and never the one carrying the default route; pc_on_ap joins nothing
+    (no netsh, nothing undone afterwards) and yields that adapter once identify proves the access point, Skips without
+    identify or without a spare adapter, raises when identify names another, and after a restart waits for the adapter
+    to come back by itself, raising when it does not; rejoin waits the same way; networks Skips."""
+    from hil import wlan
+    from hil.runner import Skip
+    assert wlan.parse_ifconfig(IFCONFIG_MAC) == {"lo0": ["127.0.0.1"], "en0": ["10.0.0.104"],
+                                                 "utun9": ["100.65.73.109"], "en10": [], "en6": ["192.168.4.2"]}
+    assert wlan.parse_route_get(ROUTE_GET_MAC) == "en0"
+    assert wlan.parse_route_get("route: writing to routing socket: not in table\n") is None
+    assert wlan.parse_netstat_defaults(NETSH_INTERFACES) == []
+    assert wlan.parse_netstat_defaults(NETSTAT_MAC) == ["en0|10.0.0.1", "utun9|link#33"]
+
+    class B:
+        def __init__(self):
+            self.cfg, self.notes = {}, []
+
+        def note(self, text):
+            self.notes.append(text)
+
+    def no_netsh(*a, **k):
+        raise AssertionError(f"netsh was run off Windows: {a}")
+    st = {"ifconfig": IFCONFIG_MAC, "reach": [], "run": []}
+
+    def run(args):
+        st["run"].append(args)
+        if args[0] == "ifconfig":
+            return st["ifconfig"]
+        if args[:2] == ["route", "-n"]:
+            return ROUTE_GET_MAC
+        if args[0] == "netstat":
+            return NETSTAT_MAC
+        raise AssertionError(f"an unexpected command off Windows: {args}")
+
+    def reach(host, port=80, timeout=wlan.REACH_WAIT_S, step=1.0):
+        assert (host, port, timeout) == ("192.168.4.1", 80, 0), (host, port, timeout)
+        return st["reach"].pop(0) if st["reach"] else 0.1
+    keys = ("ON_WINDOWS", "netsh", "_run", "reach_wait", "_spare_seen", "PREJOIN_WAIT_S", "PREJOIN_STEP_S")
+    saved = {k: getattr(wlan, k) for k in keys}
+    try:
+        wlan.ON_WINDOWS, wlan.netsh, wlan._run, wlan.reach_wait = False, no_netsh, run, reach
+        wlan._spare_seen, wlan.PREJOIN_WAIT_S, wlan.PREJOIN_STEP_S = None, 0.3, 0.01
+        assert wlan.internet_adapter() == "en0" and wlan.ipv4("en6") == ["192.168.4.2"] and wlan.ipv4("en9") == []
+        assert wlan.default_routes() == ["en0|10.0.0.1", "utun9|link#33"]
+        assert wlan.spare_leases() == [("en6", "192.168.4.2")]
+        adapter, why = wlan.pick_adapter(B())
+        assert adapter == {"name": "en6", "state": "connected"} and "default route" in why, (adapter, why)
+        try:
+            wlan.networks("en6")
+            raise AssertionError("networks scanned off Windows")
+        except Skip as e:
+            assert str(e) == wlan.NOT_WINDOWS_SKIP, e
+        # no identify (s28's W1 and W2): Skip, the access point cannot be told from another board's
+        try:
+            with wlan.pc_on_ap(B(), [], "W1 AP", "x" * 8, "W1's"):
+                raise AssertionError("an access point nobody can identify was used")
+        except Skip as e:
+            assert str(e).startswith(wlan.NOT_WINDOWS_SKIP) and "W1's cannot be told" in str(e), e
+        # proved NaviCore's: yielded, the identify asked once with the adapter's name, nothing undone afterwards
+        asked, b, problems = [], B(), []
+        with wlan.pc_on_ap(b, problems, "Droid AP", "sekrit-pass-1", "NaviCore's", spare_only=True,
+                           reach=("192.168.4.1", 80), identify=lambda n: asked.append(n)) as name:
+            assert name == "en6" and asked == ["en6"], (name, asked)
+            n_run = len(st["run"])
+        assert len(st["run"]) == n_run and not problems, (st["run"][n_run:], problems)
+        notes = "\n".join(b.notes)
+        assert "already on NaviCore's access point (192.168.4.2" in notes and "it stays there" in notes, notes
+        assert "Droid AP" not in notes and "sekrit-pass-1" not in notes, notes
+        # another board's access point: raised at once
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: "its PONG names v9"):
+                raise AssertionError("another board's access point was used")
+        except AssertionError as e:
+            assert "en6, the spare adapter holding 192.168.4.2, did not prove to be on NaviCore's access point: its " \
+                   "PONG names v9" == str(e), e
+        # a link that carries nothing yet: waited for, then used once it does
+        st["reach"] = [None, None, 0.2]
+        with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None) as name:
+            assert name == "en6" and st["reach"] == [], st["reach"]
+        st["reach"] = [None] * 1000
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None):
+                raise AssertionError("a link that never carried a connect was used")
+        except AssertionError as e:
+            assert "no spare adapter was back on NaviCore's access point within 0 s" in str(e) and \
+                "en6 holds 192.168.4.2, but 192.168.4.1:80 takes no connect" in str(e), e
+        st["reach"] = []
+        # after a restart the address is gone for a while: the adapter seen before is waited for
+        no_lease = IFCONFIG_MAC.replace("\tinet 192.168.4.2 netmask 0xffffff00 broadcast 192.168.4.255\n", "")
+        calls = {"n": 0}
+
+        def run_back(args):
+            calls["n"] += args[0] == "ifconfig"
+            return IFCONFIG_MAC if args[0] == "ifconfig" and calls["n"] > 3 else (no_lease if args[0] == "ifconfig"
+                                                                                  else run(args))
+        wlan._run = run_back
+        with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None) as name:
+            assert name == "en6" and calls["n"] > 3, calls
+        assert wlan.rejoin(B(), "en6", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80)).startswith(
+            "en6 came back by itself (off Windows the harness re-associates nothing): it held 192.168.4.2 and "
+            "192.168.4.1:80 took a connect")
+        st["ifconfig"], wlan._run = no_lease, run
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None):
+                raise AssertionError("an adapter with no address was used")
+        except AssertionError as e:
+            assert "within 0 s" in str(e) and "en6 holds no 192.168.4.x address" in str(e), e
+        try:
+            wlan.rejoin(B(), "en6", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80))
+            raise AssertionError("rejoin passed with no address")
+        except AssertionError as e:
+            assert str(e).startswith("en6 was not back on NaviCore's access point by itself within 0 s") and \
+                "holds no 192.168.4.x address" in str(e), e
+        # no spare adapter ever seen in this run: Skip, with what to do
+        wlan._spare_seen = None
+        for enter in (lambda: wlan.pick_adapter(B()),
+                      lambda: wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None).__enter__()):
+            try:
+                enter()
+                raise AssertionError("an adapter was found where none holds a 192.168.4.x address")
+            except Skip as e:
+                assert str(e) == wlan.PREJOIN_SKIP, e
+        # the adapter carrying the default route is never taken, even on 192.168.4.x
+        st["ifconfig"] = IFCONFIG_MAC.replace("inet 10.0.0.104 netmask", "inet 192.168.4.3 netmask")
+        assert wlan.spare_leases() == [("en6", "192.168.4.2")], wlan.spare_leases()
     finally:
         for k, v in saved.items():
             setattr(wlan, k, v)
@@ -3173,7 +3342,52 @@ def t_ncwifi_helpers(tmp):
     assert got == ["NaviCore's DHCP gave the adapter a default route (next hop ['192.168.4.1'])"], got
     got = S.route_problems(before, [], "Wi-Fi 2")
     assert len(got) == 1 and "1 -> 0 routes" in got[0] and "192.168.1.1" not in got[0], got
-    assert S.route_problems(None, before, "x") == ["Get-NetRoute could not be read"]
+    assert S.route_problems(None, before, "x") == ["the PC's default routes could not be read (hil/wlan.py default_routes)"]
+    # _navicore_ap, pc_on_ap's identify off Windows: NaviCore's own PONG over the socket, else what answered instead
+    class _Ws:
+        def __init__(self, reply):
+            self.reply, self.closed = reply, False
+
+        def mark(self):
+            return 0
+
+        def send(self, line):
+            assert line == S.PING_LINE, line
+
+        def expect(self, rx, timeout=0, since=0):
+            m = re.match(rx, self.reply or "")
+            if m is None:
+                raise AssertionError("no match")
+            return m
+
+        def close(self):
+            self.closed = True
+
+    class _Nc:
+        def ping(self):
+            return "v0.2.0_x"
+    keep = {k: getattr(S, k) for k in ("_open", "_nc")}
+    try:
+        S._nc = lambda bench: _Nc()
+        opened = []
+        for reply, version, want in (('{"type":"PONG","version":"v0.2.0_x"}', None, None),
+                                     ('{"type":"PONG","version":"v0.1.9"}', None, "its PONG names v0.1.9, NaviCore's "
+                                                                                    "over USB v0.2.0_x"),
+                                     ('{"type":"PONG","version":"v0.1.9"}', "v0.1.9", None),
+                                     ('{"sys":1,"type":"PONG","id":1,"version":"6.2.1"}', None,
+                                      f"ws://{S.NC_AP_IP}/ws answered no NaviCore PONG within 4 s")):
+            S._open = lambda bench, name="ncws", wait=15.0, **kw: opened.append(_Ws(reply)) or opened[-1]
+            got = S._navicore_ap(object(), version)("en6")
+            assert got == want and opened[-1].closed, (reply, version, got)
+
+        def refused(bench, name="ncws", wait=15.0, **kw):
+            raise AssertionError(f"could not open ws://{S.NC_AP_IP}/ws with a lease held (OSError: refused)\nmore")
+        S._open = refused
+        assert S._navicore_ap(object())("en6") == f"could not open ws://{S.NC_AP_IP}/ws with a lease held (OSError: " \
+                                                  f"refused)"
+    finally:
+        for k, v in keep.items():
+            setattr(S, k, v)
     selfrow = "[WDP:N=20,CLIENT=0,ALIAS=NaviCore,HW=0,HWREV=,FW=v1,CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,AGE=0,SEEN=1,PEER=3]"
     assert S.intellex_verdict(['{"type":"PONG","version":"v1"}', "Unknown command: ?RELAY,WIFI", selfrow,
                                "[WDP:END,count=0]"]) == ("navicore", "v1", None)
@@ -4179,7 +4393,7 @@ class FakeNaviDev:
     """NaviCore's (or the SBUS controller's) USB console for hil/navicore.py and hil/sbus.py: each send() is answered by
     script(text, n) - n counts the sends from 1 - with lines appended at once, and later(delay, *lines) appends lines
     from a timer. Duck-types what the drivers read of a SerialDevice: name, port, lines [(t, text)], mark(), since(),
-    send(), expect() (it waits, as SerialDevice's does), log, and send_paced() (recorded in `paced`)."""
+    send(), expect() (it waits, as SerialDevice's does), log, send_paced() (recorded in `paced`) and hold_reads()."""
 
     def __init__(self, script=None, name="fakenavi"):
         self.name, self.port, self.log = name, "COMFAKE", None
@@ -4211,11 +4425,24 @@ class FakeNaviDev:
         if self.log:
             self.log(self.name, ">", text)
         self.sent.append(text)
+        with self._lock:
+            self._reply_at = len(self.lines)
         self._append(*self._script(text, len(self.sent)))
 
     def send_paced(self, text, chunk=512, gap_s=0.004):
         self.paced.append((len(text), chunk, gap_s))
         self.send(text)
+
+    def hold_reads(self, seconds):
+        """SerialDevice.hold_reads (nccfg.long_reply_host_stall). The model has no USB TX ring, so a stall loses
+        nothing; with `cut_when_held` set (D-NC75 as it was) each line over 1 KB in the reply to the latest send loses
+        its middle, as HWCDC's pop of the oldest queued bytes left NaviCore's 14 KB CONFIG line."""
+        if getattr(self, "cut_when_held", False):
+            with self._lock:
+                for i in range(getattr(self, "_reply_at", len(self.lines)), len(self.lines)):
+                    t, text = self.lines[i]
+                    if len(text) > 1024:
+                        self.lines[i] = (t, text[:512] + text[-512:])
 
     def expect(self, pattern, timeout=3.0, since=None):
         import re as _re
@@ -6827,6 +7054,22 @@ def t_nccfg_suite_against_model(tmp):
         assert r["status"] == "SKIP" and want in r["detail"], (want, r["status"], r["detail"][:200])
         assert not any('"RESET_DEFAULTS"' in x for x in nav2.sent), "RESET_DEFAULTS sent despite the SBUS check"
         b2.close()
+    # nccfg.long_reply_host_stall (passed above) fails when a held read loses a long reply's middle (D-NC75's mutation)
+    stall = next(t for t in tests if t["id"] == "nccfg.long_reply_host_stall")
+    m3 = NaviModel()
+    b3 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                    "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    nav3, w13 = FakeNaviDev(m3.script, "navicore"), FakeNaviDev(m3.w1_script, "wcb1")
+    m3.nav, m3.w1, nav3.cut_when_held = nav3, w13, True
+    nav3.log = w13.log = b3.log
+    b3.dev = lambda name, d={"navicore": nav3, "wcb1": w13}: d[name]
+    ck3 = new_run(b3, [stall])
+    r = ck3.data["results"][0]
+    assert r["status"] == "FAIL" and "(should, D-NC75) a long reply lost bytes" in r["detail"] and \
+        "GET_CONFIG with the host holding its reads 0.3 s: 1024 chars where an unstalled read gives" in r["detail"], \
+        (r["status"], r["detail"][:300])
+    assert "GET_CMDLIB" not in r["detail"], r["detail"][:300]           # the model's CMDLIB is under 1 KB: kept whole
+    b3.close()
 
 
 # ---------------------------------------------------------------------------- NaviCore images (INF4, hil/ncflash.py)
@@ -11360,7 +11603,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash,
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations,
-         t_wlan_pc_on_ap, t_ncws_line_device, t_ncwifi_helpers]
+         t_wlan_pc_on_ap, t_wlan_prejoined, t_ncws_line_device, t_ncwifi_helpers]
 
 
 def t_wizard_spec_ids(tmp):
@@ -11894,8 +12137,9 @@ def t_intellex_wifi_flash_helpers(tmp):
 
         def note(self, text):
             self.notes.append(text)
-    saved = {k: getattr(wlan, k) for k in ("netsh", "address_wait", "wait", "reach_wait")}
+    saved = {k: getattr(wlan, k) for k in ("netsh", "address_wait", "wait", "reach_wait", "ON_WINDOWS")}
     try:
+        wlan.ON_WINDOWS = True              # Windows' rejoin, on any OS (t_wlan_prejoined has the other)
         wlan.address_wait = lambda name, subnet="192.168.4.": ("192.168.4.2", 2.5, "")
         wlan.wait = lambda pred, timeout, step=1.0: pred()
         fn = wlan.netsh = FakeNetsh()

@@ -1,6 +1,8 @@
 """The PC's own WiFi, for the tests that put it on a board's access point: W1's or W2's (suites/s28_wifi.py, opt-in
 wifi_pc) and NaviCore's (suites/s45_navicore_wifi.py, opt-in navicore_wifi). docs/hil_plan/NAVICORE.md INF5: one tested
-copy, moved out of s28 unchanged. Windows only: netsh drives the adapter, PowerShell reads its addresses and routes.
+copy, moved out of s28 unchanged. On Windows netsh drives the adapter and PowerShell reads its addresses and routes.
+Anywhere else (the Mac) the harness joins nothing: it uses a spare adapter already on the access point and only reads
+ifconfig, route and netstat (_prejoined below).
 
 The rules every caller keeps (s28's module docstring, docs/HIL_WEEK_DECISIONS.md D63):
 - A network's name is compared, never quoted. pc_on_ap's notes say only whether the adapter was on a network, and
@@ -15,9 +17,15 @@ The rules every caller keeps (s28's module docstring, docs/HIL_WEEK_DECISIONS.md
   (NaviCore's REBOOT) leaves Windows' association in place while the restarted access point drops the station's
   frames: run 20260929-202852 sat like that for 90 s with no WLAN AutoConfig event at all. rejoin(reach=) proves a TCP
   connect and re-associates when there is none.
+- Off Windows nothing here joins, moves or disconnects an adapter. The Mac bench's spare adapter is a USB TP-Link that
+  macOS does not count as Wi-Fi, so no networksetup Wi-Fi verb reaches it either; the user keeps it joined to
+  NaviCore's access point, and the adapter carrying the default route (the user's internet) is never used (D-NC14). Every
+  board's access point is 192.168.4.1 and the SSID cannot be read there, so a caller proves whose access point it is
+  (pc_on_ap identify=); one that cannot skips.
 
-What only the bench shows: that netsh's English output has these field names (parse_interfaces, parse_networks); the
-selftest feeds both parsers text captured in that form.
+What only the bench shows: that netsh's English output has these field names (parse_interfaces, parse_networks), and
+ifconfig's, route's and netstat's the layout parse_ifconfig, parse_route_get and parse_netstat_defaults read; the
+selftest feeds each parser text captured in that form.
 """
 import contextlib
 import os
@@ -31,6 +39,7 @@ from .checkpoint import redact_text
 from .runner import Skip
 
 NOT_WINDOWS_SKIP = "netsh (Windows) drives the PC's WiFi here"
+ON_WINDOWS = os.name == "nt"        # which path every function here takes; the selftest sets it to run both
 
 
 def netsh(*args, timeout=30):
@@ -73,6 +82,8 @@ def joined(name, ssid):
 
 def internet_adapter():
     """The adapter carrying the PC's default route, or None."""
+    if not ON_WINDOWS:
+        return parse_route_get(_run(["route", "-n", "get", "default"]) or "")
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command",
                             "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | "
@@ -97,11 +108,17 @@ def choose_adapter(ifaces, want, inet):
 
 def pick_adapter(bench):
     """(adapter, why): choose_adapter over this PC's adapters, bench.json "wifi_test_interface" and the adapter that
-    carries the default route. Skip anywhere but Windows: every caller goes on to drive the adapter with netsh (s45's
-    _spare_adapter checks before pc_on_ap, and ran netsh on the Mac: FileNotFoundError, three ERRORs in run
-    20261005-221308)."""
-    if os.name != "nt":
-        raise Skip(NOT_WINDOWS_SKIP)
+    carries the default route. Off Windows (where s45's _spare_adapter once ran netsh: FileNotFoundError, three ERRORs
+    in run 20261005-221308) the spare adapter already on a 192.168.4.x network, as {'name', 'state'}, which the harness
+    leaves where it is (_prejoined); Skip(PREJOIN_SKIP) when there is none."""
+    global _spare_seen
+    if not ON_WINDOWS:
+        spare = spare_leases()
+        if not spare:
+            raise Skip(PREJOIN_SKIP)
+        _spare_seen = spare[0][0]
+        return {"name": spare[0][0], "state": "connected"}, ("off Windows: the spare adapter already on a 192.168.4.x "
+                                                             "network, never the one carrying the default route")
     ifaces = wlan_interfaces()
     want = bench.cfg.get("wifi_test_interface")
     return choose_adapter(ifaces, want, None if want else internet_adapter())
@@ -146,6 +163,8 @@ def ps(command):
 
 def ipv4(name):
     """The adapter's IPv4 addresses."""
+    if not ON_WINDOWS:
+        return parse_ifconfig(_run(["ifconfig", name]) or "").get(name, [])
     esc = name.replace("'", "''")
     return (ps(f"Get-NetIPAddress -InterfaceAlias '{esc}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
                "ForEach-Object { $_.IPAddress }") or "").split()
@@ -181,9 +200,10 @@ SPARE_ONLY_SKIP = ("the only WiFi adapter on this PC carries its default route, 
 
 
 @contextlib.contextmanager
-def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None):
+def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None, identify=None):
     """The PC's chosen WiFi adapter on the access point `ssid` for the block, holding a 192.168.4.x lease from it ->
-    the adapter's name; Skip where that cannot be done here. `whose` names the AP in messages ("W1's"); the SSID is
+    the adapter's name; Skip where that cannot be done here. Off Windows: the spare adapter already on it, proved by
+    `identify` (_prejoined), and nothing to undo. `whose` names the AP in messages ("W1's"); the SSID is
     never quoted. Windows side: a temporary profile named HIL-<ssid> on the chosen adapter only, never one of the
     PC's own profiles, and every netsh call names the adapter - with two adapters an unnamed `netsh wlan connect` is
     refused (run 20260924-092602 failed that way, and reused the PC's own WCB1 profile on the other adapter). The
@@ -195,7 +215,10 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None):
     must also carry a TCP connect there (_carries), as rejoin's must. In run 20261004-125412 three NaviCore joins held a
     lease and carried nothing (a connect to NaviCore timed out) while two others worked; in 20261004-130438, with this
     check, all fifteen carried a connect at once. The cause is not known; the check costs nothing when the link works."""
-    adapter, why = pick_adapter(bench)                  # Skip anywhere but Windows
+    if not ON_WINDOWS:
+        yield _prejoined(bench, whose, reach, identify)      # the adapter stays where it was: nothing to put back
+        return
+    adapter, why = pick_adapter(bench)
     if not adapter:
         raise Skip("this PC has no WiFi adapter" if not why else "bench.json wifi_test_interface names no WiFi adapter here")
     name = adapter["name"]
@@ -295,7 +318,11 @@ def _carries(bench, name, ssid, whose, addr, reach):
 
 
 def default_routes():
-    """The PC's 0.0.0.0/0 routes as sorted 'InterfaceAlias|NextHop' strings, or None."""
+    """The PC's 0.0.0.0/0 routes as sorted 'InterfaceAlias|NextHop' strings ('interface|gateway' off Windows,
+    parse_netstat_defaults), or None."""
+    if not ON_WINDOWS:
+        out = _run(["netstat", "-rn", "-f", "inet"])
+        return None if out is None else parse_netstat_defaults(out)
     out = ps("Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
              "ForEach-Object { $_.InterfaceAlias + '|' + $_.NextHop }")
     return None if out is None else sorted(x.strip() for x in out.splitlines() if x.strip())
@@ -345,7 +372,9 @@ def rejoin(bench, name, ssid, whose, wait_s=30.0, reach=None):
     adapter (what Intellex's own bounce would do, which its --no-auto-bounce leash leaves to the harness) - and must
     then associate, take a lease and carry the connect. An adapter Windows did drop is connected again the same way
     after `wait_s` (the temporary profile is manual, so Windows would not). AssertionError when nothing brings it back;
-    the network is never named."""
+    the network is never named. Off Windows the adapter must come back by itself (_back_on_its_own)."""
+    if not ON_WINDOWS:
+        return _back_on_its_own(name, whose, reach)
     if wait(lambda: joined(name, ssid), wait_s):
         how = [f"Windows reports {name} associated"]
     else:
@@ -378,6 +407,132 @@ def rejoin(bench, name, ssid, whose, wait_s=30.0, reach=None):
     how.append(f"{target} took no connect in {REACH_WAIT_S:.0f} s (a stale association), so the harness re-associated "
                f"{name}: lease {addr} {secs} s after, and {target} took a connect {got} s later")
     return "; ".join(how)
+
+
+# ------------------------------------------------------------------ off Windows: a spare adapter already joined
+PREJOIN_WAIT_S = 90.0     # off Windows: how long a spare adapter may take to come back by itself (its board restarted)
+PREJOIN_STEP_S = 1.0      # and how often it is looked at meanwhile
+AP_REACH = ("192.168.4.1", 80)   # every board's access point here, and the endpoint it serves (WiFi.softAPIP() default)
+PREJOIN_SKIP = ("off Windows the harness joins no network itself (netsh drives the PC's WiFi on Windows): it uses a "
+                "spare WiFi adapter already on the access point, and no adapter here but the one carrying the default "
+                "route holds a 192.168.4.x address - join a spare adapter to the access point with its own utility and "
+                "leave it there")
+_spare_seen = None        # the spare adapter last found off Windows, waited for when a restart took its address away
+
+
+def _run(args):
+    """A read-only command's output (ifconfig, route, netstat), or None when it could not run."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def parse_ifconfig(text):
+    """`ifconfig` output -> {interface: [its IPv4 addresses]}, every interface listed."""
+    out, cur = {}, None
+    for line in text.splitlines():
+        m = re.match(r"^([A-Za-z0-9.]+): flags=", line)
+        if m:
+            cur = out.setdefault(m.group(1), [])
+            continue
+        m = re.match(r"^\s+inet (\d+\.\d+\.\d+\.\d+)\s", line)
+        if m and cur is not None:
+            cur.append(m.group(1))
+    return out
+
+
+def parse_route_get(text):
+    """`route -n get default` output -> the interface carrying the default route, or None (route answers 'not in
+    table' when there is none)."""
+    m = re.search(r"^\s*interface:\s*(\S+)\s*$", text, re.M)
+    return m.group(1) if m else None
+
+
+def parse_netstat_defaults(text):
+    """`netstat -rn -f inet` output -> its default routes as sorted 'interface|gateway' strings, the interface-scoped
+    ones (flag I) included: a router NaviCore's DHCP handed out would show as one on the adapter on its access point."""
+    out = []
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[0] == "default":
+            out.append(f"{f[3]}|{f[1]}")
+    return sorted(out)
+
+
+def spare_leases(subnet="192.168.4."):
+    """Off Windows: [(interface, its address in `subnet`)] for every interface holding one, except the interface that
+    carries the default route, which is never used here (D-NC14)."""
+    inet = internet_adapter()
+    out = []
+    for name, addrs in parse_ifconfig(_run(["ifconfig"]) or "").items():
+        got = [a for a in addrs if a.startswith(subnet)]
+        if got and name != inet:
+            out.append((name, got[0]))
+    return out
+
+
+def _prejoined(bench, whose, reach, identify, wait_s=None):
+    """pc_on_ap off Windows -> the name of a spare adapter already on `whose` access point, which the harness never
+    joins, moves or disconnects (the module docstring). Every board's access point is 192.168.4.1 and the SSID cannot
+    be read here, so `identify(name)` proves whose it is: None when it is `whose`, else what answered instead; without
+    one this Skips. A spare adapter holding a 192.168.4.x address that carries a connect to `reach` (AP_REACH when
+    None; one try) is identified at once, and one that proves to be another's raises. One that carries nothing yet, or
+    the one last found when a restart has taken its address away, is waited for up to `wait_s`: it comes back by itself
+    or not at all (wait_s None: PREJOIN_WAIT_S). No spare adapter at all Skips (PREJOIN_SKIP)."""
+    global _spare_seen
+    wait_s = PREJOIN_WAIT_S if wait_s is None else wait_s
+    if identify is None:
+        raise Skip(f"{NOT_WINDOWS_SKIP}; off Windows a spare adapter already on an access point is used only where the "
+                   f"test proves whose it is, and {whose} cannot be told from another board's here (every one is "
+                   f"192.168.4.1)")
+    host, port = reach or AP_REACH
+    t0 = time.monotonic()
+    while True:
+        leases, state = spare_leases(), {}
+        for name, addr in leases:
+            if reach_wait(host, port, timeout=0) is None:
+                state[name] = f"holds {addr}, but {host}:{port} takes no connect"
+                continue
+            other = identify(name)
+            if other is not None:
+                raise AssertionError(f"{name}, the spare adapter holding {addr}, did not prove to be on {whose} access "
+                                     f"point: {other}")
+            _spare_seen = name
+            bench.note(f"adapter {name}: off Windows the harness joins nothing, and this spare adapter is already on "
+                       f"{whose} access point ({addr}, proved {time.monotonic() - t0:.1f} s after asking); it stays "
+                       f"there")
+            return name
+        if not leases:
+            if _spare_seen is None:
+                raise Skip(PREJOIN_SKIP)
+            state[_spare_seen] = "holds no 192.168.4.x address"
+        if time.monotonic() - t0 >= wait_s:
+            raise AssertionError(f"no spare adapter was back on {whose} access point within {wait_s:.0f} s, and off "
+                                 f"Windows the harness re-associates nothing: "
+                                 + "; ".join(f"{n} {s}" for n, s in state.items()))
+        time.sleep(PREJOIN_STEP_S)
+
+
+def _back_on_its_own(name, whose, reach, wait_s=None):
+    """rejoin off Windows: adapter `name` holding a 192.168.4.x address again - and, given `reach`, carrying a connect
+    there - by itself within `wait_s` (None: PREJOIN_WAIT_S) -> what it took, for a note; AssertionError otherwise. The
+    harness re-associates nothing here (_prejoined)."""
+    wait_s = PREJOIN_WAIT_S if wait_s is None else wait_s
+    t0 = time.monotonic()
+    target = f"{reach[0]}:{reach[1]}" if reach is not None else ""
+    while True:
+        addr = next((a for a in ipv4(name) if a.startswith("192.168.4.")), None)
+        if addr and (reach is None or reach_wait(*reach, timeout=0) is not None):
+            return (f"{name} came back by itself (off Windows the harness re-associates nothing): it held {addr}"
+                    + (f" and {target} took a connect" if reach is not None else "")
+                    + f" {time.monotonic() - t0:.1f} s after asking")
+        if time.monotonic() - t0 >= wait_s:
+            raise AssertionError(f"{name} was not back on {whose} access point by itself within {wait_s:.0f} s (off "
+                                 f"Windows the harness re-associates nothing): it "
+                                 + (f"holds {addr}, but {target} took no connect" if addr
+                                    else "holds no 192.168.4.x address"))
+        time.sleep(PREJOIN_STEP_S)
 
 
 # ------------------------------------------------------------------ what the adapter can see
@@ -432,7 +587,9 @@ def request_scan(guid):
 
 def networks(name, scan=True, settle_s=5.0):
     """(the networks adapter `name` sees, as parse_networks returns them, whether a fresh scan was taken first). With
-    scan, WlanScan is asked for and `settle_s` waited out, so the list is not a minute-old cache."""
+    scan, WlanScan is asked for and `settle_s` waited out, so the list is not a minute-old cache. Skip off Windows."""
+    if not ON_WINDOWS:
+        raise Skip(NOT_WINDOWS_SKIP)
     fresh = False
     if scan:
         fresh = request_scan((iface(name) or {}).get("guid"))

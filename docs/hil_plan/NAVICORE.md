@@ -750,6 +750,9 @@ Every flash appends a row to `results/builds/FLASHED.md` (folder, ELF SHA, what 
 > with the same logic. New: `pc_on_ap(..., spare_only=True)` skips instead of taking the adapter that carries the
 > default route (D-NC14; s28 still takes it when it is the only one), and `parse_networks`, `request_scan` (wlanapi's
 > WlanScan through ctypes: netsh has no scan verb) and `networks`, for a test that must know an access point is down.
+> Off Windows (D79, 2026-10-06) none of that runs: `pc_on_ap` yields the spare adapter already on the access point
+> once the caller's `identify` proves whose it is (`_prejoined`; s45 `_navicore_ap` compares the socket's PONG with
+> USB's), `rejoin` waits for the adapter to come back by itself, and the tests that scan or join skip.
 > `hil/ncws.py` `NcWs(ip)` is the socket as a line device: SerialDevice's `name`, `port`, `lines`, `mark`, `since`,
 > `expect` (failing at once on a closed socket), `expect_none`, `collect` and `log`, over a reader thread that answers
 > the board's PINGs and records its PONGs, every TEXT frame's bytes and a close; `send` writes one frame,

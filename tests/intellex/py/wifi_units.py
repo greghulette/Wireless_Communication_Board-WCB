@@ -70,6 +70,9 @@ def discover_navicore(ctx):
 @case("ssid_for_host names the network the spare adapter holds its lease on (compared by SHA-256)", group="discover")
 def discover_ssid(ctx):
     import discover
+    if sys.platform != "win32":
+        raise SkipCase("ssid_for_host reads netsh: elsewhere it answers None by design (Intellex src/discover.py), and "
+                       "the macOS bounce finds its adapter by route instead")
     host = _host(ctx)
     t0 = time.monotonic()
     got = discover.ssid_for_host(host)
