@@ -228,8 +228,8 @@ def _reply_leg(w, since, n, nid, ptype):
 
 def _seq_ask(w, n, nid, call, ptype, notes):
     """call(), a NaviCore sequence pull of W<n> that raises on ok:false (NaviCore.seq / seqval), with W<n>'s ?DEBUG,MGMT
-    on (console `w`, RAM only), asked once more after 'no reply' -> its result. W<n> answers a pull once, in broadcast
-    frames with no second pass (sendResultFrags, WCB.ino:4611-4650; tracker #109), and NaviCore's request is itself
+    on (console `w`, RAM only), asked once more after 'no reply' -> its result. W<n> answers a pull in broadcast
+    frames, in two passes since 2026-10-06 (sendResultFrags; tracker #109, once before), and NaviCore's request is itself
     three unacknowledged broadcast frames (WCB_Client.cpp:1284-1291): one lost frame costs the answer, and NaviCore says
     'no reply' 6 s later (rc_telemetry.h:1559-1562; seq_pull's first W2 pull in run 20260929-042105). The note names
     the lost leg (_reply_leg); a second 'no reply' raises with it."""
@@ -1134,8 +1134,8 @@ FILL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 12
       "too long' and sends nothing", needs=["navicore", "wcb1", "wcb2"], links=[])
 def mgmt_stats_frag(bench):
     """WcbMgmt::handleLine (WCB_Client WCB_Mgmt.h:367-403). STATS sends one PT_STATS_REQ (7) raw packet (:398); W2
-    answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments, once, in broadcast frames with no
-    second pass (sendResultFrags, WCB.ino:4611-4650; tracker #109), which service() prints in ONE printf as
+    answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments in broadcast frames, in two
+    passes since 2026-10-06 (sendResultFrags; tracker #109, once before), which service() prints in ONE printf as
     '[MGMT:STATS,2]<text>' (WCB_Mgmt.h:496-511) - the text keeps its newlines, so its rows follow on lines of their own.
     A reply that never came is asked for once more, with ?DEBUG,MGMT on W2 (RAM only) so the note says which leg was
     lost (_reply_leg). A one-chunk FRAG goes to W2 as an ordinary command ('[relay] MGMT -> WCB2 (1/1): <payload>',
@@ -1253,12 +1253,14 @@ def mgmt_etm_char(bench):
     """WcbMgmt sends ONE PT_ETM_REQ (8) raw packet for ETM,CHAR (WCB_Mgmt.h:399; a PULL goes three times, :265-267). W2
     runs its characterization for NaviCore (handleETMReqPacket, WCB.ino:4766-4785; a request while a run is going is
     ignored, :4773-4776, and one that cannot run is answered at once with the reason, which is a reply too) and at the
-    end sends the result with sendResultFrags: type-10 frags, ONCE, as broadcast frames 20 ms apart with no retry
-    (WCB.ino:4611-4650, called at :2358-2362). They leave while the 10 s load the run started on its peers is still on
-    the air (the generator, WCB.ino:2044-2053; W2's own phases take about 4 s), and one lost frag loses the reply: in run
-    20260929-025701 W2 printed '[MGMT] Sent result frags (3 chunks, type 10) to WCB20' and NaviCore printed nothing for
-    150 s. A config reply goes in two passes for this (WCB.ino:4552-4556); STATS, ETM and sequence replies do not. So
-    the test waits for W2's own send line (?DEBUG,MGMT, RAM only, on meanwhile), then ETM_REPLY_WAIT_S for NaviCore's
+    end sends the result with sendResultFrags: type-10 frags as broadcast frames 20 ms apart. Until 2026-10-06 they
+    went ONCE, at once - while the 10 s load the run started on its peers was still on the air (the generator,
+    processETMLoad; W2's own phases take about 4 s) - and one lost frag lost the reply: in run 20260929-025701 W2
+    printed '[MGMT] Sent result frags (3 chunks, type 10) to WCB20' and NaviCore printed nothing for 150 s, and in
+    20261006-122850, with WCB3 adding a third generator, both asks were lost. Now (HIL_FIX_TRACKER #109) a relayed
+    result waits until the load is off the air (ETM_LOAD_RUN_MS + ETM_LOAD_SETTLE_MS after phase 3's ETMLOAD;
+    '[MGMT] ETM char results held <ms> ms' under ?DEBUG,MGMT) and goes in two passes. So the test waits for W2's own
+    send line (?DEBUG,MGMT, RAM only, on meanwhile), then ETM_REPLY_WAIT_S for NaviCore's
     '[MGMT:ETM,2]<text>' (WCB_Mgmt.h:496-511), and asks once more when W2 sent and NaviCore printed nothing (noted).
     The text starts with a newline (buildETMCharResultsString, WCB.ino:2298-2344), so the tag line is bare and the
     block follows on lines of its own, as a STATS reply's rows do: it must equal the block W2 printed on its own console

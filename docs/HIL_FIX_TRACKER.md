@@ -2327,21 +2327,29 @@ between the check and the enqueue stays open to another task filling the queue m
 
 | | |
 |---|---|
-| **Status** | TODO - low |
+| **Status** | FIXED 2026-10-06 (WIFI, _(pending)_) |
 | **Owner** | `WCB_firmware` (`WCB.ino`, `sendResultFrags`) |
 | **Effort** | S |
-| **Tests** | `ncmesh.mgmt_etm_char` (it now asks again when the reply never comes) |
+| **Tests** | `ncmesh.mgmt_etm_char` (it now asks again when the reply never comes), `inv.dedup` |
 | **Subsystem** | management relay |
 
 **Evidence (run 20260929-025701).** W2 answered NaviCore's relayed `?MGMT,ETM,CHAR` with three result frags, and none
 reached NaviCore: they left while the 10 s load the characterisation had started on the peers was still on the air.
+Full run `20261006-122850`, the first with WCB3 on the mesh (a third load generator): both of `ncmesh.mgmt_etm_char`'s
+asks lost their reply that way, and `inv.dedup` lost a one-frame SEQVAL reply in ordinary traffic.
 
 **Cause.** `sendResultFrags` (`WCB.ino:4611-4650`, called at `:2358-2362`) broadcasts a STATS, ETM,CHAR or sequence
 reply once, 20 ms between frags, unacknowledged. A config pull's reply gets a second pass (`:4552-4556`); these do not,
 so one lost frag loses the whole reply and only the requester's own retry recovers it.
 
-**Fix (proposed).** Send these replies twice as well, as the config pull does, or hold an ETM,CHAR reply until the
-load it started is off the air. Low: a requester that asks again gets its answer.
+**Fixed.** `sendResultFrags` sends every STATS, sequence-names, sequence-value and ETM,CHAR reply in two passes,
+`RESULT_PASS_GAP_MS` (100 ms) apart, and the four relay handlers (`handleStatsFragPacket`, `handleSeqFragPacket`,
+`handleSeqValFragPacket`, `handleETMFragPacket`) drop the rest of a session they have delivered, as
+`handleConfigFragPacket` does (WcbMgmt's `lastDeliveredSession` already covers every type on a NaviCore). A relayed
+ETM,CHAR result is held until the load its phase 3 started is off the air (`ETM_LOAD_RUN_MS` + `ETM_LOAD_SETTLE_MS`,
+11.5 s after `ETMLOAD`), then sent (`sendHeldETMCharResult`, from `loop()`). A relay on older firmware prints such a
+reply twice.
+
 #### 110. A PC joining a WCB's access point waits up to 47 s for a DHCP lease, on a self-assigned address meanwhile
 
 | | |

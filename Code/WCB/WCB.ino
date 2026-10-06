@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_060959ROCT2026                                  *****////
+///*****                                          Version 6.2.1_061641ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_060959ROCT2026";
+String SoftwareVersion = "6.2.1_061641ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -799,6 +799,7 @@ int etmLoadRoundRobinIndex = 0;
 // state and its start line belong to the loop task alone.
 volatile bool etmLoadRequested = false;
 int etmLoadSent = 0;   // frames this run sent, for its closing line
+static const unsigned long ETM_LOAD_RUN_MS = 10000;   // how long a peer's generator runs (processETMLoad)
 
 // Delivery confirmation tracking
 unsigned long espnowCommandDelivered = 0;
@@ -1170,6 +1171,15 @@ ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?
 ConfigPullSession seqRelaySession    = {};  // relay-side reassembly for remote ?SEQ,NAMES
 ConfigPullSession seqValRelaySession = {};  // relay-side reassembly for remote ?SEQ,GET,<key>
 uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
+// A relayed run's result waits until the load the run started on its peers is off the air (HIL_FIX_TRACKER #109): sent
+// at once, its broadcast frags met the peers' generators, and one lost frag lost the whole reply (ncmesh.mgmt_etm_char,
+// runs 20260929-025701 and 20261006-122850). A peer starts its generator when ETMLOAD reaches it, retries included,
+// so the margin covers a late start.
+static const unsigned long ETM_LOAD_SETTLE_MS = 1500;
+unsigned long etmCharLoadTriggeredMs = 0;   // when this run's phase 3 sent ETMLOAD; 0 = no load yet this run
+String        etmCharHeldResult;            // the result held for the requester below
+uint8_t       etmCharHeldFor        = 0;    // 0 = nothing held
+unsigned long etmCharHeldUntilMs    = 0;
 
 // ESP-NOW messages
 espnow_struct_message commandsToSend[10]; // Includes 1-9 and broadcast
@@ -1835,6 +1845,8 @@ const char *startETMChar() {
         Serial.println("[ETM CHAR] Temporarily disabling ETM debug for accurate timing measurements.");  
     }  
 
+    sendHeldETMCharResult(true);   // a result still held for the previous run's requester goes first
+    etmCharLoadTriggeredMs = 0;
     etmCharRunning = true;
     etmCharPhase = 1;
     etmCharPhaseMessageIndex = 0;
@@ -1939,6 +1951,7 @@ void processETMChar() {
             // that path ACKed ETMLOAD and did nothing, and the generator sent plain frames the peers dropped, so
             // phase 3 "Loaded Network" measured an idle mesh.
             sendOwnBroadcast("ETMLOAD", true);
+            etmCharLoadTriggeredMs = millis();
         }
 
         if (etmCharPhaseMessageIndex < totalMessages) {
@@ -2048,8 +2061,8 @@ void processETMLoad() {
 
     unsigned long now = millis();
 
-    // Run for 10 seconds
-    if (now - etmLoadStartTime > 10000) {
+    // Run for ETM_LOAD_RUN_MS (10 s)
+    if (now - etmLoadStartTime > ETM_LOAD_RUN_MS) {
         etmLoadRunning = false;
         Serial.printf("ETM load test complete: %d frame(s) sent.\n", etmLoadSent);
         return;
@@ -2355,13 +2368,31 @@ void printETMCharResults(int* peers, int peerCount) {
     }
     etmCharDebugWasSaved = false;
 
-    // If this run was triggered via relay, send results back via ESP-NOW fragments
+    // If this run was triggered via relay, send results back via ESP-NOW fragments - once the load this run started on
+    // its peers is off the air (sendHeldETMCharResult, from loop()).
     if (etmCharRelayRequesterWCB != 0) {
-        sendResultFrags(results, etmCharRelayRequesterWCB, PACKET_TYPE_ETM_FRAG);
-        if (debugMGMT) Serial.printf("[MGMT] ETM char results sent to WCB%d via relay\n",
-                                     etmCharRelayRequesterWCB);
+        etmCharHeldResult  = results;
+        etmCharHeldFor     = etmCharRelayRequesterWCB;
+        etmCharHeldUntilMs = etmCharLoadTriggeredMs ? etmCharLoadTriggeredMs + ETM_LOAD_RUN_MS + ETM_LOAD_SETTLE_MS
+                                                    : millis();
         etmCharRelayRequesterWCB = 0;
+        if (debugMGMT && (long)(etmCharHeldUntilMs - millis()) > 0)
+            Serial.printf("[MGMT] ETM char results held %lu ms, until the peers' load is off the air\n",
+                          (unsigned long)(etmCharHeldUntilMs - millis()));
+        sendHeldETMCharResult(false);
     }
+}
+
+// Sends a relayed run's held result once etmCharHeldUntilMs has passed, or at once with `force` (a new run is starting).
+// Called from loop() beside processETMChar().
+void sendHeldETMCharResult(bool force) {
+    if (etmCharHeldFor == 0) return;
+    if (!force && (long)(millis() - etmCharHeldUntilMs) < 0) return;
+    const uint8_t to = etmCharHeldFor;
+    etmCharHeldFor = 0;
+    sendResultFrags(etmCharHeldResult, to, PACKET_TYPE_ETM_FRAG);
+    etmCharHeldResult = String();
+    if (debugMGMT) Serial.printf("[MGMT] ETM char results sent to WCB%d via relay\n", to);
 }
 
 
@@ -4685,6 +4716,8 @@ void handleConfigFragPacket(const uint8_t *data) {
 }
 
 // ── Shared helper: fragment a String result and send back via ESP-NOW ────────
+static const uint32_t RESULT_PASS_GAP_MS = 100;   // between sendResultFrags' two passes
+
 void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacketType) {
   const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
   int totalLen    = data.length();
@@ -4705,22 +4738,29 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
     return;
   }
   uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
-  for (int i = 0; i < totalChunks; i++) {
-    espnow_struct_config_frag frag;
-    memset(&frag, 0, sizeof(frag));
-    strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
-    frag.packetType   = fragPacketType;
-    frag.sourceWCB    = WCB_Number;
-    frag.requesterWCB = requesterWCB;
-    frag.sessionId    = sessionId;
-    frag.chunkIdx     = (uint8_t)i;
-    frag.totalChunks  = (uint8_t)totalChunks;
-    int start = i * chunkStride;
-    int end   = min(start + chunkStride, totalLen);
-    String chunk = data.substring(start, end);
-    memcpy(frag.payload, chunk.c_str(), chunk.length());
-    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
-    delay(20);
+  // Two passes, as a config pull's reply has (HIL_FIX_TRACKER #109): the frags are unacknowledged broadcasts, and one
+  // lost frag lost the whole STATS, ETM,CHAR or sequence reply (inv.dedup, ncmesh.mgmt_etm_char). A relay fills a gap
+  // from the second pass and drops the rest of it once the session is delivered (handle*FragPacket, WcbMgmt's
+  // lastDeliveredSession); RESULT_PASS_GAP_MS keeps one burst of interference from taking both copies of a frag.
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass) delay(RESULT_PASS_GAP_MS);
+    for (int i = 0; i < totalChunks; i++) {
+      espnow_struct_config_frag frag;
+      memset(&frag, 0, sizeof(frag));
+      strncpy(frag.structPassword, espnowPassword, sizeof(frag.structPassword) - 1);
+      frag.packetType   = fragPacketType;
+      frag.sourceWCB    = WCB_Number;
+      frag.requesterWCB = requesterWCB;
+      frag.sessionId    = sessionId;
+      frag.chunkIdx     = (uint8_t)i;
+      frag.totalChunks  = (uint8_t)totalChunks;
+      int start = i * chunkStride;
+      int end   = min(start + chunkStride, totalLen);
+      String chunk = data.substring(start, end);
+      memcpy(frag.payload, chunk.c_str(), chunk.length());
+      wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
+      delay(20);
+    }
   }
   if (debugMGMT) Serial.printf("[MGMT] Sent result frags (%d chunks, type %d) to WCB%d\n",
                                 totalChunks, fragPacketType, requesterWCB);
@@ -4931,6 +4971,10 @@ void handleStatsFragPacket(const uint8_t *data) {
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
+  // instead of starting a session that would print the reply twice.
+  static uint16_t lastDelivered = 0;
+  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
   if (!statsRelaySession.active || statsRelaySession.sessionId != pkt.sessionId) {
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
     statsRelaySession.sourceWCB      = pkt.sourceWCB;
@@ -4950,6 +4994,7 @@ void handleStatsFragPacket(const uint8_t *data) {
     String fullResult = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(statsRelaySession.chunks[i]);
     uint8_t srcWCB = statsRelaySession.sourceWCB;
+    lastDelivered = pkt.sessionId;
     memset(&statsRelaySession, 0, sizeof(statsRelaySession));
     mgmtQueueOut("STATS", srcWCB, fullResult.c_str());    // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
@@ -4966,6 +5011,10 @@ void handleSeqFragPacket(const uint8_t *data) {
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
+  // instead of starting a session that would print the reply twice.
+  static uint16_t lastDelivered = 0;
+  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
   if (!seqRelaySession.active || seqRelaySession.sessionId != pkt.sessionId) {
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
     seqRelaySession.sourceWCB      = pkt.sourceWCB;
@@ -4985,6 +5034,7 @@ void handleSeqFragPacket(const uint8_t *data) {
     String fullResult = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqRelaySession.chunks[i]);
     uint8_t srcWCB = seqRelaySession.sourceWCB;
+    lastDelivered = pkt.sessionId;
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
     mgmtQueueOut("SEQ", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
@@ -5001,6 +5051,10 @@ void handleSeqValFragPacket(const uint8_t *data) {
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
+  // instead of starting a session that would print the reply twice.
+  static uint16_t lastDelivered = 0;
+  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
   if (!seqValRelaySession.active || seqValRelaySession.sessionId != pkt.sessionId) {
     memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
     seqValRelaySession.sourceWCB      = pkt.sourceWCB;
@@ -5020,6 +5074,7 @@ void handleSeqValFragPacket(const uint8_t *data) {
     String fullResult = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqValRelaySession.chunks[i]);
     uint8_t srcWCB = seqValRelaySession.sourceWCB;
+    lastDelivered = pkt.sessionId;
     memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
     mgmtQueueOut("SEQVAL", srcWCB, fullResult.c_str());   // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%d chars)\n",
@@ -5036,6 +5091,10 @@ void handleETMFragPacket(const uint8_t *data) {
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
+  // instead of starting a session that would print the reply twice.
+  static uint16_t lastDelivered = 0;
+  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
   if (!etmRelaySession.active || etmRelaySession.sessionId != pkt.sessionId) {
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
     etmRelaySession.sourceWCB      = pkt.sourceWCB;
@@ -5055,6 +5114,7 @@ void handleETMFragPacket(const uint8_t *data) {
     String fullResult = "";
     for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(etmRelaySession.chunks[i]);
     uint8_t srcWCB = etmRelaySession.sourceWCB;
+    lastDelivered = pkt.sessionId;
     memset(&etmRelaySession, 0, sizeof(etmRelaySession));
     mgmtQueueOut("ETM", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
     if (debugMGMT) Serial.printf("[MGMT] ETM relay complete for WCB%d (%d chars)\n",
@@ -9978,6 +10038,7 @@ void loop() {
   etmDrainAckQueue();       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
   processETMAcksAndRetries();
   processETMChar();
+  sendHeldETMCharResult(false);
   processETMLoad();
   checkMgmtTimeout();
   checkConfigPullTimeout();
