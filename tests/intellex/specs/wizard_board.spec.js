@@ -197,8 +197,11 @@ test('intellex.wizard_remote_pull_parts the shim pulls W2 through W1 in parts an
   const mine = res.seen.filter((s) => s.n === a.target);
   expect(res.done.filter((d) => d.target === a.target && d.byShim).map((d) => d.ok),
     "the shim's pull: onComplete exactly once, with true").toEqual([true]);
-  expect(res.sent.length, 'the Wizard sent a pull').toBeGreaterThan(0);
-  for (const s of res.sent) expect(s, 'the Wizard asks for parts').toMatch(new RegExp(`^.MGMT,PULL,${a.target},P$`));
+  // Every pull the Wizard sent asks for parts, and one or more were for the target. Not every one is: on a bench with a
+  // third WCB on the mesh the Wizard's auto-pull pulls that board too (run 20261006-094314, ?MGMT,PULL,3,P beside W2's).
+  for (const s of res.sent) expect(s, 'the Wizard asks for parts').toMatch(/^.MGMT,PULL,\d+,P$/);
+  expect(res.sent.filter((s) => new RegExp(`^.MGMT,PULL,${a.target},P$`).test(s)).length,
+    `the Wizard sent a pull for WCB${a.target}`).toBeGreaterThan(0);
   expect(mine.filter((s) => s.tag === 'CFGERR' && s.code !== 'NOPARTS').map((s) => s.code),
     'no CFGERR but a NOPARTS the Wizard asked again after').toEqual([]);
   expect(res.wcbNumber, 'the pulled config names its board').toBe(a.target);

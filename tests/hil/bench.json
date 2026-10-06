@@ -201,7 +201,10 @@
       "signal": "The same SBUS-24 as output A, but silent until the controller is routed to the Kyber ({\"t\":\"route\",\"to\":\"kyber\"} or \"both\", RAM only; a reset gives navicore). The Kyber's pad buttons are CH7: Released 991, buttons 1-10 at 176-788 (tests/hil/kyber/bench_kyber_config.json).",
       "how": "SBUS controller S4 TX (GPIO17, formerly RC PWM output 4) to the Kyber's SBUS input signal pin, plus GND to GND. No 5V: the Kyber has its own supply.",
       "check": "Nothing reaches the Kyber unless routed: the controller's test reply must say route kyber or both. With it routed, the Kyber Config Editor's live calibration (RC Channels & Banks / Button Values) shows CH7 moving; resting it reads Released (991). Nothing there: the wire to S4 (not S5), GND, the controller image (fwver ...-eb0517a-hil or later, kyber-sbus branch). Buttons fire wrongly: the Kyber's _buttonsCH must be 7 and its Button Values the CH7 ladder.",
-      "proof": []
+      "proof": [
+        "kyber.device_pad_serial",
+        "kyber.device_pad_maestro"
+      ]
     },
     {
       "from": "kyber:MAESTRO",
@@ -212,7 +215,9 @@
       "signal": "Pololu Maestro protocol, 115200 8N1 (Kyber Expert > Maestro must be 115200). The Kyber's TX is 5 V; WCB3's pins are 3.3 V (run direct on this bench; a BSS138 shifter or 1k/2k divider is the conservative option).",
       "how": "Kyber Maestro TX to WCB3 S2 RX (GPIO7), Kyber Maestro RX to WCB3 S2 TX (GPIO6), GND to GND. On WCB3: ?KYBER,LOCAL (broadcast mode, which takes S2 and sets it to 115200 with its broadcasts off), then ?reboot - the command does not reboot. Set 2026-10-05. Probe 4 header S2 may tap WCB3 S2's TX line (listen only).",
       "check": "On WCB3's console: ?KYBER,LIST shows Kyber local on S2; ?DEBUG,KYBER,ON dumps every bridged frame - press a Kyber Maestro button (CH7 176 = Maestro 1-1) and a frame must print. None: TX/RX swapped (swap them), GND, the Kyber's Maestro baud, WCB3 not rebooted after ?KYBER,LOCAL. Frames print but no servo moves: W1/W2 must be in Maestro-remote mode (?MAESTRO,REMOTE) and Maestro 2 wired (its own connection).",
-      "proof": []
+      "proof": [
+        "kyber.device_pad_maestro"
+      ]
     },
     {
       "from": "kyber:MARCDUINO",
@@ -223,7 +228,9 @@
       "signal": "MarcDuino-style text lines ending in CR, 9600 8N1, Kyber to WCB only. 5 V from the Kyber (see the Maestro port).",
       "how": "Kyber MarcDuino/serial TX to WCB3 S5 RX (GPIO10), GND to GND. WCB3's TX on S5 (GPIO9) stays unconnected. WCB3 S5 at ?BAUD,S5,9600 with broadcasts in on (the default).",
       "check": "Press Kyber button 7 (CH7 584, 'Periscope Up'): WCB3 runs ;w2;s4:PP100 and W2 S4 outputs :PP100 (probe 2 header S4 sees it). Nothing on WCB3's console: the wire to S5 RX (GPIO10, not 9), GND, ?BAUD,S5 not 9600, the Kyber's serial command output off (_serialSupport must be 1) or its baud not 9600.",
-      "proof": []
+      "proof": [
+        "kyber.device_pad_serial"
+      ]
     },
     {
       "from": "maestro2:TTL",
