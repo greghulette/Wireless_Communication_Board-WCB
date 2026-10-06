@@ -74,6 +74,10 @@
     "W2S1": {
       "send": ";M2,getErrors",
       "expect": "AA0221"
+    },
+    "W3S2": {
+      "send": ";S2UUUUUUUUUUUUUUUU",
+      "expect": "555555555555555555555555555555550D"
     }
   },
   "maestros": [

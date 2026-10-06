@@ -314,8 +314,10 @@ wire and test alone.
   - Its USB is a CP210x. Plugged into the PC, its serial monitor forwards MarcDuino commands verbatim to the body
     electronics (`:SE00\r`, `$1`, ...) and answers host-link verbs (`HELLO`, `GET`, `SET`, `PING`): a way for a
     future test to make the Kyber send on W3 S5 on demand. No verb to press a pad button is documented.
-- `W3S2` and `W3S5` are `port_devices` with no `port_stimulus`: the harness sends nothing there and auto-detect leaves
-  them alone.
+- `W3S5` (the MarcDuino input) is a `port_device` with no `port_stimulus`: the harness sends nothing there and
+  auto-detect leaves it alone. `W3S2` (the Maestro port) has one, `;S2` + sixteen `U` typed on WCB3's console, so
+  auto-detect finds and verifies probe 4 header S2's listen-only tap on WCB3's TX line; those 17 bytes reach the
+  Kyber's Maestro input, which ignores them (script check off). Found and verified 2026-10-05: all 19 bench wires.
 
 **Bring-up order:** flash probe 3, probe 4 and WCB3 → wire (Wiring tab, *What to connect*) → plug in probe 3, *Find
 devices* → probe 4, *Find devices* → WCB3 (powered, Kyber off), *Find devices* → *Auto-detect wires* →
