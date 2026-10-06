@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -71,6 +72,11 @@ class PipeLog:
         self.dev.log = self.old
 
 WIZARD_TESTS = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "wizard"))
+# Popen/run keywords that start a child in a process group of its own: Windows' CREATE_NEW_PROCESS_GROUP, or a new
+# session elsewhere. Either way run.py's first Ctrl+C ("pause after this test") does not reach node and Chrome, and
+# _kill_tree can end the whole tree.
+OWN_GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+             else {"start_new_session": True})
 
 
 def usb_ids(com):
@@ -94,9 +100,14 @@ def _kill_tree(proc):
     taskkill runs in its own process group and is waited out, never run(): a Ctrl+C mashed during an abort reached a
     taskkill sharing run.py's console and ended it before it killed anything (0xC000013A, measured), and run()'s bare
     except then kills the child when a KeyboardInterrupt lands in communicate(). node and Chrome, in their own group,
-    ignore that Ctrl+C, so taskkill is the only thing that ends them. A KeyboardInterrupt is re-raised once it is done."""
+    ignore that Ctrl+C, so taskkill is the only thing that ends them. A KeyboardInterrupt is re-raised once it is done.
+    Elsewhere the child leads its own session (OWN_GROUP), so its process group is it and everything it started: kill
+    the group. proc.kill() alone ended only node and left Chrome holding the board's port."""
     if os.name != "nt":
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:                  # not a group leader (started without OWN_GROUP), or already gone
+            proc.kill()
         return
     tk = subprocess.Popen(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
@@ -225,9 +236,17 @@ def navicore_repo_env(bench, test_id, env):
     bench's NaviCore image was built from, so the tool under test and the firmware on the board are one pair
     (docs/HIL_WEEK_DECISIONS.md D71). Every other spec keeps D-NC10 - the tool as it is on disk in the sibling NaviCore
     checkout, found by tests/wizard/lib/navicore/paths.js - since the no-board checks compare that tool with its own
-    firmware source (nctool.static) and with Intellex's copy. Unset, nothing changes."""
+    firmware source (nctool.static) and with Intellex's copy. Unset, nothing changes. bench.json is shared by the bench's
+    computers and its path names one of them (the Windows PC's hil-week worktree): where it does not exist, the NaviCore
+    checkout beside this repo serves, the tree this computer builds its bench image from (D77), and the test says so."""
     repo = bench.cfg.get("navicore_repo")
     if repo and test_id.startswith(BOARD_TOOL_TESTS):
+        if not os.path.isfile(os.path.join(repo, "config_tool", "index.html")):
+            sibling = os.path.normpath(os.path.join(WIZARD_TESTS, "..", "..", "..", "NaviCore"))
+            if os.path.isfile(os.path.join(sibling, "config_tool", "index.html")):
+                bench.note(f"{test_id}: bench.json navicore_repo ({repo}) is not on this computer - serving the "
+                           f"NaviCore checkout beside this repo ({sibling})")
+                repo = sibling
         env["NAVICORE_REPO"] = repo
     return env
 
@@ -245,8 +264,7 @@ def run_unit_tests(bench, timeout=120.0, files=("unit/*.test.js",)):
     # without this node shares the console, gets CTRL_C_EVENT, exits 1 and the test is recorded as FAIL. A second
     # Ctrl+C still ends it: subprocess.run kills the child when KeyboardInterrupt escapes.
     proc = subprocess.run([node, "--test", *files], cwd=WIZARD_TESTS, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                          creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout, **OWN_GROUP)
     for line in (proc.stdout + proc.stderr).splitlines():
         if line.strip():
             bench.log("wizard", "<", line.rstrip())
@@ -319,8 +337,7 @@ def run_wizard_test(bench, test_id, device="wcb1", args=None, timeout=300.0, pip
             # also reach node and Chrome in the same console and kill the Wizard test in flight. _kill_tree uses
             # taskkill, so the watchdog still ends the whole tree.
             proc = subprocess.Popen(cmd, cwd=WIZARD_TESTS, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, encoding="utf-8", errors="replace",
-                                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                                    text=True, encoding="utf-8", errors="replace", **OWN_GROUP)
             _LIVE = proc
             tail, killed = _wait_node(bench, proc, timeout)
             if killed:

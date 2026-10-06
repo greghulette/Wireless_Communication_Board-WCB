@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.parse
 
 from hil.intellex import (IntellexHost, require, run_intellex_py, run_intellex_test, run_venv, seed_firmware,
@@ -49,11 +50,21 @@ def _snapshot(d):
 
 
 # ------------------------------------------------------------------ IX-WP2: the plumbing itself
+def _real_data_dir():
+    """Intellex's own per-user directory on this computer - Intellex src/paths.py user_data_dir() without its
+    INTELLEX_DATA_DIR override: %LOCALAPPDATA%\\Intellex, ~/Library/Application Support/Intellex, or the XDG one."""
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local"), "Intellex")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Intellex")
+    return os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "Intellex")
+
+
 @test("intellex.stage_selftest", "A staged Intellex host starts offline and leashed: /_api/status answers, no serial port "
-      "is listed, its log lands in its own stage, and nothing is written to the real %LOCALAPPDATA%\\Intellex (IX-WP2)")
+      "is listed, its log lands in its own stage, and nothing is written to the real per-user Intellex directory (IX-WP2)")
 def stage_selftest(bench):
     require(bench)
-    real = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Intellex")
+    real = _real_data_dir()
     before = _snapshot(real)
     sd = stage(bench, "intellex.stage_selftest")
     with IntellexHost(bench, sd) as host:

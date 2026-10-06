@@ -1,6 +1,6 @@
 """Where Intellex keeps things, under its venv, in a scratch directory inside the stage (intellex.paths_logs_unit,
-IX-WP3). Nothing outside the stage is read or written: LOCALAPPDATA points into the stage (run_intellex_py), and each case
-re-points it at its own subdirectory.
+IX-WP3). Nothing outside the stage is read or written: INTELLEX_DATA_DIR and LOCALAPPDATA point into the stage
+(run_intellex_py), and each case re-points LOCALAPPDATA at its own subdirectory, lifting INTELLEX_DATA_DIR meanwhile.
 
 - paths.py (Intellex src/paths.py:81-144): a frozen build reads the user copy only when it is non-empty (data_dir), the
   wikis decide per subdirectory (data_subdir), updates are written to the user directory (write_dir), and the pre-rename
@@ -34,7 +34,8 @@ def _touch(path, text="x"):
 
 
 class _Frozen:
-    """paths as a frozen build sees it: FROZEN set, BUNDLE_DIR at `bundle`, LOCALAPPDATA at `appdata`; put back after."""
+    """paths as a frozen build sees it: FROZEN set, BUNDLE_DIR at `bundle`, LOCALAPPDATA at `appdata`; put back after.
+    INTELLEX_DATA_DIR, which run_intellex_py sets for the stage, is lifted meanwhile: it would win over LOCALAPPDATA."""
 
     def __init__(self, bundle, appdata):
         import paths
@@ -43,6 +44,7 @@ class _Frozen:
     def __enter__(self):
         p = self.paths
         self.saved = (p.FROZEN, p.BUNDLE_DIR, p._migrated, os.environ.get("LOCALAPPDATA"))
+        self.data_dir = os.environ.pop("INTELLEX_DATA_DIR", None)
         import pathlib
         p.FROZEN, p.BUNDLE_DIR, p._migrated = True, pathlib.Path(self.bundle), False
         os.environ["LOCALAPPDATA"] = self.appdata
@@ -55,6 +57,8 @@ class _Frozen:
             os.environ.pop("LOCALAPPDATA", None)
         else:
             os.environ["LOCALAPPDATA"] = local
+        if self.data_dir is not None:
+            os.environ["INTELLEX_DATA_DIR"] = self.data_dir
 
 
 @case("a frozen build reads a user copy only when it is non-empty; wikis decide per subdirectory; updates go to the "

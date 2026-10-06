@@ -1224,7 +1224,7 @@ def t_wizard_abort_kills_tree(tmp):
             return subprocess.Popen(cmd, **kw)
         p = subprocess.Popen([sys.executable, "-c", "import time; print('[1/1] started', flush=True); time.sleep(30)"],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                             creationflags=kw.get("creationflags", 0))
+                             **{k: kw[k] for k in ("creationflags", "start_new_session") if k in kw})
         procs.append(p)
         return p
 
@@ -1278,9 +1278,9 @@ def t_wizard_abort_kills_tree(tmp):
         b.sync_log()
         log = read(os.path.join(b.out_dir, "session.log"))
         assert "[1/1] started" in log and "not reacquired after the abort" in log, log
-        # F11: node --test gets its own process group too
+        # F11: node --test gets its own process group too (a new session off Windows, so _kill_tree can end the group)
         wizard.run_unit_tests(b)
-        assert runs and runs[0].get("creationflags") == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0), runs
+        assert runs and all(runs[0].get(k) == v for k, v in wizard.OWN_GROUP.items()), runs
         assert wizard._LIVE is None, "the finished test is no longer the live one"
         # R2-3: kill_live ends the test in flight (gui.py's close-now)
         live = popen(["node"])

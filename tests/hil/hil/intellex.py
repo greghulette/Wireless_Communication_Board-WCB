@@ -9,12 +9,14 @@ needs a leash".
 Why a staged copy: a host writes settings, logs, tool bundles and a firmware cache. Pointed at Greg's checkout and his
 real %LOCALAPPDATA%, a test would change what he runs. So each test gets <out>/intellex/<test id>/ holding a copy of
 Intellex's src/ and tools/, bundles seeded from the NaviCore and WCB working trees (so a Wizard or config-tool change is
-tested inside Intellex before it ships), and its own LOCALAPPDATA.
+tested inside Intellex before it ships), and its own data directory, appdata/Intellex: INTELLEX_DATA_DIR on every
+platform (Intellex bd4f37d) and LOCALAPPDATA's parent for an older checkout on Windows. On a Mac LOCALAPPDATA reached
+nothing, and the staged hosts wrote ~/Library/Application Support/Intellex (run 20261005-221308).
 
 Why the leash: left alone a host PINGs every Espressif COM port (the SBUS controller resets when its port opens; W1 or
-NaviCore may be mid-test), probes 192.168.4.1 over the PC's second WiFi adapter, and waits on a GitHub probe. The three
-env hooks in Intellex (INTELLEX_OFFLINE, INTELLEX_SERIAL_ALLOW, INTELLEX_DISCOVER_HOSTS) hold it to what the test
-wants; every host here starts offline, with no serial port and no discovery host unless the test names them.
+NaviCore may be mid-test), probes 192.168.4.1 over the PC's second WiFi adapter, and waits on a GitHub probe. The env
+hooks in Intellex (INTELLEX_OFFLINE, INTELLEX_SERIAL_ALLOW, INTELLEX_DISCOVER_HOSTS; INTELLEX_DATA_DIR above) hold it to
+what the test wants; every host here starts offline, with no serial port and no discovery host unless the test names them.
 
 The harness itself stays standard library plus pyserial: HTTP through urllib, WebSocket through hil/ws.py. Checks that
 must import Intellex's own modules run as scripts under Intellex's venv (run_intellex_py).
@@ -34,7 +36,7 @@ from contextlib import contextmanager
 
 from .bridge import Bridge
 from .runner import Skip
-from .wizard import _kill_tree, _outcomes, _reacquire, _wait_node
+from .wizard import OWN_GROUP, _kill_tree, _outcomes, _reacquire, _wait_node
 from .wlan import scrub
 from .ws import WsClient, frame
 
@@ -70,7 +72,6 @@ def builds_dir():
 
 GITHUB = github_dir(REPO)
 INTELLEX_TESTS = os.path.join(REPO, "tests", "intellex")
-_NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 STAGE_DIR = "ixstage"      # <out>/ixstage/<test id>: a staged Intellex (running_intellex() tells ours apart by it)
 
 
@@ -110,7 +111,7 @@ def running_intellex():
           "($_.CommandLine -match 'src[\\\\/](app|host)\\.py') } | Select-Object ProcessId,CommandLine | ConvertTo-Json")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=30,
-                             creationflags=_NEW_GROUP).stdout.strip()
+                             **OWN_GROUP).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return []
     if not out:
@@ -231,7 +232,7 @@ def stage(bench, test_id, tools="worktree", settings=None, include_data=False):
 def _git(repo, *args):
     try:
         return subprocess.run(["git", "-C", repo] + list(args), capture_output=True, text=True, timeout=30,
-                              creationflags=_NEW_GROUP).stdout.strip()
+                              **OWN_GROUP).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -269,6 +270,7 @@ class IntellexHost:
         self.port = _free_port()
         env = {k: v for k, v in os.environ.items() if not k.startswith("INTELLEX_")}
         env.update(LOCALAPPDATA=os.path.join(self.stage, "appdata"), PYTHONUTF8="1",
+                   INTELLEX_DATA_DIR=os.path.join(self.stage, "appdata", "Intellex"),
                    INTELLEX_SERIAL_ALLOW=",".join(self.allow_ports),
                    INTELLEX_DISCOVER_HOSTS=",".join(self.discover_hosts))
         if self.offline:
@@ -276,7 +278,7 @@ class IntellexHost:
         env.update(self.extra_env)
         cmd = [py, os.path.join(self.stage, "src", "host.py"), "--port", str(self.port), "--no-auto-bounce"] + self.args
         self.proc = subprocess.Popen(cmd, cwd=self.stage, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, encoding="utf-8", errors="replace", creationflags=_NEW_GROUP)
+                                     text=True, encoding="utf-8", errors="replace", **OWN_GROUP)
         self._reader = threading.Thread(target=self._drain, daemon=True)
         self._reader.start()
         self.url = f"http://127.0.0.1:{self.port}"
@@ -466,7 +468,7 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
             bench.note(f"intellex: {test_id} at {host.url}" + (f", attached to {attach}" if attach else ""))
             proc = subprocess.Popen(cmd, cwd=INTELLEX_TESTS, env=penv, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                                    creationflags=_NEW_GROUP)
+                                    **OWN_GROUP)
             tail, killed = _wait_node(bench, proc, timeout)
             if killed:
                 raise AssertionError(f"{test_id}: Playwright still running after {timeout:.0f}s - killed")
@@ -527,7 +529,7 @@ def run_venv(bench, argv, cwd, timeout=600.0, env=None):
     e.update(PYTHONUTF8="1")
     e.update(env or {})
     p = subprocess.run([py] + list(argv), cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=timeout, env=e, creationflags=_NEW_GROUP)
+                       errors="replace", timeout=timeout, env=e, **OWN_GROUP)
     out = (p.stdout or "") + (p.stderr or "")
     for line in out.splitlines():
         if line.strip():
@@ -626,7 +628,8 @@ def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none"
         args.setdefault("port", port)
     if allow_ports is None:
         allow_ports = [port] if port else []
-    e = {"LOCALAPPDATA": os.path.join(sd, "appdata"), "INTELLEX_OFFLINE": "1",
+    e = {"LOCALAPPDATA": os.path.join(sd, "appdata"), "INTELLEX_DATA_DIR": os.path.join(sd, "appdata", "Intellex"),
+         "INTELLEX_OFFLINE": "1",
          "INTELLEX_SERIAL_ALLOW": ",".join(allow_ports), "INTELLEX_DISCOVER_HOSTS": ""}
     e.update(env or {})
     argv = [os.path.join(PY_DIR, script), "--stage", sd, "--args", json.dumps(args), "--out", out]
