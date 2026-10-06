@@ -212,8 +212,9 @@ def frame_walk(data, frame):
     i = data.find(frame)
     if i < 0:
         return -1, 0, "no whole copy of #L13's frame in the window"
+    lead = None
     if i >= n or (i and data[:i] != frame[-i:]):
-        return i, 0, f"{i} bytes before the first copy are not the end of a frame"
+        lead = f"{i} bytes before the first copy are not the end of a frame"
     j, count = i, 0
     while data[j:j + n] == frame:
         j += n
@@ -221,11 +222,13 @@ def frame_walk(data, frame):
     rest = data[j:]
     if len(rest) >= n:
         k = next(x for x in range(n) if rest[x] != frame[x])
-        return i, count, (f"frame {count + 1} differs from #L13's at byte {k} (0x{rest[k]:02X}, #L13 0x{frame[k]:02X}), "
-                          f"after {count} whole copies")
-    if rest != frame[:len(rest)]:
-        return i, count, f"the {len(rest)} bytes after the last copy are not the start of a frame"
-    return i, count, None
+        tail = (f"frame {count + 1} differs from #L13's at byte {k} (0x{rest[k]:02X}, #L13 0x{frame[k]:02X}), "
+                f"after {count} whole copies")
+    elif rest != frame[:len(rest)]:
+        tail = f"the {len(rest)} bytes after the last copy are not the start of a frame"
+    else:
+        tail = None
+    return i, count, "; ".join(x for x in (lead, tail) if x) or None
 
 
 def frame_times(bursts, start, n, count):
@@ -688,7 +691,7 @@ def sbus_out_tee(bench):
     wire must be whole copies of #L13's frame back to back (frame_walk: a partial frame only at each edge of the window),
     at least 70 % of what #L09's fps says the window holds, a frame period within 1 ms (or 10 %) of 1000 / fps on the
     probe's clock (frame_times), no RXERR, and the frame must decode (hil/sbus.py decode, INF2) to the channels #L09
-    prints. Skips unless SBUS is in at full rate. sbusOutEnabled off (not this bench) drops the sink: the wire must then
+    prints. The channel joins a running stream, so a first burst shorter than a frame is the cut one and is not read. Skips unless SBUS is in at full rate. sbusOutEnabled off (not this bench) drops the sink: the wire must then
     stay silent, which is all that is checked. Enabling and disabling the tee live is nccfg.sbus_out_toggle's (log
     lines); this test changes nothing."""
     nc = _nc(bench)
@@ -718,6 +721,14 @@ def sbus_out_tee(bench):
         _release(l)
     if not frame:
         raise Skip("#L13: NaviCore has parsed no SBUS frame")
+    if len(bursts) > 1 and len(bursts[0][1]) < len(frame):
+        # The channel joined a stream already running: the burst in flight at the bind is a frame's tail, and a UART
+        # that starts mid-byte misreads its first bytes (run 20261005-221308: a frame's last 20 bytes, the first read as
+        # 0xB4 - 0x5A a bit late - with 166 whole copies behind it). Read from the next burst, which starts a frame,
+        # and drop what the probe reported before it.
+        cut, nxt = bursts[0], bursts[1][0]
+        bursts, data = bursts[1:], data[len(cut[1]):]
+        errs = [e for e in errs if len(e.split()) > 2 and e.split()[2].isdigit() and int(e.split()[2]) >= nxt]
     problems = []
     start, count, why = frame_walk(data, frame)
     if why:

@@ -12120,7 +12120,7 @@ class WireProbe(FakeProbeDev):
                 if answer.startswith("OK"):
                     fmt = next((t.split("=", 1)[1].upper() for t in tok if t.upper().startswith("FMT=")), "8N1")
                     self.chans[tok[1]] = {"header": tok[2], "baud": int(tok[3]), "fmt": fmt, "inv": "INV" in tok,
-                                          "swap": "SWAP" in tok, "rx_only": "RXONLY" in tok}
+                                          "swap": "SWAP" in tok, "rx_only": "RXONLY" in tok, "joined": False}
                 self._rx(answer)
             elif verb == "UNBIND":
                 self.chans.pop(tok[1], None)
@@ -12177,6 +12177,12 @@ class WireProbe(FakeProbeDev):
                     self._rx(f"RX {ch} {ms} {bytes(0xFF - b for b in data[:3]).hex().upper()}")
                     self._rx(f"RXERR {ch} {ms} FRAME n=1")
                     return
+                if pin == "SBO" and not c["joined"] and len(data) > 20:
+                    # SBUS OUT streams from boot, so a channel bound on it joins mid-frame and mid-byte: the bench read a
+                    # frame's last 20 bytes, the first a bit late (0x5A as 0xB4; run 20261005-221308)
+                    c["joined"] = True
+                    data = bytes([(data[-20] << 1) & 0xFF]) + data[-19:]
+                c["joined"] = True
                 for i in range(0, len(data), 192):
                     self._rx(f"RX {ch} {ms} {data[i:i + 192].hex().upper()}")
                 if errs and ch in "AB":
@@ -12579,7 +12585,10 @@ def t_ncwire_helpers(tmp):
     bad[7] ^= 1
     assert S.frame_walk(f + bytes(bad) + f, f)[2] == f"frame 2 differs from #L13's at byte 7 (0x{bad[7]:02X}, #L13 " \
         f"0x{f[7]:02X}), after 1 whole copies"
-    assert S.frame_walk(b"\x55" * 40 + f, f)[2] == "40 bytes before the first copy are not the end of a frame"
+    assert S.frame_walk(b"\x55" * 40 + f, f) == (40, 1, "40 bytes before the first copy are not the end of a frame")
+    assert S.frame_walk(b"\x55" * 4 + f * 2 + b"\x99", f) == (4, 2, "4 bytes before the first copy are not the end of a "
+                                                                     "frame; the 1 bytes after the last copy are not the "
+                                                                     "start of a frame")
     assert S.frame_walk(f + b"\x99", f)[2] == "the 1 bytes after the last copy are not the start of a frame"
     assert S.frame_walk(b"\x00" * 50, f) == (-1, 0, "no whole copy of #L13's frame in the window")
     assert S.frame_times([(100, f), (109, f), (118, f[:10]), (120, f[10:])], 0, 36, 3) == [100, 109, 118]
