@@ -16,7 +16,11 @@ extern bool inSequenceBody;
 // Keep in step with httpd_config_t::max_open_sockets in wcbWsBegin(). More
 // clients than the server will accept is just dead slots; fewer means a
 // connected client the sink never writes to — a silently deaf client.
-static const uint8_t  WS_MAX_CLIENTS = 3;
+// Two, not three (Greg, 2026-10-07; HIL tracker #111): with the access point up a classic
+// ESP32 has about 17 KB of heap, and three busy sessions took it to within 48 bytes of
+// empty. A third client still connects: httpd closes the least recently used session
+// to take it (lru_purge_enable in wcbWsBegin()).
+static const uint8_t  WS_MAX_CLIENTS = 2;
 // See the header: sized for ?OTALOCAL,DATA with a 1024-byte chunk.
 static const size_t   WS_LINE_MAX    = 1536;
 // drain() runs ONE command per loop() pass. Depth only has to absorb a burst;
@@ -41,7 +45,7 @@ struct WsCmd {
 
 static QueueHandle_t  wsQueue   = nullptr;
 static httpd_handle_t wsServer  = nullptr;
-static int            wsFds[WS_MAX_CLIENTS] = { -1, -1, -1 };
+static int            wsFds[WS_MAX_CLIENTS] = { -1, -1 };
 
 // ---- Output sink ----------------------------------------------------------
 static char     sinkBuf[WS_SINK_BUF];

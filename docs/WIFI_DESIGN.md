@@ -215,6 +215,13 @@ WiFi uses, and that is the *direct* path — `?OTALOCAL,DATA,<base64>` with a
 plus prefix. At 384 every DATA frame would hit the line-too-long guard, and the
 transfer would ACK the BEGIN and then move nothing.
 
+**Two clients at once** (`WS_MAX_CLIENTS`, httpd's `max_open_sockets`). A third
+connection still succeeds: `lru_purge_enable` closes the least recently used session
+to take it. Each session costs heap beyond its static 1.5 KB accumulator: its socket,
+TCP buffers and httpd's session state. With the AP up a classic ESP32 has about 17 KB
+of heap, and with three sessions a `?backup` streamed to them took it to within 48 bytes
+of empty (HIL tracker #111). It was three until 2026-10-07.
+
 **AP address: the stock `192.168.4.1`. Do not call `softAPConfig()`.**
 
 The plan was `192.168.4.<board number>`, so a host could tell a WCB from a NaviCore
@@ -335,8 +342,8 @@ Adding the WebSocket endpoint (`WCB_WS`) on top:
 | ESP32 | 1,345,847 (68%) — **+36.3 KB** | 105,552 (32%) — **+9.8 KB** |
 | ESP32-S3 | 1,311,099 (66%) — **+35.5 KB** | 103,808 (31%) — **+9.8 KB** |
 
-The static growth is the three per-socket accumulators (3 × 1536 B), the 2 KB output
-sink and the 3 KB static receive buffer. The command queue is *heap*-allocated
+The static growth is the per-socket accumulators (three, 3 × 1536 B, when this was
+measured; two now), the 2 KB output sink and the 3 KB static receive buffer. The command queue is *heap*-allocated
 (6 × 1540 B ≈ 9.2 KB) and so comes out of runtime free heap, not this figure.
 
 **Measured on hardware**, WCB1 with the AP up and no client attached:
@@ -345,10 +352,13 @@ sink and the 3 KB static receive buffer. The command queue is *heap*-allocated
 Free heap : 110588 bytes (min since boot 109828)
 ```
 
-A 760-byte spread between current and minimum means a flat, unfragmented heap — this
-is headroom, not a lucky sample. Against ~9 KB for the queue plus httpd's own socket
-and TCP allocations, that leaves comfortable margin on the *classic* ESP32, which is
-the tighter of the two targets.
+That figure was `ESP.getFreeHeap()`, which on a classic ESP32 also counts the ~39 KB IRAM
+heap that a byte buffer cannot use (`MALLOC_CAP_INTERNAL`, as #58 found for
+`getMaxAllocHeap()`), and it predates most of today's firmware. `?WIFI` now reads the heap
+a `String` or a socket buffer comes from (`heap_caps_get_free_size(MALLOC_CAP_8BIT)`,
+`WCB_WiFi.cpp`): about 17 KB on a classic ESP32 with the AP up and nobody attached, and
+within a few hundred bytes of empty while a client is busy (HIL tracker #111). An
+ESP32-S3 keeps about 100 KB.
 
 That is the WiFi module only — no web server yet. For reference, the WebSocket
 endpoint in `MgmtRelay` measured **+37 KB flash / +4.7 KB static RAM**, which would

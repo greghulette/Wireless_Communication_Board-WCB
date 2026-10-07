@@ -627,6 +627,9 @@ def _ws_quiet(ws, quiet=1.5, cap=20.0):
             size, since = len(ws.text), time.monotonic()
 
 
+WS_MAX_CLIENTS = 2      # WCB_WS.cpp: httpd's max_open_sockets with LRU purge; 3 until tracker #111 (2026-10-07)
+
+
 def _ws_client_count(w):
     m = re.search(r"\((\d+) client\(s\) connected\)$", _status(w).get("WS endpoint", ""))
     return int(m.group(1)) if m else None
@@ -796,32 +799,32 @@ def ws_backup_over_ws(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("ws.client_slots", "OPT-IN (wifi_pc): at most three WebSocket clients - a fourth evicts the least recently used, whose socket closes - each keeps its own line buffer, so a line split over frames on one client never fuses with another's, and a broadcast typed over the socket right after W2 sent W1 a command still reaches the mesh", needs=["wcb1", "wcb2"], links=["W1S2", "W2S3"], opt_in="wifi_pc")
+@test("ws.client_slots", "OPT-IN (wifi_pc): at most two WebSocket clients - a third evicts the least recently used, whose socket closes - each keeps its own line buffer, so a line split over frames on one client never fuses with another's, and a broadcast typed over the socket right after W2 sent W1 a command still reaches the mesh", needs=["wcb1", "wcb2"], links=["W1S2", "W2S3"], opt_in="wifi_pc")
 def ws_client_slots(bench):
-    """WCB-WP22 row 3 (ws.clients_slots_and_source_flags). wcbWsBegin sets max_open_sockets to WS_MAX_CLIENTS (3) with
-    lru_purge_enable, so httpd closes the least recently used session to take a fourth; accFor keeps one accumulator
-    per socket (WCB_WS.cpp), so interleaved partial lines from two clients stay apart. sinkPump sends the console to
-    every client, so each open client sees every answer: two commands, two answers on each. The source flags:
-    wcbWsService clears lastReceivedViaESPNOW and inSequenceBody before it runs a socket's line, as the USB reader
-    does, so a broadcast typed there right after a mesh-received command (;W1;S2 from W2's console) is not taken for a
-    received one and dropped from the mesh: it reaches W2 S3, the port that takes broadcasts on W2."""
+    """WCB-WP22 row 3 (ws.clients_slots_and_source_flags). wcbWsBegin sets max_open_sockets to WS_MAX_CLIENTS (2 since
+    tracker #111) with lru_purge_enable, so httpd closes the least recently used session to take a third; accFor keeps
+    one accumulator per socket (WCB_WS.cpp), so interleaved partial lines from two clients stay apart. sinkPump sends
+    the console to every client, so each open client sees every answer: two commands, two answers on each. The source
+    flags: wcbWsService clears lastReceivedViaESPNOW and inSequenceBody before it runs a socket's line, as the USB
+    reader does, so a broadcast typed there right after a mesh-received command (;W1;S2 from W2's console) is not taken
+    for a received one and dropped from the mesh: it reaches W2 S3, the port that takes broadcasts on W2."""
     s2, w2s3 = link(bench, 1, "S2"), link(bench, 2, "S3")
     problems = []
     with _pc_on_w1_ap(bench, problems) as (w, ip, _):
         clients = []
         try:
-            for k in range(3):
+            for k in range(WS_MAX_CLIENTS):
                 c = _ws_open(ip)
                 assert c is not None, f"client {k + 1} could not open ws://{ip}/ws with a lease held"
                 clients.append(c)
                 c.send_text("?VERSION\n")
                 c.read_until("End of Version", timeout=6)
             n = _ws_client_count(w)
-            if n != 3:
-                problems.append(f"with three clients open W1 counts {n}")
-            fourth = _ws_open(ip, wait=8)
-            assert fourth is not None, "a fourth client could not connect at all"
-            clients.append(fourth)
+            if n != WS_MAX_CLIENTS:
+                problems.append(f"with {WS_MAX_CLIENTS} clients open W1 counts {n}")
+            extra = _ws_open(ip, wait=8)
+            assert extra is not None, "a client over the limit could not connect at all"
+            clients.append(extra)
             time.sleep(1.0)
             first = clients[0]
             try:
@@ -833,11 +836,11 @@ def ws_client_slots(bench):
             except (ConnectionError, OSError):
                 evicted = True
             if not evicted:
-                problems.append("the first client still answers after a fourth connected: nothing was evicted")
+                problems.append("the first client still answers after one over the limit connected: nothing was evicted")
             n = _ws_client_count(w)
-            if n != 3:
-                problems.append(f"after the fourth connected W1 counts {n}, not 3")
-            a, b = clients[1], clients[2]
+            if n != WS_MAX_CLIENTS:
+                problems.append(f"after one over the limit connected W1 counts {n}, not {WS_MAX_CLIENTS}")
+            a, b = clients[-2], clients[-1]                  # the two still open: the newest two
             _ws_until(a, lambda t: False, 0.5)
             _ws_until(b, lambda t: False, 0.5)
             a.text, b.text = "", ""
@@ -845,7 +848,7 @@ def ws_client_slots(bench):
             b.send_text("?VERSION\n")
             time.sleep(0.3)
             a.send_text("SION\n")
-            for c, who in ((a, "second"), (b, "third")):
+            for c, who in ((a, "older open"), (b, "newest")):
                 _ws_until(c, lambda t: t.count("End of Version") >= 2, 6)
                 _ws_until(c, lambda t: False, 0.5)
                 if c.text.count("End of Version") != 2:
