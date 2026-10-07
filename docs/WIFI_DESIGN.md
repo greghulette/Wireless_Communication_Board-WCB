@@ -376,6 +376,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | `48da52a` | §6a: two WebSocket clients at once, not three (HIL tracker #111, Greg's call); a third evicts the least recently used. The memory section no longer reads the old 110 KB `ESP.getFreeHeap()` figure, which counted the IRAM heap, as headroom. |
 | 2026-09-28 | `e55ba82` | §2: JOIN reads its association and the AP's channel from the driver, not `WiFi.status()` and the radio's momentary channel, cancels the core's forced reconnect on a loss, and starts over after 20 s associated without an address (tracker #103: the lost network was never noticed and never rejoined). |
 | 2026-09-28 | `5770675` | §2: JOIN scans the mesh channel alone before each `WiFi.begin` (tracker #103): the channel argument was only the start of the driver's connect scan, which swept the band while the AP was absent. §3's retry line follows. |
 | 2026-09-27 | `1f629a8` | §5 item 1: PWM output pulses are RMT-clocked (tracker #94), so `PWMTask` no longer busy-waits for each pulse; re-pinning it to core 1 costs less than it did. |

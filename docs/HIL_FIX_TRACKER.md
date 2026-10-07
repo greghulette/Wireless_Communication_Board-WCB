@@ -35,7 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
-| 2026-10-07 | **#11**'s residual race seen (`client_mesh.rejoin_seq_reuse`, `20261007-090301`: W1 re-adopted a re-joined probe after its three boot announces and dropped two commands as duplicates) and FIXED (unverified): a boot announce now clears the sender's duplicate ring whether or not it is a peer yet. |
+| 2026-10-07 | **#11**'s residual race seen (`client_mesh.rejoin_seq_reuse`, `20261007-090301`: W1 re-adopted a re-joined probe after its three boot announces and dropped two commands as duplicates) and fixed in `77a39d2`: a boot announce now clears the sender's duplicate ring whether or not it is a peer yet. VERIFIED by the new `client_mesh.rejoin_unadopted`: `[0, 0, 0, 1]` on `48da52a`, `[1, 1, 1, 1]` on `77a39d2`. |
 | 2026-10-07 | **#111** decided (Greg: two WebSocket sessions) and FIXED (unverified): `48da52a`, `WS_MAX_CLIENTS` 3 to 2, flashed on W1-W3 as `6.2.1_070853ROCT2026`. Not measured yet: that needs a PC on W1's access point (the Windows PC, or the Mac's TP-Link moved there). |
 | 2026-09-29 | Filed **#110** (a PC waits up to 47 s for a lease on W1's access point) and **#111** (with an access point up the heap's low-water mark reaches 76 bytes on W1 and 240 on W2), both found writing WCB-WP22 (`20260929-055154`, `-055837`). |
 | 2026-09-29 | Filed **#109** (a relayed STATS, ETM,CHAR or sequence reply is sent once; NC-WP6's first bench run lost an ETM,CHAR reply to the load it had started). |
@@ -334,7 +334,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | VERIFIED — client_mesh.rejoin_seq_reuse PASS on the bench (20260922-125537); the residual race below FIXED (unverified) 2026-10-07 |
+| **Status** | VERIFIED — client_mesh.rejoin_seq_reuse PASS on the bench (20260922-125537); the residual race below VERIFIED 2026-10-07 (client_mesh.rejoin_unadopted) |
 | **Owner** | `unclear` |
 | **Effort** | M |
 | **Tests** | `client_mesh.rejoin_seq_reuse` |
@@ -351,7 +351,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 **Risk.** The announce only clears the ring when the WCB already treats the sender as a peer (`wcbPeerActive[senderIdx] || isSpecialPeer`, WCB.ino:4281) — three spaced announces cover the case where the first arrives before the WDP advert is digested; consider also re-announcing once the first WCB heartbeat is heard. A client in a crash loop announcing more often than every 4 s will clear the ring repeatedly, which could let a genuine in-flight retry double-fire — the 4 s hold at WCB.ino:4301 bounds it, and WCBs already carry the identical exposure. Cross-repo release discipline applies: push WCBClient master, sync Arduino-Code/libraries/WCB_Client (it shadows locally), then rebuild NaviCore and tests/hil/wcb_probe.
 
 
-**The residual race, seen 2026-10-07 (run `20261007-090301`).** The Risk above happened: the probe re-joined as WCB18 and W1 re-adopted it as a temporary peer at its next digested WDP advert, about 3 s after the join, after all three boot announces. The announces were ignored (the ring clear sat inside `wcbPeerActive[senderIdx] || isSpecialPeer`), so session B's seqs 2 and 3 matched session A's and were ACKed and not run (`[1, 0, 0, 1]`); W2, which adopted it in time, printed the `(boot)` line. A command needs no peer status to run, so the ring is now cleared on any sender's boot announce, after the password and the id-to-MAC check (`espNowReceiveCallback`, `WCB.ino`). It had passed in the six runs before.
+**The residual race, seen 2026-10-07 (run `20261007-090301`).** The Risk above happened: the probe re-joined as WCB18 and W1 re-adopted it as a temporary peer at its next digested WDP advert, about 3 s after the join, after all three boot announces. The announces were ignored (the ring clear sat inside `wcbPeerActive[senderIdx] || isSpecialPeer`), so session B's seqs 2 and 3 matched session A's and were ACKed and not run (`[1, 0, 0, 1]`); W2, which adopted it in time, printed the `(boot)` line. A command needs no peer status to run, so the ring is now cleared on any sender's boot announce, after the password and the id-to-MAC check (`espNowReceiveCallback`, `WCB.ino`, `77a39d2`). It had passed in the six runs before. `client_mesh.rejoin_unadopted` (`4086299`) forces the race: W1's WDP held off, so it never adopts the client but still ACKs and runs its commands. Session B ran `[0, 0, 0, 1]` on `48da52a` (`20261007-101100`) and `[1, 1, 1, 1]` on `77a39d2` (`20261007-101228`), where `rejoin_seq_reuse` passes too.
 
 
 #### 12. A remote ?reboot ACKs and then destroys every command queued behind it — the CLAUDE.md rule-11 trap, still live in four places
