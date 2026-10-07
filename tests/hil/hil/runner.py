@@ -347,6 +347,9 @@ class Bench:
                     raise
             else:
                 self.devs[name] = SerialDevice(name, d["port"], baud, log=self.log).open()
+                # NaviCore's native-USB port answers every command and an open never resets it, so one gone silent
+                # is reopened (hil/serialdev.py); the Kyber resets on every open, and the rest has never needed it.
+                self.devs[name].revive_silent = d["kind"] == "navicore"
             time.sleep(0.2)
         return self.devs[name]
 
@@ -585,6 +588,41 @@ def _probe_incidents(bench, marks):
     return "; ".join(out)
 
 
+MESH_STALL = "[MESH] ESP-NOW transmit stalled"     # WCB_EspNow.cpp watchStall, every 30 s while a stall lasts
+
+
+def _wcb_marks(bench):
+    """{device name: (SerialDevice, log mark)} for every WCB console open as a test starts; one that cannot be marked
+    is left out, as a scan never breaks the run."""
+    kinds = {n: (d or {}).get("kind") for n, d in (bench.cfg.get("devices") or {}).items()}
+    out = {}
+    for name, dev in list(getattr(bench, "devs", {}).items()):
+        if kinds.get(name) != "wcb":
+            continue
+        try:
+            out[name] = (dev, dev.mark())
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _wcb_stalls(bench, marks):
+    """One line per WCB that reported its ESP-NOW transmit stalled during the test (MESH_STALL: every frame refused
+    for 5 s or more, none completing), or "". Such a board sends nothing to the mesh, heartbeats included, so what the
+    test concluded about its mesh traffic is not a result: full run 20261006-122850 had one board stalled for 2 min,
+    seen only because its peers called it offline. The line carries the board's heap figures, quoted here."""
+    out = []
+    for name, (dev, since) in marks.items():
+        try:
+            hits = [x.strip() for x in dev.since(since) if x.startswith(MESH_STALL)]
+        except Exception as e:  # noqa: BLE001 - a scan never breaks the run
+            bench.note(f"stall scan of {name} failed: {e}")
+            continue
+        if hits:
+            out.append(f"{name} reported its ESP-NOW transmit stalled ({len(hits)} report(s), the last {hits[-1][:200]!r})")
+    return "; ".join(out)
+
+
 def _ports_back(bench, awake_s=120, abort=None):
     """Wait for every active port to reopen. Counted in loop turns, not by the clock: if the host sleeps again during
     the wait, the clock jump must not use up the budget before USB has even re-enumerated. abort() (Pause or Stop
@@ -727,6 +765,7 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                 on_start(t)
             bench.note(f"===== {t['id']} {t['title']}")
             probe_marks = _probe_marks(bench)
+            wcb_marks = _wcb_marks(bench)
             start = time.monotonic()
             awake0 = _awake_s()
             try:
@@ -765,6 +804,11 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                     own = {"PASS": "The test itself passed, but read through that probe."}.get(
                         status, f"The test itself said ({status}): {detail}")
                     status, detail = "FAIL", f"{incident}\n{own}"
+                stall = _wcb_stalls(bench, wcb_marks)
+                if stall:
+                    own = {"PASS": "The test itself passed, but that board sent nothing to the mesh meanwhile."}.get(
+                        status, f"The test itself said ({status}): {detail}")
+                    status, detail = "FAIL", f"{stall}\n{own}"
             # A baud a test pinned with listen(<baud>) must not outlive it: config_guard's resync only re-binds
             # auto-baud wires, so one pinned W1S2 at 115200 once garbled every later injection into that 9600 port.
             # A wire on NaviCore's own pins is released whatever its baud: nothing re-binds it between tests, and a

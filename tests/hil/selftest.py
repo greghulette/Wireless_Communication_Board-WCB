@@ -2909,6 +2909,101 @@ class FakeNetsh:
         return ""
 
 
+def t_runner_mesh_stall(tmp):
+    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' after the test's
+    mark is reported, with its last report quoted; lines before the mark, a clean console and a non-WCB device are not."""
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
+                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    w1, w2, nav = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="navicore")
+    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame accepted or completed while frames are given up (in flight 0, "
+             "internal heap free 9000, largest block 4000, min since boot 1800)")
+    w2._append(stall.replace("5s", "40s"))                        # before the test: not this test's
+    b.devs.update({"wcb1": w1, "wcb2": w2, "navicore": nav})
+    marks = runner._wcb_marks(b)
+    assert set(marks) == {"wcb1", "wcb2"}, marks
+    assert runner._wcb_stalls(b, marks) == ""
+    nav._append(stall)                                            # not a WCB
+    w2._append("[MESH] 3 ESP-NOW frame(s) not sent: the radio's queue stayed full (3 since the stats were reset)")
+    w2._append(stall)
+    w2._append(stall.replace("5s", "35s"))
+    got = runner._wcb_stalls(b, marks)
+    assert got.startswith("wcb2 reported its ESP-NOW transmit stalled (2 report(s), the last '[MESH] ESP-NOW transmit "
+                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got, got
+    b.devs.clear()
+    b.close()
+
+
+def t_serial_silent_revive(tmp):
+    """hil/serialdev.py: a timed-out expect() on a revive_silent port that gave no byte at all since the last command
+    (SILENT_S or more) has the reader reopen it, and the failure says so; the next command is answered through the
+    new handle. A port that answered something, a port not marked revive_silent, and a timeout before SILENT_S are left
+    alone (full run 20261006-122850: NaviCore's handle went silent until a hand-off reopened it)."""
+    from hil.serialdev import ExpectTimeout, SerialDevice
+    opened = []
+
+    class Ser:
+        def __init__(self, replies):
+            self.replies, self.out, self.timeout = list(replies), [], 0.05
+            self.is_open = True
+
+        def read(self, n):
+            if self.replies and self.out:
+                return self.replies.pop(0)
+            time.sleep(0.02)
+            return b""
+
+        def write(self, data):
+            self.out.append(data)
+            return len(data)
+
+        def close(self):
+            self.is_open = False
+
+    def fresh(replies):
+        def make():
+            s = Ser(replies)
+            opened.append(s)
+            return s
+        return make
+
+    # silent: no byte after the command -> reopened; the reopened handle answers the next command
+    d = SerialDevice("navicore", "FAKE")
+    d._open_port = fresh([])                       # the first handle never gives a byte
+    d.revive_silent, d.SILENT_S, d.REVIVE_WAIT_S, d.REOPEN_EVERY_S = True, 0.2, 2.0, 0.05
+    d.open()
+    try:
+        d._open_port = fresh([b"PONG\n"])          # what the reader opens next
+        d.send("PING")
+        try:
+            d.expect("^PONG$", timeout=0.4)
+            raise AssertionError("a silent port answered")
+        except ExpectTimeout as e:
+            assert "gave no byte for" in str(e) and "reopened it; silent-port reopen 1 on this device" in str(e), e
+        assert len(opened) == 2 and not opened[0].is_open, opened
+        assert any(t.startswith("<<silent: no byte since the last command") for t in d.since(0))
+        m = d.mark()
+        d.send("PING")
+        assert d.expect("^PONG$", timeout=2, since=m)
+    finally:
+        d.close()
+    # answered something (not the pattern): left alone; not revive_silent: left alone; too soon: left alone
+    for revive, replies, silent_s in ((True, [b"busy\n"], 0.2), (False, [], 0.2), (True, [], 5.0)):
+        opened.clear()
+        d = SerialDevice("x", "FAKE")
+        d._open_port = fresh(replies)
+        d.revive_silent, d.SILENT_S = revive, silent_s
+        d.open()
+        try:
+            d.send("PING")
+            try:
+                d.expect("^PONG$", timeout=0.4)
+            except ExpectTimeout as e:
+                assert "gave no byte" not in str(e), (revive, replies, e)
+            assert len(opened) == 1 and d.revived == 0, (revive, replies, len(opened))
+        finally:
+            d.close()
+
+
 def t_ncflash_arduino15(tmp):
     """hil/ncflash.py default_arduino15, arduino-cli's own default data folder per OS - the fallback when HIL_ARDUINO15
     is unset and the CLI cannot answer `config get` (the Mac IDE's 0.35.3): ~/Arduino15 is not where a Mac keeps it,
@@ -3165,12 +3260,13 @@ def t_wlan_prejoined(tmp):
         assert (host, port, timeout) == ("192.168.4.1", 80, 0), (host, port, timeout)
         return st["reach"].pop(0) if st["reach"] else 0.1
     keys = ("ON_WINDOWS", "netsh", "_run", "reach_wait", "_spare_seen", "PREJOIN_WAIT_S", "PREJOIN_STEP_S",
-            "SPARE_FILE")
+            "SPARE_FILE", "_spare_lost_at")
     saved = {k: getattr(wlan, k) for k in keys}
     try:
         wlan.ON_WINDOWS, wlan.netsh, wlan._run, wlan.reach_wait = False, no_netsh, run, reach
         wlan._spare_seen, wlan.PREJOIN_WAIT_S, wlan.PREJOIN_STEP_S = None, 0.3, 0.01
         wlan.SPARE_FILE = os.path.join(tmp.root, "wifi_spare.json")      # never this computer's own
+        wlan._spare_lost_at = None
         assert wlan.internet_adapter() == "en0" and wlan.ipv4("en6") == ["192.168.4.2"] and wlan.ipv4("en9") == []
         assert wlan.default_routes() == ["en0|10.0.0.1", "utun9|link#33"]
         assert wlan.spare_leases() == [("en6", "192.168.4.2")]
@@ -3215,7 +3311,9 @@ def t_wlan_prejoined(tmp):
         except AssertionError as e:
             assert "no spare adapter was back on NaviCore's access point within 0 s" in str(e) and \
                 "en6 holds 192.168.4.2, but 192.168.4.1:80 takes no connect" in str(e), e
+        assert wlan._spare_lost_at is not None
         st["reach"] = []
+        wlan._spare_lost_at = None
         # after a restart the address is gone for a while: the adapter seen before is waited for
         no_lease = IFCONFIG_MAC.replace("\tinet 192.168.4.2 netmask 0xffffff00 broadcast 192.168.4.255\n", "")
         calls = {"n": 0}
@@ -3236,12 +3334,26 @@ def t_wlan_prejoined(tmp):
                 raise AssertionError("an adapter with no address was used")
         except AssertionError as e:
             assert "within 0 s" in str(e) and "en6 holds no 192.168.4.x address" in str(e), e
+        # the wait ran out: later tests skip at once while it has no address, and stop skipping once it has one
+        assert wlan._spare_lost_at is not None
+        try:
+            with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None):
+                raise AssertionError("waited for again")
+        except Skip as e:
+            assert "has been off NaviCore's access point since" in str(e) and "not waited for again" in str(e), e
+        st["ifconfig"] = IFCONFIG_MAC
+        with wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None) as name:
+            assert name == "en6" and wlan._spare_lost_at is None
+        st["ifconfig"] = no_lease
+        wlan._spare_lost_at = None
         try:
             wlan.rejoin(B(), "en6", "Droid AP", "NaviCore's", reach=("192.168.4.1", 80))
             raise AssertionError("rejoin passed with no address")
         except AssertionError as e:
             assert str(e).startswith("en6 was not back on NaviCore's access point by itself within 0 s") and \
                 "holds no 192.168.4.x address" in str(e), e
+        assert wlan._spare_lost_at is not None
+        wlan._spare_lost_at = None
         # a new run (nothing seen in this process) that starts while the adapter has no address: the one an earlier
         # run proved is waited for, not skipped (run 20261006-172611 skipped every test right after a NaviCore restart)
         assert json.load(open(wlan.SPARE_FILE)) == {"adapter": "en6"}
@@ -3253,8 +3365,8 @@ def t_wlan_prejoined(tmp):
                 raise AssertionError("an adapter with no address was used")
         except AssertionError as e:
             assert "en6 holds no 192.168.4.x address" in str(e), e
-        # no spare adapter ever seen on this computer: Skip, with what to do
-        wlan._spare_seen = None
+        # no spare adapter ever seen on this computer (a new process: nothing lost yet either): Skip, with what to do
+        wlan._spare_seen, wlan._spare_lost_at = None, None
         os.remove(wlan.SPARE_FILE)
         for enter in (lambda: wlan.pick_adapter(B()),
                       lambda: wlan.pc_on_ap(B(), [], "Droid AP", "pw", "NaviCore's", identify=lambda n: None).__enter__()):
@@ -11690,7 +11802,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations,
          t_wlan_pc_on_ap, t_wlan_prejoined, t_ncws_line_device, t_ncwifi_helpers, t_inv_dedup_verdict,
-         t_group_tokens, t_ncflash_arduino15]
+         t_group_tokens, t_ncflash_arduino15, t_serial_silent_revive, t_runner_mesh_stall]
 
 
 def t_wizard_spec_ids(tmp):

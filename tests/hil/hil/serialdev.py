@@ -12,6 +12,11 @@ Two failure modes are handled here rather than in every test (both cost a whole 
 - A port that vanishes is reopened. When a board's USB drops or re-enumerates, the reader used to log
   "<<serial error>>" and exit for good, so every later test on that device errored. It now reopens the
   same port (DTR/RTS still deasserted) until it comes back or the device is closed.
+- A port that goes silent is reopened too, where that is safe (revive_silent: NaviCore). In full run
+  20261006-122850 the handle on NaviCore's native-USB port stopped delivering bytes, with no error, for
+  up to half an hour while NaviCore itself answered over WiFi; three tests failed in a row until a
+  hand-off closed and reopened the port. An expect() that times out on a port which gave no byte at all
+  since the last command now has the reader reopen it, and says so in the failure.
 """
 import os
 import re
@@ -28,6 +33,8 @@ class ExpectTimeout(AssertionError):
 class SerialDevice:
     REOPEN_EVERY_S = 0.5      # how often the reader retries a vanished port
     SEND_WAIT_S = 5.0         # how long send() waits for a reopen before failing the test
+    SILENT_S = 2.5            # no byte at all for this long after a command: a silent port (revive_silent)
+    REVIVE_WAIT_S = 5.0       # how long a timed-out expect() waits for the reader to reopen a silent port
 
     def __init__(self, name, port, baud=115200, log=None):
         self.name = name
@@ -43,6 +50,11 @@ class SerialDevice:
         self._wlock = threading.Lock()   # one writer at a time; also held while the handle is swapped
         self.last_error_at = None        # monotonic time the port last failed - runner.host_usb_loss() compares these
         self._hold_until = 0.0           # hold_reads(): the reader reads nothing until this monotonic time
+        self.revive_silent = False       # reopen the port when it goes silent after a command (Bench.dev: NaviCore)
+        self.last_tx_at = None           # monotonic time of the last write that went out
+        self.last_rx_at = None           # ... and of the last byte read
+        self.revived = 0                 # silent-port reopens so far
+        self._revive_req = False         # set by expect(), served by the reader thread
 
     # ------------------------------------------------------------ lifecycle
     def _open_port(self):
@@ -117,6 +129,12 @@ class SerialDevice:
 
     def _reader(self):
         while not self._stop:
+            if self._revive_req:
+                self._revive_req = False
+                self._append(f"<<silent: no byte since the last command; reopening {self.port}>>")
+                if not self._reopen():
+                    return
+                continue
             if self._hold_until > time.monotonic():
                 time.sleep(0.01)
                 continue
@@ -132,6 +150,7 @@ class SerialDevice:
                 continue
             if not chunk:
                 continue
+            self.last_rx_at = time.monotonic()
             self._partial += chunk
             while b"\n" in self._partial:
                 raw, _, rest = self._partial.partition(b"\n")
@@ -190,6 +209,7 @@ class SerialDevice:
                 if ser is not None:
                     try:
                         ser.write(data)          # bounded by the write_timeout set in _open_port()
+                        self.last_tx_at = time.monotonic()
                         return
                     except serial.SerialTimeoutException:
                         raise ExpectTimeout(f"{self.name}: write to {self.port} timed out - the board is not "
@@ -225,6 +245,7 @@ class SerialDevice:
                             ser.write(data[done:done + chunk])
                             done = min(done + chunk, len(data))
                             time.sleep(gap_s)       # the board's loop() drains its RX ring between chunks
+                        self.last_tx_at = time.monotonic()
                         return
                     except serial.SerialTimeoutException:
                         raise ExpectTimeout(f"{self.name}: write to {self.port} timed out {done} bytes into a "
@@ -262,9 +283,35 @@ class SerialDevice:
                 left = deadline - time.monotonic()
                 if left <= 0:
                     tail = "\n    ".join(t for _, t in self.lines[max(start, len(self.lines) - 15):])
-                    raise ExpectTimeout(f"{self.name}: no line matching /{pattern}/ within {timeout}s; "
-                                        f"last lines:\n    {tail}")
+                    break
                 self._cv.wait(left)
+        # Outside the lock: the reader takes it to log its reopen.
+        raise ExpectTimeout(f"{self.name}: no line matching /{pattern}/ within {timeout}s; "
+                            f"last lines:\n    {tail}" + self._revive_if_silent())
+
+    def silent_since_send(self):
+        """revive_silent is set, a command went out SILENT_S or more ago, and the port has given no byte since."""
+        tx, rx = self.last_tx_at, self.last_rx_at
+        return (self.revive_silent and tx is not None and (rx is None or rx < tx)
+                and time.monotonic() - tx >= self.SILENT_S)
+
+    def _revive_if_silent(self):
+        """After an expect() timed out: on a silent port (silent_since_send), have the reader reopen it, wait up to
+        REVIVE_WAIT_S for that -> a note for the failure, '' when the port was not silent. The command's reply is
+        lost either way; the reopen is for the commands after it."""
+        if not self.silent_since_send():
+            return ""
+        quiet = time.monotonic() - self.last_tx_at
+        m = self.mark()
+        self._revive_req = True
+        end = time.monotonic() + self.REVIVE_WAIT_S
+        while time.monotonic() < end and not any(t.startswith("<<reopened") for t in self.since(m)):
+            time.sleep(0.05)
+        self.revived += 1
+        done = any(t.startswith("<<reopened") for t in self.since(m))
+        return (f"\n    ({self.port} gave no byte for {quiet:.1f} s after the command: "
+                + ("reopened it" if done else f"asked the reader to reopen it, not done in {self.REVIVE_WAIT_S:.0f} s")
+                + f"; silent-port reopen {self.revived} on this device)")
 
     def expect_none(self, pattern, window=2.0, since=None):
         """Assert that no line matching `pattern` appears within `window` seconds."""

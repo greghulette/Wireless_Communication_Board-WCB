@@ -2402,3 +2402,32 @@ aborted the board before (#102).
 receive buffers, the WebSocket sockets). Then: fewer WebSocket clients (`WS_MAX_CLIENTS` 3 to 1 or 2) and a smaller
 static receive buffer; fewer AP stations (`max_conn` 4); or static WiFi buffers, which need a custom ESP-IDF build of
 the Arduino core.
+
+#### 112. A WCB's ESP-NOW transmit can stall for good after a load, until a reboot
+
+| | |
+|---|---|
+| **Status** | OPEN - diagnostic in place (`2ed4f4e`), cause not found |
+| **Owner** | `WCB_firmware` (`WCB_EspNow.cpp`), probably the WiFi driver under #111's heap |
+| **Effort** | M (catching it again) |
+| **Tests** | `etm.char_per_board_clamp` (every WCB must transmit again after its load); the runner fails any test during which a WCB prints `[MESH] ESP-NOW transmit stalled` |
+| **Subsystem** | mesh / heap |
+
+**Evidence (full run `20261006-122850`).** During `etm.char_per_board_clamp`'s load W2 gave up frames ("the radio's
+queue stayed full", 252 in 10 s; its generator sent 42 frames where it sends ~100), and after the load it never sent
+again: every heartbeat was given up, one each ~10 s, for 2 min, until the next test rebooted it. W2 kept receiving (it
+called no peer offline and processed probe2's leave); W1 and W3 called it offline after 55 s. `esp_now_send` returned
+`ESP_ERR_ESPNOW_NO_MEM` for every frame though `wcbEspNowSend` had reset its in-flight count: the driver itself
+refused them.
+
+**Not reproduced.** `20261006-185149` replayed the run's sequence (`etm.seq_wrap`'s 65,000-frame flood, then the
+relayed and local ETM,CHAR loads): no frame given up, W2's heap flat across the flood (16,744 free before and after).
+The flooding W1's low-water reached 1,780 bytes (#111).
+
+**Diagnostic.** `wcbEspNowReportDrops` now prints `[MESH] ESP-NOW transmit stalled <n>s` with the internal heap's free,
+largest block and low-water when frames have been given up while none was accepted or completed for 5 s, every 30 s
+while it lasts, and `... recovered after <n>s`. The next occurrence names the heap state.
+
+**Fix (after the cause).** If the heap is to blame, #111's options. A board could also recover by itself: re-initialise
+ESP-NOW (`esp_now_deinit`/`init`, the callbacks, every peer `setup()` adds) or restart, once a stall passes some limit
+- Greg's call, as a restart has side effects.

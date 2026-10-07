@@ -69,6 +69,65 @@ def _reboot_while(w, send_one, limit_s):
     return m, (went - queued if went is not None else None)
 
 
+HEAP_RX = re.compile(r"Free heap\s*:\s*(\d+) bytes \(min since boot (\d+)\)")     # WCB_WiFi.cpp, ?WIFI's status
+LOAD_DONE = "ETM load test complete:"                                                # processETMLoad's closing line
+NOT_SENT = re.compile(r"^\[MESH\] (\d+) ESP-NOW frame\(s\) not sent")             # wcbEspNowReportDrops
+TX_SETTLE_S = 3.0     # after a generator ends, its last given-up frames are still being reported
+TX_WATCH_S = 12.0     # then a heartbeat period (HB 10 +/- 1 s) in which a working board gives no frame up
+
+
+def _heaps(bench):
+    """{board: (free heap, lowest since boot)} from ?WIFI on every WCB with its own USB cable."""
+    out = {}
+    for n, dev in sorted(bench.usb_wcbs().items()):
+        for x in WCB(bench.dev(dev)).run("?WIFI", timeout=6):
+            m = HEAP_RX.search(x)
+            if m:
+                out[n] = (int(m.group(1)), int(m.group(2)))
+                break
+    return out
+
+
+def _heap_note(bench, test_id, label):
+    """Note every USB WCB's free heap (lowest since boot) -> the readings. ESP-NOW's driver buffers come from it, and an
+    AP-mode board has about 17 KB (W1) or 13 KB (W2, with WLED) free: the readings around a load show whether one
+    ran out (full run 20261006-122850, W2's wedged transmit)."""
+    h = _heaps(bench)
+    bench.note(f"{test_id}: free heap {label}: " + ", ".join(f"W{n} {f} (min {m})" for n, (f, m) in h.items()))
+    return h
+
+
+def _tx_after_load(bench, w, since, problems, facts):
+    """After a ?ETM,CHAR's load: once every other USB WCB's generator has ended (its LOAD_DONE line since its mark in
+    `since`), each must transmit again - its ';W1,;S0,<marker>' reaches W1's console - and give no frame up
+    (NOT_SENT) over TX_WATCH_S after TX_SETTLE_S. In full run 20261006-122850 W2's transmit wedged during
+    etm.char_per_board_clamp's load: every frame was given up, heartbeats included, for 2 min until a reboot, and W1
+    and W3 called W2 offline. Problems are added; facts get each board's last report."""
+    peers = {n: WCB(bench.dev(dev)) for n, dev in bench.usb_wcbs().items() if n != bench.usb_wcb_number()}
+    deadline = time.monotonic() + 20.0
+    for n, wn in peers.items():
+        while not any(x.startswith(LOAD_DONE) for x in wn.dev.since(since[n])) and time.monotonic() < deadline:
+            time.sleep(0.5)
+    time.sleep(TX_SETTLE_S)
+    after = {n: wn.dev.mark() for n, wn in peers.items()}
+    for n, wn in peers.items():
+        tag = marker("TX")
+        m1 = w.dev.mark()
+        wn.dev.send(f";W1,;S0,{tag}")
+        try:
+            w.dev.expect(rf"{tag}$", timeout=6, since=m1)
+        except AssertionError:
+            problems.append(f"W{n} could not reach W1 after the load (';W1,;S0,<marker>' never arrived)")
+    time.sleep(TX_WATCH_S)
+    for n, wn in peers.items():
+        given_up = [x.rstrip() for x in wn.dev.since(after[n]) if NOT_SENT.match(x)]
+        facts[f"W{n}_given_up_after_load"] = len(given_up)
+        if given_up:
+            problems.append(f"W{n} still gave frames up {TX_SETTLE_S:.0f}-{TX_SETTLE_S + TX_WATCH_S:.0f} s after its "
+                            f"load ended ({len(given_up)} report(s), the last {given_up[-1]!r}): its ESP-NOW transmit "
+                            f"is wedged")
+
+
 def _peers_online(bench, w, wait=25.0, strict=True):
     """Wait until W1's ETM table shows every other bench WCB online -> the seconds it took. A WCB that has just booted
     treats every peer as offline until that peer's next packet, a whole heartbeat away at worst (HB 10 +/- 1 s): nothing
@@ -411,6 +470,7 @@ def seq_wrap(bench):
                 w.run(f"?BCAST,OUT,{p},OFF")
             w2.reboot()                                    # W2's duplicate ring for W1 starts empty
             _peers_online(bench, w)
+            facts["heap_before"] = _heap_note(bench, "etm.seq_wrap", "before the flood")
             c0 = _seq_now(w)
             t0 = time.monotonic()
             bulk = SEQ_TOP - c0 - WRAP_MARGIN
@@ -468,6 +528,10 @@ def seq_wrap(bench):
                 w.run(f"?BCAST,OUT,{p},ON")
             time.sleep(12.0)                               # a heartbeat period: every board hears W1 again
             _peers_online(bench, w, strict=False)
+            try:
+                _heap_note(bench, "etm.seq_wrap", "after the flood")
+            except AssertionError as e:
+                bench.note(f"etm.seq_wrap: the heap after the flood could not be read: {e}")
     bench.note(f"etm.seq_wrap: {facts}")
     assert not bad, "; ".join(bad)
 
@@ -647,7 +711,7 @@ CLAMP = re.compile(r"^\[ETM CHAR\] (\d+) online peers x (\d+) messages exceeds t
                    r"(\d+) per board instead\.")
 
 
-@test("etm.char_per_board_clamp", "?ETM,COUNT,200 with two or more online peers is clamped per board so a phase never passes its 200-message row: one '[ETM CHAR] N online peers x 200 messages exceeds the 200-message phase cap - sampling M per board' notice, and every phase still completes (~1 min, probe2 joins as a temporary client)", needs=["wcb1", "wcb2", "probe2"])
+@test("etm.char_per_board_clamp", "?ETM,COUNT,200 with two or more online peers is clamped per board so a phase never passes its 200-message row: one '[ETM CHAR] N online peers x 200 messages exceeds the 200-message phase cap - sampling M per board' notice, and every phase still completes; once the load is over every WCB transmits again - its unicast reaches W1 and it gives no frame up for a heartbeat period (~1.5 min, probe2 joins as a temporary client)", needs=["wcb1", "wcb2", "probe2"])
 def char_per_board_clamp(bench):
     """WCB-WP24 row 3 (wcb.etm.char_per_board_clamp). processETMChar (WCB.ino) clamps messages per board to
     ETM_CHAR_MAX_MSGS / peerCount, the row length of etmCharPhaseSentTimes[3][200]; unclamped, phases 1-2 clobbered each
@@ -657,17 +721,23 @@ def char_per_board_clamp(bench):
     was not."""
     w = usb_wcb(bench)
     require_tokens(bench, 1, "?ETM,ON")
+    tx_problems, tx_facts = [], {}
     with config_guard(bench, 1) as before:
         count = token(before[1], "?ETM,COUNT,")
         with probe_in_mesh(bench, "probe2", 15):
             _peers_online(bench, w)
+            _heap_note(bench, "etm.char_per_board_clamp", "before the load")
             try:
                 w.run("?ETM,COUNT,200")
+                since = {n: WCB(bench.dev(dev)).dev.mark() for n, dev in bench.usb_wcbs().items()
+                         if n != bench.usb_wcb_number()}
                 m = w.send("?ETM,CHAR")
                 rec = w.dev.expect(r"Recommended ETM timeout: (\d+)ms|\[ETM\] Characterization aborted: (.*)",
                                    timeout=240, since=m)
                 time.sleep(1.0)
                 lines = [x.rstrip() for x in w.dev.since(m)]
+                _tx_after_load(bench, w, since, tx_problems, tx_facts)
+                _heap_note(bench, "etm.char_per_board_clamp", "after the load")
             finally:
                 w.run(count or "?ETM,COUNT,20")
     notices = [c for c in map(CLAMP.match, lines) if c]
@@ -680,6 +750,8 @@ def char_per_board_clamp(bench):
     peers, per = int(notices[0].group(1)), int(notices[0].group(3))
     assert peers >= 2 and per == 200 // peers, f"the notice says {peers} peers sampled at {per} each"
     assert phases == {1, 2, 3}, f"the results block names phases {sorted(phases)}, not all three"
+    bench.note(f"etm.char_per_board_clamp: after the load {tx_facts}")
+    assert not tx_problems, "; ".join(tx_problems)
 
 
 # ============================================================ F18: the WiFi task's came-ONLINE line, queued for loop()

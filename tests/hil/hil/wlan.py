@@ -426,6 +426,11 @@ _spare_seen = None        # the spare adapter last found off Windows, waited for
 # ... and remembered for the next run on this computer (untracked, beside ports.json): a run whose first WiFi test
 # came right after a NaviCore restart found no lease, knew no adapter, and skipped every test (run 20261006-172611).
 SPARE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "wifi_spare.json")
+# When a wait for the spare adapter ran out: it rejoins on its own schedule (the Mac bench's TP-Link: 5-25 s after a
+# NaviCore restart, or many minutes; its menu-bar utility does the joining and cycling its network service does not
+# bring it back, 2026-10-06), so later tests skip at once until it holds an address again, instead of waiting
+# PREJOIN_WAIT_S each.
+_spare_lost_at = None
 
 
 def _remember_spare(name):
@@ -516,8 +521,13 @@ def _prejoined(bench, whose, reach, identify, wait_s=None):
         raise Skip(f"{NOT_WINDOWS_SKIP}; off Windows a spare adapter already on an access point is used only where the "
                    f"test proves whose it is, and {whose} cannot be told from another board's here (every one is "
                    f"192.168.4.1)")
+    global _spare_lost_at
     host, port = reach or AP_REACH
     t0 = time.monotonic()
+    if _spare_lost_at is not None and not spare_leases():
+        raise Skip(f"the spare adapter {remembered_spare() or ''} has been off {whose} access point since "
+                   f"{time.strftime('%H:%M:%S', time.localtime(_spare_lost_at))}, after a {wait_s:.0f} s wait this run "
+                   f"(it rejoins by itself, or through its own WiFi utility): not waited for again")
     while True:
         leases, state = spare_leases(), {}
         for name, addr in leases:
@@ -529,6 +539,7 @@ def _prejoined(bench, whose, reach, identify, wait_s=None):
                 raise AssertionError(f"{name}, the spare adapter holding {addr}, did not prove to be on {whose} access "
                                      f"point: {other}")
             _remember_spare(name)
+            _spare_lost_at = None
             bench.note(f"adapter {name}: off Windows the harness joins nothing, and this spare adapter is already on "
                        f"{whose} access point ({addr}, proved {time.monotonic() - t0:.1f} s after asking); it stays "
                        f"there")
@@ -539,6 +550,7 @@ def _prejoined(bench, whose, reach, identify, wait_s=None):
                 raise Skip(PREJOIN_SKIP)
             state[known] = "holds no 192.168.4.x address"
         if time.monotonic() - t0 >= wait_s:
+            _spare_lost_at = time.time()
             raise AssertionError(f"no spare adapter was back on {whose} access point within {wait_s:.0f} s, and off "
                                  f"Windows the harness re-associates nothing: "
                                  + "; ".join(f"{n} {s}" for n, s in state.items()))
@@ -549,16 +561,19 @@ def _back_on_its_own(name, whose, reach, wait_s=None):
     """rejoin off Windows: adapter `name` holding a 192.168.4.x address again - and, given `reach`, carrying a connect
     there - by itself within `wait_s` (None: PREJOIN_WAIT_S) -> what it took, for a note; AssertionError otherwise. The
     harness re-associates nothing here (_prejoined)."""
+    global _spare_lost_at
     wait_s = PREJOIN_WAIT_S if wait_s is None else wait_s
     t0 = time.monotonic()
     target = f"{reach[0]}:{reach[1]}" if reach is not None else ""
     while True:
         addr = next((a for a in ipv4(name) if a.startswith("192.168.4.")), None)
         if addr and (reach is None or reach_wait(*reach, timeout=0) is not None):
+            _spare_lost_at = None
             return (f"{name} came back by itself (off Windows the harness re-associates nothing): it held {addr}"
                     + (f" and {target} took a connect" if reach is not None else "")
                     + f" {time.monotonic() - t0:.1f} s after asking")
         if time.monotonic() - t0 >= wait_s:
+            _spare_lost_at = time.time()
             raise AssertionError(f"{name} was not back on {whose} access point by itself within {wait_s:.0f} s (off "
                                  f"Windows the harness re-associates nothing): it "
                                  + (f"holds {addr}, but {target} took no connect" if addr
