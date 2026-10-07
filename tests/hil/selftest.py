@@ -6351,8 +6351,8 @@ class NaviModel:
     against (NaviCore.ino processInputLine :3773-4257, execCliLine :3359-3693, applySerialBauds/applySbusOut/
     applyConfigSideEffects :3229-3345; rc_config.h rcConfigLoadDefaults :801-968, actionToJson/actionFromJson
     :970-1155, rcConfigToJSON :1211-1482, rcConfigFromJSON :1502-1905). It keeps RAM and flash apart (SET_CONFIG saves,
-    RESET_DEFAULTS does not, REBOOT reloads the flash copy) and a boot-time copy of the mesh identity, so the RTERM
-    split (D-NC17) shows. W1's console (w1_script) relays ;W20 JSON and CLI lines and lists NaviCore's advertised port
+    RESET_DEFAULTS does not, REBOOT reloads the flash copy) and a boot-time copy of the mesh identity, which the RTERM
+    reply uses as NaviCore 0169cb9 does (D-NC17; rterm_live_pw = True is the old live read, the split). W1's console (w1_script) relays ;W20 JSON and CLI lines and lists NaviCore's advertised port
     labels in its ?WDP,DUMP. What it does not model it answers with silence, and a forbidden command (#L2, #L20, #L21,
     ?FORGET,ALL, ?REC,START...) fails the selftest outright. Two fixes of the 2026-10-04 campaign are ported, because
     normal tests now assert them: RESET_DEFAULTS keeps the network identity (D-NC16, rcConfigResetKeepIdentity) and
@@ -6418,6 +6418,7 @@ class NaviModel:
         self.channels[6], self.channels[11] = 992, 172
         self.boot()
         self.nav = self.w1 = None
+        self.rterm_live_pw = False     # True: the RTERM reply reads the live password, as before 0169cb9 (D-NC17)
         self.received = []
         self.seq_busy = False
 
@@ -7197,7 +7198,7 @@ class NaviModel:
             lines = self.cli(body)
             for x in lines:
                 self.nav._append(x)
-            if self.c["wcbNetwork"]["password"] == self.ident["pw"]:
+            if not self.rterm_live_pw or self.c["wcbNetwork"]["password"] == self.ident["pw"]:
                 return [f"[TERM:20]{x}" for x in lines if x]
             return []
         return []
@@ -7205,10 +7206,9 @@ class NaviModel:
 
 INFO_LINE = '{"type":"INFO","msg":"boardType changed — reboot to apply the new pin profile"}'
 NCCFG_SHOULD = {"nccfg.string_truncation_utf8", "nccfg.hold_exceeds_tap_window", "nccfg.dest_null_hazard"}
-# reset_defaults_keeps_identity passes: NaviModel ports D-NC16. mesh_creds_live_split skips for the same reason - the
-# reset keeps the saved password, so no split is left to show (D-NC17's fix stands on the code; showing it would need a
-# throwaway mesh password, which the bench never sets).
-NCCFG_SKIP = {"nccfg.mesh_creds_live_split"}
+# reset_defaults_keeps_identity passes: NaviModel ports D-NC16. mesh_creds_live_split passes too: it sets a throwaway
+# mesh password over USB (Greg's OK, 2026-10-07) and the model's RTERM reply uses the boot copy, as 0169cb9 (D-NC17).
+NCCFG_SKIP = set()
 
 
 def t_nccfg_suite_against_model(tmp):
@@ -7216,9 +7216,8 @@ def t_nccfg_suite_against_model(tmp):
     NaviCore firmware the suite was written against - and a W1 console that relays to it: each normal test passes, each
     (should) test fails on today's behaviour, the hook tests skip (no hook build), the model ends every test with the
     config it started with (the guard restores it), and session.log carries no credential. Then
-    nccfg.mesh_creds_live_split, the RESET_DEFAULTS test restored without a restart, alone against two models whose SBUS
-    input the defaults would act on: CH7 inside a default band, and a mode switch other than SE on CH12. It skips
-    without sending RESET_DEFAULTS."""
+    nccfg.mesh_creds_live_split alone against a model whose RTERM reply reads the live password (before NaviCore
+    0169cb9): it fails on the missing [TERM:20], and the guard still puts the bench's password back."""
     saved = list(runner.REGISTRY)
     try:
         # t_nc_guard_bench_test imported the suite already, and an earlier case left its own entries here: a
@@ -7260,25 +7259,24 @@ def t_nccfg_suite_against_model(tmp):
     assert not any(s in log for s in SECRETS), "a credential reached session.log"
     b.close()
     split = next(t for t in tests if t["id"] == "nccfg.mesh_creds_live_split")
-    for want, prep in (("CH7 reads 1811", lambda m: m.channels.__setitem__(6, 1811)),
-                       ("move the mode off 2", lambda m: (m.c.update(modeSwitch=0), setattr(m, "mode", 2)))):
-        m2 = NaviModel()
-        prep(m2)
-        b2 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
-                        "navicore": {"port": "COMNAV", "kind": "navicore"}})
-        nav2, w12 = FakeNaviDev(m2.script, "navicore"), FakeNaviDev(m2.w1_script, "wcb1")
-        m2.nav, m2.w1 = nav2, w12
-        nav2.log = w12.log = b2.log
-        b2.dev = lambda name, d={"navicore": nav2, "wcb1": w12}: d[name]
-        saved_g = _fast_guard()
-        try:
-            ck2 = new_run(b2, [split])
-        finally:
-            _slow_guard(saved_g)
-        r = ck2.data["results"][0]
-        assert r["status"] == "SKIP" and want in r["detail"], (want, r["status"], r["detail"][:200])
-        assert not any('"RESET_DEFAULTS"' in x for x in nav2.sent), "RESET_DEFAULTS sent despite the SBUS check"
-        b2.close()
+    m2 = NaviModel()
+    m2.rterm_live_pw = True
+    orig2 = m2.flash
+    b2 = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1},
+                    "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    nav2, w12 = FakeNaviDev(m2.script, "navicore"), FakeNaviDev(m2.w1_script, "wcb1")
+    m2.nav, m2.w1 = nav2, w12
+    nav2.log = w12.log = b2.log
+    b2.dev = lambda name, d={"navicore": nav2, "wcb1": w12}: d[name]
+    saved_g = _fast_guard()
+    try:
+        ck2 = new_run(b2, [split])
+    finally:
+        _slow_guard(saved_g)
+    r = ck2.data["results"][0]
+    assert r["status"] == "FAIL" and "never reached W1" in r["detail"], (r["status"], r["detail"][:200])
+    assert m2.flash == orig2 and m2.c["wcbNetwork"]["password"] == m2.ident["pw"], "the guard did not put the password back"
+    b2.close()
     # nccfg.long_reply_host_stall (passed above) fails when a held read loses a long reply's middle (D-NC75's mutation)
     stall = next(t for t in tests if t["id"] == "nccfg.long_reply_host_stall")
     m3 = NaviModel()

@@ -47,7 +47,7 @@ WCB_ONLINE = re.compile(r"^\[WCB\] WCB(\d+)(?: · .*)? ONLINE\s*$")             
 REMOTE_REBOOT = "[RC] Remote REBOOT requested via WCB"                                            # rc_telemetry.h:2406
 REBOOT_ACK = {"type": "ACK", "ok": True, "msg": "rebooting"}                                       # NaviCore.ino:4032
 INFO_BOARD = '{"type":"INFO","msg":"boardType changed — reboot to apply the new pin profile"}'     # :3964
-PEER_GRACE_S = 8.0                     # PEER_GRACE_MS (:110): new-peer events are silent this long after join
+PEER_GRACE_S = 12.0                    # PEER_GRACE_MS (:114): new-peer events are silent this long after join
 ROLL_CALL_S = 30.0                     # ROLL_CALL_MS (:137): the roll call runs this long after join
 ADVERT_WAIT_S = 8.0                    # after W1's ?WDP,POLL: every WCB advertises within 600 ms (WCB_WDP.cpp:366-372)
 SW_RESET_CODE = 3                      # ESP_RST_SW: 'Software restart (incl. boot-guard retry)' (:4393)
@@ -496,8 +496,8 @@ def wcbs_see_reboot(bench):
       "(NaviCore restarts)", needs=["navicore", "wcb1"],
       opt_in="navicore_reboot")
 def new_peer_after_boot(bench):
-    """NAVICORE.md D-NC25. drainPeerEvents (NaviCore.ino:5708) records a board silently when its first advert of the
-    session lands inside PEER_GRACE_MS (8 s, :110) of the join, or when it is ETM-online the moment the grace ends; a
+    """NAVICORE.md D-NC25. drainPeerEvents (NaviCore.ino:5712) records a board silently when its first advert of the
+    session lands inside PEER_GRACE_MS (12 s, :114) of the join, or when it is ETM-online the moment the grace ends; a
     WCB advertises every 60 s, so without the second rule every present WCB's next advert fired the alert and the
     configured peer actions - a sound or a servo on a user's droid, for a board that never left. Here the actions are
     one guarded wcb_unicast of ';S2<marker>' to W1, which lands on the W1S2 probe; the grace is waited out and W1's
@@ -538,7 +538,7 @@ def new_peer_after_boot(bench):
            f"9-11 s" if late else "")
     assert not fired and not markers, (
         f"(should, D-NC25) NaviCore fired its new-peer alert for WCB {fired}, which never left (PEER_GRACE_MS, "
-        f"NaviCore.ino:110), and its configured action ran {markers} time(s){gap}: a restart re-fires a user's peer "
+        f"NaviCore.ino:114), and its configured action ran {markers} time(s){gap}: a restart re-fires a user's peer "
         f"actions for boards that never left")
 
 

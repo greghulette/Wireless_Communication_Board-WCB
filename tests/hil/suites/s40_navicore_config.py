@@ -34,6 +34,7 @@ import copy
 import json
 import os
 import re
+import secrets
 import time
 
 from hil import optin
@@ -1613,20 +1614,18 @@ def _defaults_live_effects(nc, cfg):
 
 @test("nccfg.mesh_creds_live_split", "(should) While NaviCore's mesh password in RAM differs from the one it booted "
       "with, the remote terminal keeps answering: ;W20,?version gets its [TERM:20] lines back as the ETM path still "
-      "delivers the command", needs=["navicore", "wcb1"], links=[])
+      "delivers the command (a throwaway mesh password, saved over USB and put back by the guard)",
+      needs=["navicore", "wcb1"], links=[])
 def mesh_creds_live_split(bench):
-    """NAVICORE.md D-NC17. WCB_Client copies the mesh password at boot and the ETM stack keeps that copy, but the RTERM
-    reply (navicore_rterm.h:67-70), OTA auth and ACKs (navicore_ota.h:328, :336, :471, :508, :521) and WcbMgmt
-    (NaviCore.ino:4849, a pointer) read rcConfig.wcbNetwork.password live. When the two differ, a relayed ;W20,?version
-    still runs on NaviCore - its output appears on NaviCore's own USB, the capture tee - but the [TERM:20] reply carries
-    the other password and W1 drops it. The plan makes the difference with a throwaway password saved over USB; this
-    bench's rule is that no test changes a board's mesh password, so the test uses RESET_DEFAULTS instead, which loads
-    the compile-time password into RAM and saves nothing (NaviCore.ino:3989-3992, rc_config.h:957): the flash never
-    holds another password, and a crash in the window would boot the saved one. The guard's diff path puts the saved
-    config back (no reboot), and the relay must answer again after it. Skips when the compile-time password is the
-    bench's (then there is no split, and after D-NC16's fix RESET_DEFAULTS keeps the identity), and when the defaults
-    would read a held button or another mode from the live SBUS input (_defaults_live_effects): no restart clears that
-    here."""
+    """NAVICORE.md D-NC17. WCB_Client copies the mesh password at boot and the ETM stack keeps that copy; the RTERM
+    reply, OTA auth and ACKs and WcbMgmt read rcConfig.wcbNetwork.password live, so after an unrebooted password change
+    a relayed ;W20,?version still ran on NaviCore - its output appears on NaviCore's own USB, the capture tee - but the
+    [TERM:20] reply carried the other password and W1 dropped it. NaviCore 0169cb9 gives those paths the boot copy
+    (g_meshPasswordBoot). The split is made the way a user makes it: a throwaway password saved over USB, with no reboot
+    (Greg's OK, 2026-10-07: this bench's rule was that no test changes a board's mesh password). nc_guard puts the
+    saved config back with the bench's password (step 2 of its restore, no reboot), and it wrote the snapshot to the
+    run folder first, so an aborted run is restored by the resume. The password is never printed (runner REDACT_KINDS).
+    RESET_DEFAULTS made the split before D-NC16's fix, which keeps the network identity through a reset."""
     w1 = WCB(bench.dev("wcb1"))
     nc = _nc(bench)
     nid = nc.wcb_status()["self"]
@@ -1644,20 +1643,16 @@ def mesh_creds_live_split(bench):
 
     term0, _ = relayed()
     if not term0:
-        raise Skip(f";W{nid},?version gets no [TERM:{nid}] even before the reset: the remote terminal is down")
-    effects = _defaults_live_effects(nc, nc.config())
-    if effects:
-        raise Skip("RESET_DEFAULTS would act on the live SBUS input before the guard restores the config: "
-                   + "; ".join(effects))
+        raise Skip(f";W{nid},?version gets no [TERM:{nid}] even before the change: the remote terminal is down")
     with nc_guard(bench) as g:
-        g.nc.reset_defaults()
-        if g.nc.config()["wcbNetwork"]["password"] == g.before["wcbNetwork"]["password"]:
-            raise Skip("RESET_DEFAULTS left the mesh password as it was: no split to observe (the compile-time "
-                       "default is the bench's, or D-NC16 keeps the identity now)")
+        throwaway = "HILmc" + secrets.token_hex(5)
+        g.nc.set_config({"wcbNetwork": {"password": throwaway}})
+        if g.nc.config()["wcbNetwork"]["password"] != throwaway:
+            raise AssertionError("NaviCore did not take the throwaway mesh password over USB")
         term, ran = relayed()
     term1, _ = relayed()
-    bench.note(f"with the reset password in RAM: ;W{nid},?version ran on NaviCore {ran}, [TERM:{nid}] on W1 {term}; "
-               f"after the restore [TERM:{nid}] {term1}")
+    bench.note(f"with a throwaway mesh password in RAM and saved: ;W{nid},?version ran on NaviCore {ran}, "
+               f"[TERM:{nid}] on W1 {term}; after the guard put the bench's back, [TERM:{nid}] {term1}")
     assert term1, f"after the guard restored the config, ;W{nid},?version still gets no [TERM:{nid}] on W1"
     assert ran, "NaviCore never ran the relayed ?version: the ETM path was down too, so no split was shown"
     assert term, (f"the relayed ?version ran on NaviCore but its [TERM:{nid}] reply never reached W1: the RTERM reply "
@@ -1745,7 +1740,7 @@ def reset_defaults_ram(bench):
     outputs: nothing moves) with its own network identity. The
     REBOOT is the restore: nothing is written, and the guard then finds the config as it was. A button or mode the
     defaults decode from the live SBUS input meanwhile dies with the restart (tap and mode state are RAM), which is
-    why these tests, unlike nccfg.mesh_creds_live_split, need no _defaults_live_effects check."""
+    why these tests, unlike ncmesh's bridged reset (s43), need no _defaults_live_effects check."""
     problems = []
     with nc_guard(bench) as g:
         nc = g.nc
