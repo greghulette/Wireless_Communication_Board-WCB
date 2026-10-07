@@ -140,7 +140,14 @@ static bool sinkPump() {
   f.len     = send;
   for (int i = 0; i < WS_MAX_CLIENTS; i++) {
     if (wsFds[i] < 0) continue;
-    if (httpd_ws_send_frame_async(wsServer, wsFds[i], &f) != ESP_OK) wsFds[i] = -1;
+    if (httpd_ws_send_frame_async(wsServer, wsFds[i], &f) != ESP_OK) {
+      // Close the session, not just leave the tee: a session left open holds its unsent output in lwIP (up to a
+      // whole TCP send buffer, ~5.7 KB) for as long as TCP retries a peer that has gone, and two or three such
+      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113, run
+      // 20261007-140804: 4.8 KB free, largest block 980 B, nothing connected). wsClose resets it.
+      httpd_sess_trigger_close(wsServer, wsFds[i]);
+      wsFds[i] = -1;
+    }
   }
 
   // Re-read sinkLen: a writer may have appended while the send was in flight.
@@ -305,10 +312,49 @@ static esp_err_t wsHandler(httpd_req_t *req) {
 // Session close: release the accumulator and the sink slot. Without this a
 // departed client holds both until some later send happens to fail on it, and
 // the unowned tail of a half-accumulated line eats the next client's first command.
+//
+// Closed with a reset (SO_LINGER 0), not a FIN: a graceful close keeps the socket's unsent data queued while TCP
+// retries a peer that may be gone - a phone out of range, a PC moved to another network - and that is the heap the
+// next client needs (#113). A client that is still there sees its connection reset, which it treats as closed.
 static void wsClose(httpd_handle_t /*hd*/, int sockfd) {
   accRelease(sockfd);
   sinkDrop(sockfd);
+  struct linger lg = { 1, 0 };
+  setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
   close(sockfd);
+}
+
+// ---- A client whose station left the access point -----------------------
+// The AP sees a station leave (WIFI_EVENT_AP_STADISCONNECTED) long before TCP gives up on its sockets. When the
+// last station has gone, every session from the AP's own subnet is dead: close them at once rather than wait for a
+// send to fail on each (each failed send also stalls loop() for the send timeout). With stations still there a
+// dead session closes at its first failed send instead (sinkPump). The flag is set on the Arduino event task and
+// read on loop().
+static volatile bool apStationLeft = false;
+
+static void onApStationLeft(arduino_event_id_t, arduino_event_info_t) { apStationLeft = true; }
+
+static void closeSessionsOfLeftStations() {
+  if (!apStationLeft) return;
+  apStationLeft = false;
+  if (!wsServer || WiFi.getMode() == WIFI_STA || WiFi.softAPgetStationNum() > 0) return;
+  IPAddress ap = WiFi.softAPIP();
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+    if (wsFds[i] < 0) continue;
+    struct sockaddr_in6 peer = {};
+    socklen_t len = sizeof(peer);
+    if (getpeername(wsFds[i], (struct sockaddr *)&peer, &len) != 0) continue;
+    uint32_t v4;
+    if (peer.sin6_family == AF_INET) v4 = ((struct sockaddr_in *)&peer)->sin_addr.s_addr;
+    else if (peer.sin6_family == AF_INET6 && peer.sin6_addr.un.u32_addr[0] == 0 && peer.sin6_addr.un.u32_addr[1] == 0 &&
+             peer.sin6_addr.un.u32_addr[2] == PP_HTONL(0x0000FFFFUL)) v4 = peer.sin6_addr.un.u32_addr[3];   // v4-mapped
+    else continue;
+    IPAddress ip(v4);
+    if (ip[0] == ap[0] && ip[1] == ap[1] && ip[2] == ap[2]) {   // the AP's /24: a client that came through it
+      httpd_sess_trigger_close(wsServer, wsFds[i]);
+      wsFds[i] = -1;
+    }
+  }
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -326,6 +372,9 @@ bool wcbWsBegin() {
   cfg.max_open_sockets = WS_MAX_CLIENTS;
   cfg.close_fn         = wsClose;
   cfg.lru_purge_enable = true;
+  // A send to a client that has gone blocks loop() until it times out (sinkPump runs on loop): 5 s by default, seen
+  // as five-second stalls of W1's console with one dead client (#113). Two is plenty for a live one on this link.
+  cfg.send_wait_timeout = 2;
   // The default 4096 is not enough once our handler's frame work is on it.
   cfg.stack_size       = 6144;
   if (httpd_start(&wsServer, &cfg) != ESP_OK) {
@@ -367,7 +416,9 @@ void wcbWsService() {
     if (startTried || !wcbWifiReady()) return;
     startTried = true;
     if (!wcbWsBegin()) return;
+    WiFi.onEvent(onApStationLeft, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
   }
+  closeSessionsOfLeftStations();
 
   // Run at most ONE queued command per pass. processSerialCommandHelper() can
   // block on ETM retries, and a burst back-to-back would stall the rest of loop().
