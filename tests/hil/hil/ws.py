@@ -7,6 +7,7 @@ import base64
 import hashlib
 import os
 import socket
+import sys
 import struct
 import threading
 import time
@@ -169,9 +170,21 @@ class WsEndpoint:
         self._lock = threading.Lock()
         self._silent = threading.Event()
         self._stopped = threading.Event()
+        self.wildcard = False                   # listening on every address, serving only `host` (below)
         self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            self._lsock.bind((host, port))      # OSError when the address is taken or cannot be used here
+            try:
+                self._lsock.bind((host, port))  # OSError when the address is taken or cannot be used here
+            except PermissionError:
+                # macOS (10.14 on) lets an unprivileged process take a port below 1024 only on the wildcard address:
+                # 127.0.0.2:80 itself is EACCES there. So listen on all of them, and _accept() closes, unserved, every
+                # connection not addressed to `host`: nothing on the Mac's other addresses reaches the stand-in.
+                if sys.platform != "darwin" or not 0 < port < 1024:
+                    raise
+                self._lsock.close()
+                self._lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._lsock.bind(("0.0.0.0", port))
+                self.wildcard = True
             self._lsock.listen(4)
             self.port = self._lsock.getsockname()[1]     # the one bound, for port 0
         except OSError:
@@ -185,6 +198,14 @@ class WsEndpoint:
                 conn, _ = self._lsock.accept()
             except OSError:
                 return                          # the listener closed: go_silent() or close()
+            if self.wildcard:
+                try:
+                    local = conn.getsockname()[0]
+                except OSError:
+                    local = ""
+                if local != self.host:          # another of the Mac's addresses: not the stand-in's
+                    conn.close()
+                    continue
             with self._lock:
                 self._conns.append(conn)
                 self.accepted += 1

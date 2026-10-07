@@ -12451,6 +12451,88 @@ def t_intellex_wifi_flash_helpers(tmp):
         sys.path.pop(0)
 
 
+def t_ws_endpoint_wildcard(tmp):
+    """hil/ws.py WsEndpoint on a macOS port below 1024: binding 127.0.0.2:80 itself is EACCES for a user, so it listens on
+    every address and serves only connections addressed to 127.0.0.2. A fake socket refuses the specific bind: the
+    wildcard one listens, a connection to another address is closed unserved and not counted, one to 127.0.0.2 is
+    accepted; off macOS, and for a port of 1024 or more, the refusal is raised as before."""
+    import socket as _socket
+    from hil import ws as W
+    real = _socket.socket
+    made = []
+
+    class Conn:
+        def __init__(self, local):
+            self.local, self.closed = local, False
+        def getsockname(self):
+            return (self.local, 80)
+        def close(self):
+            self.closed = True
+        def settimeout(self, t):
+            pass
+        def recv(self, n):
+            return b""
+
+    class Sock:
+        def __init__(self, *a):
+            self.bound, self.queue = None, []
+            made.append(self)
+        def bind(self, addr):
+            if addr[0] != "0.0.0.0":
+                raise PermissionError(13, "Permission denied")
+            self.bound = addr
+        def listen(self, n):
+            pass
+        def getsockname(self):
+            return self.bound
+        def accept(self):
+            if not self.queue:
+                time.sleep(0.05)
+                raise OSError("closed")
+            return self.queue.pop(0), ("x", 1)
+        def close(self):
+            pass
+
+    plat = W.sys.platform
+    try:
+        W.socket.socket = Sock
+        W.sys.platform = "darwin"
+        ep = W.WsEndpoint.__new__(W.WsEndpoint)
+        other, mine = Conn("127.0.0.1"), Conn("127.0.0.2")
+        orig_thread = W.threading.Thread
+
+        class NoThread:
+            def __init__(self, target=None, args=(), **kw):
+                self.target, self.args = target, args
+            def start(self):
+                pass
+        W.threading.Thread = NoThread
+        try:
+            W.WsEndpoint.__init__(ep, "127.0.0.2", 80)
+        finally:
+            W.threading.Thread = orig_thread
+        assert ep.wildcard and made[-1].bound == ("0.0.0.0", 80), (ep.wildcard, made[-1].bound)
+        made[-1].queue = [other, mine]
+        served = []
+        ep._serve = lambda c: served.append(c)
+        W.threading.Thread = lambda target=None, args=(), **kw: type("T", (), {"start": lambda self: target(*args)})()
+        try:
+            ep._accept()
+        finally:
+            W.threading.Thread = orig_thread
+        assert other.closed and not mine.closed and served == [mine] and ep.accepted == 1, (other.closed, served)
+        for plat_, port in (("win32", 80), ("darwin", 8080)):
+            W.sys.platform = plat_
+            try:
+                W.WsEndpoint("127.0.0.2", port)
+                raise AssertionError(f"{plat_}:{port} fell back to the wildcard")
+            except PermissionError:
+                pass
+    finally:
+        W.socket.socket = real
+        W.sys.platform = plat
+
+
 def t_ws_endpoint_drop_stall(tmp):
     """INTELLEX.md finding 19's board-free test (suites/s32_intellex.py intellex.link_drop_no_stall): hil/ws.py
     accept_key against RFC 6455's own example, server_frame read back by parse; WsEndpoint upgrades a WsClient, answers a
@@ -13216,6 +13298,7 @@ TESTS += [t_ncwire_links, t_ncwire_helpers, t_ncwire_discover, t_ncwire_suite_ag
           t_ncwire_mutations]                                                                         # (s51)
 TESTS += [t_bridge_hooks, t_intellex_wifi_flash_helpers]      # IX-WP9/10 (suites/s35, s36)
 TESTS += [t_ws_endpoint_drop_stall]      # INTELLEX.md finding 19 (suites/s32)
+TESTS += [t_ws_endpoint_wildcard]        # the macOS port-80 fallback of WsEndpoint
 
 
 def t_kyber_device_helpers(tmp):

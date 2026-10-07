@@ -757,7 +757,10 @@ with the recent lines attached), and skips by raising `Skip`.
   192.168.4.x address and carry the connect by itself.
 - **A far end that vanishes, with no board:** `hil/ws.py` `WsEndpoint` is a stand-in `/ws` endpoint on a loopback
   address (s32 uses 127.0.0.2:80) that answers pings and a PING line, and on `go_silent()` closes its listener and
-  falls silent on the open sockets, kept open: no FIN, no close frame, as a restarting access point.
+  falls silent on the open sockets, kept open: no FIN, no close frame, as a restarting access point. On a Mac
+  127.0.0.2 is an alias someone adds once per boot (`sudo ifconfig lo0 alias 127.0.0.2 up`), and macOS lets a user
+  take port 80 only on the wildcard address, so there the endpoint listens on all addresses and closes, unserved,
+  every connection not addressed to 127.0.0.2 (`WsEndpoint.wildcard`).
 - **Flashing through Intellex** (`suites/s36_intellex_flash.py`): W2 only, with the bench image it runs, read from
   `results/builds/wcb-esp32-meshq` (`hil/intellex.py` `builds_dir`: the main checkout's from a worktree) and seeded as
   `WCB_<version>_hilbench_ESP32*.bin` for branch `hil-bench`, the other product's branch `hil-none` (nothing cached).
