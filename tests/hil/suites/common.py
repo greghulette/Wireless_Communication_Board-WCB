@@ -337,9 +337,9 @@ def probe_in_mesh(bench, probe_name, device_id, forget=True, **overrides):
     expect its broadcast ACKs, until they evict it 50 s later (WCB.ino:508).
 
     Ids: never a WCB's, NaviCore's, or a persisted learned peer's — a temporary advert from a learned id downgrades it
-    and persists the removal (WCB_WDP.cpp:658-669). A WCB clears a sender's duplicate ring only on a boot announce,
-    which clients never send (WCB.ino:4219-4228), so a test that sends commands uses an id no other test has used
-    since that WCB's last boot."""
+    and persists the removal (WCB_WDP.cpp:658-669). A WCB clears a sender's duplicate ring only on its boot announce
+    (espNowReceiveCallback), three unacknowledged broadcasts, so a test that sends commands uses an id no other test
+    has used since that WCB's last boot."""
     from hil.runner import Skip
     if device_id in FORBIDDEN_MESH_IDS:
         raise AssertionError(f"mesh id {device_id} is reserved on this bench")

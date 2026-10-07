@@ -329,7 +329,11 @@ class App:
         # USB serial ports only. Every bench device is a USB board; a Bluetooth SPP port (no VID) blocks writes
         # indefinitely when nothing is paired, and on 2026-09-22 sbus ended up on COM19 that way and hung a run.
         ports = sorted(p.device for p in comports() if p.vid is not None)
-        self.add_port_cb.configure(values=ports)
+        # Wide enough for the longest name: "COM12" fits in 10, but a Mac's "/dev/cu.wchusbserial52D20606051" showed as
+        # "/dev/cu.wc" in the field and in its list, which Tk sizes to the field, so no two ports could be told apart.
+        names = ports + [d.get("port") or "" for d in self.bench.cfg["devices"].values()]
+        pw = max([10] + [len(x) + 2 for x in names])
+        self.add_port_cb.configure(values=ports, width=pw)
         for col, h in enumerate(("Device", "Kind", "COM port", "Status", "", "")):
             ttk.Label(self.dev_grid, text=h, font=BOLD).grid(row=0, column=col, sticky="w", padx=8, pady=4)
         self.dev_status = {}
@@ -343,7 +347,7 @@ class App:
                            command=lambda n=name: self.submit(f"remove {n}", self.job_remove_device, n)).grid(row=r, column=5, padx=4)
             ttk.Label(self.dev_grid, text=kind).grid(row=r, column=1, sticky="w", padx=8)
             var = tk.StringVar(value=d.get("port", ""))
-            cb = ttk.Combobox(self.dev_grid, textvariable=var, values=ports, width=10, state="readonly")
+            cb = ttk.Combobox(self.dev_grid, textvariable=var, values=ports, width=pw, state="readonly")
             cb.grid(row=r, column=2, sticky="w", padx=8)
             # A Tk combobox steps through its values on the mouse wheel and fires <<ComboboxSelected>>, which SAVES
             # the port - so scrolling the tab with the pointer over a row silently re-assigned a board. Wheel off.

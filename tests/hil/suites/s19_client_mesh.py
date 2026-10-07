@@ -6,7 +6,7 @@ Built from the verified client_mesh specs (plus the deferred mesh-mode ones). Ru
   (WCB.ino:4186-4201, 4254-4273); adoption only gates WCB -> client routing (;W<id>) and online tracking.
 - ACK != executed on both sides (WCB.ino:4269-4312, WCB_Client.cpp:2744-2807): bytes are asserted on the wire.
 - Each test that sends commands has its own probe id (MESH_IDS): a client restarts its seq numbers at every join,
-  and a WCB clears a sender's duplicate ring only on a boot announce, which clients never send.
+  and a WCB clears a sender's duplicate ring only on its boot announce, three unacknowledged broadcasts.
 - Broadcast byte tests use ;S4/;S5: NaviCore writes mesh ;s1-;s3 to its own aux ports (NaviCore.ino:3066-3076).
 - probe_in_mesh forgets the temporary peer on every WCB after leaving, so no 50 s stale-ACK window follows.
 """
@@ -449,6 +449,50 @@ def rejoin_seq_reuse(bench):
     bench.note(f"executions per command: {counts}")
     assert counts["A"] == [1, 1, 1], f"session A (control): {counts['A']}"
     assert counts["B"] == [1, 1, 1, 1], f"after re-joining, session B: {counts['B']}"
+
+
+@test("client_mesh.rejoin_unadopted", "(should) A client that re-joins under the same id before W1 has adopted it again "
+      "has its first commands executed: W1 forgets the client's old seqs at its boot announce, peer or not (W1's WDP "
+      "held off, so it never adopts the client; 2 W1 reboots)", needs=["wcb1", "probe2"])
+def rejoin_unadopted(bench):
+    """Tracker #11's residual race (run 20261007-090301), made certain. rejoin_seq_reuse passes when W1 re-adopts the
+    re-joined probe from its WDP advert before the probe's three boot announces end; once, it adopted it after them,
+    and the announces of a sender it did not count as a peer cleared nothing, so session B's seqs 2 and 3 matched
+    session A's and were ACKed and not run. With W1's WDP off it adopts no client at all, yet still ACKs (etmSendAck
+    registers the sender on demand) and runs the client's commands, and hears its announces: every session B command
+    must run once. The probe's id is rejoin's; W1 is rebooted before (a clean ring) and after (WDP back on, and the
+    on-demand ESP-NOW peer gone)."""
+    s12 = link(bench, 1, "S2")
+    w = usb_wcb(bench)
+    if token(bench.config_tokens(1, refresh=True), "?WDP,OFF"):
+        raise Skip("W1's WDP is already off: this test would turn it back on")
+    cid = MESH_IDS["rejoin"]
+    counts = {}
+    with config_guard(bench, 1):
+        w.reboot()
+        try:
+            if not _has(w.run("?WDP,OFF"), "[WDP] disabled"):
+                raise AssertionError("?WDP,OFF did not confirm on W1")
+            for session, n in (("A", 3), ("B", 4)):
+                ms = [marker(f"{session}{k}") for k in range(n)]
+                m, wm = s12.mark(), w.dev.mark()
+                with probe_in_mesh(bench, "probe2", cid) as probe:
+                    time.sleep(2)
+                    for x in ms:
+                        probe.mesh_send(1, f";S2{x}", ensured=True)
+                        time.sleep(0.6)
+                    time.sleep(2)
+                if any(f"[PEER] WCB{cid} registered" in x for x in w.dev.since(wm)):
+                    raise AssertionError(f"W1 adopted WCB{cid} with its WDP off: the test no longer holds the race")
+                got = s12.received(m)
+                counts[session] = [got.count(x.encode() + b"\r") for x in ms]
+        finally:
+            w.run("?WDP,ON")
+            w.reboot()
+    bench.note(f"executions per command, W1 never adopting the client: {counts}")
+    assert counts["A"] == [1, 1, 1], f"session A (control): {counts['A']}"
+    assert counts["B"] == [1, 1, 1, 1], (f"(should, tracker #11) after re-joining unadopted, session B: {counts['B']}: "
+                                         f"W1 kept the first session's seqs")
 
 
 @test("client_mesh.leave_stale_temp_peer", "The probe refuses a second join; leaving reboots it; the stale temporary peer fails a broadcast's ACK until W1 evicts it at 50 s (slow, ~75 s)", needs=["wcb1", "probe2"], links=[])
