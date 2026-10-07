@@ -59,14 +59,16 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 RESULTS = os.path.join(HERE, "results")
 BUILDS = os.path.join(RESULTS, "builds")
 KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board since 2026-09-22 (FLASHED.md)
-# Folder under BUILDS: the image the bench NaviCore runs (docs/HIL_WEEK_DECISIONS.md D77: NaviCore 0657025, the
+# Folder under BUILDS: the image the bench NaviCore runs (docs/HIL_WEEK_DECISIONS.md D77, D80: NaviCore main 520b096,
+# built as 6bd0ced before its rebase onto CI's auto-build, same source; the
 # aux-port fixes of 2026-10-06 on D76's tree - RMT soft TX, the device-write gate, the console off UART0, D-NC57,
-# D-NC59 - and D-NC75's paced long replies, with WCB_Client 1.17.2, App SHA256 88ddbd392b06899e, with the
-# NAVICORE_HIL_HOOKS hooks, built on the Mac; before it navicore-fix5 (c454c66, 46640d0be405faf7), D76's navicore-fix4
+# D-NC59 - D-NC75's paced long replies and D-NC77's boot-panic fix (the GPIO ISR service installed first in setup()),
+# with WCB_Client 1.17.2, App SHA256 b199a45cf155d8a5, with the NAVICORE_HIL_HOOKS hooks, built on the Mac; before it
+# navicore-fix6 (0657025, 88ddbd392b06899e), navicore-fix5 (c454c66, 46640d0be405faf7), D76's navicore-fix4
 # (57c83d3, 4dbe0b305ce57a22) and D45's navicore-hil1, 6925773). The tests that flash NaviCore flash only this image
 # and end on it, verified by its App SHA256 (suites/s47_navicore_ota.py); ncota.image_identity fails when the board
 # runs anything else. A new image changes this one line. KNOWN_GOOD above stays the rollback.
-BENCH_IMAGE = "navicore-fix6"
+BENCH_IMAGE = "navicore-fix7"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.

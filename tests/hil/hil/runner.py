@@ -623,6 +623,43 @@ def _wcb_stalls(bench, marks):
     return "; ".join(out)
 
 
+BOARD_PANIC = ("Guru Meditation Error", "abort() was called")    # an ESP32 panic on a board's console
+
+
+def _console_marks(bench):
+    """{device name: (SerialDevice, log mark)} for every WCB and NaviCore console open as a test starts; one that
+    cannot be marked is left out, as a scan never breaks the run."""
+    kinds = {n: (d or {}).get("kind") for n, d in (bench.cfg.get("devices") or {}).items()}
+    out = {}
+    for name, dev in list(getattr(bench, "devs", {}).items()):
+        if kinds.get(name) not in ("wcb", "navicore"):
+            continue
+        try:
+            out[name] = (dev, dev.mark())
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _console_panics(bench, marks):
+    """One line per WCB or NaviCore that panicked during the test, or "". No test expects one, and a board that
+    panicked restarted, so whatever the test concluded across that moment is not a result. NaviCore panicked on 8 of
+    45 boots in full runs 20261006-122850 and -235930 - in its IPC task while installing the GPIO ISR service - and
+    every test that saw it passed, because each looked only at its own lines; only ncboot.reboot_resets_ram_state,
+    which checks the reset reason, caught it."""
+    out = []
+    for name, (dev, since) in marks.items():
+        try:
+            hits = [x.strip() for x in dev.since(since) if any(p in x for p in BOARD_PANIC)]
+        except Exception as e:  # noqa: BLE001 - a scan never breaks the run
+            bench.note(f"panic scan of {name} failed: {e}")
+            continue
+        if hits:
+            more = f", {len(hits)} panic lines in all" if len(hits) > 1 else ""
+            out.append(f"{name} panicked during the test ({hits[0][:160]!r}{more})")
+    return "; ".join(out)
+
+
 def _ports_back(bench, awake_s=120, abort=None):
     """Wait for every active port to reopen. Counted in loop turns, not by the clock: if the host sleeps again during
     the wait, the clock jump must not use up the budget before USB has even re-enumerated. abort() (Pause or Stop
@@ -766,6 +803,7 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
             bench.note(f"===== {t['id']} {t['title']}")
             probe_marks = _probe_marks(bench)
             wcb_marks = _wcb_marks(bench)
+            console_marks = _console_marks(bench)
             start = time.monotonic()
             awake0 = _awake_s()
             try:
@@ -804,6 +842,11 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                     own = {"PASS": "The test itself passed, but read through that probe."}.get(
                         status, f"The test itself said ({status}): {detail}")
                     status, detail = "FAIL", f"{incident}\n{own}"
+                panic = _console_panics(bench, console_marks)
+                if panic:
+                    own = {"PASS": "The test itself passed, but that board restarted meanwhile."}.get(
+                        status, f"The test itself said ({status}): {detail}")
+                    status, detail = "FAIL", f"{panic}\n{own}"
                 stall = _wcb_stalls(bench, wcb_marks)
                 if stall:
                     own = {"PASS": "The test itself passed, but that board sent nothing to the mesh meanwhile."}.get(

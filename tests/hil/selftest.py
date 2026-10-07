@@ -2290,7 +2290,8 @@ GATED = {
     **{t: ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s")
        for t in ("ncboot.banner_order", "ncboot.reboot_resets_ram_state", "ncboot.wcbs_see_reboot",
                  "ncboot.new_peer_after_boot", "ncboot.roll_call_missing_board", "ncboot.mesh_reboot",
-                 "ncboot.boardtype2_mismatch", "sbus.boot_quiet", "ncota.recovery_hard_reset")},
+                 "ncboot.boardtype2_mismatch", "ncboot.reboots_clean", "sbus.boot_quiet",
+                 "ncota.recovery_hard_reset")},
     "ncboot.bad_device_id": ("navicore_identity", "takes NaviCore off the mesh with a saved invalid deviceId until it "
                                                   "is restored over USB; attended only"),
     "ncota.recovery_esptool": ("navicore_esptool", "resets NaviCore into ROM download mode and writes its app0 and "
@@ -2929,6 +2930,32 @@ def t_runner_mesh_stall(tmp):
     got = runner._wcb_stalls(b, marks)
     assert got.startswith("wcb2 reported its ESP-NOW transmit stalled (2 report(s), the last '[MESH] ESP-NOW transmit "
                           "stalled 35s:") and "wcb1" not in got and "navicore" not in got, got
+    b.devs.clear()
+    b.close()
+
+
+def t_runner_board_panic(tmp):
+    """hil/runner.py _console_marks/_console_panics: a 'Guru Meditation Error' or 'abort() was called' on a WCB or
+    NaviCore console after the test's mark is reported (the first line quoted, a count when there are more); lines
+    before the mark, a clean console and a probe are not."""
+    b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "navicore": {"port": "COMNAV", "kind": "navicore"},
+                   "probe1": {"port": "COMP1", "kind": "probe"}})
+    w1, nav, p1 = FakeNaviDev(name="wcb1"), FakeNaviDev(name="navicore"), FakeNaviDev(name="probe1")
+    panic = "Guru Meditation Error: Core  1 panic'ed (Unhandled debug exception). "
+    nav._append(panic)                                            # before the test: not this test's
+    b.devs.update({"wcb1": w1, "navicore": nav, "probe1": p1})
+    marks = runner._console_marks(b)
+    assert set(marks) == {"wcb1", "navicore"}, marks
+    assert runner._console_panics(b, marks) == ""
+    p1._append(panic)                                             # a probe's panic is _probe_incidents'
+    nav._append("[SBUS] IN+OUT share Serial1/UART1 - RX GPIO4 / TX GPIO5, 100k " + panic)
+    nav._append("Core  1 register dump:")
+    nav._append(panic)
+    w1._append("abort() was called at PC 0x400d1234 on core 0")
+    got = runner._console_panics(b, marks)
+    assert got.startswith("wcb1 panicked during the test ('abort() was called at PC 0x400d1234 on core 0')") and \
+        "navicore panicked during the test (\"[SBUS] IN+OUT share" in got and "2 panic lines in all" in got and \
+        "probe1" not in got, got
     b.devs.clear()
     b.close()
 
@@ -8791,7 +8818,7 @@ def t_ncboot_ncota_against_model(tmp):
     res, model, x = _run_boot_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCBOOT_SHOULD else 'PASS'}) {r['detail'][:400]}"
            for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCBOOT_SHOULD else "PASS")]
-    assert len(res) == x["count"] == 19, (len(res), x["count"])
+    assert len(res) == x["count"] == 20, (len(res), x["count"])          # 20: ncboot.reboots_clean (2026-10-07)
     assert not bad, "\n".join(bad)
     for tid in NCBOOT_SHOULD:
         assert "(should, D-NC" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
@@ -11802,7 +11829,8 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_ncflash_flash_failures, t_ncflash_recover, t_ncflash_identity, t_ncboot_helpers, t_ncboot_ncota_against_model,
          t_ncboot_mutations, t_ncdev_helpers, t_ncdev_suite_against_model, t_ncdev_mutations,
          t_wlan_pc_on_ap, t_wlan_prejoined, t_ncws_line_device, t_ncwifi_helpers, t_inv_dedup_verdict,
-         t_group_tokens, t_ncflash_arduino15, t_serial_silent_revive, t_runner_mesh_stall]
+         t_group_tokens, t_ncflash_arduino15, t_serial_silent_revive, t_runner_mesh_stall,
+         t_runner_board_panic]
 
 
 def t_wizard_spec_ids(tmp):

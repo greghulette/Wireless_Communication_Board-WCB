@@ -52,6 +52,12 @@ def _session_id():
     return int(nonce(), 16) % 60000 + 1
 
 
+# The bench builds per chip (results/builds, FLASHED.md): W1 and W2 run the ESP32 one, WCB3 the ESP32-S3 one. Same
+# source and version, so ota.local_wrong_chip_image takes its S3 image from there once WCB3 is on the bench, rather than
+# waiting for CI to publish a release of that version (run 20261006-235930 skipped on that).
+BENCH_BUILDS = {"ESP32": "wcb-esp32-meshq", "ESP32S3": "wcb-esp32s3-meshq"}
+
+
 def _image(w, chip="ESP32"):
     """The image the board is running (Skip if none is found), sanity-checked.
 
@@ -61,13 +67,14 @@ def _image(w, chip="ESP32"):
     full 'same image' OTA from Code/bin would change their firmware. The firmware reports nothing more specific than
     its version string, so this relies on the bench convention that W1/W2 are flashed from the builds folder."""
     version = w.version()
-    bench_build = os.path.join(REPO, "tests", "hil", "results", "builds", "wcb-esp32-meshq", "WCB.ino.bin")
-    paths = [bench_build] if chip == "ESP32" and os.path.exists(bench_build) \
+    folder = BENCH_BUILDS.get(chip, "")
+    bench_build = os.path.join(REPO, "tests", "hil", "results", "builds", folder, "WCB.ino.bin")
+    paths = [bench_build] if folder and os.path.exists(bench_build) \
         and version.encode() in open(bench_build, "rb").read() else []
     paths += [p for p in glob.glob(os.path.join(REPO, "Code", "bin", f"WCB_{version}_*.bin")) if p.endswith(f"_{chip}.bin")]
     if not paths:
         raise Skip(f"no image of the running firmware {version}: neither the bench build "
-                   f"(results/builds/wcb-esp32-meshq) nor Code/bin/WCB_{version}_*_{chip}.bin carries it")
+                   f"(results/builds/{folder or '-'}) nor Code/bin/WCB_{version}_*_{chip}.bin carries it")
     data = open(paths[0], "rb").read()
     if data[:1] != b"\xe9" or version.encode() not in data or len(data) > SLOT_SIZE:
         raise AssertionError(f"{os.path.basename(paths[0])} does not look like a {chip} image of {version}")

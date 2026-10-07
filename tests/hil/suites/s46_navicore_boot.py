@@ -43,10 +43,11 @@ JOINED = re.compile(r"^\[WCB\] Joined network as device ID (\d+) \(quantity=(\d+
 ROLL_CALL = re.compile(r"^\[WCB\] roll call: (\d+)/(\d+) board\(s\) online (\d+)s after join")    # :5360-5361
 NEVER_HEARD = re.compile(r"^\[WCB\] roll call: WCB(\d+)(?: · .*)? never heard from")              # :5356-5357
 PEER_NEW = re.compile(r"^\[PEER\] New WCB (\d+)")                                                  # :5307
+WCB_ONLINE = re.compile(r"^\[WCB\] WCB(\d+)(?: · .*)? ONLINE\s*$")                                 # onWcbStatus (:5758)
 REMOTE_REBOOT = "[RC] Remote REBOOT requested via WCB"                                            # rc_telemetry.h:2406
 REBOOT_ACK = {"type": "ACK", "ok": True, "msg": "rebooting"}                                       # NaviCore.ino:4032
 INFO_BOARD = '{"type":"INFO","msg":"boardType changed — reboot to apply the new pin profile"}'     # :3964
-PEER_GRACE_S = 8.0                     # PEER_GRACE_MS (:107): new-peer events are silent this long after join
+PEER_GRACE_S = 8.0                     # PEER_GRACE_MS (:110): new-peer events are silent this long after join
 ROLL_CALL_S = 30.0                     # ROLL_CALL_MS (:137): the roll call runs this long after join
 ADVERT_WAIT_S = 8.0                    # after W1's ?WDP,POLL: every WCB advertises within 600 ms (WCB_WDP.cpp:366-372)
 SW_RESET_CODE = 3                      # ESP_RST_SW: 'Software restart (incl. boot-guard retry)' (:4393)
@@ -399,6 +400,36 @@ def reboot_resets_ram_state(bench):
     assert not problems, "; ".join(problems)
 
 
+CLEAN_REBOOTS = 20     # ncboot.reboots_clean: at the old one-boot-in-five panic rate, 20 clean in a row is 2 in 100
+
+
+@test("ncboot.reboots_clean", "20 REBOOTs in a row each boot NaviCore once and cleanly: every banner names reset 3 "
+      "(software restart) and no panic line comes between a REBOOT and NaviCore answering again (NaviCore restarts 20 "
+      "times, ~1.5 min)", needs=["navicore"], links=[], opt_in="navicore_reboot")
+def reboots_clean(bench):
+    """NaviCore 2c698c6 (D-NC24) installed the soft ports' GPIO ISR service after SBUS had started streaming into
+    UART1. ESP-IDF registers it through the core's IPC task, and an interrupt pending across the registration's heap
+    critical section overflowed that task's 1 KB stack: 'Guru Meditation Error: Core 1 panic'ed (Unhandled debug
+    exception)' in _frxt_int_enter on ipc1, then a second boot reporting 'Crash (panic)' - 8 of 45 boots in full runs
+    20261006-122850 and -235930, none of 18 before 2c698c6. NaviCore 6bd0ced installs it first in setup(). A run of
+    restarts catches a rate of that order: at the old 18 %, 20 clean boots in a row happen about 2 times in 100."""
+    nc = _nc(bench)
+    _restartable(nc)
+    problems, codes = [], []
+    with nc_guard(bench, nc=nc) as g:
+        for i in range(CLEAN_REBOOTS):
+            _, lines, _ = _restart(g.nc, "json")
+            boot = parse_boot(lines)
+            codes.append(boot["reset_code"])
+            panics = [x for x in lines if "Guru Meditation" in x or "abort() was called" in x]
+            if panics:
+                problems.append(f"restart {i + 1}: {panics[0][:150]!r}")
+            elif boot["reset_code"] is not None and boot["reset_code"] != SW_RESET_CODE:
+                problems.append(f"restart {i + 1}: the banner names reset {boot['reset_code']} ({boot['reset']})")
+    bench.note(f"ncboot.reboots_clean: reset codes {codes}")
+    assert not problems, f"{len(problems)} of {CLEAN_REBOOTS} restarts were not clean: " + "; ".join(problems[:4])
+
+
 # ============================================================ the mesh across a restart
 @test("ncboot.wcbs_see_reboot", "After a NaviCore REBOOT the mesh has it back within seconds: W1 prints '[ETM] WCB20 came "
       "ONLINE (boot)', W1's WDP row for 20 holds an advert from after the restart with PONG's version, ;W20,?version "
@@ -460,24 +491,25 @@ def wcbs_see_reboot(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("ncboot.new_peer_after_boot", "(should) After a restart NaviCore does not treat the WCBs that were online when its "
-      "8 s boot grace ended as new peers: no '[PEER] New WCB' line and no new-peer action (here a ;S2 marker to W1S2) "
-      "when their next adverts arrive (NaviCore restarts)", needs=["navicore", "wcb1"],
+@test("ncboot.new_peer_after_boot", "(should) After a restart NaviCore does not treat the WCBs that never left as new "
+      "peers: no '[PEER] New WCB' line and no new-peer action (here a ;S2 marker to W1S2) when their next adverts arrive "
+      "(NaviCore restarts)", needs=["navicore", "wcb1"],
       opt_in="navicore_reboot")
 def new_peer_after_boot(bench):
-    """NAVICORE.md D-NC25. drainPeerEvents (NaviCore.ino:5293-5317) records a board silently only when its first advert
-    of the session lands inside PEER_GRACE_MS (8 s, :107) of the join; a WCB advertises every 60 s, so after most
-    restarts every present WCB's next advert fires the alert and the configured peer actions - a sound or a servo on a
-    user's droid, for a board that never left. Here the actions are one guarded wcb_unicast of ';S2<marker>' to W1,
-    which lands on the W1S2 probe; the grace is waited out and W1's ?WDP,POLL makes W1 and W2 advertise at once
-    instead of within a minute (WCB_WDP.cpp:366-372). The boards count as present when GET_WCB_STATUS shows them online
-    at that moment (ETM heartbeats reach NaviCore within seconds of its boot). The peer-event config is the guard's to
-    restore."""
+    """NAVICORE.md D-NC25. drainPeerEvents (NaviCore.ino:5708) records a board silently when its first advert of the
+    session lands inside PEER_GRACE_MS (8 s, :110) of the join, or when it is ETM-online the moment the grace ends; a
+    WCB advertises every 60 s, so without the second rule every present WCB's next advert fired the alert and the
+    configured peer actions - a sound or a servo on a user's droid, for a board that never left. Here the actions are
+    one guarded wcb_unicast of ';S2<marker>' to W1, which lands on the W1S2 probe; the grace is waited out and W1's
+    ?WDP,POLL makes every WCB advertise at once instead of within a minute (WCB_WDP.cpp:366-372). The boards count as
+    never having left when GET_WCB_STATUS shows them online 1.5 s after the grace. NaviCore hears each one again at its
+    next ETM heartbeat, 0-11 s after the join (one every 9-11 s, at its own phase), so the failure names the boards first
+    heard after the grace: the ones its snapshot missed. The peer-event config is the guard's to restore."""
     s12 = link(bench, 1, "S2")
     nc, w1 = _nc(bench), WCB(bench.dev("wcb1"))
     _restartable(nc)
     mk = marker("PEER")
-    events, markers, online = [], 0, set()
+    events, markers, online, heard = [], 0, set(), {}
     with nc_guard(bench, nc=nc) as g:
         nid = g.nc.wcb_status()["self"]
         g.nc.set_config({"peerEvent": {"alert": True, "actions": [{"type": "wcb_unicast", "target": "1",
@@ -492,13 +524,22 @@ def new_peer_after_boot(bench):
         after = _flushed(g.nc, m)
         events = sorted({int(p.group(1)) for x in after for p in [PEER_NEW.match(x)] if p})
         markers = s12.received(pm).count(mk.encode())
+        for t, x in list(g.nc.dev.lines[m:]):                     # each board's first '[WCB] WCBn ONLINE' since the join
+            o = WCB_ONLINE.match(x)
+            if o and int(o.group(1)) not in heard:
+                heard[int(o.group(1))] = t - t_join
     fired = sorted(set(events) & online)
-    bench.note(f"online when the grace ended: {sorted(online)}; [PEER] New WCB lines for {events}; markers on W1S2: "
-               f"{markers}")
+    when = ", ".join(f"W{b} {s:.1f} s" for b, s in sorted(heard.items()))
+    bench.note(f"online {PEER_GRACE_S + 1.5:.1f} s after the join: {sorted(online)} (first heard after it: "
+               f"{when or 'no ONLINE lines'}); [PEER] New WCB lines for {events}; markers on W1S2: {markers}")
+    late = {b: heard[b] for b in fired if heard.get(b, 0.0) >= PEER_GRACE_S}
+    gap = (f"; it first heard {', '.join(f'WCB{b} {s:.1f} s' for b, s in late.items())} after the join, past its "
+           f"{PEER_GRACE_S:.0f} s grace, which records only the boards online by then, while a WCB heartbeats every "
+           f"9-11 s" if late else "")
     assert not fired and not markers, (
-        f"(should, D-NC25) NaviCore fired its new-peer alert for WCB {fired}, online when its 8 s boot grace ended "
-        f"(PEER_GRACE_MS, NaviCore.ino:107), and its configured action ran {markers} time(s): every restart re-fires a "
-        f"user's peer actions for boards that never left")
+        f"(should, D-NC25) NaviCore fired its new-peer alert for WCB {fired}, which never left (PEER_GRACE_MS, "
+        f"NaviCore.ino:110), and its configured action ran {markers} time(s){gap}: a restart re-fires a user's peer "
+        f"actions for boards that never left")
 
 
 @test("ncboot.roll_call_missing_board", "With the mesh floor (quantity) raised to take in an absent board, the boot roll "

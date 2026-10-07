@@ -192,6 +192,25 @@ def _slot_of(w, line):
     return None
 
 
+POLL_TRIES, POLL_EACH_S = 3, 3.5     # _poll_expect: an answered poll comes back within about a second
+
+
+def _poll_expect(w, pattern, tries=POLL_TRIES, each_s=POLL_EACH_S):
+    """?WDP,POLL on W1, then the line `pattern` that a peer's answering advert brings -> (the match or None, polls
+    sent). W1's solicit and the peer's advert are each one unacknowledged broadcast frame, and the advert after a lost
+    one is the 60 s backstop (WCB_WDP.cpp wdpTick), so a poll the line does not follow in `each_s` is sent again; the
+    line may answer any of them. maestro.wdp_auto_add_readd_rebaud failed on one lost answer in run 20261006-235930
+    (its next poll, 10 s later, was answered in 110 ms)."""
+    wm = w.dev.mark()
+    for n in range(1, tries + 1):
+        w.run("?WDP,POLL")
+        try:
+            return w.dev.expect(pattern, timeout=each_s, since=wm), n
+        except AssertionError:
+            continue
+    return None, tries
+
+
 def _wdp_gates(bench, *wcbs):
     """Skip unless WDP runs on every board named and W1 auto-joins: with either off, no Maestro is auto-added."""
     for n in wcbs:
@@ -238,30 +257,24 @@ def wdp_auto_add_readd_rebaud(bench):
             raise Skip(f"W1's M2:W2 proxy sits in slot {k} with a free slot below it: learnt back, it would move and "
                        f"reorder W1's table")
         try:
-            wm = w.dev.mark()
             out = [x.rstrip() for x in w.run(f"?MAESTRO,CLEAR,{target}")]
             if f"Cleared Maestro {target} (freed slot {k})" not in out:
                 raise AssertionError(f"?MAESTRO,CLEAR,{target} printed {out}")
-            w.run("?WDP,POLL")
-            try:
-                got = w.dev.expect(AUTO_ADDED.format(mid=2, host=2), timeout=10, since=wm)
-                if (int(got.group(1)), int(got.group(2))) != (host[1], k):
-                    bad.append(f"the proxy was learnt back at {got.group(1)} baud in slot {got.group(2)}, expected "
-                               f"{host[1]} in slot {k}")
-            except AssertionError:
-                bad.append("W1 did not learn the cleared M2:W2 proxy back from W2's advert")
+            got, polls = _poll_expect(w, AUTO_ADDED.format(mid=2, host=2))
+            if got is None:
+                bad.append(f"W1 did not learn the cleared M2:W2 proxy back from W2's advert ({polls} polls)")
+            elif (int(got.group(1)), int(got.group(2))) != (host[1], k):
+                bad.append(f"the proxy was learnt back at {got.group(1)} baud in slot {got.group(2)}, expected "
+                           f"{host[1]} in slot {k}")
             if _m_lines(snapshot(bench, 1)) != lines:
                 bad.append("W1's Maestro table is not as before after the auto-add")
             alt = 9600 if host[1] != 9600 else 19200
             out = [x.rstrip() for x in w.run(f"?MAESTRO,{target}:{alt}")]
             if f"✓ Maestro 2: Remote on WCB2 (unicast, slot {k})" not in out:
                 bad.append(f"re-issuing the proxy at {alt} baud printed {out}")
-            wm = w.dev.mark()
-            w.run("?WDP,POLL")
-            try:
-                w.dev.expect(rf"^\[WDP\] Maestro 2 @ WCB2 baud updated to {host[1]}$", timeout=10, since=wm)
-            except AssertionError:
-                bad.append(f"W2's next advert did not put the proxy back to {host[1]} baud")
+            got, polls = _poll_expect(w, rf"^\[WDP\] Maestro 2 @ WCB2 baud updated to {host[1]}$")
+            if got is None:
+                bad.append(f"W2's next advert did not put the proxy back to {host[1]} baud ({polls} polls)")
             if _m_lines(snapshot(bench, 1)) != lines:
                 bad.append("W1's Maestro table is not as before after the baud refresh")
         finally:
@@ -312,11 +325,9 @@ def wdp_auto_add_table_full(bench):
             if not _has(w.run("?WDP,ON"), "[WDP] enabled"):
                 raise AssertionError("?WDP,ON did not confirm")
             wm = w.dev.mark()
-            w.run("?WDP,POLL")
-            try:
-                w.dev.expect(r"^\[WDP\] Maestro 2 @ WCB2 heard but no free slot \(max 9\)", timeout=10, since=wm)
-            except AssertionError:
-                bad.append("no 'Maestro 2 @ WCB2 heard but no free slot (max 9)' line under ?DEBUG,ON")
+            got, polls = _poll_expect(w, r"^\[WDP\] Maestro 2 @ WCB2 heard but no free slot \(max 9\)")
+            if got is None:
+                bad.append(f"no 'Maestro 2 @ WCB2 heard but no free slot (max 9)' line under ?DEBUG,ON ({polls} polls)")
             if any(re.match(AUTO_ADDED.format(mid=2, host=2), x) for x in w.dev.since(wm)):
                 bad.append("W1 auto-added Maestro 2 into a full table")
         finally:
@@ -388,14 +399,11 @@ def wdp_auto_add_beside_local(bench):
                         f"?BCAST,IN,{port},OFF"):
                 if tok not in after2:
                     bad.append(f"W2's chain lacks {tok} with a Maestro on {port}")
-            wm = w.dev.mark()
-            w.run("?WDP,POLL")
-            try:
-                got = w.dev.expect(AUTO_ADDED.format(mid=1, host=2), timeout=10, since=wm)
-                if int(got.group(1)) != 19200:
-                    bad.append(f"the proxy for W2's Maestro 1 was added at {got.group(1)} baud, not 19200")
-            except AssertionError:
-                bad.append("W1 added no proxy for W2's Maestro 1 beside its own local Maestro 1")
+            got, polls = _poll_expect(w, AUTO_ADDED.format(mid=1, host=2))
+            if got is None:
+                bad.append(f"W1 added no proxy for W2's Maestro 1 beside its own local Maestro 1 ({polls} polls)")
+            elif int(got.group(1)) != 19200:
+                bad.append(f"the proxy for W2's Maestro 1 was added at {got.group(1)} baud, not 19200")
             now1 = _m_lines(snapshot(bench, 1))
             if local_line.upper() not in [t.upper() for t in now1]:
                 bad.append("W1's local Maestro 1 slot changed")
