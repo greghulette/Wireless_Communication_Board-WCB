@@ -2407,7 +2407,7 @@ the Arduino core.
 
 | | |
 |---|---|
-| **Status** | OPEN - diagnostic in place (`2ed4f4e`), cause not found |
+| **Status** | OPEN - diagnostic in place (`f748de6`), cause not found |
 | **Owner** | `WCB_firmware` (`WCB_EspNow.cpp`), probably the WiFi driver under #111's heap |
 | **Effort** | M (catching it again) |
 | **Tests** | `etm.char_per_board_clamp` (every WCB must transmit again after its load); the runner fails any test during which a WCB prints `[MESH] ESP-NOW transmit stalled` |
