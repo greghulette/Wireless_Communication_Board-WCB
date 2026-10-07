@@ -45,7 +45,7 @@ from hil.wcb import WCB
 from suites.common import config_guard, usb_wcb
 from suites.s33_intellex_bench import _boot_edges
 from suites.s34_intellex_tools import _nc_quiet
-from suites.s45_navicore_wifi import NC_AP_IP, _on_ap, _spare_adapter, ap_of
+from suites.s45_navicore_wifi import NC_AP_IP, _navicore_ap, _on_ap, _spare_adapter, ap_of
 from suites.s46_navicore_boot import _line1, _restartable, _restarted, _uptime_ms
 
 NC_WS = {"kind": "ws", "host": NC_AP_IP, "role": "navicore"}   # what Intellex's chooser attaches for a NaviCore
@@ -455,9 +455,10 @@ def wifi_ap_hop_reidentify(bench):
     on whatever the adapter joined since, and the role must be corrected BEFORE the attach, which the page reads at
     once (CLAUDE.md rule 10: a WCB doorway taken for a direct NaviCore sends ?OTALOCAL to the WCB). The spec asks the
     harness to move the adapter (hooks hop and hop_back: s28 _pc_on_w1_ap nested inside _on_ap, so hop_back returns it
-    to NaviCore's temporary profile); the host's lines are read with both network names taken out. Skipped off Windows,
-    where the harness moves no adapter (hil/wlan.py _prejoined)."""
-    if not wlan.ON_WINDOWS:
+    to NaviCore's temporary profile); the host's lines are read with both network names taken out. Off Windows the
+    adapter moves through the Realtek menu (bench.json wifi_switch, hil/wlan.py realtek_on_ap; D82), and without it the
+    test skips (the harness moves no adapter there, _prejoined)."""
+    if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip(f"{wlan.NOT_WINDOWS_SKIP}: the hop moves the PC's spare adapter to W1's access point and back")
     from suites.s28_wifi import _pc_on_w1_ap, _status as _w1_wifi, _wifi_token
     _free_of_others(bench)
@@ -515,7 +516,10 @@ class _AdapterWatch:
     def _run(self):
         while not self._stop.is_set():
             try:
-                now = {i["name"]: i.get("state", "") for i in wlan.wlan_interfaces() if i["name"] in self.names}
+                if wlan.ON_WINDOWS:
+                    now = {i["name"]: i.get("state", "") for i in wlan.wlan_interfaces() if i["name"] in self.names}
+                else:                                   # the Mac: ifconfig's status line, per interface
+                    now = {n: wlan.iface_state(n) for n in self.names}
                 self.samples.append((time.monotonic(), now))
             except Exception:  # noqa: BLE001 - a failed read is a missing sample, not a failure
                 pass
@@ -558,9 +562,11 @@ def wifi_bounce_scoped(bench):
     'netsh wlan disconnect' drops every adapter - and it reconnects through the profile Windows keeps under the
     network's own name (no password needed). Run from its venv (tests/intellex/py/wifi_units.py group bounce), the SSID
     in its environment only, inside _on_ap so the adapter goes back to its own network afterwards whatever the bounce
-    did. Skipped off Windows: the adapter watch and the way back read and drive netsh, and Intellex's macOS bounce
-    (_wifi_bounce_macos) cycles a network service instead, which nothing here watches yet."""
-    if not wlan.ON_WINDOWS:
+    did. Off Windows (bench.json wifi_switch, D82) Intellex's macOS bounce (_wifi_bounce_macos) finds the adapter by
+    route and cycles its network service: the watch reads ifconfig's status line, and 'back' is the adapter proved on
+    NaviCore's access point by its PONG within 45 s, which nothing here helps - the bounce's own way back is the
+    subject. Without the switch the test skips."""
+    if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip(f"{wlan.NOT_WINDOWS_SKIP}: the adapter watch and the way back are netsh's")
     _free_of_others(bench)
     inet = wlan.internet_adapter()
@@ -575,13 +581,25 @@ def wifi_bounce_scoped(bench):
         try:
             run_intellex_py(bench, tid, "wifi_units.py", timeout=120, env={"IX_SSID": ssid},
                             args={"group": "bounce", "host": NC_AP_IP})
-            back = wlan.wait(lambda: wlan.joined(name, ssid), 45)
-            addr, secs, renewed = wlan.address_wait(name) if back else (None, 0, "")
+            if wlan.ON_WINDOWS:
+                back = wlan.wait(lambda: wlan.joined(name, ssid), 45)
+                addr, secs, renewed = wlan.address_wait(name) if back else (None, 0, "")
+            else:
+                t0 = time.monotonic()
+                ident = _navicore_ap(bench)
+                back = wlan.wait(lambda: wlan._realtek_there(name, (NC_AP_IP, 80), ident), 45, step=2.0)
+                addr = next((a for a in wlan.ipv4(name) if a.startswith("192.168.4.")), None) if back else None
+                secs = round(time.monotonic() - t0, 1)
         finally:
             samples = watch.stop()
         p, f = bounce_problems(samples, inet, name)
         problems += p
         facts.update(f)
+        if not wlan.ON_WINDOWS and f.get("spare_not_connected"):
+            # Intellex's macOS bounce leaves an adapter macOS does not count as Wi-Fi alone (its own utility joins it;
+            # cycling its service left it off for minutes, 2026-10-07): it must not have dropped at all.
+            problems.append(f"{name} left 'connected' in {f['spare_not_connected']} of {f['samples']} samples, though "
+                            f"the bounce was to leave it alone")
         if not back:
             problems.append(f"{name} was not back on NaviCore's network 45 s after the bounce")
         elif not addr:

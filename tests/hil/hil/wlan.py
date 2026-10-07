@@ -632,6 +632,15 @@ for t in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown, Quartz.kCGEve
 """
 
 
+def iface_state(name):
+    """Off Windows: 'connected' when ifconfig says the interface is active, else 'disconnected' (or 'absent' when ifconfig
+    knows no such interface) - the netsh state's counterpart for an adapter watch."""
+    out = _run(["ifconfig", name])
+    if not out:
+        return "absent"
+    return "connected" if re.search(r"^\s*status: active\s*$", out, re.M) else "disconnected"
+
+
 def realtek_enabled(bench):
     """bench.json "wifi_switch": "realtek", off Windows: pc_on_ap may move the spare adapter through the Realtek menu."""
     return not ON_WINDOWS and (bench.cfg.get("wifi_switch") or "") == "realtek"
@@ -669,22 +678,41 @@ def own_wifi_network():
     return m.group(1) if m else None
 
 
+REALTEK_SCAN = "USB-WiFi: Scan Networks..."    # the menu's own items, never a network
+REALTEK_OWN_ITEMS = (REALTEK_SCAN, "Turn USB-WiFi Off", "Turn USB-WiFi On", "Join Other Network...", "WPS...",
+                     "Open Wireless Utility...")
+
+
+def _realtek_click(item, what):
+    """Open the Realtek menu and click `item` with a real mouse event; `what` names it in messages."""
+    out = _realtek_menu(item)
+    if out == "ABSENT":
+        raise AssertionError(f"the Realtek menu does not list {what} (out of range, or its board's access point is down)")
+    m = re.match(r"^AT (-?\d+) (-?\d+)$", out)
+    if not m:
+        raise AssertionError(f"the Realtek menu gave no position for {what}")
+    p = subprocess.run([QUARTZ_PYTHON, "-c", _QUARTZ_CLICK, m.group(1), m.group(2)], capture_output=True, text=True,
+                       timeout=20)
+    if p.returncode:
+        raise AssertionError("the click on the Realtek menu failed: " + (p.stderr.strip().splitlines() or ["?"])[-1][-160:])
+
+
 def realtek_pick(ssid, whose):
     """Click `ssid` in the Realtek menu with a real mouse event. Refuses the Mac's own Wi-Fi network; raises when the
     menu does not list it. `whose` names it in messages: the network's name is never quoted."""
     if ssid == own_wifi_network():
         raise AssertionError(f"{whose} network is the one the Mac's own Wi-Fi is on: never picked for the spare adapter")
-    out = _realtek_menu(ssid)
-    if out == "ABSENT":
-        raise AssertionError(f"the Realtek menu does not list {whose} network (out of range, or its board's access "
-                             f"point is down)")
-    m = re.match(r"^AT (-?\d+) (-?\d+)$", out)
-    if not m:
-        raise AssertionError(f"the Realtek menu gave no position for {whose} network")
-    p = subprocess.run([QUARTZ_PYTHON, "-c", _QUARTZ_CLICK, m.group(1), m.group(2)], capture_output=True, text=True,
-                       timeout=20)
-    if p.returncode:
-        raise AssertionError("the click on the Realtek menu failed: " + (p.stderr.strip().splitlines() or ["?"])[-1][-160:])
+    if ssid in REALTEK_OWN_ITEMS:
+        raise AssertionError(f"{whose} network has the name of one of the Realtek menu's own items")
+    _realtek_click(ssid, f"{whose} network")
+
+
+def realtek_scan(settle_s=8.0):
+    """A fresh scan through the Realtek menu ('Scan Networks...'), then the networks it lists -> [name]. The menu shows
+    names only: whether a network is open cannot be read there."""
+    _realtek_click(REALTEK_SCAN, "its Scan Networks item")
+    time.sleep(settle_s)
+    return [x for x in realtek_networks() if x not in REALTEK_OWN_ITEMS]
 
 
 def _realtek_there(name, reach, identify):

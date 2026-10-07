@@ -1334,14 +1334,16 @@ def refuse_short_password(bench):
     no longer hears in its list for a while). The proof the access point is down is the join: with the real password
     it must fail to associate. Then the snapshot is written back (SET_CONFIG of the exact text) and NaviCore restarts
     onto it however the body ended, and ap_block and a join prove the access point back. nc_guard proves the config
-    byte-identical afterwards. Skipped off Windows, where the harness joins nothing (hil/wlan.py _prejoined): the scan
-    and the join attempt with the real password are the PC's own, and a spare adapter that merely stays off a refused
+    byte-identical afterwards. Off Windows the scan and the join go through the Realtek menu (bench.json wifi_switch,
+    hil/wlan.py realtek_scan and realtek_on_ap; D82): a fresh scan must not list NaviCore's network, or, still listed
+    (a scan can keep a network it no longer hears), the join must not be proved. The menu shows names only, so 'not
+    open' rests on that failed join. Without the switch the test skips: a spare adapter that merely stays off a refused
     access point cannot tell refused from open."""
-    if not wlan.ON_WINDOWS:
+    if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip(f"{NOT_WINDOWS_SKIP}: this test's fresh scan and its join attempt are the PC's own, and off Windows "
                    f"the harness joins nothing")
     _reboot_too(bench)
-    adapter = _spare_adapter(bench)
+    adapter = _spare_adapter(bench) if wlan.ON_WINDOWS else None
     nc = _nc(bench)
     _restartable(nc)
     problems, facts = [], {}
@@ -1361,17 +1363,26 @@ def refuse_short_password(bench):
                 problems.append("no boot banner arrived after the first REBOOT")
             else:
                 problems += refused_block(banner, 3)
-            nets, fresh = networks(adapter["name"])
-            mine = [n for n in nets if n["ssid"] == ssid]
-            facts.update(scan="fresh" if fresh else "cached", visible=len(nets), still_listed=bool(mine))
-            if any((n["auth"] or "").lower() == "open" for n in mine):
-                problems.append("the PC sees an OPEN network under NaviCore's access point name")
-            try:
-                with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True):
-                    problems.append("the PC joined NaviCore's access point while its saved password was 3 characters")
-            except AssertionError as e:
-                if "did not associate" not in str(e):
-                    problems.append(f"joining the refused access point: {_line1(e)}")
+            if adapter is not None:
+                nets, fresh = networks(adapter["name"])
+                mine = [n for n in nets if n["ssid"] == ssid]
+                facts.update(scan="fresh" if fresh else "cached", visible=len(nets), still_listed=bool(mine))
+                if any((n["auth"] or "").lower() == "open" for n in mine):
+                    problems.append("the PC sees an OPEN network under NaviCore's access point name")
+                refused = ("did not associate",)
+            else:
+                listed = wlan.realtek_scan()
+                facts.update(scan="fresh (Realtek menu)", visible=len(listed), still_listed=ssid in listed)
+                refused = ("does not list", "was not proved on")
+            if adapter is not None or facts.get("still_listed"):
+                try:
+                    with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, reach=(NC_AP_IP, 80),
+                                  identify=_navicore_ap(bench, version)):
+                        problems.append("the PC joined NaviCore's access point while its saved password was 3 "
+                                        "characters")
+                except AssertionError as e:
+                    if not any(r in str(e) for r in refused):
+                        problems.append(f"joining the refused access point: {_line1(e)}")
         except Exception as e:  # noqa: BLE001 - raised after the put-back below
             failure = e
         try:

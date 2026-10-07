@@ -96,6 +96,12 @@ def bounce(ctx):
     ok, msg = discover.wifi_bounce(ssid)
     shown = scrubbed(msg, ssid)[:200]
     ctx.note(f"wifi_bounce: {'ok' if ok else 'FAILED'} after {time.monotonic() - t0:.1f} s ({shown})")
+    if sys.platform == "darwin" and "does not count as Wi-Fi" in msg:
+        # A USB adapter macOS does not count as Wi-Fi (the Mac bench's TP-Link): its own utility joins it, and cycling
+        # its network service left it off for minutes, so wifi_bounce declines and touches nothing. The harness checks
+        # the adapter stayed on NaviCore's network (s35 intellex.wifi_bounce_scoped).
+        check(not ok, f"wifi_bounce reported success on an adapter it says it left alone: {shown}")
+        return
     check(ok, f"wifi_bounce did not reconnect the adapter: {shown}")
 
 

@@ -440,6 +440,23 @@ Found on the bench in IX-WP9 (run `20260929-202852`, Intellex `e9f95f2`):
     only `/` and `\`, so a `ref` of `..` files a listing one level up, at the cache root. Low impact (the local host's
     own cache, one level, no path separators). Found by the 2026-10-04 fix agent; no test yet.
 
+21. **On a Mac, moving to another board's access point kept the old board's role.** Found 2026-10-07, when the
+    harness could first move the Mac's TP-Link (D82).
+    - `_reidentify_if_moved` compares the attach's recorded SSID with the current one, and `ssid_for_host` answers
+      None off Windows, so the check never ran on a Mac.
+    - Attached to NaviCore's access point and moved to W1's, the host reattached to `192.168.4.1` still calling it
+      NaviCore: CLAUDE.md rule 10's OTA hazard. `intellex.wifi_ap_hop_reidentify` failed (role navicore after 90 s).
+    - Fixed in Intellex `f22d62d`: with no recorded SSID the host is probed on each reattach
+      (`_reidentify_by_probe`). The test passes on the Mac, re-identified 1.5 s after each hop (`20261007-143727`).
+22. **Intellex's macOS bounce cycled a USB adapter's network service, which left it off.** Found 2026-10-07.
+    - On a port macOS does not count as Wi-Fi (the TP-Link), `_wifi_bounce_macos` turned its network service off and
+      on. Its own utility does the joining, so nothing joined it again: still off two minutes later.
+    - configd's IP configuration queue hung for 60 s and the watchdog killed it (14:43:24); the Mac froze soon
+      after and was restarted (`intellex.wifi_bounce_scoped`, `20261007-144222`).
+    - Fixed in Intellex `cfa973a`: it declines there and says to rejoin from the adapter's utility (a built-in Wi-Fi
+      port is still power-cycled). The test passes on the Mac: declined, both adapters connected throughout
+      (`20261007-175637`).
+
 ---
 
 ## 2. Running Intellex under test
