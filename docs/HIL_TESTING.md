@@ -1180,10 +1180,13 @@ the port's baud, and reading that needs the board's own console.
 
 **Finding the port.** Web Serial shows no COM numbers, only VID/PID. `wcb2` and both probes are identical CP210x
 bridges (`10C4:EA60`), so each device gets its own persistent Chrome profile, `tests/wizard/.profiles/<device>`
-(gitignored), holding only that board's grant. The first run for a profile puts a *HIL: Pick COMx* button on the
-page and opens Chrome's port dialog: pick the COM port it names. The grant persists (every bench board reports a USB
-serial number, which Chrome needs to keep one). A wrong pick is revoked with `port.forget()` and fails the test, but
-cancelling the dialog, or leaving it unanswered for three minutes, **skips** — needing it at all means nobody has
+(gitignored), holding only that board's grant. The first run for a profile puts a *HIL: click here, then pick COMx*
+button on the page: click it, and pick the port it names in Chrome's port dialog. The click is the person's, not the
+script's: Chrome closes the dialog whenever its window is not the active one, and on a Mac a scripted click opened it
+in a window that was not (closed within 6 s, 2026-10-07). A dialog that closes leaves the button to click again. The
+grant persists (every bench board reports a USB serial number, which Chrome needs to keep one). A wrong pick is
+revoked with `port.forget()` and fails the test, but leaving the button unanswered for three minutes **skips** —
+needing it at all means nobody has
 authorized that board, which says no one is at the keyboard rather than that the Wizard is broken. `WIZ_NO_AUTHORIZE=1`
 skips an unauthorized board without opening the dialog at all, for a run nobody is watching.
 After that, tests connect through the Wizard's own port picker (`boardManualConnect`) with no dialog, and check the
@@ -1345,9 +1348,9 @@ snapshot in a failed spec's `test-results/.../error-context.md`, which would oth
 
 **L3, real Web Serial** (`specs/navicore/webserial.spec.js`, fixtures in `lib/navicore/webserial.js`; attended, opt-in
 `navicore_webserial`). NaviCore's port goes to Chrome as a Wizard board's does, in the persistent profile
-`tests/wizard/.profiles/navicore` on the tool's origin 8779. The first run puts a *HIL: Pick COMx* button on the page and
-opens Chrome's port dialog filtered to NaviCore's USB ids; pick the port it names. A cancel or three minutes without an
-answer skips, and `WIZ_NO_AUTHORIZE=1` skips without the dialog. The spec then connects through the tool's own
+`tests/wizard/.profiles/navicore` on the tool's origin 8779. The first run puts the same *click here, then pick* button
+on the page; clicking it opens Chrome's port dialog filtered to NaviCore's USB ids, and you pick the port it names.
+Three minutes without an answer skips, and `WIZ_NO_AUTHORIZE=1` skips without the button. The spec then connects through the tool's own
 `openPortAndStart(port, 4000)` on the granted port (the "Connect via USB" path minus Chrome's native chooser, which
 Playwright cannot answer), with the real 4 s settle: Chrome's open asserts DTR/RTS and restarts NaviCore, and the boot
 must fit inside it. The SBUS controller is the same ESP32-S3 USB-Serial/JTAG (303A:1001), so the harness holds its port

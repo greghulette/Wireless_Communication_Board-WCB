@@ -32,8 +32,12 @@ function grantedMatches(page, ctx) {
   }, { vid: ctx.vid, pid: ctx.pid });
 }
 
-// First run for a profile: open Chrome's own port dialog and wait for Greg to pick the COM port the harness named.
-// requestPort() needs a user gesture; a Playwright click is a real one. The grant then persists in the profile.
+// First run for a profile: a banner in the page asks Greg to click it, which opens Chrome's own port dialog, and to
+// pick the port the harness named. The grant then persists in the profile. The click is his, not Playwright's:
+// requestPort() needs a user gesture, and Chrome closes its port dialog whenever its window is not the active one.
+// On a Mac the window Playwright opens often is not, and a scripted click there opened a dialog that closed
+// within 6 s ('cancelled (NotFoundError)', 2026-10-07, both profiles). A dialog that closes leaves the banner to
+// click again, until the 3 minutes are up.
 //
 // Needing the dialog at all means nobody has authorized this board yet, so cancelling it — or leaving it
 // unanswered — SKIPS the test rather than failing it: it says no one is at the keyboard, not that the Wizard is
@@ -41,7 +45,7 @@ function grantedMatches(page, ctx) {
 // dialog failed wizard.pull and wizard.push_label). Picking the WRONG port is still a failure.
 // WIZ_NO_AUTHORIZE=1 skips without ever opening the dialog, for a run nobody is watching.
 async function authorize(page, ctx) {
-  const say = `Pick ${ctx.com} (${ctx.device}) in Chrome's port dialog — once per profile`;
+  const say = `click here, then pick ${ctx.com} (${ctx.device}) in Chrome's port dialog — once per profile`;
   if (process.env.WIZ_NO_AUTHORIZE) {
     test.skip(true, `${ctx.device} (${ctx.com}) is not authorized in .profiles/${ctx.device} and ` +
                     'WIZ_NO_AUTHORIZE is set — run this once with someone at the keyboard to authorize it');
@@ -64,12 +68,13 @@ async function authorize(page, ctx) {
           b.dataset.done = 'ok';
         }
       } catch (e) {
-        b.dataset.done = `cancelled (${e.name})`;
+        b.dataset.closed = String(Number(b.dataset.closed || 0) + 1);
+        b.textContent = `HIL: the port dialog closed (${e.name}) — ${say}`;
       }
     };
     document.body.appendChild(b);
   }, { say, vid: ctx.vid, pid: ctx.pid });
-  await page.locator('#hil-authorize').click();
+  await page.bringToFront();
   let done;
   try {
     const handle = await page.waitForFunction(() => document.getElementById('hil-authorize')?.dataset.done,

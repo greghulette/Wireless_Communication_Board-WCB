@@ -56,8 +56,9 @@ function grantedMatches(page, ctx) {
     .filter((k) => k >= 0), { vid: ctx.vid, pid: ctx.pid });
 }
 
-// First run for the profile: a button in the page opens Chrome's port dialog (requestPort needs a user gesture, and a
-// Playwright click is one), filtered to NaviCore's USB ids, and someone picks the COM port the harness names. Needing
+// First run for the profile: a button in the page, which someone clicks (as lib/wizard.js explains: a scripted click
+// opened a dialog a Mac closed at once), opens Chrome's port dialog filtered to NaviCore's USB ids, and they pick the
+// COM port the harness names; a dialog that closes leaves the button to click again. Needing
 // it at all means nobody has authorized NaviCore in this profile, so a cancel or no answer in 3 minutes SKIPS (as
 // lib/wizard.js does); WIZ_NO_AUTHORIZE=1 skips without opening the dialog. The SBUS controller is the same ESP32-S3
 // USB-Serial/JTAG (303A:1001), so the dialog may list it too: its grant would do no harm (the harness holds its port,
@@ -67,7 +68,7 @@ async function authorize(page, ctx) {
     test.skip(true, `NaviCore (${ctx.com}) is not authorized in .profiles/navicore and WIZ_NO_AUTHORIZE is set - run ` +
                     'an nctool.webserial_* test once with someone at the keyboard to authorize it');
   }
-  const say = `Pick ${ctx.com} (NaviCore) in Chrome's port dialog - once per profile`;
+  const say = `click here, then pick ${ctx.com} (NaviCore) in Chrome's port dialog - once per profile`;
   console.log(`>>> ${say}`);
   await page.evaluate(({ say, vid, pid }) => {
     const b = document.createElement('button');
@@ -81,12 +82,13 @@ async function authorize(page, ctx) {
         const i = p.getInfo();
         b.dataset.done = i.usbVendorId === vid && i.usbProductId === pid ? 'ok' : 'wrong port';
       } catch (e) {
-        b.dataset.done = `cancelled (${e.name})`;
+        b.dataset.closed = String(Number(b.dataset.closed || 0) + 1);
+        b.textContent = `HIL: the port dialog closed (${e.name}) - ${say}`;
       }
     };
     document.body.appendChild(b);
   }, { say, vid: ctx.vid, pid: ctx.pid });
-  await page.locator('#hil-authorize').click();
+  await page.bringToFront();
   let done;
   try {
     done = await (await page.waitForFunction(() => document.getElementById('hil-authorize')?.dataset.done, null,
