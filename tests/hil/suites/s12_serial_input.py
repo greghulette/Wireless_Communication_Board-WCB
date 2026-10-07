@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 
 from hil.links import SW_MAX_BAUD
 from hil.probe import HW_ONLY_HEADERS, PROBE_LEVELRX_VERSION, SW_CHANNELS
@@ -1480,8 +1481,20 @@ def _da_row(dump, n, port, type_):
     return next((x.rstrip() for x in dump if x.startswith(f"[WDPDA:N={n},S={port},TYPE={type_},")), None)
 
 
-def _unlabelled(bench, port):
-    return token(bench.config_tokens(1, refresh=True), f"?LABEL,{port},") is None
+@contextmanager
+def _port_unlabelled(bench, w, port):
+    """W1's <port> with no ?LABEL while the block runs. A user label outranks the first-heard device type as the port's
+    WDP label, so the wdpda label checks need the port bare; on this bench W1 S3-S5 carry labels, and the checks skipped.
+    The label goes back afterwards, and config_guard proves W1's config ends byte-identical."""
+    label = token(bench.config_tokens(1, refresh=True), f"?LABEL,{port},")
+    with config_guard(bench, 1):
+        if label:
+            w.run(f"?LABEL,CLEAR,{port}")
+        try:
+            yield
+        finally:
+            if label:
+                w.run(label)
 
 
 @test("input.wdpda_basic", "An @WDP1 announce on a port is recorded and printed once, saved only by its second announce, and never broadcast", needs=["wcb1"])
@@ -1769,52 +1782,51 @@ def wdpda_shared_port(bench):
     a, b = "HILSA" + marker()[3:7], "HILSB" + marker()[3:7]
     la = f'@WDP1 {{"type":"{a}","fw":"1.1"}}\n'.encode()
     lb = f'@WDP1 {{"type":"{b}","fw":"2.2","hw":"revC","caps":["hil.x"]}}\n'.encode()
-    try:
-        prime(s3)
-        time.sleep(0.3)
-        m = w.dev.mark()
-        s3.send(la)
-        w.dev.expect(rf"^\[WDP-DA\] S3: {a} fw 1\.1$", timeout=3, since=m)
-        s3.send(lb)
-        w.dev.expect(rf"^\[WDP-DA\] S3: {b} fw 2\.2$", timeout=3, since=m)
-        s3.send(la)                                   # each one's second announce saves it
-        w.dev.expect(rf"^\[WDP-DA\] S3: {a} saved$", timeout=3, since=m)
-        s3.send(lb)
-        w.dev.expect(rf"^\[WDP-DA\] S3: {b} saved$", timeout=3, since=m)
-        m = w.dev.mark()
-        s3.send(la)
-        time.sleep(0.5)
-        s3.send(lb)
-        time.sleep(1.0)
-        again = [x for x in w.dev.since(m) if x.startswith("[WDP-DA]")]
-        assert not again, f"a re-announce printed again: {again}"
-        assert _da_types(w, "S3") == [a, b], f"?WDP,DA: {_da_rows(w)}"
-        dump = w.run("?WDP,DUMP", timeout=8)
-        da = [x.rstrip() for x in dump if x.startswith(f"[WDPDA:N={me},S=3,")]
-        assert len(da) == 2, f"expected two WDPDA records on S3: {da}"
-        assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={a},FW=1\.1,HW=,CAPS=,SEEN=1,AGE=\d+\]$", da[0]), da[0]
-        assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={b},FW=2\.2,HW=revC,CAPS=hil\.x,SEEN=1,AGE=\d+\]$", da[1]), da[1]
-        if not _unlabelled(bench, "S3"):
-            raise Skip("record checks passed; the port-label checks need W1 S3 unlabelled (input.wdpda_shared_label_mesh covers them on W2 S4)")
-        assert _has(dump, f"[WDPIF:N={me},S=3,DEV={a}]"), f"S3's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
-        # A label that followed the latest announce would move on every one of these, and each
-        # move costs an advert plus a re-send (the on-change check in wdpTick).
+    with _port_unlabelled(bench, w, "S3"):
         try:
-            assert _has(w.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled")
+            prime(s3)
+            time.sleep(0.3)
             m = w.dev.mark()
-            for _ in range(3):
-                s3.send(lb)
-                time.sleep(1.0)
-                s3.send(la)
-                time.sleep(1.0)
+            s3.send(la)
+            w.dev.expect(rf"^\[WDP-DA\] S3: {a} fw 1\.1$", timeout=3, since=m)
+            s3.send(lb)
+            w.dev.expect(rf"^\[WDP-DA\] S3: {b} fw 2\.2$", timeout=3, since=m)
+            s3.send(la)                                   # each one's second announce saves it
+            w.dev.expect(rf"^\[WDP-DA\] S3: {a} saved$", timeout=3, since=m)
+            s3.send(lb)
+            w.dev.expect(rf"^\[WDP-DA\] S3: {b} saved$", timeout=3, since=m)
+            m = w.dev.mark()
+            s3.send(la)
+            time.sleep(0.5)
+            s3.send(lb)
             time.sleep(1.0)
-            sent = [x for x in w.dev.since(m) if x.startswith("[WDP] advert sent")]
+            again = [x for x in w.dev.since(m) if x.startswith("[WDP-DA]")]
+            assert not again, f"a re-announce printed again: {again}"
+            assert _da_types(w, "S3") == [a, b], f"?WDP,DA: {_da_rows(w)}"
+            dump = w.run("?WDP,DUMP", timeout=8)
+            da = [x.rstrip() for x in dump if x.startswith(f"[WDPDA:N={me},S=3,")]
+            assert len(da) == 2, f"expected two WDPDA records on S3: {da}"
+            assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={a},FW=1\.1,HW=,CAPS=,SEEN=1,AGE=\d+\]$", da[0]), da[0]
+            assert re.match(rf"^\[WDPDA:N={me},S=3,TYPE={b},FW=2\.2,HW=revC,CAPS=hil\.x,SEEN=1,AGE=\d+\]$", da[1]), da[1]
+            assert _has(dump, f"[WDPIF:N={me},S=3,DEV={a}]"), f"S3's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
+            # A label that followed the latest announce would move on every one of these, and each
+            # move costs an advert plus a re-send (the on-change check in wdpTick).
+            try:
+                assert _has(w.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled")
+                m = w.dev.mark()
+                for _ in range(3):
+                    s3.send(lb)
+                    time.sleep(1.0)
+                    s3.send(la)
+                    time.sleep(1.0)
+                time.sleep(1.0)
+                sent = [x for x in w.dev.since(m) if x.startswith("[WDP] advert sent")]
+            finally:
+                w.run("?DEBUG,MGMT,OFF")
+            assert len(sent) <= 2, f"{len(sent)} adverts in 7 s while two devices took turns announcing"
+            assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N={me},S=3,DEV={a}]"), "S3's label moved while the devices took turns"
         finally:
-            w.run("?DEBUG,MGMT,OFF")
-        assert len(sent) <= 2, f"{len(sent)} adverts in 7 s while two devices took turns announcing"
-        assert _has(w.run("?WDP,DUMP", timeout=8), f"[WDPIF:N={me},S=3,DEV={a}]"), "S3's label moved while the devices took turns"
-    finally:
-        _da_forget(w, "S3", a, b)
+            _da_forget(w, "S3", a, b)
 
 
 @test("input.wdpda_port_full", "On a full port a newcomer replaces a device heard only once but never a saved one: it is refused until one is forgotten; the first heard keeps the label", needs=["wcb1"])
@@ -1828,44 +1840,43 @@ def wdpda_port_full(bench):
     tag = marker()[3:7]
     names = [f"HILF{i}{tag}" for i in range(5)]
     lines = [f'@WDP1 {{"type":"{n}","fw":"{i}"}}\n'.encode() for i, n in enumerate(names)]
-    try:
-        prime(s4)
-        time.sleep(0.3)
-        m = w.dev.mark()
-        for i in range(3):                             # three saved devices...
-            s4.send(lines[i])
+    with _port_unlabelled(bench, w, "S4"):
+        try:
+            prime(s4)
             time.sleep(0.3)
-            s4.send(lines[i])
-            w.dev.expect(rf"^\[WDP-DA\] S4: {names[i]} saved$", timeout=3, since=m)
-        s4.send(lines[3])                              # ...and one heard once fill the port
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} fw 3$", timeout=3, since=m)
-        m = w.dev.mark()
-        s4.send(lines[4])                              # a newcomer may only replace the heard-once one
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} dropped, port full \(4 devices\)$", timeout=3, since=m)
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[4]} fw 4$", timeout=3, since=m)
-        s4.send(lines[4])
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[4]} saved$", timeout=3, since=m)
-        m = w.dev.mark()
-        s4.send(lines[3])                              # four saved: refused, and said only once
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} not added: port full", timeout=3, since=m)
-        s4.send(lines[3])
-        # Each confirm above re-armed the 1 s wdp_da save (WCB_WDP.cpp:846), so the last one's lands in this sleep, with
-        # S4 idle. Slow this test down and it can land under an announce and garble it (DA_SAVE_SETTLE_S).
-        time.sleep(1.0)
-        refusals = [x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S4: {names[3]} not added")]
-        assert len(refusals) == 1, f"the refusal repeated: {refusals}"
-        assert _da_types(w, "S4") == [names[0], names[1], names[2], names[4]], f"?WDP,DA: {_da_rows(w)}"
-        w.run(f"?WDP,DA,FORGET,S4,{names[1]}")
-        m = w.dev.mark()
-        s4.send(lines[3])                              # a free slot again
-        w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} fw 3$", timeout=3, since=m)
-        assert _da_types(w, "S4") == [names[0], names[2], names[4], names[3]], f"?WDP,DA: {_da_rows(w)}"
-        if not _unlabelled(bench, "S4"):
-            raise Skip("record checks passed; the port-label check needs W1 S4 unlabelled")
-        dump = w.run("?WDP,DUMP", timeout=8)
-        assert _has(dump, f"[WDPIF:N={me},S=4,DEV={names[0]}]"), f"S4's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
-    finally:
-        _da_forget(w, "S4", *names)
+            m = w.dev.mark()
+            for i in range(3):                             # three saved devices...
+                s4.send(lines[i])
+                time.sleep(0.3)
+                s4.send(lines[i])
+                w.dev.expect(rf"^\[WDP-DA\] S4: {names[i]} saved$", timeout=3, since=m)
+            s4.send(lines[3])                              # ...and one heard once fill the port
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} fw 3$", timeout=3, since=m)
+            m = w.dev.mark()
+            s4.send(lines[4])                              # a newcomer may only replace the heard-once one
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} dropped, port full \(4 devices\)$", timeout=3, since=m)
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[4]} fw 4$", timeout=3, since=m)
+            s4.send(lines[4])
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[4]} saved$", timeout=3, since=m)
+            m = w.dev.mark()
+            s4.send(lines[3])                              # four saved: refused, and said only once
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} not added: port full", timeout=3, since=m)
+            s4.send(lines[3])
+            # Each confirm above re-armed the 1 s wdp_da save (WCB_WDP.cpp:846), so the last one's lands in this sleep, with
+            # S4 idle. Slow this test down and it can land under an announce and garble it (DA_SAVE_SETTLE_S).
+            time.sleep(1.0)
+            refusals = [x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S4: {names[3]} not added")]
+            assert len(refusals) == 1, f"the refusal repeated: {refusals}"
+            assert _da_types(w, "S4") == [names[0], names[1], names[2], names[4]], f"?WDP,DA: {_da_rows(w)}"
+            w.run(f"?WDP,DA,FORGET,S4,{names[1]}")
+            m = w.dev.mark()
+            s4.send(lines[3])                              # a free slot again
+            w.dev.expect(rf"^\[WDP-DA\] S4: {names[3]} fw 3$", timeout=3, since=m)
+            assert _da_types(w, "S4") == [names[0], names[2], names[4], names[3]], f"?WDP,DA: {_da_rows(w)}"
+            dump = w.run("?WDP,DUMP", timeout=8)
+            assert _has(dump, f"[WDPIF:N={me},S=4,DEV={names[0]}]"), f"S4's label is not the first-heard type: {[x for x in dump if x.startswith('[WDPIF')]}"
+        finally:
+            _da_forget(w, "S4", *names)
 
 
 @test("input.wdpda_shared_ttl", "Devices on a shared port go quiet one at a time; a quiet one keeps its place and the port's label (~100 s)", needs=["wcb1"])
@@ -1877,41 +1888,40 @@ def wdpda_shared_ttl(bench):
     a, b = "HILTA" + marker()[3:7], "HILTB" + marker()[3:7]
     la = f'@WDP1 {{"type":"{a}"}}\n'.encode()
     lb = f'@WDP1 {{"type":"{b}"}}\n'.encode()
-    try:
-        prime(s5)
-        time.sleep(0.3)
-        m = w.dev.mark()
-        s5.send(la)
-        w.dev.expect(rf"^\[WDP-DA\] S5: {a}$", timeout=3, since=m)
-        s5.send(la)                                   # saved; A's last announce
-        t0 = time.monotonic()
-        w.dev.expect(rf"^\[WDP-DA\] S5: {a} saved$", timeout=3, since=m)
-        time.sleep(30)
-        s5.send(lb)
-        w.dev.expect(rf"^\[WDP-DA\] S5: {b}$", timeout=3, since=m)
-        s5.send(lb)
-        w.dev.expect(rf"^\[WDP-DA\] S5: {b} saved$", timeout=3, since=m)
-        next_b, gone = time.monotonic() + 20, None
-        while gone is None and time.monotonic() - t0 < 110:
-            if time.monotonic() >= next_b:
-                s5.send(lb)   # only the first device goes quiet
-                next_b += 20
-            gone = next((x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S5: {a} stopped announcing")), None)
-            time.sleep(0.25)
-        elapsed = time.monotonic() - t0
-        assert gone, f"{a} did not go quiet within 110 s"
-        bench.note(f"first device on a shared port went quiet {elapsed:.1f} s after its only announce")
-        assert 88 <= elapsed <= 96, f"{a} went quiet {elapsed:.1f} s after its only announce, expected ~90"
-        assert not any(x.startswith(f"[WDP-DA] S5: {b} stopped") for x in w.dev.since(m)), f"{b} went quiet while it kept announcing"
-        assert _da_types(w, "S5") == [a, b], f"the quiet device lost its place: {_da_rows(w)}"
-        dump = w.run("?WDP,DUMP", timeout=8)
-        ra, rb = _da_row(dump, me, 5, a), _da_row(dump, me, 5, b)
-        assert ra and ",SEEN=0," in ra and rb and ",SEEN=1," in rb, f"SEEN flags: {ra} / {rb}"
-        if not _unlabelled(bench, "S5"):
-            raise Skip("record checks passed; the port-label check needs W1 S5 unlabelled")
-        assert _has(dump, f"[WDPIF:N={me},S=5,DEV={a}]"), "the quiet first-heard device no longer names S5"
-    finally:
-        _da_forget(w, "S5", a, b)
+    with _port_unlabelled(bench, w, "S5"):
+        try:
+            prime(s5)
+            time.sleep(0.3)
+            m = w.dev.mark()
+            s5.send(la)
+            w.dev.expect(rf"^\[WDP-DA\] S5: {a}$", timeout=3, since=m)
+            s5.send(la)                                   # saved; A's last announce
+            t0 = time.monotonic()
+            w.dev.expect(rf"^\[WDP-DA\] S5: {a} saved$", timeout=3, since=m)
+            time.sleep(30)
+            s5.send(lb)
+            w.dev.expect(rf"^\[WDP-DA\] S5: {b}$", timeout=3, since=m)
+            s5.send(lb)
+            w.dev.expect(rf"^\[WDP-DA\] S5: {b} saved$", timeout=3, since=m)
+            next_b, gone = time.monotonic() + 20, None
+            while gone is None and time.monotonic() - t0 < 110:
+                if time.monotonic() >= next_b:
+                    s5.send(lb)   # only the first device goes quiet
+                    next_b += 20
+                gone = next((x for x in w.dev.since(m) if x.startswith(f"[WDP-DA] S5: {a} stopped announcing")), None)
+                time.sleep(0.25)
+            elapsed = time.monotonic() - t0
+            assert gone, f"{a} did not go quiet within 110 s"
+            bench.note(f"first device on a shared port went quiet {elapsed:.1f} s after its only announce")
+            assert 88 <= elapsed <= 96, f"{a} went quiet {elapsed:.1f} s after its only announce, expected ~90"
+            assert not any(x.startswith(f"[WDP-DA] S5: {b} stopped") for x in w.dev.since(m)), f"{b} went quiet while it kept announcing"
+            assert _da_types(w, "S5") == [a, b], f"the quiet device lost its place: {_da_rows(w)}"
+            dump = w.run("?WDP,DUMP", timeout=8)
+            ra, rb = _da_row(dump, me, 5, a), _da_row(dump, me, 5, b)
+            assert ra and ",SEEN=0," in ra and rb and ",SEEN=1," in rb, f"SEEN flags: {ra} / {rb}"
+            assert _has(dump, f"[WDPIF:N={me},S=5,DEV={a}]"), "the quiet first-heard device no longer names S5"
+        finally:
+            _da_forget(w, "S5", a, b)
 
 
 @test("input.wdpda_persists_reboot", "Saved devices survive a reboot and reload as not heard, in order with every field; announcing brings one back, and a forget survives a reboot too", needs=["wcb1"])
