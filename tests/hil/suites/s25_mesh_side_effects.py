@@ -17,6 +17,7 @@ touches). Restore if aborted: W1 `?WDP,ON`, `?DEBUG,OFF`, `?MAESTRO,M2:W2S1:<its
 `?MAESTRO,CLEAR,M<n>` for any placeholder on WCB11+; on W2 `?MAESTRO,CLEAR,M1:W2S<p>` if it hosts a Maestro 1, then
 `?MAESTRO,CLEAR,M1:W2S1` on W1.
 """
+import json
 import re
 import time
 
@@ -470,7 +471,7 @@ def rc_relay_ota_pause(bench):
 RELAY_DROP = re.compile(r"\[RCBRG\] relay queue FULL \S+ dropped a JSON line \(total drops=(\d+)\)")
 
 
-@test("client_mesh.rc_relay_drops_counted", "With W1's RC relay window open, a mesh client's JSON flood (~150 Hz for 3 s) that lands while W1's loop prints ?HELP, ?backup and ?config overflows the 64-slot relay queue, and every drop prints '[RCBRG] relay queue FULL ... (total drops=N)' with N counting up by one: no relayed line twice, and relayed plus dropped account for what was sent, less a little air loss (~20 s)", needs=["wcb1", "probe2"], links=[])
+@test("client_mesh.rc_relay_drops_counted", "With W1's RC relay window open, a mesh client's JSON flood (~100 Hz for 3 s) that lands while W1's loop prints ?HELP, ?backup and ?config overflows the 64-slot relay queue, and every drop prints '[RCBRG] relay queue FULL ... (total drops=N)' with N counting up by one: no relayed line twice, and relayed plus dropped account for what was sent, less a little air loss (~20 s)", needs=["wcb1", "probe2"], links=[])
 def rc_relay_drops_counted(bench):
     """WCB-WP28 row 3 (wcb.rcrelay.queue_full_visible). enqueueRcJsonRelay increments rcJsonRelayDrops under a mux
     and prints the running total on every drop (WCB.ino:420-439), so the printed totals must be consecutive: a drop
@@ -491,12 +492,22 @@ def rc_relay_drops_counted(bench):
         wm = w.dev.mark()
         for cmd in ("?HELP", "?backup", "?config"):
             w.send(cmd)
-        sent, k, end = [], 0, time.monotonic() + 3.0
+        # Pipelined: waiting for each 'OK MBROADCAST' held the flood to ~18 Hz, which never filled the queue (the test
+        # skipped in every run). The probe answers each command in order, and its 4 KB input buffer holds the backlog.
+        pm, k, end = probe.dev.mark(), 0, time.monotonic() + 3.0
         while time.monotonic() < end:
-            if probe.mesh_broadcast(f'{{"hil":"{tag}","k":{k}}}', ensured=False):
-                sent.append(k)
+            probe.dev.send(f"MBROADCAST 0 {json.dumps({'hil': tag, 'k': k}, separators=(',', ':')).encode().hex().upper()}")
             k += 1
-            time.sleep(0.005)
+            time.sleep(0.010)     # ~100 Hz: at ~140 Hz the air and W1's driver lost 14 % uncounted (20261007-124459)
+        deadline = time.monotonic() + 5.0
+        answers = []
+        while time.monotonic() < deadline:
+            answers = [x for x in probe.dev.since(pm) if re.match(r"^(OK MBROADCAST [01]|ERR\b)", x)]
+            if len(answers) >= k:
+                break
+            time.sleep(0.1)
+        assert len(answers) == k, f"the probe answered {len(answers)} of {k} broadcast commands: {answers[-3:]}"
+        sent = [i for i, a in enumerate(answers) if a == "OK MBROADCAST 1"]
         w.run("?PEERSLIVE", timeout=30)
         time.sleep(2.0)
         lines = w.dev.since(wm)
