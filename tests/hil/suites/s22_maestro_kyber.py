@@ -2388,7 +2388,8 @@ def local_targets_one_write_per_port(bench):
     forwardDataFromKyber (WCB.ino) scopes a per-port mask to each byte: in targeted mode two enabled targets on one local
     port write the byte once, and in broadcast mode it walks the local Maestro slots once per PORT. Daisy-chained
     Maestros share a line, so a byte written twice garbles every frame. ?KYBER,LOCAL,S2 with the explicit targets
-    M1:W1S1 and M3:W1S1 puts a second local id (M3) on S1 - WDP is off, so it is never advertised - and names no remote
+    M1:W1S1 and M<x>:W1S1 puts a second local id on S1 (x, the first of 3-8 W1 does not use: the bench's W1 has proxies
+    for 3 and 4) - WDP is off, so it is never advertised - and names no remote
     target, so the targeted arm sends nothing to the mesh. The bare ?KYBER,LOCAL after it switches to broadcast mode
     live (kyber.local_mode_s2), which also broadcasts the bytes: they stay below 0x80, and Maestro 2's error flags are
     read at the end."""
@@ -2401,8 +2402,9 @@ def local_targets_one_write_per_port(bench):
     with config_guard(bench, 1) as before:
         lines = _m_lines(before[1])
         _require_replayable(lines)
-        if len(lines) > 8 or any(re.match(r"^\?MAESTRO,M3:", t, re.I) for t in lines):
-            raise Skip("W1 needs a free slot and no Maestro 3")
+        x = next((d for d in range(3, 9) if not any(re.match(rf"^\?MAESTRO,M{d}:", t, re.I) for t in lines)), None)
+        if len(lines) > 8 or x is None:
+            raise Skip("W1 needs a free slot and a Maestro id from 3 to 8 it does not use")
         shared = [t for t in lines if re.match(r"^\?MAESTRO,M[2-9]:W1S1:", t, re.I)]
         if shared:
             raise Skip(f"W1 S1 already carries more Maestros than M1: {shared}")
@@ -2412,13 +2414,13 @@ def local_targets_one_write_per_port(bench):
         ports = _port_tokens(before[1], "S1") + _port_tokens(before[1], "S2")
         with _wdp_off(w, before[1]):
             try:
-                out = w.run(f"?KYBER,LOCAL,S2,M1:W1S1:{b1},M3:W1S1:{b1}", timeout=8)
+                out = w.run(f"?KYBER,LOCAL,S2,M1:W1S1:{b1},M{x}:W1S1:{b1}", timeout=8)
                 if _has(out, "Cannot set Kyber LOCAL"):
                     raise Skip(f"W1 S2 cannot take the Kyber: {out}")
                 problems = _in_order(out, ["Kyber is LOCAL on Serial2", f"Kyber target 1: Maestro 1 → WCB1 S1 ({b1} baud)",
                                            f"✓ Maestro 1: Local S1 at {b1} baud (slot",
-                                           f"Kyber target 2: Maestro 3 → WCB1 S1 ({b1} baud)",
-                                           f"✓ Maestro 3: Local S1 at {b1} baud (slot",
+                                           f"Kyber target 2: Maestro {x} → WCB1 S1 ({b1} baud)",
+                                           f"✓ Maestro {x}: Local S1 at {b1} baud (slot",
                                            "Kyber local with targeted forwarding configured"], "LOCAL,S2 with two targets on S1")
                 if problems:
                     raise AssertionError(problems[0])
@@ -2427,7 +2429,7 @@ def local_targets_one_write_per_port(bench):
                 if not _has(boot, "Kyber_Local Task Created") or _has(boot, "Maestro_Remote Task Created"):
                     raise AssertionError("the reboot did not start the Kyber_Local task in place of Maestro_Remote")
                 targets = [x for x in _kyber_list(w) if re.match(r"^  Maestro \d → WCB\d+ S\d$", x)]
-                if targets != ["  Maestro 1 → WCB1 S1", "  Maestro 3 → WCB1 S1"]:
+                if targets != ["  Maestro 1 → WCB1 S1", f"  Maestro {x} → WCB1 S1"]:
                     raise AssertionError(f"setup: the Kyber targets are {targets}")
                 s1.listen()
                 s2.listen(115200)

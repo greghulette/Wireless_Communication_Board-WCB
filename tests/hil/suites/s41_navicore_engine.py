@@ -710,23 +710,40 @@ def skip_running_fail_open(bench):
 
 
 def _servo_channel(nc, cfg):
-    """(slot, device, channel, position) of a local Maestro channel no passthrough knob drives, reading a servo
-    position well inside 1000-2000 us (4400-7600 quarter-us), so a 100 us step stays in range; Skip otherwise."""
+    """(slot, device, channel, position, seeded) of a local Maestro channel no passthrough knob drives, reading a servo
+    position well inside 1000-2000 us (4400-7600 quarter-us), so a 100 us step stays in range. When none holds one - a
+    Maestro's channels have no target after power-up, and this bench's undriven ones never get one, so the test skipped
+    in every run - the highest undriven channel the Maestro answers for is given 6000 (1500 us) first. The Maestro
+    reports the position it drives, not a servo's, so nothing need be attached there, and the highest channel is the
+    least likely to have anything. seeded is the position that channel read before (0, no target), to put back; None
+    when the channel already held one. Skip when the Maestro answers for no undriven channel."""
+    spare = []
     for slot, dev in nc.local_slots(cfg):
         driven = {o.get("maestroCh") for k in (cfg.get("knobs") or {}).values() if k.get("function") == 1
                   for key in ("outputs", "outputs2", "outputs3") for o in (k.get(key) or []) if o.get("target") == slot}
         for ch in sorted(set(range(24)) - driven):
             pos = nc.mae_get(slot, ch)
             if isinstance(pos, int) and 4400 <= pos <= 7600:
-                return slot, dev, ch, pos
+                return slot, dev, ch, pos, None
             if not isinstance(pos, int):
                 break
-    raise Skip("no undriven local Maestro channel reads a servo position between 4400 and 7600")
+            if pos == 0:
+                spare.append((slot, dev, ch))
+    # A channel the Maestro does not have also reads 0 and ignores a target (this bench's is a Mini Maestro 12: 12-23 do),
+    # so each spare is tried from the highest down. A channel with no target jumps straight to its first one.
+    for slot, dev, ch in reversed(spare):
+        nc.test_action({"type": "maestro", "target": str(slot), "cmd": f"setTarget,{ch},6000", "skipRunning": False})
+        time.sleep(0.4)
+        if nc.mae_get(slot, ch) == 6000:
+            return slot, dev, ch, 6000, 0
+        nc.test_action({"type": "maestro", "target": str(slot), "cmd": f"setTarget,{ch},0", "skipRunning": False})
+    raise Skip("no undriven local Maestro channel reads a servo position between 4400 and 7600, or takes one")
 
 
 @test("ncengine.maestro_skip_running_slot", "skipRunning on a Maestro action: on NaviCore's local Maestro a gated "
       "action is skipped while a slow move runs and goes once it has stopped; on a remote slot nobody answers for, the "
-      "gate asks, fails open and the frame reaches W1 S1 (moves one dome servo 100 us, slowly, and back)",
+      "gate asks, fails open and the frame reaches W1 S1 (moves one Maestro channel 100 us, slowly, and back; a channel "
+      "with no target is given 1500 us first and turned off after)",
       needs=["navicore", "wcb1"], links=["W1S1"])
 def maestro_skip_running_slot(bench):
     """maestroSequenceBusy (NaviCore.ino:873-900): a LOCAL slot asks the Maestro (getMovingState on Serial2, cached for
@@ -742,7 +759,7 @@ def maestro_skip_running_slot(bench):
     l11 = link(bench, 1, "S1")
     nc = _nc(bench)
     cfg = nc.config()
-    slot, _, ch, p0 = _servo_channel(nc, cfg)
+    slot, _, ch, p0, seeded = _servo_channel(nc, cfg)
     rslot, rdev = _remote_slot(cfg)
     p1 = p0 + 400 if p0 <= 6000 else p0 - 400
     problems = []
@@ -788,9 +805,13 @@ def maestro_skip_running_slot(bench):
             nc.test_action(act(f"setTarget,{ch},{p0}", False))
             settle()
             nc.test_action(act(f"setSpeed,{ch},0", False))
+            if seeded is not None:
+                nc.test_action(act(f"setTarget,{ch},{seeded}", False))    # no target again, as it was found
     back = nc.mae_get(slot, ch)
-    bench.note(f"slot {slot} ch {ch}: {p0} -> {p1} -> {p0} at speed 4, then speed 0; reads {back}")
-    assert back == p0, f"channel {ch} reads {back}, not its starting {p0}"
+    start = p0 if seeded is None else seeded
+    bench.note(f"slot {slot} ch {ch}: {p0} -> {p1} -> {p0} at speed 4, then speed 0"
+               f"{'' if seeded is None else f', then {seeded} (it had no target before the test)'}; reads {back}")
+    assert back == start, f"channel {ch} reads {back}, not its starting {start}"
     assert not problems, "; ".join(problems)
 
 
