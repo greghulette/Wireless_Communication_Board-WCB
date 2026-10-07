@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_070853ROCT2026                                  *****////
+///*****                                          Version 6.2.1_070910ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_070853ROCT2026";
+String SoftwareVersion = "6.2.1_070910ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5470,11 +5470,11 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     // packet (not just heartbeats). Otherwise if heartbeats are dropped
     // but commands flow, etmAddToPendingTable would skip the peer for
     // ACK-pending tracking, leaving our unicast sends to it un-retried.
+    bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
     if (wcbPeerActive[senderIdx] || isSpecialPeer) {
       // WiFi task, core 0: the loop() sweep clears the same pair on core 1, so both stores and
       // the edge test go through boardTableMux (boardMarkSeen); the print stays outside it (#80).
       bool wasOffline     = boardMarkSeen(senderIdx);
-      bool isBootAnnounce = (etmReceived.structPacketType == PACKET_TYPE_ETM_BOOT);
       // A boot announce always re-prints "came ONLINE" (even if we still thought
       // the board was up) so the wizard re-establishes the relay session after a
       // reboot too fast to have crossed our offline threshold (e.g. an OTA).
@@ -5485,17 +5485,23 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                        info->src_addr[0], info->src_addr[1], info->src_addr[2],
                        info->src_addr[3], info->src_addr[4], info->src_addr[5]);
       }
-      // A rebooted peer restarts its sequence counter at 1, but our duplicate ring still holds
-      // the seqs it used before the reboot — so its first commands matched a "already seen" entry
-      // and were ACKed and then silently NOT executed. Clear this sender's history on a boot
-      // announce so the reused low seqs are treated as new.
-      // Once per boot: a board sends three announces ~1.2 s apart, and clearing on each one would let the retry of a
-      // command it sent between them (ACK lost) run a second time. Later announces within 4 s are presence only.
-      if (isBootAnnounce && (etmBootClearMs[senderIdx] == 0 || millis() - etmBootClearMs[senderIdx] > 4000)) {
-        for (int h = 0; h < ETM_SEQ_HISTORY; h++) etmSeqHistory[senderIdx][h] = 0;
-        etmSeqHistoryIdx[senderIdx] = 0;
-        etmBootClearMs[senderIdx] = millis() | 1;
-      }
+    }
+
+    // A rebooted sender restarts its sequence counter at 1, but our duplicate ring still holds
+    // the seqs it used before the reboot — so its first commands matched a "already seen" entry
+    // and were ACKed and then silently NOT executed. Clear this sender's history on a boot
+    // announce so the reused low seqs are treated as new.
+    // Whether or not we count the sender as a peer right now: its commands are deduplicated (and run) either way, and
+    // a temporary client re-joining under the same id is re-adopted only when its WDP advert is digested, which can
+    // land after all three of its announces. Gated on the peer, W1 kept a re-joined probe's old seqs and dropped two of
+    // its first four commands (client_mesh.rejoin_seq_reuse, run 20261007-090301). The password and the id-to-MAC
+    // binding above already vouch for the sender, and this runs on the WiFi task like the ring's other users.
+    // Once per boot: a board sends three announces ~1.2 s apart, and clearing on each one would let the retry of a
+    // command it sent between them (ACK lost) run a second time. Later announces within 4 s are presence only.
+    if (isBootAnnounce && (etmBootClearMs[senderIdx] == 0 || millis() - etmBootClearMs[senderIdx] > 4000)) {
+      for (int h = 0; h < ETM_SEQ_HISTORY; h++) etmSeqHistory[senderIdx][h] = 0;
+      etmSeqHistoryIdx[senderIdx] = 0;
+      etmBootClearMs[senderIdx] = millis() | 1;
     }
 
     // WDP discovery advert, or a WDP-DA device-list frame — presence already refreshed

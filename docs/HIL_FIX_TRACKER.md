@@ -35,6 +35,8 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-10-07 | **#11**'s residual race seen (`client_mesh.rejoin_seq_reuse`, `20261007-090301`: W1 re-adopted a re-joined probe after its three boot announces and dropped two commands as duplicates) and FIXED (unverified): a boot announce now clears the sender's duplicate ring whether or not it is a peer yet. |
+| 2026-10-07 | **#111** decided (Greg: two WebSocket sessions) and FIXED (unverified): `48da52a`, `WS_MAX_CLIENTS` 3 to 2, flashed on W1-W3 as `6.2.1_070853ROCT2026`. Not measured yet: that needs a PC on W1's access point (the Windows PC, or the Mac's TP-Link moved there). |
 | 2026-09-29 | Filed **#110** (a PC waits up to 47 s for a lease on W1's access point) and **#111** (with an access point up the heap's low-water mark reaches 76 bytes on W1 and 240 on W2), both found writing WCB-WP22 (`20260929-055154`, `-055837`). |
 | 2026-09-29 | Filed **#109** (a relayed STATS, ETM,CHAR or sequence reply is sent once; NC-WP6's first bench run lost an ETM,CHAR reply to the load it had started). |
 | 2026-09-29 | Run `20260929-023811` on `6.2.1_290236RSEP2026` (29 pass, 1 known skip): **#108** VERIFIED; the pacing retune (D54) passes `kyber.*` with no frame given up and the whole `etm.seq_wrap` flood; the four other fixes from `20260928-220200` pass. |
@@ -332,7 +334,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | | |
 |---|---|
-| **Status** | VERIFIED — client_mesh.rejoin_seq_reuse PASS on the bench (20260922-125537) |
+| **Status** | VERIFIED — client_mesh.rejoin_seq_reuse PASS on the bench (20260922-125537); the residual race below FIXED (unverified) 2026-10-07 |
 | **Owner** | `unclear` |
 | **Effort** | M |
 | **Tests** | `client_mesh.rejoin_seq_reuse` |
@@ -347,6 +349,9 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 **Fix.** In the WCBClient repo: add `_sendBootAnnounce()` as a copy of `_sendHeartbeat()` (WCB_Client.cpp:1800-1815) with `structPacketType = WCB_PACKET_ETM_BOOT` and `structSequenceNumber = 0`, and send it redundantly in the first seconds after begin() — mirror the firmware exactly: 3 announces ~1200 ms apart (WCB.ino:1096-1105, `etmBootAnnouncesLeft` / 1200 ms; broadcast is unacknowledged, which is why it is sent more than once). Drive it from update() with a counter+deadline pair like the firmware's, not from begin(), so it does not block the join. Belt-and-braces second half: seed `_seqCounter` from `esp_random()` at WCB_Client.cpp:77 instead of 0 (keeping the skip-0 rule at 2183-2184) so a host whose announce is lost still misses the stale ring by ~65535/8. Do NOT try to fix this on the WCB side — the failing case leaves the peer continuously registered (the probe rejoined inside the 50 s temporary-peer TTL, so addTemporaryPeer's `!esp_now_is_peer_exist` branch at WCB.ino:7741 never re-runs), and WDP carries no boot or session counter, so the firmware has no signal to clear on.
 
 **Risk.** The announce only clears the ring when the WCB already treats the sender as a peer (`wcbPeerActive[senderIdx] || isSpecialPeer`, WCB.ino:4281) — three spaced announces cover the case where the first arrives before the WDP advert is digested; consider also re-announcing once the first WCB heartbeat is heard. A client in a crash loop announcing more often than every 4 s will clear the ring repeatedly, which could let a genuine in-flight retry double-fire — the 4 s hold at WCB.ino:4301 bounds it, and WCBs already carry the identical exposure. Cross-repo release discipline applies: push WCBClient master, sync Arduino-Code/libraries/WCB_Client (it shadows locally), then rebuild NaviCore and tests/hil/wcb_probe.
+
+
+**The residual race, seen 2026-10-07 (run `20261007-090301`).** The Risk above happened: the probe re-joined as WCB18 and W1 re-adopted it as a temporary peer at its next digested WDP advert, about 3 s after the join, after all three boot announces. The announces were ignored (the ring clear sat inside `wcbPeerActive[senderIdx] || isSpecialPeer`), so session B's seqs 2 and 3 matched session A's and were ACKed and not run (`[1, 0, 0, 1]`); W2, which adopted it in time, printed the `(boot)` line. A command needs no peer status to run, so the ring is now cleared on any sender's boot announce, after the password and the id-to-MAC check (`espNowReceiveCallback`, `WCB.ino`). It had passed in the six runs before.
 
 
 #### 12. A remote ?reboot ACKs and then destroys every command queued behind it — the CLAUDE.md rule-11 trap, still live in four places
@@ -2381,7 +2386,7 @@ or phone to the droid waits this long too, which reads as "the access point is b
 
 | | |
 |---|---|
-| **Status** | TODO - needs a decision |
+| **Status** | FIXED (unverified) - `48da52a`: two WebSocket clients at once (Greg's call, 2026-10-07) |
 | **Owner** | `WCB_firmware` (`WCB_WS.cpp`, `WCB_WiFi.cpp`) |
 | **Effort** | M |
 | **Tests** | none asserts it; every `wifi_pc` test notes W1's `Free heap` line after the PC leaves (`_left_clean`, s28) |
@@ -2402,6 +2407,15 @@ aborted the board before (#102).
 receive buffers, the WebSocket sockets). Then: fewer WebSocket clients (`WS_MAX_CLIENTS` 3 to 1 or 2) and a smaller
 static receive buffer; fewer AP stations (`max_conn` 4); or static WiFi buffers, which need a custom ESP-IDF build of
 the Arduino core.
+
+**Decision (Greg, 2026-10-07): two sessions.** `48da52a` sets `WS_MAX_CLIENTS` to 2 (`WCB_WS.cpp`), which is
+also httpd's `max_open_sockets`; a third client still connects and the least recently used session is closed
+for it. Each session saves its 1.5 KB static accumulator and its socket, TCP and httpd state while open. The
+AP-station limit and the WiFi buffers are unchanged. After the flash W1 read 19,268 bytes free with the AP up
+and nobody attached (low-water 18,224). Still to measure, with a PC on W1's access point: where the transient
+goes and how low two sessions take it (`ws.backup_over_ws`, `ws.client_slots`). Full run `20261006-235930`
+showed W1's low-water at 1,248 bytes with no PC on its access point at all, so the sessions are not the only
+cause.
 
 #### 112. A WCB's ESP-NOW transmit can stall for good after a load, until a reboot
 
