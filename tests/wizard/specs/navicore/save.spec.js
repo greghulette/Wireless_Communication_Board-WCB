@@ -172,7 +172,7 @@ test.describe(() => {
     expect(order.slice(-2)).toEqual(['RESET_DEFAULTS', 'GET_CONFIG']);
     expect(await T.toasts(page)).not.toContainEqual(expect.stringContaining('Reset to factory defaults'));
     emu.release('GET_CONFIG');
-    await expect.poll(() => T.toasts(page)).toContainEqual('✓Reset to factory defaults');
+    await expect.poll(() => T.toasts(page)).toContainEqual('✓Reset to factory defaults — Save to keep it on NaviCore');
     expect(await page.evaluate(() => Object.keys(config.mappings).length), 'the defaults (no mappings) are loaded').toBe(0);
     // No CONFIG after a reset: the watchdog says so instead of claiming success.
     emu.hold.add('GET_CONFIG');
@@ -191,6 +191,31 @@ test.describe(() => {
     expect(dialogs.at(-1)).toMatchObject({ type: 'alert' });
     expect(dialogs.at(-1).message).toContain('Restore Defaults needs a direct USB connection');
     expect(emu.rx.slice(before).filter((r) => /RESET_DEFAULTS/.test(r.line))).toEqual([]);
+    T.expectNoPageErrors(page);
+  });
+
+  test('nctool.reset_defaults_needs_save (should) After Restore Defaults the reset stays unsaved until Save stores it: Save sends the defaults instead of answering "No changes to save" (D-NC74)', async ({ page, emu }) => {
+    // RESET_DEFAULTS is RAM only on NaviCore (the emulator too): /config.json keeps the old config until a Save. The tool
+    // took the reset as its baseline, so an unedited Save said "No changes to save" and the reset was gone at the next
+    // reboot. Now the stored config stays the baseline and the reset is a change to save.
+    T.answerDialogs(page, [true]);
+    await T.openTool(page);
+    await T.connectUsb(page, emu);
+    expect(await page.evaluate(() => Object.keys(config.mappings).length), 'the emulator starts with mappings, so the reset changes something').toBeGreaterThan(0);
+    await page.locator('#btn-hwsetup').click();
+    await page.locator('#btn-defaults').click();
+    await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Reset to factory defaults'));
+    expect(await page.evaluate(() => _configUnsaved()), 'the reset is not stored on NaviCore yet').toBe(true);
+    await expect(page.locator('#push-budget')).not.toHaveText('No changes to save');
+    await page.locator('#btn-hwsetup-save').click();
+    const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
+    // A diff-save clears a deleted button as {} (the firmware leaves an absent key untouched, _diffMappings).
+    const cleared = Object.values(sent.data.mappings || {});
+    expect(cleared.length, 'Save clears every button the stored config mapped').toBeGreaterThan(0);
+    expect(cleared.every((m) => Object.keys(m).length === 0), 'each one as {}').toBe(true);
+    await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Config saved to NaviCore'));
+    expect(await T.toasts(page)).not.toContainEqual(expect.stringContaining('No changes to save'));
+    expect(await page.evaluate(() => _configUnsaved())).toBe(false);
     T.expectNoPageErrors(page);
   });
 

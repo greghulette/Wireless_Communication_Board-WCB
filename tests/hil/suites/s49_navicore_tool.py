@@ -74,6 +74,7 @@ _L1 = (
     ("save_diff_payload", "An edit typed into General is the only thing Save sends; the hold clamp matches the firmware; a second Save sends nothing"),
     ("save_ack_correlation", "A NACK and a 12 s silence leave the baseline alone, an overlapping Save is refused, a stale saveId is ignored, an ACK with no saveId still counts"),
     ("reset_defaults_flow", "Restore Defaults asks, sends RESET_DEFAULTS then GET_CONFIG, reports success only once the CONFIG is in, warns after 12 s without one, and refuses over the bridge"),
+    ("reset_defaults_needs_save", "(should) After Restore Defaults the reset stays unsaved until Save stores it: Save sends the defaults instead of answering 'No changes to save' (D-NC74)"),
     ("refresh_overwrites_edits", "(should) Refresh with unsaved edits asks first; declined, the edit stays and nothing is re-read (D-NC31)"),
     ("close_prompt", "Closing Config prompts only for edits made in that window and not yet on the board: Cancel keeps them unsaved, OK saves"),
     ("push_budget_prediction", "The Config footer predicts the bridged Save: a single packet for a small edit, and exactly as many fragments as the Save sends"),
