@@ -222,6 +222,13 @@ TCP buffers and httpd's session state. With the AP up a classic ESP32 has about 
 of heap, and with three sessions a `?backup` streamed to them took it to within 48 bytes
 of empty (HIL tracker #111). It was three until 2026-10-07.
 
+**A client that leaves without closing is let go at once** (HIL tracker #113). A phone out of range or a PC moved
+to another network leaves its socket open while TCP retries it, and everything teed to it waits in lwIP, up to a
+TCP send buffer (~5.7 KB) per session. So a failed send closes the session (`httpd_sess_trigger_close`), not just
+the tee; `wsClose` resets the socket (`SO_LINGER` 0) so its buffers are freed at once; when the AP's last station
+leaves, every session from the AP's /24 is closed on the next `loop()`; and httpd's send timeout, which a send to a
+gone client blocks `loop()` for, is 2 s.
+
 **AP address: the stock `192.168.4.1`. Do not call `softAPConfig()`.**
 
 The plan was `192.168.4.<board number>`, so a host could tell a WCB from a NaviCore
@@ -376,6 +383,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-07 | `41ce60b` | §6a: a WebSocket client that leaves without closing is let go at once - closed on a failed send and when the AP's last station leaves, reset so lwIP frees its buffers; send timeout 2 s (HIL tracker #113). |
 | 2026-10-07 | `48da52a` | §6a: two WebSocket clients at once, not three (HIL tracker #111, Greg's call); a third evicts the least recently used. The memory section no longer reads the old 110 KB `ESP.getFreeHeap()` figure, which counted the IRAM heap, as headroom. |
 | 2026-09-28 | `e55ba82` | §2: JOIN reads its association and the AP's channel from the driver, not `WiFi.status()` and the radio's momentary channel, cancels the core's forced reconnect on a loss, and starts over after 20 s associated without an address (tracker #103: the lost network was never noticed and never rejoined). |
 | 2026-09-28 | `5770675` | §2: JOIN scans the mesh channel alone before each `WiFi.begin` (tracker #103): the channel argument was only the start of the driver's connect scan, which swept the band while the AP was absent. §3's retry line follows. |

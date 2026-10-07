@@ -260,5 +260,6 @@
         "navicore.bench_health"
       ]
     }
-  ]
+  ],
+  "wifi_switch": "realtek"
 }

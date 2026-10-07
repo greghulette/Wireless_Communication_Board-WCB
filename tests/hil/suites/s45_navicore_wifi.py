@@ -298,6 +298,18 @@ def data_line(offset=1048576):
 
 
 # ------------------------------------------------------------------ the PC on NaviCore's access point
+def navicore_home(bench):
+    """Where the Mac's spare adapter rests between tests, for pc_on_ap's home= (hil/wlan.py realtek_on_ap): (NaviCore's
+    SSID, "NaviCore's", its identify), or None when NaviCore is not on this bench or hosts no access point."""
+    if "navicore" not in (bench.cfg.get("devices") or {}):
+        return None
+    try:
+        ap = ap_of(_nc(bench).config())
+    except AssertionError:
+        return None
+    return None if ap is None else (ap[0], "NaviCore's", _navicore_ap(bench))
+
+
 @contextmanager
 def _on_ap(bench, problems):
     """The PC on NaviCore's access point for the block (hil/wlan.py pc_on_ap, a spare adapter only, D-NC14) -> (nc,

@@ -35,9 +35,11 @@ from hil.runner import Skip, test
 from hil.wcb import WCB
 from hil.wlan import default_routes as _default_routes
 from hil.wlan import pc_on_ap as _pc_on_ap
+from hil.wlan import realtek_enabled as _realtek_enabled
 from hil.ws import WsClient
 from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 from suites.s03_wcb import _w2_online
+from suites.s45_navicore_wifi import navicore_home as _navicore_home
 
 
 def _has(lines, text):
@@ -62,10 +64,10 @@ def _wifi_token(tokens):
     return t, mode, ssid, pw
 
 
-def _status(w):
+def _status(w, timeout=5.0):
     """The ?WIFI block as {label: value} ('Mode', 'Interface', 'IP address', 'Radio channel', 'WS endpoint', ...)."""
     out = {}
-    for x in w.run("?WIFI"):
+    for x in w.run("?WIFI", timeout=timeout):
         m = re.match(r"^([A-Za-z][A-Za-z ]*?)\s+: (.*)$", x.rstrip())
         if m:
             out[m.group(1)] = m.group(2)
@@ -582,9 +584,12 @@ def join_absent_ssid_keeps_mesh(bench):
 @contextlib.contextmanager
 def _pc_on_w1_ap(bench, problems):
     """The PC on W1's access point for the block (_pc_on_ap) -> (w, W1's address, the adapter's name). Skip unless W1
-    hosts a named, password-protected access point that is up with its WebSocket endpoint running."""
-    if os.name != "nt":
-        raise Skip("netsh (Windows) drives the PC's WiFi here")
+    hosts a named, password-protected access point that is up with its WebSocket endpoint running. Off Windows only
+    with bench.json "wifi_switch": "realtek" (hil/wlan.py realtek_on_ap): the Mac's spare adapter is moved to W1's
+    access point, proved W1's by a ;S0 marker that comes out on W1's USB (_w1_identify), and put back on NaviCore's
+    (navicore_home) afterwards."""
+    if os.name != "nt" and not _realtek_enabled(bench):
+        raise Skip("netsh (Windows) drives the PC's WiFi here; off Windows set bench.json wifi_switch to realtek")
     w = usb_wcb(bench)
     _, mode, ssid, pw = _wifi_token(bench.config_tokens(1, refresh=True))
     if mode != "AP" or not pw or not ssid:
@@ -593,8 +598,33 @@ def _pc_on_w1_ap(bench, problems):
     if st.get("Interface") != "up" or not st.get("WS endpoint", "").startswith("ws://"):
         raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
     ip = st.get("IP address", "")
-    with _pc_on_ap(bench, problems, ssid, pw, "W1's") as name:
+    with _pc_on_ap(bench, problems, ssid, pw, "W1's", identify=_w1_identify(w), home=_navicore_home(bench)) as name:
         yield w, ip, name
+
+
+def _w1_identify(w):
+    """pc_on_ap's identify for W1's access point: None when a ;S0 marker sent to ws://192.168.4.1/ws through the
+    adapter comes out on W1's own USB console, else what happened instead. Every board's access point is 192.168.4.1,
+    and NaviCore's endpoint takes the same connect: only W1's console can say it was W1."""
+    def identify(name):
+        try:
+            c = WsClient("192.168.4.1", timeout=4.0)
+        except OSError as e:
+            return f"ws://192.168.4.1/ws took no connect ({e})"
+        try:
+            mk = marker("AP")
+            m = w.dev.mark()
+            c.send_text(f";S0,{mk}\n")
+            try:
+                w.dev.expect(rf"^{mk}", timeout=3, since=m)
+                return None
+            except AssertionError:
+                return "a ;S0 marker sent to ws://192.168.4.1/ws never came out on W1's console"
+        except OSError as e:
+            return f"the socket to 192.168.4.1 failed ({e})"
+        finally:
+            c.close()
+    return identify
 
 
 def _ws_open(ip, wait=15.0):
@@ -630,8 +660,8 @@ def _ws_quiet(ws, quiet=1.5, cap=20.0):
 WS_MAX_CLIENTS = 2      # WCB_WS.cpp: httpd's max_open_sockets with LRU purge; 3 until tracker #111 (2026-10-07)
 
 
-def _ws_client_count(w):
-    m = re.search(r"\((\d+) client\(s\) connected\)$", _status(w).get("WS endpoint", ""))
+def _ws_client_count(w, timeout=5.0):
+    m = re.search(r"\((\d+) client\(s\) connected\)$", _status(w, timeout).get("WS endpoint", ""))
     return int(m.group(1)) if m else None
 
 
@@ -797,6 +827,72 @@ def ws_backup_over_ws(bench):
             ws.close()
     _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)
+
+
+def _heap_free(w):
+    """W1's free byte-addressable heap from ?STATS ('Heap: N free, largest block M, ...'), or None."""
+    for x in w.run("?STATS", timeout=30):
+        m = re.match(r"^Heap: (\d+) free", x.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+@test("ws.vanished_client_released", "(should) OPT-IN (wifi_pc): a client that leaves W1's access point with its "
+      "WebSocket still open is dropped as it leaves, and the heap its undelivered output held comes back: W1 counts no "
+      "client within 10 s, and 10 s later its free heap is within 3 KB of where it started", needs=["wcb1"], links=[],
+      opt_in="wifi_pc")
+def ws_vanished_client_released(bench):
+    """HIL tracker #113. A WebSocket whose PC left the access point without closing it - a phone out of range, a PC
+    moved to another network - stays open on W1 while TCP retries it, and sinkPump keeps teeing the console to it: each
+    send blocked loop() for httpd's send timeout (5 s) and the undelivered output stayed in lwIP, up to a TCP send
+    buffer (~5.7 KB) per session. In run 20261007-140804 two or three such sessions left W1 with 4.8 KB free, largest
+    block 980 B, nothing connected, and no client could connect at all. Here the socket is left open on purpose, the
+    adapter leaves (pc_on_ap's way back), and W1 prints ?backup and ?config into the departed client."""
+    problems = []
+    w = usb_wcb(bench)
+    heap0 = _heap_free(w)
+    left = None
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        ws.send_text("?VERSION\n")
+        ws.read_until("End of Version", timeout=6)
+        if (_ws_client_count(w) or 0) < 1:
+            problems.append("W1 counts no WebSocket client while one is open")
+        left = ws                                  # never closed: the adapter leaves with it open
+    stalls = []
+    try:
+        t0 = time.monotonic()
+        for cmd in ("?backup", "?config"):             # a plain answer takes well under a second
+            t = time.monotonic()
+            w.run(cmd, timeout=30)
+            if time.monotonic() - t > 3.0:
+                stalls.append(f"{cmd} took {time.monotonic() - t:.1f} s")
+        n = None
+        while time.monotonic() - t0 < 10:
+            n = _ws_client_count(w, timeout=30)
+            if n == 0:
+                break
+            time.sleep(1)
+        gone = time.monotonic() - t0
+        time.sleep(10)
+        heap1 = _heap_free(w)
+    finally:
+        try:
+            left.sock.close()                      # this end only: its peer is on another network now
+        except (OSError, AttributeError):
+            pass
+    bench.note(f"after the PC left with its socket open: W1 counted {n} client(s) {gone:.1f} s later; free heap "
+               f"{heap0} before, {heap1} 10 s after that; slow answers: {stalls or 'none'}")
+    if stalls:
+        problems.append("W1's console stalled while it sent the departed client its output: " + ", ".join(stalls))
+    if n != 0:
+        problems.append(f"W1 still counts {n} WebSocket client(s) 10 s after the PC left with its socket open")
+    if heap0 and heap1 is not None and heap1 < heap0 - 3000:
+        problems.append(f"W1's free heap is {heap1} bytes, {heap0 - heap1} below the {heap0} it had before the client "
+                        f"came: the departed client's session still holds it")
+    assert not problems, "(should, #113) " + "; ".join(problems)
 
 
 @test("ws.client_slots", "OPT-IN (wifi_pc): at most two WebSocket clients - a third evicts the least recently used, whose socket closes - each keeps its own line buffer, so a line split over frames on one client never fuses with another's, and a broadcast typed over the socket right after W2 sent W1 a command still reaches the mesh", needs=["wcb1", "wcb2"], links=["W1S2", "W2S3"], opt_in="wifi_pc")

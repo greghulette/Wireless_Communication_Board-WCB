@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-10-07 | Filed and fixed **#113** (`41ce60b`): a WebSocket client that left W1's access point without closing held up to a TCP send buffer of heap and stalled `loop()` 5 s per send, until no client could connect. VERIFIED by the new `ws.vanished_client_released`; #111's two-client limit verified on the bench by `ws.client_slots` (`20261007-142719`). |
 | 2026-10-07 | **#11**'s residual race seen (`client_mesh.rejoin_seq_reuse`, `20261007-090301`: W1 re-adopted a re-joined probe after its three boot announces and dropped two commands as duplicates) and fixed in `77a39d2`: a boot announce now clears the sender's duplicate ring whether or not it is a peer yet. VERIFIED by the new `client_mesh.rejoin_unadopted`: `[0, 0, 0, 1]` on `48da52a`, `[1, 1, 1, 1]` on `77a39d2`. |
 | 2026-10-07 | **#111** decided (Greg: two WebSocket sessions) and FIXED (unverified): `48da52a`, `WS_MAX_CLIENTS` 3 to 2, flashed on W1-W3 as `6.2.1_070853ROCT2026`. Not measured yet: that needs a PC on W1's access point (the Windows PC, or the Mac's TP-Link moved there). |
 | 2026-09-29 | Filed **#110** (a PC waits up to 47 s for a lease on W1's access point) and **#111** (with an access point up the heap's low-water mark reaches 76 bytes on W1 and 240 on W2), both found writing WCB-WP22 (`20260929-055154`, `-055837`). |
@@ -2386,7 +2387,7 @@ or phone to the droid waits this long too, which reads as "the access point is b
 
 | | |
 |---|---|
-| **Status** | FIXED (unverified) - `48da52a`: two WebSocket clients at once (Greg's call, 2026-10-07) |
+| **Status** | VERIFIED - `48da52a`: two WebSocket clients at once (Greg's call, 2026-10-07); `ws.client_slots` PASS on the Mac (`20261007-142719`) |
 | **Owner** | `WCB_firmware` (`WCB_WS.cpp`, `WCB_WiFi.cpp`) |
 | **Effort** | M |
 | **Tests** | none asserts it; every `wifi_pc` test notes W1's `Free heap` line after the PC leaves (`_left_clean`, s28) |
@@ -2445,3 +2446,31 @@ while it lasts, and `... recovered after <n>s`. The next occurrence names the he
 **Fix (after the cause).** If the heap is to blame, #111's options. A board could also recover by itself: re-initialise
 ESP-NOW (`esp_now_deinit`/`init`, the callbacks, every peer `setup()` adds) or restart, once a stall passes some limit
 - Greg's call, as a restart has side effects.
+
+#### 113. A WebSocket client that leaves without closing holds the WCB's heap until no client can connect
+
+| | |
+|---|---|
+| **Status** | VERIFIED - `41ce60b`, `ws.vanished_client_released` PASS (run `20261007-142719`) |
+| **Owner** | `WCB_firmware` (`WCB_WS.cpp`) |
+| **Effort** | S |
+| **Tests** | `ws.vanished_client_released` (should); every W1-access-point test in s28 ends on `_left_clean` |
+| **Subsystem** | WiFi / WebSocket / heap |
+
+**Evidence.** Run `20261007-140804`, the first with the Mac's TP-Link moved between access points by the harness: its
+proof of the new board started before the adapter had left the old one, and the switch stranded those sockets
+half-open on W1. W1 went on counting a WebSocket client with no station attached; each burst of console output
+stalled its `loop()` about 5.5 s (`?WIFI` answered at 106.3 s for 100.8 s); then no new client could connect, and W1
+sat at 4.8 KB free, largest block 980 B, nothing connected, for minutes. `ws.vanished_client_released`, which leaves
+its socket open on purpose, fails on `c73c979`: W1's heap 7.3 KB below where it started 10 s after the PC left.
+
+**Cause.** `sinkPump` sends the console to every client with `httpd_ws_send_frame_async`, which blocks for httpd's
+send timeout (5 s) when the peer is gone and its send buffer full, and on failure only took the client out of the
+tee: the session stayed open, its unsent output held in lwIP (up to a TCP send buffer, ~5.7 KB) for as long as TCP
+retries a vanished peer. Any phone or laptop that leaves W1's access point mid-session does this on a real droid.
+
+**Fix (`41ce60b`).** A failed send closes the session (`httpd_sess_trigger_close`); `wsClose` resets the socket
+(`SO_LINGER` 0) so its buffers are freed at once; when the AP's last station leaves
+(`ARDUINO_EVENT_WIFI_AP_STADISCONNECTED`), every session from the AP's /24 is closed on the next `loop()`; httpd's
+send timeout is 2 s. On it the test drops the client 0.6 s after the PC left and the heap is back within 0.4 KB, and
+every s28 W1-access-point test passes (`20261007-142719`).

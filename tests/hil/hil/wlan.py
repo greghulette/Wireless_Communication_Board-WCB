@@ -17,11 +17,16 @@ The rules every caller keeps (s28's module docstring, docs/HIL_WEEK_DECISIONS.md
   (NaviCore's REBOOT) leaves Windows' association in place while the restarted access point drops the station's
   frames: run 20260929-202852 sat like that for 90 s with no WLAN AutoConfig event at all. rejoin(reach=) proves a TCP
   connect and re-associates when there is none.
-- Off Windows nothing here joins, moves or disconnects an adapter. The Mac bench's spare adapter is a USB TP-Link that
-  macOS does not count as Wi-Fi, so no networksetup Wi-Fi verb reaches it either; the user keeps it joined to
-  NaviCore's access point, and the adapter carrying the default route (the user's internet) is never used (D-NC14). Every
-  board's access point is 192.168.4.1 and the SSID cannot be read there, so a caller proves whose access point it is
-  (pc_on_ap identify=); one that cannot skips.
+- Off Windows the harness joins nothing by default. The Mac bench's spare adapter is a USB TP-Link that macOS does not
+  count as Wi-Fi, so no networksetup Wi-Fi verb reaches it; the user keeps it joined to NaviCore's access point, and the
+  adapter carrying the default route (the user's internet) is never used (D-NC14). Every board's access point is
+  192.168.4.1 and the SSID cannot be read there, so a caller proves whose access point it is (pc_on_ap identify=); one
+  that cannot skips. With bench.json "wifi_switch": "realtek" (D82) pc_on_ap moves that adapter itself, through the
+  Realtek utility's menu-bar menu - the only thing that drives it: the menu is opened by UI scripting and the network's
+  item clicked with a real mouse event (realtek_pick), as the user would, then the caller's identify proves the board,
+  and on the way out the adapter goes back to its resting network (home=, NaviCore's). It needs the Accessibility
+  permission for VS Code, which runs the harness, and Python with pyobjc's Quartz (QUARTZ_PYTHON); it never picks the
+  network the Mac's own Wi-Fi is on.
 
 What only the bench shows: that netsh's English output has these field names (parse_interfaces, parse_networks), and
 ifconfig's, route's and netstat's the layout parse_ifconfig, parse_route_get and parse_netstat_defaults read; the
@@ -33,6 +38,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -205,7 +211,7 @@ SPARE_ONLY_SKIP = ("the only WiFi adapter on this PC carries its default route, 
 
 
 @contextlib.contextmanager
-def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None, identify=None):
+def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None, identify=None, home=None):
     """The PC's chosen WiFi adapter on the access point `ssid` for the block, holding a 192.168.4.x lease from it ->
     the adapter's name; Skip where that cannot be done here. Off Windows: the spare adapter already on it, proved by
     `identify` (_prejoined), and nothing to undo. `whose` names the AP in messages ("W1's"); the SSID is
@@ -213,7 +219,8 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None, ide
     PC's own profiles, and every netsh call names the adapter - with two adapters an unnamed `netsh wlan connect` is
     refused (run 20260924-092602 failed that way, and reused the PC's own WCB1 profile on the other adapter). The
     profile holds the AP's password from the board's chain and is deleted afterwards. netsh's replies are noted with
-    every network name scrubbed; they carry no key. On the way out the adapter goes back to the network it was on, and
+    every network name scrubbed; they carry no key. Off Windows with "wifi_switch": "realtek": realtek_on_ap, and
+    home= says where the adapter goes back to. On the way out the adapter goes back to the network it was on, and
     failing to is added to `problems` (and noted, for when the block raised). No association in 30 s, or no lease in
     ADDR_WAIT_S, raises after the same cleanup. spare_only: Skip rather than take the adapter that carries the PC's
     default route (NaviCore's tests, D-NC14; s28's take it when it is the only one). reach ((host, port)): the lease
@@ -221,6 +228,10 @@ def pc_on_ap(bench, problems, ssid, pw, whose, spare_only=False, reach=None, ide
     lease and carried nothing (a connect to NaviCore timed out) while two others worked; in 20261004-130438, with this
     check, all fifteen carried a connect at once. The cause is not known; the check costs nothing when the link works."""
     if not ON_WINDOWS:
+        if identify is not None and realtek_enabled(bench):
+            with realtek_on_ap(bench, problems, ssid, whose, reach, identify, home) as name:
+                yield name
+            return
         yield _prejoined(bench, whose, reach, identify)      # the adapter stays where it was: nothing to put back
         return
     adapter, why = pick_adapter(bench)
@@ -579,6 +590,179 @@ def _back_on_its_own(name, whose, reach, wait_s=None):
                                  + (f"holds {addr}, but {target} took no connect" if addr
                                     else "holds no 192.168.4.x address"))
         time.sleep(PREJOIN_STEP_S)
+
+
+# ------------------------------------------------------------------ the Mac's TP-Link, through its Realtek utility
+REALTEK_PROCESS = "StatusBarApp"     # the Realtek utility's menu-bar app (/Library/Application Support/WLAN)
+QUARTZ_PYTHON = os.path.expanduser("~/.venvs/benchcam/bin/python")   # a Python with pyobjc's Quartz (the camera's venv)
+REALTEK_JOIN_S = 45.0     # a click to a proved board: the TP-Link took ~5 s to WCB1, then the board must answer
+# The menu's network items are custom views: a scripted AXPress, a System Events click at their position and type-to-
+# select all left the adapter where it was (2026-10-07); a real mouse event at the item's centre joins.
+_REALTEK_MENU = """on run argv
+	set want to item 1 of argv
+	tell application "System Events" to tell process "StatusBarApp"
+		set mbi to menu bar item 1 of menu bar 2
+		click mbi
+		delay 1.0
+		set m to menu 1 of mbi
+		if want is "" then
+			set out to {}
+			repeat with mi in menu items of m
+				set nm to name of mi
+				if nm is not missing value then set end of out to nm
+			end repeat
+			key code 53
+			set AppleScript's text item delimiters to linefeed
+			return out as text
+		end if
+		if not (exists menu item want of m) then
+			key code 53
+			return "ABSENT"
+		end if
+		set {px, py} to position of menu item want of m
+		set {sw, sh} to size of menu item want of m
+		return "AT " & ((px + (sw div 2)) as text) & " " & ((py + (sh div 2)) as text)
+	end tell
+end run"""
+_QUARTZ_CLICK = """import sys, time, Quartz
+x, y = float(sys.argv[1]), float(sys.argv[2])
+for t in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, t, (x, y), Quartz.kCGMouseButtonLeft))
+    time.sleep(0.25 if t == Quartz.kCGEventMouseMoved else 0.08)
+"""
+
+
+def realtek_enabled(bench):
+    """bench.json "wifi_switch": "realtek", off Windows: pc_on_ap may move the spare adapter through the Realtek menu."""
+    return not ON_WINDOWS and (bench.cfg.get("wifi_switch") or "") == "realtek"
+
+
+def realtek_ready():
+    """None when the Realtek menu can be driven here, else why not."""
+    if ON_WINDOWS or sys.platform != "darwin":
+        return "not a Mac"
+    if not (_run(["pgrep", "-x", REALTEK_PROCESS]) or "").strip():
+        return "the Realtek WiFi utility (StatusBarApp) is not running"
+    if not os.path.exists(QUARTZ_PYTHON):
+        return f"no Python with pyobjc's Quartz at {QUARTZ_PYTHON}: the menu needs a real mouse event"
+    return None
+
+
+def _realtek_menu(want, timeout=20):
+    p = subprocess.run(["osascript", "-", want], input=_REALTEK_MENU, capture_output=True, text=True, timeout=timeout)
+    if p.returncode:
+        why = (p.stderr or p.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        raise AssertionError("the Realtek menu could not be read (VS Code needs the Accessibility permission): "
+                             + why[0][-160:])
+    return p.stdout.strip()
+
+
+def realtek_networks():
+    """The names the Realtek menu lists (its own items included). Opens the menu and closes it with Escape."""
+    return [x for x in _realtek_menu("").splitlines() if x]
+
+
+def own_wifi_network():
+    """The network the Mac's own Wi-Fi (the user's internet, en0) is on, or None - never picked."""
+    out = _run(["networksetup", "-getairportnetwork", "en0"]) or ""
+    m = re.match(r"^Current Wi-Fi Network: (.+)$", out.strip())
+    return m.group(1) if m else None
+
+
+def realtek_pick(ssid, whose):
+    """Click `ssid` in the Realtek menu with a real mouse event. Refuses the Mac's own Wi-Fi network; raises when the
+    menu does not list it. `whose` names it in messages: the network's name is never quoted."""
+    if ssid == own_wifi_network():
+        raise AssertionError(f"{whose} network is the one the Mac's own Wi-Fi is on: never picked for the spare adapter")
+    out = _realtek_menu(ssid)
+    if out == "ABSENT":
+        raise AssertionError(f"the Realtek menu does not list {whose} network (out of range, or its board's access "
+                             f"point is down)")
+    m = re.match(r"^AT (-?\d+) (-?\d+)$", out)
+    if not m:
+        raise AssertionError(f"the Realtek menu gave no position for {whose} network")
+    p = subprocess.run([QUARTZ_PYTHON, "-c", _QUARTZ_CLICK, m.group(1), m.group(2)], capture_output=True, text=True,
+                       timeout=20)
+    if p.returncode:
+        raise AssertionError("the click on the Realtek menu failed: " + (p.stderr.strip().splitlines() or ["?"])[-1][-160:])
+
+
+def _realtek_there(name, reach, identify):
+    """Adapter `name` holds a 192.168.4.x address, `reach` takes a connect, and identify(name) proves the board."""
+    if not next((a for a in ipv4(name) if a.startswith("192.168.4.")), None):
+        return False
+    if reach_wait(*reach, timeout=0) is None:
+        return False
+    return identify(name) is None
+
+
+REALTEK_LEAVE_S = 12.0    # after a click, how long to wait for the old access point to stop answering before proving
+
+
+def _realtek_left(reach, timeout=REALTEK_LEAVE_S):
+    """After a click: until `reach` takes no connect - the adapter has left the access point it was on - then back to
+    the caller, or `timeout`. Proving the new board any sooner opened its socket on the OLD one, which the switch then
+    stranded half-open: W1 went on counting a WebSocket client after the PC had left (wifi.pc_joins_ap_ws, run
+    20261007-140804)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if reach_wait(*reach, timeout=0) is None:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _realtek_move(bench, name, ssid, whose, reach, identify):
+    """Click `ssid`, let the adapter leave the access point it was on, and wait for the proof; once more after half the
+    wait -> seconds it took, or None."""
+    t0 = time.monotonic()
+    for wait_s in (REALTEK_JOIN_S / 2, REALTEK_JOIN_S):
+        realtek_pick(ssid, whose)
+        _realtek_left(reach)
+        if wait(lambda: _realtek_there(name, reach, identify), wait_s, step=2.0):
+            return time.monotonic() - t0
+    return None
+
+
+@contextlib.contextmanager
+def realtek_on_ap(bench, problems, ssid, whose, reach, identify, home=None):
+    """pc_on_ap off Windows with "wifi_switch": "realtek": the spare adapter on `whose` access point for the block,
+    moved there through the Realtek menu when identify does not already prove it -> the adapter's name. home ((ssid,
+    whose, identify)): where it goes back to afterwards, proved the same way; a failure is added to `problems`.
+    Without a home it stays where the test left it."""
+    reach = reach or AP_REACH
+    name = remembered_spare() or next((n for n, _ in spare_leases()), None)
+    if name is None:
+        raise Skip(PREJOIN_SKIP)
+    why = realtek_ready()
+    if why:
+        raise Skip(f"bench.json wifi_switch is realtek, but {why}")
+    if _realtek_there(name, reach, identify):
+        bench.note(f"adapter {name}: already on {whose} access point")
+    else:
+        took = _realtek_move(bench, name, ssid, whose, reach, identify)
+        if took is None:
+            raise AssertionError(f"{name} was not proved on {whose} access point within {REALTEK_JOIN_S:.0f} s of "
+                                 f"choosing it in the Realtek menu (twice)")
+        bench.note(f"adapter {name}: moved to {whose} access point through the Realtek menu, proved {took:.1f} s after "
+                   f"the click")
+    _remember_spare(name)
+    try:
+        yield name
+    finally:
+        if home is not None and home[0] != ssid:
+            hssid, hwhose, hident = home
+            try:
+                took = _realtek_move(bench, name, hssid, hwhose, reach, hident)
+            except AssertionError as e:
+                took, err = None, str(e)
+            else:
+                err = f"not proved there within {REALTEK_JOIN_S:.0f} s of choosing it in the Realtek menu (twice)"
+            if took is None:
+                problems.append(f"{name} did not go back to {hwhose} access point: {err}")
+                bench.note(problems[-1])
+            else:
+                bench.note(f"adapter {name}: back on {hwhose} access point, proved {took:.1f} s after the click")
 
 
 # ------------------------------------------------------------------ what the adapter can see

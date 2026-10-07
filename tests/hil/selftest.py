@@ -2254,7 +2254,7 @@ GATED = {
                                      "and reboots W2"),
     **{t: ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard")
        for t in ("wifi.pc_joins_ap_ws", "ws.line_framing", "ws.backup_over_ws", "ws.client_slots",
-                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk")},
+                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released")},
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
