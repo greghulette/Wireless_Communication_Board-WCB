@@ -44,6 +44,8 @@ SERVO_TESTS = {
     "maestro.comma_int": ";M1,7 runs subroutine 7 on NaviCore's Maestro 1",
     "maestro.verbs": ";M1,setTarget / goHome / sub move NaviCore's Maestro 1 (ch 0 is knob J2's servo)",
     "maestro.bad_verb": "its positive control ;M11 runs subroutine 1 on NaviCore's Maestro 1",
+    "maestro.no_alias": "its positive control ;M11 runs subroutine 1 on NaviCore's Maestro 1; before WcbCmd 0.9.2 "
+                        "setTarget,261,6000 moved channel 5 there",
     "maestro.fanout_remote": "asserts that ;M11 runs subroutine 1 on NaviCore's Maestro 1",
     "pwm.p_refused_on_maestro_port": "sends ;M11 twice: subroutine 1 on NaviCore's Maestro 1",
     # Listed on doubt. clearAllMaestroConfigs drops every slot (WCB_Maestro.cpp:1050-1068), so on today's firmware its

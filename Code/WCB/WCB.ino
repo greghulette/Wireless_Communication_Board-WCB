@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_070910ROCT2026                                  *****////
+///*****                                          Version 6.2.1_071224ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_070910ROCT2026";
+String SoftwareVersion = "6.2.1_071224ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -8367,7 +8367,9 @@ void processMaestroCommand(const String &message){
     if (message.length() < 2 || message[1] < '0' || message[1] > '9') return;   // bare/typo ;M → ignore
     int id  = message.substring(1, 2).toInt();
     int seq = message.substring(2).toInt();
-    if (seq < 0 || seq > 255) return;
+    // 0-127: the subroutine goes out as a frame's data byte, and 128-255 would read as a command byte
+    // (NaviCore HIL plan D-NC23; WcbCmd 0.9.2 refuses the same in parse() and build()).
+    if (seq < 0 || seq > 127) return;
     sendMaestroCommand(id, seq);
     return;
   }
@@ -8387,7 +8389,7 @@ void processMaestroCommand(const String &message){
     if (devDigits && pureInt) {
       int  dev = devStr.toInt();
       long seq = after.toInt();
-      if (dev >= 0 && dev <= 9 && seq >= 0 && seq <= 255) {
+      if (dev >= 0 && dev <= 9 && seq >= 0 && seq <= 127) {     // 0-127, as the short form above
         sendMaestroCommand((uint8_t)dev, (uint8_t)seq);
         return;
       }

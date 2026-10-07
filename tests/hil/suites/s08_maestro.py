@@ -64,6 +64,35 @@ def bad_verb(bench):
     probe.expect_silence(ch, window=1.5, since=m)
 
 
+# Numbers that wrapped onto a valid frame when cast to their wire width (WcbCmd 0.9.1), and subroutines over 127, whose
+# byte reads as a command byte, in each spelling (the short and comma forms are the WCB's own, WCB.ino).
+NO_ALIAS = (";M1,setTarget,261,6000", ";M1,setTarget,5,70000", ";M1,setSpeed,5,65537", ";M1,setAccel,261,5",
+            ";M1,getPosition,261", ";M1,sub,200", ";M1,200", ";M1200")
+
+
+@test("maestro.no_alias", "(should) An out-of-range ;M number never wraps onto a valid frame: channel 261, target "
+      "70000, speed 65537 and subroutine 200 (;M1200, ;M1,200, ;M1,sub,200) put nothing on the servo wire", needs=NEEDS)
+def no_alias(bench):
+    """NAVICORE.md D-NC76, and D-NC23's WCB twin. WcbCmd's build() cast the channel, target and speed to their wire
+    widths before any check (WcbMaestro.cpp, 0.9.1), so ;M1,setTarget,261,6000 sent channel 5, a target of 70000 sent
+    4464 and a speed of 65537 sent 1, each a valid command for something else; the builders' own range checks saw only
+    the cast value. Subroutines 128-255 went out unmasked, from WcbCmd and from the WCB's own short (;M1200) and comma
+    (;M1,200) forms: 0xC8 inside the frame reads as a new command. maestro.bad_verb's values sit just past each range
+    and never wrapped. Passing: the positive control arrives, then not one byte reaches W1 S1 for any of these."""
+    _frame(bench, ";M11", bytes.fromhex("AA012701"))   # positive control
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    sent = []
+    for cmd in NO_ALIAS:
+        m = probe.dev.mark()
+        w.send(cmd)
+        time.sleep(0.6)
+        got = probe.received(ch, m)
+        if got:
+            sent.append(f"{cmd} sent {got.hex(' ')}")
+    assert not sent, "(should, D-NC76) out-of-range numbers reached the wire: " + "; ".join(sent)
+
+
 @test("maestro.target9", ";M9,goHome re-addresses to each local Maestro's own id", needs=NEEDS)
 def target9(bench):
     _frame(bench, ";M9,goHome", bytes.fromhex("AA0122"))
