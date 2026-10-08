@@ -808,10 +808,7 @@ def remote_unreachable_failed(bench):
     s3 = link(bench, 1, "S3")
     w = usb_wcb(bench)
     _no_pwm(bench, 1)
-    seen = {int(n) for x in w.run("?WDP,DUMP", timeout=8) for n in re.findall(r"^\[WDP:N=(\d+),", x)}
-    k = next((n for n in range(3, 19) if n not in seen), None)
-    if k is None:
-        raise Skip("no unused board number 3-18")
+    k = _unused_boards(bench, w, 1)[0]
     with config_guard(bench, 1):
         try:
             s3.pwm_out(0)
@@ -1117,10 +1114,12 @@ def _in_order(lines, wanted):
     return None if i == len(wanted) else wanted[i]
 
 
-def _unused_boards(w, n):
-    """n board numbers 3-18 no board on this mesh uses (W1's WDP table): outputs nobody answers, as in
-    pwm.remote_unreachable_failed."""
+def _unused_boards(bench, w, n):
+    """n board numbers 3-18 no board on this mesh uses: outputs nobody answers, as in pwm.remote_unreachable_failed.
+    Neither in W1's WDP table nor one of the bench's own boards: W1 rebooted by the test before relearns W3 a few
+    seconds after its boot, and an empty row then let W3 be picked, its sends ACKed (20261007-183330)."""
     seen = {int(k) for x in w.run("?WDP,DUMP", timeout=8) for k in re.findall(r"^\[WDP:N=(\d+),", x)}
+    seen |= set(bench.wcb_numbers())
     free = [k for k in range(3, 19) if k not in seen]
     if len(free) < n:
         raise Skip(f"fewer than {n} unused board numbers 3-18")
@@ -1427,7 +1426,7 @@ def multi_output_and_multi_input(bench):
     _require_free_ports(bench, 1, "S2", "S3", "S4", "S5")
     _require_free_ports(bench, 2, "S3")
     require_tokens(bench, 2, "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON")
-    k1, k2, k3 = _unused_boards(w, 3)
+    k1, k2, k3 = _unused_boards(bench, w, 3)
     problems = []
     with config_guard(bench, 1, 2):
         mapped = cleared = False
@@ -1815,7 +1814,7 @@ def passthrough_debug_and_settle(bench):
     w = usb_wcb(bench)
     _no_pwm(bench, 1)
     _require_free_ports(bench, 1, "S3", "S4")
-    k = _unused_boards(w, 1)[0]
+    k = _unused_boards(bench, w, 1)[0]
     problems = []
     with config_guard(bench, 1):
         mapped = False

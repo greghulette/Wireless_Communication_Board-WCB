@@ -697,22 +697,54 @@ def _realtek_click(item, what):
         raise AssertionError("the click on the Realtek menu failed: " + (p.stderr.strip().splitlines() or ["?"])[-1][-160:])
 
 
-def realtek_pick(ssid, whose):
-    """Click `ssid` in the Realtek menu with a real mouse event. Refuses the Mac's own Wi-Fi network; raises when the
-    menu does not list it. `whose` names it in messages: the network's name is never quoted."""
+REALTEK_APPEAR_S = 30.0   # how long a network the menu does not list gets, rescanning, before realtek_pick gives up
+REALTEK_SCAN_SETTLE_S = 8.0
+
+
+def realtek_pick(ssid, whose, appear_s=REALTEK_APPEAR_S):
+    """Click `ssid` in the Realtek menu with a real mouse event. Refuses the Mac's own Wi-Fi network. A network the menu
+    does not list gets another look - after a 'Scan Networks...' when the menu offers one - until `appear_s` is up, then
+    raises: the menu lists the utility's last scan, and an access point that had just restarted was missing from it 3
+    and 6 s after its SoftAP line (ncwifi.refuse_short_password's put-back, then ws_line_trim; run 20261007-183330).
+    `whose` names it in messages: the network's name is never quoted."""
     if ssid == own_wifi_network():
         raise AssertionError(f"{whose} network is the one the Mac's own Wi-Fi is on: never picked for the spare adapter")
     if ssid in REALTEK_OWN_ITEMS:
         raise AssertionError(f"{whose} network has the name of one of the Realtek menu's own items")
-    _realtek_click(ssid, f"{whose} network")
+    end = time.monotonic() + appear_s
+    while True:
+        try:
+            _realtek_click(ssid, f"{whose} network")
+            return
+        except AssertionError as e:
+            if "does not list" not in str(e) or time.monotonic() >= end:
+                raise
+        _realtek_scan_click()
+        time.sleep(REALTEK_SCAN_SETTLE_S)
 
 
-def realtek_scan(settle_s=8.0):
-    """A fresh scan through the Realtek menu ('Scan Networks...'), then the networks it lists -> [name]. The menu shows
-    names only: whether a network is open cannot be read there."""
-    _realtek_click(REALTEK_SCAN, "its Scan Networks item")
+def _realtek_scan_click():
+    """Click 'Scan Networks...' when the menu offers it -> True, else False. The menu's first item is the utility's
+    status: 'USB-WiFi: Scan Networks...' only while it is idle. Once its adapter lost its network it read 'USB-WiFi: On',
+    with no scan item, and stayed so for minutes after the adapter was back (2026-10-08, after a NaviCore restart;
+    ncwifi.refuse_short_password, run 20261008-002857). The utility goes on scanning by itself, so its list is current
+    without the click, if less fresh."""
+    try:
+        _realtek_click(REALTEK_SCAN, "its Scan Networks item")
+        return True
+    except AssertionError as e:
+        if "does not list" not in str(e):
+            raise
+        return False
+
+
+def realtek_scan(settle_s=REALTEK_SCAN_SETTLE_S):
+    """A scan through the Realtek menu, then the networks it lists -> ([name], fresh): fresh when its 'Scan Networks...'
+    was clicked, else the utility's own list (_realtek_scan_click) after the same settle. The menu shows names only:
+    whether a network is open cannot be read there."""
+    fresh = _realtek_scan_click()
     time.sleep(settle_s)
-    return [x for x in realtek_networks() if x not in REALTEK_OWN_ITEMS]
+    return [x for x in realtek_networks() if x not in REALTEK_OWN_ITEMS and not x.startswith("USB-WiFi:")], fresh
 
 
 def _realtek_there(name, reach, identify):

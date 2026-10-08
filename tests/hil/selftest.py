@@ -13299,6 +13299,82 @@ TESTS += [t_ws_endpoint_drop_stall]      # INTELLEX.md finding 19 (suites/s32)
 TESTS += [t_ws_endpoint_wildcard]        # the macOS port-80 fallback of WsEndpoint
 
 
+def t_realtek_pick_rescans(tmp):
+    """hil/wlan.py realtek_pick against a scripted Realtek menu: a network missing from the menu gets 'Scan Networks...'
+    and another look, and is clicked once it shows (an access point that had just restarted, run 20261007-183330); with
+    no Scan item in the menu (its status read 'USB-WiFi: On', run 20261008-002857) it still gets its looks, and is
+    clicked once listed; one that never shows raises 'does not list' once appear_s is up; any other menu failure is
+    raised at once, with no scan; and the Mac's own Wi-Fi network is refused before the menu is opened. realtek_scan ->
+    (names, fresh): fresh after a Scan click; without the item, the utility's own list, status items left out."""
+    from hil import wlan as L
+    saved = (L._realtek_click, L.own_wifi_network, L.REALTEK_SCAN_SETTLE_S, L.realtek_networks, L.time.sleep)
+    clicks = []
+    state = {"scan_item": True, "looks": 0}
+
+    def menu(shows_after, fail=None):
+        def click(item, what):
+            clicks.append(item)
+            absent = AssertionError(f"the Realtek menu does not list {what} (out of range, or its board's access point "
+                                    f"is down)")
+            if item == L.REALTEK_SCAN:
+                if not state["scan_item"]:
+                    raise absent
+                return
+            if fail:
+                raise AssertionError(fail)
+            state["looks"] += 1
+            if state["looks"] <= shows_after:
+                raise absent
+        return click
+
+    try:
+        L.own_wifi_network = lambda: "HomeNet"
+        L.REALTEK_SCAN_SETTLE_S = 0.0
+        L._realtek_click = menu(2)
+        L.realtek_pick("NC", "NaviCore's", appear_s=5)
+        assert clicks == ["NC", L.REALTEK_SCAN, "NC", L.REALTEK_SCAN, "NC"], clicks
+        clicks.clear()
+        state.update(scan_item=False, looks=0)
+        L.realtek_pick("NC", "NaviCore's", appear_s=5)
+        assert clicks == ["NC", L.REALTEK_SCAN, "NC", L.REALTEK_SCAN, "NC"], clicks
+        clicks.clear()
+        state.update(scan_item=True, looks=0)
+        L._realtek_click = menu(10 ** 6)
+        try:
+            L.realtek_pick("NC", "NaviCore's", appear_s=0.05)
+            raise AssertionError("a network the menu never lists was picked")
+        except AssertionError as e:
+            assert "does not list NaviCore's network" in str(e), e
+        assert clicks[0] == "NC" and clicks[-1] == "NC" and L.REALTEK_SCAN in clicks, clicks
+        clicks.clear()
+        L._realtek_click = menu(0, fail="the Realtek menu gave no position for NaviCore's network")
+        try:
+            L.realtek_pick("NC", "NaviCore's", appear_s=5)
+            raise AssertionError("a menu failure other than 'does not list' was retried away")
+        except AssertionError as e:
+            assert "gave no position" in str(e), e
+        assert clicks == ["NC"], clicks
+        clicks.clear()
+        try:
+            L.realtek_pick("HomeNet", "the user's", appear_s=5)
+            raise AssertionError("the Mac's own Wi-Fi network was picked")
+        except AssertionError as e:
+            assert "never picked" in str(e), e
+        assert clicks == [], clicks
+        L.time.sleep = lambda s: None
+        L.realtek_networks = lambda: ["USB-WiFi: On", "NaviNet", "Turn USB-WiFi Off"]
+        L._realtek_click = menu(0)
+        assert L.realtek_scan() == (["NaviNet"], True) and clicks == [L.REALTEK_SCAN], clicks
+        clicks.clear()
+        state["scan_item"] = False
+        assert L.realtek_scan() == (["NaviNet"], False) and clicks == [L.REALTEK_SCAN], clicks
+    finally:
+        (L._realtek_click, L.own_wifi_network, L.REALTEK_SCAN_SETTLE_S, L.realtek_networks, L.time.sleep) = saved
+
+
+TESTS += [t_realtek_pick_rescans]        # the Realtek menu's rescan for a network it does not list yet (D82)
+
+
 def t_kyber_device_helpers(tmp):
     """suites/s52_kyber_device.py's readers of the bench Kyber's config: kyber_config() takes the device's own table
     (tests/hil/kyber/bench_kyber_live.json, its GET) over the pasted file, and since Greg's config was loaded onto the

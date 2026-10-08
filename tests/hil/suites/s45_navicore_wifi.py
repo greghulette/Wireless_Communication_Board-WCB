@@ -1336,8 +1336,9 @@ def refuse_short_password(bench):
     onto it however the body ended, and ap_block and a join prove the access point back. nc_guard proves the config
     byte-identical afterwards. Off Windows the scan and the join go through the Realtek menu (bench.json wifi_switch,
     hil/wlan.py realtek_scan and realtek_on_ap; D82): a fresh scan must not list NaviCore's network, or, still listed
-    (a scan can keep a network it no longer hears), the join must not be proved. The menu shows names only, so 'not
-    open' rests on that failed join. Without the switch the test skips: a spare adapter that merely stays off a refused
+    (a scan can keep a network it no longer hears), the join must not be proved. The menu offers no Scan item once its
+    adapter has lost a network, so the list is then the utility's own (noted as such) - the same rule covers it. The
+    menu shows names only, so 'not open' rests on that failed join. Without the switch the test skips: a spare adapter that merely stays off a refused
     access point cannot tell refused from open."""
     if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip(f"{NOT_WINDOWS_SKIP}: this test's fresh scan and its join attempt are the PC's own, and off Windows "
@@ -1371,8 +1372,9 @@ def refuse_short_password(bench):
                     problems.append("the PC sees an OPEN network under NaviCore's access point name")
                 refused = ("did not associate",)
             else:
-                listed = wlan.realtek_scan()
-                facts.update(scan="fresh (Realtek menu)", visible=len(listed), still_listed=ssid in listed)
+                listed, fresh = wlan.realtek_scan()
+                facts.update(scan="fresh (Realtek menu)" if fresh else "the Realtek utility's own list (no Scan item)",
+                             visible=len(listed), still_listed=ssid in listed)
                 refused = ("does not list", "was not proved on")
             if adapter is not None or facts.get("still_listed"):
                 try:
