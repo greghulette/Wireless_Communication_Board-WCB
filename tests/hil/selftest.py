@@ -13375,6 +13375,60 @@ def t_realtek_pick_rescans(tmp):
 TESTS += [t_realtek_pick_rescans]        # the Realtek menu's rescan for a network it does not list yet (D82)
 
 
+def t_serial_open_timeout(tmp):
+    """hil/serialdev.py _open_port against a scripted open that hangs (WCB1's CH343, run 20261008-073116): it raises
+    after OPEN_TIMEOUT_S with last_error_at set, and a second open while the first is still stuck raises at once
+    without another helper thread; the hung open, once it returns, has its port closed; then an open that works
+    returns its port as before, and one that fails raises its own error."""
+    import serial as _serial
+    from hil.serialdev import SerialDevice
+    release, closed, made = threading.Event(), [], []
+
+    class Port:
+        def __init__(self, tag):
+            self.tag = tag
+            made.append(tag)
+        def close(self):
+            closed.append(self.tag)
+
+    d = SerialDevice("fake", "/dev/cu.fake")
+    d.OPEN_TIMEOUT_S = 0.2
+    d._open_port_now = lambda: (release.wait(5), Port("late"))[1]
+    t0 = time.monotonic()
+    try:
+        d._open_port()
+        raise AssertionError("a hung open returned")
+    except _serial.SerialException as e:
+        assert "has not returned in 0 s" in str(e) and "unplug and replug" in str(e), e
+    assert 0.15 < time.monotonic() - t0 < 2, time.monotonic() - t0
+    assert d.last_error_at is not None
+    threads = threading.active_count()
+    try:
+        d._open_port()
+        raise AssertionError("a second open went ahead while the first was stuck")
+    except _serial.SerialException as e:
+        assert "earlier open" in str(e), e
+    assert threading.active_count() == threads, "a second helper thread was started"
+    release.set()
+    d._open_pending.join(2)
+    assert made == ["late"] and closed == ["late"], (made, closed)
+    d._open_port_now = lambda: Port("ok")
+    p = d._open_port()
+    assert p.tag == "ok" and closed == ["late"], (p.tag, closed)
+
+    def fails():
+        raise _serial.SerialException("could not open port: busy")
+    d._open_port_now = fails
+    try:
+        d._open_port()
+        raise AssertionError("a failed open returned")
+    except _serial.SerialException as e:
+        assert "busy" in str(e), e
+
+
+TESTS += [t_serial_open_timeout]         # a hung port open raises instead of freezing the run (WCB1's CH343)
+
+
 def t_kyber_device_helpers(tmp):
     """suites/s52_kyber_device.py's readers of the bench Kyber's config: kyber_config() takes the device's own table
     (tests/hil/kyber/bench_kyber_live.json, its GET) over the pasted file, and since Greg's config was loaded onto the

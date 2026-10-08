@@ -35,6 +35,7 @@ class SerialDevice:
     SEND_WAIT_S = 5.0         # how long send() waits for a reopen before failing the test
     SILENT_S = 2.5            # no byte at all for this long after a command: a silent port (revive_silent)
     REVIVE_WAIT_S = 5.0       # how long a timed-out expect() waits for the reader to reopen a silent port
+    OPEN_TIMEOUT_S = 15.0     # an open that has not returned by then is a hung chip or driver (_open_port)
 
     def __init__(self, name, port, baud=115200, log=None):
         self.name = name
@@ -55,9 +56,54 @@ class SerialDevice:
         self.last_rx_at = None           # ... and of the last byte read
         self.revived = 0                 # silent-port reopens so far
         self._revive_req = False         # set by expect(), served by the reader thread
+        self._open_pending = None        # the helper thread of an open that never returned (_open_port)
 
     # ------------------------------------------------------------ lifecycle
     def _open_port(self):
+        """_open_port_now, given OPEN_TIMEOUT_S. On 2026-10-08 (run 20261008-073116) the open of WCB1's CH343 port
+        after a Wizard test never returned: its chip had hung, the WCH driver's open waited on it in the kernel, and the
+        GUI froze for half an hour. The open runs on a helper thread instead; one that has not returned raises, with
+        last_error_at set so the runner treats the board as lost (host_usb_loss, then its outage pause), and the stuck
+        thread is left behind - nothing can cancel the call - to close the port if the open ever does return. While it
+        is stuck, every further open of this device raises at once rather than leaving another thread behind it."""
+        pend = self._open_pending
+        if pend is not None and pend.is_alive():
+            self.last_error_at = time.monotonic()
+            raise serial.SerialException(f"{self.name}: an earlier open of {self.port} has still not returned - its "
+                                         f"USB-serial chip or driver is hung; unplug and replug it")
+        box, lock = {}, threading.Lock()
+
+        def work():
+            try:
+                s = self._open_port_now()
+            except Exception as e:  # noqa: BLE001 - handed to the caller below
+                with lock:
+                    box["err"] = e
+                return
+            with lock:
+                if not box.get("abandoned"):
+                    box["ser"] = s
+                    return
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        t = threading.Thread(target=work, name=f"open-{self.name}", daemon=True)
+        t.start()
+        t.join(self.OPEN_TIMEOUT_S)
+        with lock:
+            if "ser" in box:
+                return box["ser"]
+            if "err" in box:
+                raise box["err"]
+            box["abandoned"] = True
+        self._open_pending = t
+        self.last_error_at = time.monotonic()
+        raise serial.SerialException(f"{self.name}: opening {self.port} has not returned in {self.OPEN_TIMEOUT_S:.0f} s "
+                                     f"- its USB-serial chip or driver is hung; unplug and replug it")
+
+    def _open_port_now(self):
         s = serial.Serial()
         s.port, s.baudrate, s.timeout = self.port, self.baud, 0.05
         # Set ONCE, here. Assigning write_timeout on an open port makes pyserial re-run _reconfigure_port()
