@@ -71,7 +71,10 @@ test.describe(() => {
     // Scrollback is capped at TERM_MAX_LINES (3000) by trimming the head.
     const lines = Array.from({ length: 3050 }, (_, i) => `HILFLOOD ${String(i).padStart(4, '0')}`).join('\r\n') + '\r\n';
     emu.injectRaw(Buffer.from(lines));
-    await expect.poll(() => T.termLines(page, /HILFLOOD 3049/)).toHaveLength(1);
+    // 20 s, not the default 5: the flood renders in ~200 ms, yet in 2 of 7 full HIL runs on the Mac one poll of the
+    // page went unanswered for the whole 5 s ('waiting on the predicate', 20261006-095709 and 20261007-183330), never
+    // when run alone (15 of 15). What this checks is the cap below, not the speed; a page that hangs still fails.
+    await expect.poll(() => T.termLines(page, /HILFLOOD 3049/), { timeout: 20_000 }).toHaveLength(1);
     expect(await paneCount(page, 'terminal-output')).toBe(3000);
     expect(await T.termLines(page, /HILFLOOD 0000/), 'the oldest lines were trimmed').toEqual([]);
     T.expectNoPageErrors(page);
