@@ -13429,6 +13429,89 @@ def t_serial_open_timeout(tmp):
 TESTS += [t_serial_open_timeout]         # a hung port open raises instead of freezing the run (WCB1's CH343)
 
 
+def t_port_hung_pauses(tmp):
+    """runner.hung_ports: a test that fails while a board's port open is stuck (serialdev PortHung, WCB1's CH343 on
+    the resume of 20261008-073116) is NOT A RESULT - kept in flight, an outage of kind port_hung - and the run pauses at
+    once with 'unplug and replug', where it used to error every later test on the board; a hung port found before a
+    test starts pauses the run with the test never run; a parked (closed) device counts; after the replug the resume
+    runs the cut-off test first."""
+    class HungDev(FakeDev):
+        def __init__(self, name, stuck):
+            super().__init__(name)
+            self.stuck = stuck
+        def hung(self):
+            return self.stuck[0]
+
+    stuck = [False]
+    ran = []
+
+    def hangs(bench):
+        ran.append("a")
+        stuck[0] = True
+        raise AssertionError("wcb1 did not come back after the Wizard test")
+    b = tmp.bench()
+    tests = [fake("a", hangs), fake("b", ran=ran)]
+    runner.REGISTRY[:] = tests
+    ck = runner.start_run(b, tests, "hung")
+    b.devs["probe1"] = FakeDev("probe1")
+    b._parked["wcb1"] = HungDev("wcb1", stuck)
+    runner.continue_run(b, ck, resuming=False)
+    assert ck.state == "paused" and ck.data["reason"] == "host_outage", (ck.state, ck.data["reason"])
+    assert ran == ["a"] and ids(ck) == [] and ck.in_flight == "a", (ran, ids(ck), ck.in_flight)
+    o = ck.data["outages"]
+    assert [x["kind"] for x in o] == ["port_hung"] and o[0]["then"] == "paused", o
+    assert "unplug and replug" in ck.data["reason_text"] and "wcb1" in ck.data["reason_text"], ck.data["reason_text"]
+    assert "NOT A RESULT" in o[0]["detail"] and "did not come back" in o[0]["detail"], o[0]["detail"]
+    # still hung on the next start: the gate pauses before the test runs
+    b2 = tmp.bench()
+    ran2 = []
+    tests2 = [fake("x", ran=ran2)]
+    runner.REGISTRY[:] = tests2
+    ck2 = runner.start_run(b2, tests2, "hung gate")
+    b2.devs["wcb1"] = HungDev("wcb1", [True])
+    runner.continue_run(b2, ck2, resuming=False)
+    assert ran2 == [] and ck2.state == "paused" and ck2.data["outages"][0]["kind"] == "port_hung", (ran2, ck2.state)
+    # replugged: the resume runs the cut-off test first, then the rest
+    stuck[0] = False
+    runner.REGISTRY[:] = [fake("a", ran=ran), fake("b", ran=ran)]
+    ck3 = resume_run(tmp.bench(), ck.out_dir)
+    assert ran == ["a", "a", "b"] and ids(ck3) == ["a", "b"] and ck3.state == "done", (ran, ids(ck3), ck3.state)
+
+
+TESTS += [t_port_hung_pauses]            # one board's hung port pauses the run instead of erroring its tests
+
+
+def t_wizard_port_free(tmp):
+    """hil/wizard.py _port_free, the wait before the harness takes a port back from Chrome off Windows (WCB1's CH343
+    hung on an open that raced Chrome's close, 2026-10-08): it polls lsof until nobody holds the port, then settles;
+    a port held past the timeout returns False; a port with no path is free at once."""
+    from types import SimpleNamespace
+    from hil import wizard as W
+    saved = (W.subprocess, W.PORT_SETTLE_S)
+    calls = []
+
+    def runs(held_for):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return SimpleNamespace(stdout="4242\n" if len(calls) <= held_for else "")
+        return SimpleNamespace(run=run)
+    try:
+        W.PORT_SETTLE_S = 0.0
+        W.subprocess = runs(3)
+        assert W._port_free("/dev/cu.fake", timeout=5) is True and len(calls) == 4, calls
+        assert calls[0] == ["lsof", "-t", "/dev/cu.fake"], calls[0]
+        calls.clear()
+        W.subprocess = runs(10 ** 6)
+        assert W._port_free("/dev/cu.fake", timeout=0.6) is False and len(calls) >= 2, calls
+        calls.clear()
+        assert W._port_free(None) is True and calls == []
+    finally:
+        W.subprocess, W.PORT_SETTLE_S = saved[0], saved[1]
+
+
+TESTS += [t_wizard_port_free]            # a Wizard test's port is reopened only once Chrome has let go of it
+
+
 def t_kyber_device_helpers(tmp):
     """suites/s52_kyber_device.py's readers of the bench Kyber's config: kyber_config() takes the device's own table
     (tests/hil/kyber/bench_kyber_live.json, its GET) over the pasted file, and since Greg's config was loaded onto the

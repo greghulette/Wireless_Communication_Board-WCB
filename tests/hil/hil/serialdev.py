@@ -30,6 +30,11 @@ class ExpectTimeout(AssertionError):
     pass
 
 
+class PortHung(serial.SerialException):
+    """A port open that never returned: the board's USB-serial chip or its driver is hung, and only a replug brings it
+    back (_open_port). The runner pauses the run on it (runner.hung_ports)."""
+
+
 class SerialDevice:
     REOPEN_EVERY_S = 0.5      # how often the reader retries a vanished port
     SEND_WAIT_S = 5.0         # how long send() waits for a reopen before failing the test
@@ -63,13 +68,15 @@ class SerialDevice:
         """_open_port_now, given OPEN_TIMEOUT_S. On 2026-10-08 (run 20261008-073116) the open of WCB1's CH343 port
         after a Wizard test never returned: its chip had hung, the WCH driver's open waited on it in the kernel, and the
         GUI froze for half an hour. The open runs on a helper thread instead; one that has not returned raises, with
-        last_error_at set so the runner treats the board as lost (host_usb_loss, then its outage pause), and the stuck
-        thread is left behind - nothing can cancel the call - to close the port if the open ever does return. While it
-        is stuck, every further open of this device raises at once rather than leaving another thread behind it."""
+        last_error_at set, and the stuck thread is left behind - nothing can cancel the call - to close the port if the
+        open ever does return. While it is stuck, hung() is True and every further open of this device raises at once
+        rather than leaving another thread behind it; the runner pauses the run on a hung port (runner.hung_ports): one
+        board's hang is not host_usb_loss, which needs every port, and each later test on the board only errored
+        (resume of 20261008-073116)."""
         pend = self._open_pending
         if pend is not None and pend.is_alive():
             self.last_error_at = time.monotonic()
-            raise serial.SerialException(f"{self.name}: an earlier open of {self.port} has still not returned - its "
+            raise PortHung(f"{self.name}: an earlier open of {self.port} has still not returned - its "
                                          f"USB-serial chip or driver is hung; unplug and replug it")
         box, lock = {}, threading.Lock()
 
@@ -100,8 +107,13 @@ class SerialDevice:
             box["abandoned"] = True
         self._open_pending = t
         self.last_error_at = time.monotonic()
-        raise serial.SerialException(f"{self.name}: opening {self.port} has not returned in {self.OPEN_TIMEOUT_S:.0f} s "
+        raise PortHung(f"{self.name}: opening {self.port} has not returned in {self.OPEN_TIMEOUT_S:.0f} s "
                                      f"- its USB-serial chip or driver is hung; unplug and replug it")
+
+    def hung(self):
+        """An open of this port that never returned is still stuck (_open_port)."""
+        pend = self._open_pending
+        return pend is not None and pend.is_alive()
 
     def _open_port_now(self):
         s = serial.Serial()

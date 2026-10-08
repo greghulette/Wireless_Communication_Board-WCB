@@ -542,6 +542,19 @@ def host_usb_loss(bench, since):
     return None
 
 
+def hung_ports(bench):
+    """Names of the bench devices with a port open that never returned (serialdev PortHung): a USB-serial chip or driver
+    that only a replug brings back. Parked ports count too: the open that hangs is usually the one that takes a port
+    back after a Wizard test (WCB1's CH343, 2026-10-08)."""
+    devs = list(bench.devs.values()) + list(getattr(bench, "_parked", {}).values())
+    return sorted({getattr(d, "name", "?") for d in devs if callable(getattr(d, "hung", None)) and d.hung()})
+
+
+def _hung_text(hung):
+    return (f"{', '.join(hung)}: its port's open never returned - the USB-serial chip or its driver is hung; unplug and "
+            f"replug it, then resume")
+
+
 def _probe_marks(bench):
     """{probe name: (Probe object, log mark)} for every probe open as a test starts."""
     return {name: (p, p.dev.mark()) for name, p in list(bench.probes.items())}
@@ -772,6 +785,12 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
         if why:
             _pause_here(bench, ckpt, why)
             break
+        hung = hung_ports(bench)
+        if hung:      # no test can use the board, and nothing but a replug brings it back: pause, not a run of ERRORs
+            bench.note(f"===== {t['id']} NOT STARTED - {_hung_text(hung)}")
+            ckpt.record_outage(t, "port_hung", f"not started - {_hung_text(hung)}")
+            _pause_outage(bench, ckpt, _hung_text(hung))
+            break
         bad = _bench_unhealthy(bench, ckpt.last_boundary)
         if bad:
             bench.note(f"===== {t['id']} NOT STARTED - {bad}")
@@ -818,10 +837,11 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
             dur = time.monotonic() - start
             awake1 = _awake_s()
             slept = dur - (awake1 - awake0) if awake0 is not None and awake1 is not None else 0.0
-            usb_lost = None
+            usb_lost, hung = None, []
             if status in ("FAIL", "ERROR"):
                 time.sleep(0.5)       # a failed write can return a few ms before the reader threads log their errors
                 usb_lost = host_usb_loss(bench, start)
+                hung = hung_ports(bench)
             if status in ("FAIL", "ERROR") and slept > 5:
                 status = "ERROR"
                 detail = (f"NOT A RESULT - the host was asleep for {slept:.0f}s during this test (sleep or hibernate, "
@@ -832,6 +852,10 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                 detail = (f"NOT A RESULT - the host lost every USB serial port at once {usb_lost - start:.1f}s into "
                           f"this test (the PC slept, or a hub reset / cable pull); rerun it. The test said: "
                           f"{detail.splitlines()[0] if detail else '-'}")
+            elif hung:
+                status = "ERROR"
+                detail = (f"NOT A RESULT - {_hung_text(hung)}. The test said: "
+                          f"{redact_text(detail.strip().splitlines()[-1]) if detail.strip() else '-'}")
             else:
                 # A probe that restarted on its own during the test lost every channel binding; whatever the test
                 # concluded from those channels is not a result about the WCB. Fail THIS test with the reason, and
@@ -867,9 +891,13 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
         if r[1] == "ERROR" and r[2].startswith("NOT A RESULT"):
             # Not a result: checkpointed as an outage, and the test runs again (it has no result, so it is also first
             # on a resume). It stays in_flight: its own cleanup ran against dead ports.
-            ckpt.record_outage(t, "slept" if "was asleep" in r[2] else "usb_loss", r[2])
+            kind = "slept" if "was asleep" in r[2] else "port_hung" if "USB-serial chip" in r[2] else "usb_loss"
+            ckpt.record_outage(t, kind, r[2])
             if on_requeue:
                 on_requeue(t, r[2])
+            if kind == "port_hung":     # no automatic retry: the chip stays hung until someone replugs it
+                _pause_outage(bench, ckpt, _hung_text(hung_ports(bench)) if hung_ports(bench) else r[2])
+                break
             if t["id"] in retried:
                 _pause_outage(bench, ckpt, f"{t['id']} lost the host a second time")
                 break

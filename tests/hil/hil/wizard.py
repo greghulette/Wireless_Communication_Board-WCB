@@ -151,14 +151,42 @@ def _outcomes(report):
     return out
 
 
+PORT_SETTLE_S = 1.0      # after the last holder of a port lets go, before the harness opens it (_port_free)
+
+
+def _port_free(path, timeout=10.0):
+    """Off Windows: wait until no process holds `path` (lsof), then PORT_SETTLE_S more -> True, or False at the timeout.
+    On 2026-10-08 the harness's open of WCB1's CH343 port right after wizard.relay_terminal hung in the kernel twice
+    (WCH's CH34xVCPDriver), and the chip itself then answered nothing until it was replugged. Chrome may still be
+    closing the port when node exits, and an open racing a close is the likeliest way into that; the wait costs about
+    a second a Wizard test. Windows' exclusive open already fails fast while Chrome holds the port."""
+    if os.name == "nt" or not path:
+        return True
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            held = subprocess.run(["lsof", "-t", path], capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:  # noqa: BLE001 - no lsof answer: treat as free and rely on the settle
+            held = ""
+        if not held:
+            time.sleep(PORT_SETTLE_S)
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def _reacquire(bench, device, timeout=25.0):
     """Take the port back from Chrome and wait for the board to answer. Opening or closing the port from Chrome can
     toggle DTR/RTS and reset the board, and Chrome may hold the handle a moment after it exits. A NaviCore must answer
     a PING (its native-USB S3 resets on a DTR/RTS edge and needs a few seconds to boot); other non-WCB devices only
-    need the port back. After a pipe run the port was never released, so this only proves the board still answers."""
+    need the port back. After a pipe run the port was never released, so this only proves the board still answers.
+    Off Windows nothing opens the port until Chrome has let go of it (_port_free)."""
     deadline = time.monotonic() + timeout
     last = None
     kind = bench.cfg["devices"][device]["kind"]
+    if not _port_free(bench.cfg["devices"][device].get("port")):
+        bench.note(f"{device}: {bench.cfg['devices'][device].get('port')} is still held 10 s after the Wizard test; "
+                   f"opening it anyway")
     while time.monotonic() < deadline:
         try:
             dev = bench.dev(device)
