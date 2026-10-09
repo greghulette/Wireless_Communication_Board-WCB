@@ -636,7 +636,7 @@ def _restart_arm(w1, w2, delay, want, keys):
     return problems, straddled, t
 
 
-@test("wcb.pull_holds_restart", "A deferred ?reboot on W2 waits for a config pull W2 is sending: a 6-part pull (?DEBUG,PULLPART,512) running when ?reboot arrives, and one landing 3.3/3.6/3.9 s after it so the 4 s quiet window runs out mid-job, both arrive whole and CRC-valid at W1, and W2 restarts only after its 'Config pull to WCB1 sent' (WCB-WP25; 2-4 W2 reboots)", needs=["wcb1", "wcb2"])
+@test("wcb.pull_holds_restart", "A deferred ?reboot on W2 waits for a config pull W2 is sending: a 6-part pull (?DEBUG,PULLPART,512) running when ?reboot arrives, and one landing so the 4 s quiet window runs out mid-job (aimed at half the measured job before it; up to five tries), both arrive whole and CRC-valid at W1, and W2 restarts only after its 'Config pull to WCB1 sent' (WCB-WP25; 2-4 W2 reboots)", needs=["wcb1", "wcb2"])
 def pull_holds_restart(bench):
     """The restart gate in loop() (WCB.ino) is '(quiet || capped) && !configPullJobActive()', and a config request
     never moves the quiet clock: it reaches the target through drainMgmtReqs, not through the command queue that stamps
@@ -644,7 +644,10 @@ def pull_holds_restart(bench):
     shows only that nothing restarts early. Arm 2 would catch a lost configPullJobActive() term: the pull lands just
     before the window runs out, so the restart falls due mid-job and must wait for the job's end. An offset counts only
     when W2's log shows it straddled that moment (see _restart_arm); a mesh command in the window moves the moment, and
-    the next offset is tried. The throwaway HILP sequences are removed again."""
+    the next offset is tried. The first offset is aimed at the middle: the job's length from arm 1 (about 0.7 s), half of
+    it before the window runs out. Fixed 3.3/3.6/3.9 s alone missed it once (20261009-082225: the 3.3 s job ended at 4.10
+    s, 0.00 s short of counting; at 3.6 s a mesh command held the restart 3 s; 3.9 s began too late). The throwaway HILP
+    sequences are removed again."""
     w1, w2 = usb_wcb(bench), _w2(bench)
     keys, problems, seen = [], [], []
     with config_guard(bench, 2):
@@ -655,7 +658,14 @@ def pull_holds_restart(bench):
             got, straddled, t = _restart_arm(w1, w2, None, want, keys)
             problems += [f"?reboot during the pull: {x}" for x in got]
             seen.append(("during", t))
-            for delay in (3.3, 3.6, 3.9):
+            job = (t[1] - t[0]) if t else 0.75             # accepted -> sent, the pull job's length on W2
+            aim = round(QUIET_S - job / 2 - 0.05, 2)        # the pull is accepted ~0.05 s after it is sent
+            delays = []
+            for d in (aim, aim - 0.15, aim + 0.15, 3.3, 3.6):
+                d = round(min(max(d, 3.0), 3.85), 2)
+                if all(abs(d - x) > 0.05 for x in delays):
+                    delays.append(d)
+            for delay in delays:
                 got, straddled, t = _restart_arm(w1, w2, delay, want, keys)
                 problems += [f"pull {delay} s after ?reboot: {x}" for x in got]
                 seen.append((delay, t))
