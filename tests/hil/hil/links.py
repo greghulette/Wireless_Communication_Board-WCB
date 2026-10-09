@@ -354,9 +354,10 @@ class LinkManager:
     # ------------------------------------------------------------ lookup
     def get(self, wcb, port, raw=False):
         """The wire on W<wcb> <port>, or None. A port with a real device and no port_stimulus is hidden from tests —
-        nothing may be sent there — even when a listen-only wire is on it; raw=True (GUI, plan) returns it anyway."""
+        nothing may be sent there — even when a listen-only wire is on it; so is a tap on what a device sends INTO the
+        port (device_sends), which never carries the port's output. raw=True (GUI, plan, devchecks) returns it anyway."""
         link = self.links.get((wcb, port))
-        if link is not None and not raw and self.device_only(wcb, port):
+        if link is not None and not raw and (self.device_only(wcb, port) or self.device_sends(wcb, port)):
             return None
         return link
 
@@ -374,6 +375,9 @@ class LinkManager:
             from .runner import Skip, describe_device
             if self.device_only(wcb, port):
                 raise Skip(f"W{wcb}{port} has {describe_device(self.device_on(wcb, port))} on it, so no test traffic goes there")
+            if self.device_sends(wcb, port):
+                raise Skip(f"W{wcb}{port} has {describe_device(self.device_on(wcb, port))} on it, and its probe wire only "
+                           f"hears what that device sends into the port, never the port's output")
             raise Skip(f"no wire on W{wcb} {port} (run with --discover after wiring)")
         return link
 
@@ -422,6 +426,13 @@ class LinkManager:
         """A real device is on the port and no port_stimulus names a safe way to make the port transmit, so the
         tool must not make it transmit at all (discovery, verify and link.out skip it)."""
         return self.device_on(wcb, port) is not None and f"W{wcb}{port}" not in self.bench.cfg.get("port_stimulus", {})
+
+    def device_sends(self, wcb, port):
+        """The port's port_stimulus makes a device send INTO it ({"kyber_button": n}): the wire there taps that device's
+        TX, not the WCB port's output. Discovery, verify, link.out and devchecks use it; get() hides it from tests, which
+        all expect a wire to carry the port's output (input.softserial_idle_high_after_boot read W3 S5 empty in full
+        run 20261009-174225 the day the Kyber's MarcDuino tap was added)."""
+        return "kyber_button" in (self.bench.cfg.get("port_stimulus", {}).get(f"W{wcb}{port}") or {})
 
     # ------------------------------------------------------------ channels
     def _owned(self, probe_name):

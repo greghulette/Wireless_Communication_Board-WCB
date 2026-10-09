@@ -423,7 +423,9 @@ def missing(bench, t):
         alts = key.split("|")
         if not any(bench.links.get_key(a) for a in alts):   # get() hides a device port with no port_stimulus
             held = [f"{a} has {describe_device(devices[a])} on it" +
-                    ("" if bench.links.device_only(*parse_key(a)) else ", so only a listen-only tap can go there")
+                    ("" if bench.links.device_only(*parse_key(a)) else
+                     ", and its wire only hears what the device sends in" if bench.links.device_sends(*parse_key(a)) else
+                     ", so only a listen-only tap can go there")
                     for a in alts if a in devices]
             nav = [a for a in alts if a.startswith("N")]
             if nav and not held:

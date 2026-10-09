@@ -118,7 +118,7 @@ def _kyber(bench):
         ctl = k._ctl(bench)
     except Skip as e:
         return [Check(n, None, str(e)) for n in names]
-    tap = bench.links.get(3, "S5")                       # a listen-only tap on the Kyber's MarcDuino TX, if wired
+    tap = bench.links.get(3, "S5", raw=True)             # a listen-only tap on the Kyber's MarcDuino TX, if wired
     if tap:
         tap.listen(9600)
     marc_got = marc_sent = maestro_frames = None

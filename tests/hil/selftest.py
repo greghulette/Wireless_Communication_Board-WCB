@@ -2043,6 +2043,30 @@ def t_probe_reboot_rebinds(tmp):
     assert d.binds() == 4 and d.sent[-1].startswith("TX C "), d.sent[-2:]
 
 
+def t_device_sends_tap_hidden(tmp):
+    """A tap on what a device sends INTO a port (port_stimulus {"kyber_button": n}, W3 S5 on the bench) never carries the
+    port's output, so get() hides it from tests the way it hides a device port with no stimulus, require() skips naming
+    why, and runner.missing says so; raw=True (devchecks, GUI) still has it. A tap whose stimulus is a WCB command (W3 S2)
+    stays visible. Full run 20261009-174225: input.softserial_idle_high_after_boot read W3 S5 empty."""
+    b, d = _probe_bench(tmp)
+    b.cfg["port_devices"] = {"W1S5": {"kind": "kyber"}, "W1S4": {"kind": "maestro"}}
+    b.cfg["port_stimulus"] = {"W1S5": {"kyber_button": 3}, "W1S4": {"send": ";S4UU", "expect": "55550D"}}
+    s5 = b.links.set_link(1, "S5", "probe1", "S5")
+    s4 = b.links.set_link(1, "S4", "probe1", "S4")
+    assert s5.tap and s4.tap
+    assert b.links.device_sends(1, "S5") and not b.links.device_only(1, "S5")
+    assert not b.links.device_sends(1, "S4")
+    assert b.links.get(1, "S5") is None and b.links.get(1, "S5", raw=True) is s5
+    assert b.links.get(1, "S4") is s4 and b.links.get_key("W1S5") is None
+    e = _raises(lambda: b.links.require(1, "S5"), runner.Skip)
+    assert "only hears what that device sends into the port" in str(e), e
+    t = fake("x.y")
+    t["links"] = ["W1S5"]
+    miss = runner.missing(b, t)
+    assert miss and "only hears what the device sends in" in miss[0], miss
+    assert s5 in b.links.all(), "link.out and the resume checks still walk it"
+
+
 def t_runner_fails_test_on_probe_panic(tmp):
     """The runner scans every open probe after each test: an unplanned restart fails THAT test with 'probe1 panicked
     at t=...' (a result, not a harness crash) and forgets the probe, so the next test binds afresh and passes. A
@@ -11810,7 +11834,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_wizard_abort_kills_tree, t_nctool_pipe_bridge, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
-         t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
+         t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_device_sends_tap_hidden, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
