@@ -303,6 +303,9 @@ def _taps(nc, since, mode, slot):
     return [(ts, k[2]) for ts, k in _rc_trigs(nc, since, {(mode, slot)})]
 
 
+
+FPS_WINDOW_CLEAR_S = 2.2   # long enough that #L09's fps window (the last whole second loop() timed) excludes an earlier stall
+
 @test("sbus.matrix_logical_band", "A logical band (slots 22-36) decodes like a physical one: a controller lua button "
       "whose value no band covers presses the logical slot once a band is placed on it; where two bands overlap the "
       "lower slot wins; each press gives one rc_trig and its mapping's marker", needs=["sbus", "navicore", "wcb1"],
@@ -1264,6 +1267,11 @@ def lock_under_load(bench):
     reader decode garbage is sbus.stall_no_phantom's question; that test makes everything inert before it stalls."""
     ctl, nc, cfg, ncfg = _sbus_setup(bench)
     slots = nc.local_slots(ncfg)
+    # #L09's fps is the frame count of the last whole second loop() timed (NaviCore.ino sbusFpsCounter), which can end
+    # up to a second before the read: a sample taken soon after a stall counts the stall. The test before this one ends
+    # with nc_guard's config save, a ~0.45 s LittleFS write that stalls loop(); sample 0 once read fps 48 for it while
+    # the frame counter ran at full rate under the load itself (20261009-082225). Two seconds put it out of every window.
+    time.sleep(FPS_WINDOW_CLEAR_S)
     base = nc.sbus_dump()
     samples, problems = [], []
     m = nc.dev.mark()
@@ -1419,7 +1427,9 @@ def stall_no_phantom(bench):
         finally:
             nc.ack({"type": "STOP_MONITOR"})
             nc.set_debug_flags(0)
-        time.sleep(1.0)
+        # #L09's fps is the last whole second loop() timed (see sbus.lock_under_load): read 1 s after the last stall it
+        # still counted the stall's lost frames (fps 81, 20261009-082225). Read it once a clean second has passed.
+        time.sleep(FPS_WINDOW_CLEAR_S)
         lines = [x.rstrip() for x in nc.dev.since(nm)]
         after = nc.sbus_dump()
         phantom = _frames(l11, m11, dev, set(chans))
