@@ -109,7 +109,8 @@ def _local_status(w):
 def _recover_local(w):
     """Leave W1 idle at 115200. ?OTALOCAL,ABORT prints nothing when idle but always restores the board's rate
     (WCB_OTA.cpp:94-95), so it goes at the rate host and board last agreed on, then the host follows. If the board
-    still does not answer, it is stranded at the raised rate (the rejected-re-BEGIN finding): ABORT there too."""
+    still does not answer, it is stranded at the raised rate (the rejected-re-BEGIN finding): ABORT there too, at the
+    rate _bump last raised it to."""
     w.dev.send("?OTALOCAL,ABORT")
     time.sleep(0.2)
     w.dev.set_baud(115200)
@@ -119,7 +120,7 @@ def _recover_local(w):
         return
     except AssertionError:
         pass
-    w.dev.set_baud(921600)
+    w.dev.set_baud(getattr(w, "ota_rate", OTA_RATES[0]))
     w.dev.send("?OTALOCAL,ABORT")
     time.sleep(0.2)
     w.dev.set_baud(115200)
@@ -544,7 +545,62 @@ def local_write_refreshes_timeout(bench):
 
 
 # ============================================================ OPT-IN ota_erase: the USB baud bump
-def _bump(w, rate=921600):
+OTA_RATES = (921600, 460800)    # the raised rates these tests use, fastest first: the Wizard's OTA_XFER_BAUD and fallback
+
+
+def _host_rate(bench, w):
+    """The fastest rate in OTA_RATES this host's USB link to W1 carries, found once per run (the first test that needs
+    it pays for it). The board takes every rate it accepts; whether the HOST's serial driver carries it is another
+    matter: on the Mac, Apple's own CH34x driver carries 460800 and 1000000 to W1's CH9102 but nothing at all at
+    921600 (2026-10-09), where WCH's driver carried 921600. The probe is the Wizard's own proof (Wizard/app.js
+    boardOtaSerial): BEGIN, BAUD, then STATUS must answer at the raised rate. A rate that gets no answer leaves W1 at it
+    until its session timeout (30 s from BEGIN) restores 115200, so nothing is sent until then - a line at the wrong
+    rate reaches W1 as junk text it would broadcast. -> the rate, or 115200 when none carries (the bump tests then
+    run at 115200, which the firmware also accepts)."""
+    cache = bench.__dict__.setdefault("_ota_host_rates", {})
+    if w.dev.port in cache:
+        return cache[w.dev.port]
+    rate = 115200
+    for r in OTA_RATES:
+        m0 = w.dev.mark()
+        w.dev.send("?OTALOCAL,BEGIN,4096,0")
+        w.dev.expect(r"^\[OTA:BEGIN,OK,0\]$", timeout=10, since=m0)
+        began = _line_time(w.dev, m0, r"^\[OTA:BEGIN,OK,0\]")
+        _bump(w, r)
+        m = w.dev.mark()
+        w.dev.send("?OTALOCAL,STATUS")
+        try:
+            w.dev.expect(r"^Session:\s+ACTIVE", timeout=1.5, since=m)
+            carried = True
+        except AssertionError:
+            carried = False
+        if carried:
+            w.dev.send("?OTALOCAL,ABORT")             # restores 115200 at once
+            time.sleep(0.2)
+            w.dev.set_baud(115200)
+            time.sleep(0.2)
+            w.version()
+            rate = r
+            break
+        w.dev.set_baud(115200)
+        time.sleep(max(0.0, began + 31.5 - time.monotonic()))
+        # The unanswered STATUS reached W1 as bytes with no line end, which would prefix ?VERSION and turn it into text
+        # (see local_baud_rejected_rebegin_restores): end that line first. The host read bytes at the wrong rate too, and
+        # they lead W1's first line back ('@\ufffd\ufffdSoftware Version: ...', 20261009-081745): ask twice if need be.
+        w.dev.send("")
+        time.sleep(0.2)
+        try:
+            w.version()
+        except AssertionError:
+            w.version()
+        bench.note(f"W1's USB link carries nothing at {r} on this host: no answer to STATUS at it, and W1 was back at "
+                   f"115200 after its session timeout")
+    cache[w.dev.port] = rate
+    bench.note(f"OTA transfer rate on this host's link to W1: {rate}")
+    return rate
+
+
+def _bump(w, rate):
     """?OTALOCAL,BAUD handshake. The ACK arrives at the old rate; the board flushes, waits 20 ms and switches
     (WCB_OTA.cpp:257-260), so the host follows 100 ms later. dev.send, never run(): its echo would cross the switch."""
     m = w.dev.mark()
@@ -552,15 +608,17 @@ def _bump(w, rate=921600):
     w.dev.expect(rf"^\[OTA:BAUD,OK,{rate}\]$", timeout=3, since=m)
     time.sleep(0.1)
     w.dev.set_baud(rate)
+    w.ota_rate = rate
     time.sleep(0.1)
 
 
-@test("ota.local_baud_bump_abort", "OPT-IN (ota_erase): the BAUD 921600 handshake, commands at the raised rate, and ABORT restoring 115200", needs=["wcb1"], links=[], opt_in="ota_erase")
+@test("ota.local_baud_bump_abort", "OPT-IN (ota_erase): the BAUD handshake at the fastest rate this host's link carries (921600, else 460800), commands at the raised rate, and ABORT restoring 115200", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_bump_abort(bench):
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     with _local(w):
         _begin(w, 4096)
-        _bump(w)
+        _bump(w, rate)
         fast = w.version()
         active = _local_status(w)
         m = w.dev.mark()
@@ -570,7 +628,7 @@ def local_baud_bump_abort(bench):
         w.dev.set_baud(115200)
         time.sleep(0.1)
         slow = w.version()
-    assert fast == slow, f"?VERSION at 921600 {fast!r}, at 115200 {slow!r}"
+    assert fast == slow, f"?VERSION at {rate} {fast!r}, at 115200 {slow!r}"
     assert active["session"] == "ACTIVE id=1  0 / 4096 B", active["session"]
 
 
@@ -593,18 +651,19 @@ def local_baud_invalid(bench):
 @test("ota.local_baud_timeout_restore", "OPT-IN (ota_erase): the idle timeout at a raised baud restores the board to 115200; BAUD does not refresh the window (~35 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_timeout_restore(bench):
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     with _local(w):
         m0 = w.dev.mark()
         _begin(w, 4096)
         t0 = _line_time(w.dev, m0, r"^\[OTA:BEGIN,OK,0\]")
-        _bump(w)
+        _bump(w, rate)
         w.dev.expect(r"^\[OTA\] aborted: session timed out \(current app intact\)$", timeout=max(1.0, t0 + 35 - time.monotonic()), since=m0)
         fired = _line_time(w.dev, m0, r"^\[OTA\] aborted: session timed out") - t0
         time.sleep(0.15)
         w.dev.set_baud(115200)
         time.sleep(0.1)
         version = w.version()
-    bench.note(f"timed out {fired:.1f} s after BEGIN at 921600; W1 answered {version} at 115200")
+    bench.note(f"timed out {fired:.1f} s after BEGIN at {rate}; W1 answered {version} at 115200")
     assert 29.5 <= fired <= 33, f"timeout {fired:.1f} s after BEGIN (the window runs from BEGIN, not from BAUD)"
 
 
@@ -613,17 +672,18 @@ def local_baud_rejected_rebegin_restores(bench):
     """Tracker #61. otaBegin tears a live session down before its guards run, so a rejected re-BEGIN leaves no session,
     and neither the ota.active-gated idle reaper nor BAUD can undo a raised rate. The BEGIN handler restores 115200
     itself, after the [OTA:BEGIN,ERR] marker has gone out at the raised rate. The stranded state is probed first, at
-    921600; if the fix holds, that probe arrives at 115200 as line-less junk, which the empty line below flushes."""
+    raised rate; if the fix holds, that probe arrives at 115200 as line-less junk, which the empty line below flushes."""
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     with _local(w):
         _begin(w, 4096)
-        _bump(w)
+        _bump(w, rate)
         m = w.dev.mark()
         w.dev.send("?OTALOCAL,BEGIN,4096,1")
         w.dev.expect(r"^\[OTA:BEGIN,ERR,0\]$", timeout=5, since=m)
         time.sleep(0.3)
         try:
-            w.version()                              # host still at 921600
+            w.version()                              # host still at the raised rate
             stranded = True
         except AssertionError:
             stranded = False
@@ -632,12 +692,12 @@ def local_baud_rejected_rebegin_restores(bench):
             time.sleep(0.2)
         w.dev.set_baud(115200)
         time.sleep(0.1)
-        # A 921600 probe reaches a board already back at 115200 as a few bytes with no CR/LF, and
+        # A raised-rate probe reaches a board already back at 115200 as a few bytes with no CR/LF, and
         # processIncomingSerial would prefix them to the next ?VERSION, which then runs as text. End that line first.
         w.dev.send("")
         time.sleep(0.2)
         w.version()
-    assert not stranded, "W1 stayed at 921600 with no session after the rejected re-BEGIN"
+    assert not stranded, f"W1 stayed at {rate} with no session after the rejected re-BEGIN"
 
 
 # ============================================================ OPT-IN ota_erase: relay sessions on W2
@@ -842,7 +902,7 @@ def _progress_lines(size):
     return size // 65536 + (1 if size % 65536 else 0)     # every 65536 B plus the final one (WCB_OTA.cpp:167-171)
 
 
-def _stream_local(w, image, baud=921600):
+def _stream_local(w, image, baud):
     """BEGIN (full erase, up to 30 s), the BAUD bump, ACK-paced 1024-B chunks following the cursor, the RX-overflow
     probe line, then END. Returns (mark before END, progress lines, overflow suffix of the probe line, seconds)."""
     started = time.monotonic()
@@ -880,6 +940,7 @@ def _stream_local(w, image, baud=921600):
 @test("ota.local_sha_corrupt_full", "OPT-IN (ota_full): the full image with one flipped byte streams to 100 % and fails verify at END; no reboot, no slot change, nothing leaks onto S2-S5", needs=["wcb1"], links=["W1S2", "W1S3", "W1S4", "W1S5"], opt_in="ota_full")
 def local_sha_corrupt_full(bench):
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     img = _image(w)
     corrupt = bytearray(img)
     corrupt[700000] ^= 0xFF
@@ -887,7 +948,7 @@ def local_sha_corrupt_full(bench):
     watch = Watch(*wires)
     with _local(w):
         before = _local_status(w)
-        m_end, progress, overflow, secs = _stream_local(w, bytes(corrupt))
+        m_end, progress, overflow, secs = _stream_local(w, bytes(corrupt), rate)
         end = _ota(w.dev.since(m_end))
         time.sleep(0.15)
         w.dev.set_baud(115200)                     # after END,ERR the board restores 115200 itself
@@ -911,6 +972,7 @@ def local_full_same_image_wcb1(bench):
     Rollback only rescues an image that dies before initArduino (esp32-hal-misc.c:277-292). If W1 does not come back, the
     recovery is a USB reflash by the operator: the harness never runs esptool."""
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     img, fw = _image(w), w.version()
     passes = []
     with config_guard(bench, 1):
@@ -918,7 +980,7 @@ def local_full_same_image_wcb1(bench):
         try:
             for _ in range(2):
                 before = _local_status(w)
-                m_end, progress, overflow, secs = _stream_local(w, img)
+                m_end, progress, overflow, secs = _stream_local(w, img, rate)
                 end = _ota(w.dev.since(m_end))
                 w.dev.set_baud(115200)                 # the restart comes 2 s after [OTA:END,OK], at 115200
                 w.wait_boot(m_end, timeout=25)
@@ -943,10 +1005,11 @@ def local_wrong_chip_image(bench):
     stops a wrong image with a correct declared family. If END ever succeeded W1 would reboot into an S3 image: stop
     and reflash it by USB."""
     w = usb_wcb(bench)
+    rate = _host_rate(bench, w)
     s3_image = _image(w, chip="ESP32S3")
     with _local(w):
         before = _local_status(w)
-        m_end, _, _, _ = _stream_local(w, s3_image)
+        m_end, _, _, _ = _stream_local(w, s3_image, rate)
         end = _ota(w.dev.since(m_end))
         time.sleep(0.15)
         w.dev.set_baud(115200)

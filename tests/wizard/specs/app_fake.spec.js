@@ -673,3 +673,96 @@ test('wizard.app_fake_pending_funcchar (should) a function identifier typed into
   const cmds = await page.evaluate(() => __fake.log.filter((e) => e.slot === 1 && e.op !== 'close').map((e) => e.s));
   expect(cmds).toEqual(['?SEQ,SAVE,hello,;S1bye', '?DEBUG,ETM,ON', '?WDP,DUMP']);
 });
+
+// The OTA transfer-rate proof (Wizard/app.js boardOtaSerial, OTA_XFER_FALLBACKS). On the Mac bench Apple's CH34x driver
+// carried nothing to WCB1's CH9102 at 921600 while 460800 and 1000000 worked (2026-10-09), and the board only returns to
+// 115200 when its session timeout ends the session. A fake board here answers only at the rate both sides are on, is
+// deaf at the rates a run names, and drops back to 115200 (ending the session) OTA_SESSION_TIMEOUT_MS after BEGIN.
+test('wizard.app_fake_ota_baud_fallback an OTA over USB proves its raised baud: a board deaf at 921600 is left to its session timeout with nothing sent, begun again and streamed at 460800, the rate remembered so the next OTA starts there; a rate it answers at is used at once', async ({ page }) => {
+  await openWizard(page);
+  await install(page);
+  const runs = await page.evaluate(async () => {
+    OTA_SESSION_TIMEOUT_MS = 400;
+    window.getBinaryData = async () => ({ images: [{ address: 0x10000, buf: new Uint8Array(2500).fill(0xa5).buffer }] });
+    const KEY = 'wcbOtaBaud:6790:21972';
+    const run = async (deaf) => {
+      const b = { baud: 115200, host: 115200, active: false, size: 0, written: 0, began: 0 };
+      const log = [], dataRates = new Set();
+      const c = window.__fake.conn(1, {});
+      c.port = { reconfigure() {}, getInfo: () => ({ usbVendorId: 0x1a86, usbProductId: 0x55d4 }) };
+      c.setBaud = async (r) => { b.host = r; log.push(`host ${r}`); };
+      // A line the board could not read (wrong rate, or a rate the link does not carry) leaves junk with no line end in
+      // its input, which turns the next line into junk too - until a bare CR ends it.
+      const timeout = () => {
+        if (b.active && b.baud !== 115200 && performance.now() - b.began > OTA_SESSION_TIMEOUT_MS) {
+          b.baud = 115200; b.active = false; log.push('board timeout');
+        }
+      };
+      c.send = async (s) => {
+        timeout();
+        log.push(`send ${JSON.stringify(s)} @${b.host}`);
+        if (s === '\r' && b.host === b.baud) b.junk = false;
+      };
+      c.sendAndCollect = async (s) => {
+        timeout();
+        const m = s.match(/OTALOCAL,(\w+)(?:,(.*))?$/);
+        if (!m) return '';
+        const [, sub, rest] = m;
+        log.push(sub === 'DATA' ? `DATA @${b.host}` : `${sub}${rest ? ',' + rest : ''} @${b.host}`);
+        if (b.host !== b.baud || deaf.includes(b.baud)) { b.junk = true; log.push('  (no answer)'); return ''; }
+        if (b.junk) { b.junk = false; log.push('  (eaten by junk)'); return ''; }
+        if (sub === 'STATUS') {
+          return `Chip:        ESP32-D0WD (family 0)\r\nSession:     ${b.active ? `ACTIVE id=1  ${b.written} / ${b.size} B` : 'idle'}`;
+        }
+        if (sub === 'BEGIN') {
+          Object.assign(b, { active: true, size: parseInt(rest, 10), written: 0, began: performance.now() });
+          return '[OTA:BEGIN,OK,0]';
+        }
+        if (sub === 'BAUD') { const r = parseInt(rest, 10); setTimeout(() => { b.baud = r; }, 0); return `[OTA:BAUD,OK,${r}]`; }
+        if (sub === 'DATA') {
+          const [off, b64] = rest.split(',');
+          b.written = parseInt(off, 10) + atob(b64).length;
+          dataRates.add(b.host);
+          return `[OTA:ACK,${b.written}]`;
+        }
+        if (sub === 'END') return b.written === b.size ? '[OTA:END,OK]' : '[OTA:END,ERR]';
+        return '';
+      };
+      await boardOtaSerial(1);
+      let kept = null;
+      try { kept = localStorage.getItem(KEY); } catch (_) {}
+      return { log, dataRates: [...dataRates], kept, ended: log.some((l) => l.startsWith('END')), toasts: window.__fake.toastText() };
+    };
+    try { localStorage.removeItem(KEY); } catch (_) {}
+    const deaf = await run([921600]);
+    const again = await run([921600]);
+    try { localStorage.removeItem(KEY); } catch (_) {}
+    const clean = await run([]);
+    return { deaf, again, clean };
+  });
+
+  // Deaf at 921600: the proof gets no answer, the host goes back to 115200 and sends nothing until the board's timeout
+  // has restored it; then STATUS (idle), BEGIN again, 460800 proved, and every chunk at 460800.
+  const d = runs.deaf.log;
+  const proofAt921 = d.indexOf('STATUS @921600');
+  expect(proofAt921, d.join('\n')).toBeGreaterThan(d.indexOf('BAUD,921600 @115200'));
+  expect(d[proofAt921 + 2], 'the host returns to 115200 right after the failed proof').toBe('host 115200');
+  const after = d.slice(proofAt921 + 3);
+  // The fake notes its timeout when the next command arrives, so 'board timeout' leads: the board had restored 115200
+  // before anything more was sent.
+  expect(after.slice(0, 3), 'after the wait: the board timed out, a bare CR ends the junk line, then STATUS at 115200')
+    .toEqual(['board timeout', 'send "\\r" @115200', 'STATUS @115200']);
+  expect(after.filter((l) => l.startsWith('BEGIN')).length, 'BEGIN again after the timeout ended the session').toBe(1);
+  expect(after).toContain('BAUD,460800 @115200');
+  expect(after).toContain('STATUS @460800');
+  expect(runs.deaf.dataRates).toEqual([460800]);
+  expect(runs.deaf.ended && runs.deaf.kept).toBe('460800');
+  expect(runs.deaf.toasts).not.toContain('OTA failed');
+  // Remembered: the next OTA on that bridge starts at 460800 and never tries 921600.
+  expect(runs.again.log.some((l) => l.includes('921600')), runs.again.log.join('\n')).toBe(false);
+  expect(runs.again.dataRates).toEqual([460800]);
+  // A board that answers at 921600 streams at 921600 at once, one BEGIN, and that is what is remembered.
+  expect(runs.clean.log.filter((l) => l.startsWith('BEGIN')).length).toBe(1);
+  expect(runs.clean.dataRates).toEqual([921600]);
+  expect(runs.clean.kept).toBe('921600');
+});

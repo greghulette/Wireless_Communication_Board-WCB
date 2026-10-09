@@ -186,6 +186,7 @@ _FAKE_MORE = (
     ("app_fake_wcb_number_above_floor", "(should) A board above the WCB quantity can be renumbered to any number its dropdown offers (W-18)"),
     ("app_fake_fw_check", "The latest-release check: the version from the bin name, the update badge behind it, up to date on it, dev ahead of it, a malformed version harmless, the check throttled, a stale branch override warned"),
     ("app_fake_relay_card", "A MgmtRelay card lists the WCBs its mesh hears, Manage all arms their terminals and pulls one at a time, a second Manage all only re-arms, Push All and the export leave it out, a disconnect un-manages"),
+    ("app_fake_ota_baud_fallback", "An OTA over USB proves its raised baud: a board deaf at 921600 is left to its session timeout with nothing sent, begun again and streamed at 460800, the rate remembered so the next OTA starts there; a rate it answers at is used at once"),
     ("app_fake_hub_flash_refused", "A flash or an erase on the shared port is refused while this tab only follows the hub or another tab waits on its lock; nothing is flashed and the outcome says the push did not run"),
     ("app_fake_pull_leaves_nothing_pending", "(should) Pulling a board leaves nothing pending in General: no 'push to all boards' toast, Push All not flagged (W-19)"),
     ("app_fake_pending_funcchar", "(should) A function identifier typed into General but not yet pushed is not used for the board's immediate commands (W-13)"),
