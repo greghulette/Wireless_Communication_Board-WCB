@@ -229,6 +229,23 @@ MP3 Trigger, DFPlayer or WLED is routed to is not swept (its device would read t
 of discovery notes a pin that was busy in its baseline windows once, with its highest count, rather than once per port:
 SBUS OUT on a probe header is busy in all of them.
 
+**Device links** (`hil/devchecks.py`). The sweep proves WCB -> probe wires only; a wire from one device into another
+has no probe on it (or only a listen-only tap) and nothing in the sweep sends on it. On 2026-10-09 the Kyber's MarcDuino
+wire into W3 S5 came off in a rebuild, auto-detect verified 19 of 19 wires, and only `kyber.device_pad_serial` found
+it, hours into the run. So *Auto-detect wires* ends with a check of each `device_links` wire, end to end, and the same
+checks run as `probe.device_links`, the third test of every run:
+
+| Link | Check | A failure says |
+|---|---|---|
+| SBUS A: controller S5 -> NaviCore SBUS IN | `#L09`: fps at full rate, SBUS-24, no lost or failsafe flag | the controller's S5 TX to GPIO4, GND |
+| NaviCore J3 <-> Maestro 1 | `?MAE,GET,<first local slot>,0` answers a value | J3 TX (GPIO6) to the Maestro's RX, its TX to J3 RX (GPIO7), GND, power |
+| SBUS B -> Kyber -> MarcDuino -> W3 S5 | a pad button whose MarcDuino line is a WCB port command (button 3, `;w3;s3track1`): its text out that port's probe | read against the next row: the Kyber's MarcDuino TX to W3 S5 RX if the script went through, else SBUS B and the Kyber's power |
+| Kyber Maestro -> W3 S2 -> W1 S1 | a pad button that runs a Maestro 1 script (button 1): its `restartScript` on W1 S1's probe | the Kyber's Maestro TX to W3 S2 RX (GPIO7), GND |
+
+Both Kyber rows come from one routed session (`KyberPad`), so W2's Maestro 2 may centre a servo (`hil/servos.py`). A
+link whose devices are not on the bench is skipped. A listen-only tap on the Kyber's MarcDuino TX (W3 S5), once wired and
+found, tells the last two cases apart further: the Kyber sent, but WCB3 did not run it.
+
 **What Greg wires and adds** (once, before the first `ncwire` run):
 
 1. Flash a spare V2.4 board with `tests/hil/wcb_probe` (v7, §3). Nothing new is needed for SBUS OUT: a hardware channel

@@ -1785,13 +1785,27 @@ class App:
         self.emit("links_changed")
         good = sum(1 for l in links if l.verified)
         lines.append(f"{len(links)} wire(s) found, {good} verified")
+        # The device-to-device wires the sweep cannot see (hil/devchecks.py): a loose one passed auto-detect once and
+        # failed a test hours into the run (2026-10-09).
+        self.emit("status", f"Auto-detect: {len(links)} wire(s) found, {good} verified - checking the device links…")
+        try:
+            from hil import devchecks
+            checks = devchecks.run_all(self.bench, log=log)
+        except Exception as e:  # noqa: BLE001 - the sweep's result stands; say why the device links were not checked
+            checks = []
+            log(f"  device links not checked: {e}")
+        bad = [c for c in checks if c.ok is False]
+        dev_line = (f"device links: {sum(1 for c in checks if c.ok)} ok, {len(bad)} failed, "
+                    f"{sum(1 for c in checks if c.ok is None)} skipped")
+        lines.append(dev_line + "".join(f"\n  FAILED {c}" for c in bad))
         # The notes (a noisy pin, a skipped port) are what explain a missing wire: kept past the Log tab, overwritten
         # by the next auto-detect.
         try:
             checkpoint.atomic_write_text(os.path.join(RESULTS, "last_discover.log"), "\n".join(lines) + "\n")
         except OSError:
             pass
-        self.emit("status", f"Auto-detect: {len(links)} wire(s) found, {good} verified")
+        self.emit("status", f"Auto-detect: {len(links)} wire(s) found, {good} verified; {dev_line}"
+                            + (f" - FAILED: {', '.join(c.name for c in bad)}" if bad else ""))
 
     def device_note(self, wcb, port):
         dev = self.bench.links.device_on(wcb, port)

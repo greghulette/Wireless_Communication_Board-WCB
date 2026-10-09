@@ -233,6 +233,8 @@ SERVO_TESTS = {
                                    "minute; a mode set before it is sent back",
     # ---- the real Kyber on WCB3 (s52): routed to output B it hears the controller's channels, and RC CH1-3 pass
     # through to Maestro channels, so it streams setTargets at their rest (centre) over the mesh to Maestro 2
+    "probe.device_links": "routes the controller to the Kyber for one pad press: its CH1-3 pass-through setTargets reach "
+                          "Maestro 2",
     "kyber.device_pad_serial": "routes the controller to the Kyber: its CH1-3 pass-through setTargets reach Maestro 2",
     "kyber.device_pad_maestro": "routes the controller to the Kyber: its pass-through setTargets reach Maestro 2, and "
                                 "button 1 runs Maestro 1's script 1 on whatever answers device 1 there",
