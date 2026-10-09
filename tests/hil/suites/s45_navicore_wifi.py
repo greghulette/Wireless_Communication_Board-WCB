@@ -651,7 +651,9 @@ def ws_console_mirror(bench):
                     problems.append("a USB TRIGGER's rc_trig did not reach the socket")
                 m = _sync(ws)
                 nc.cli("?version", until=r"^End of Version")
-                if not any(x.startswith("Software Version:") for x in ws.since(m)):
+                try:     # the socket's copy trails USB's by a few ms: read on the instant USB ended, it once was not there
+                    ws.expect(r"^Software Version:", timeout=2, since=m)        # yet (4 ms later, 20261009-082225)
+                except AssertionError:
                     problems.append("a USB ?version's reply did not reach the socket")
                 um = _sync(nc.dev)
                 ws.send(PING_LINE)
@@ -904,6 +906,10 @@ def ws_utf8_and_latch(bench):
             if got != want:
                 problems.append(f"{sum(1 for x in want if x in got)} of {len(want)} multi-byte echoes arrived whole on the "
                                 f"socket ({len(got)} echo lines)")
+            try:     # USB's copy can trail the socket's by a few ms (see ws_console_mirror)
+                nc.dev.expect(_echo_rx(lines[-1][1:]), timeout=3, since=um)
+            except AssertionError:
+                pass
             usb = [x for x in nc.dev.since(um) if x.startswith(f"{UNKNOWN}?{tag}")]
             if usb != want:
                 problems.append(f"USB shows {sum(1 for x in want if x in usb)} of the {len(want)} echoes whole")
