@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '04.20:18.R.OCT.2026';
+const UI_VERSION = '09.08:21.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1715,10 +1715,41 @@ function boardOta(n) {
 // fails on Macs and button-less boards). ACK-paced for reliable flow control.
 // Faster USB serial rate for the OTA byte transfer. The 115200 terminal rate is the
 // throughput bottleneck (a base64 app image over 115200 is minutes). Both sides switch
-// to this for the transfer and restore to 115200 after. CP2102/CH9102 bridges handle
-// 921600; if a particular board's bridge corrupts at this rate the OTA just fails END
-// (SHA verify) and you retry — lower this to 460800 if that happens. 115200 disables it.
+// for the transfer, and the board returns to 115200 after it (END reboots it; ABORT and
+// its 30 s session timeout restore it). 115200 here disables the raise.
+// A raised rate is proved before any DATA goes out: the board must answer STATUS at it.
+// One that gets no answer is not used again on that port. On macOS, Apple's own CH34x
+// driver (no WCH driver installed) carries 460800 and 1000000 to a CH9102 but nothing at
+// all at 921600 (HIL, 2026-10-09). The board then stays at the raised rate until its
+// session timeout (30 s from BEGIN), so the Wizard waits that out without sending - bytes
+// at the wrong rate arrive as junk lines, which a WCB broadcasts as text - and then begins
+// again one rate lower. The rate that worked is remembered per USB vendor/product id.
 const OTA_XFER_BAUD = 921600;
+const OTA_XFER_FALLBACKS = [460800];       // tried in order when a faster rate fails its proof
+let OTA_SESSION_TIMEOUT_MS = 30000;        // the board's session timeout, from BEGIN (WCB_OTA.cpp); a spec shortens it
+const OTA_BAUD_PROOF_MS = 1500;            // how long the board gets to answer STATUS at a raised rate
+
+function _otaBaudKey(conn) {
+  try {
+    const i = conn?.port?.getInfo?.() || {};
+    return i.usbVendorId != null ? `wcbOtaBaud:${i.usbVendorId}:${i.usbProductId}` : null;
+  } catch (_) { return null; }
+}
+
+// The transfer rates to try on this connection, fastest first, capped at the rate this
+// browser last found that kind of USB bridge to carry (none above 115200: no raise).
+function _otaBaudLadder(conn) {
+  const all = [OTA_XFER_BAUD, ...OTA_XFER_FALLBACKS].filter((r) => r !== 115200);
+  const k = _otaBaudKey(conn);
+  let cap = NaN;
+  if (k) { try { cap = parseInt(localStorage.getItem(k), 10); } catch (_) { cap = NaN; } }
+  return Number.isFinite(cap) ? all.filter((r) => r <= cap) : all;
+}
+
+function _otaBaudRemember(conn, rate) {
+  const k = _otaBaudKey(conn);
+  if (k) { try { localStorage.setItem(k, String(rate)); } catch (_) {} }
+}
 
 async function boardOtaSerial(n) {
   const conn = boardConnections[n];
@@ -1761,9 +1792,14 @@ async function boardOtaSerial(n) {
 
     // 3) BEGIN — board validates chip family + partition size, esp_ota_begin.
     setFlashStatus(n, 'Starting OTA…');
-    const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
-    if (!/\[OTA:BEGIN,OK,/.test(beginResp))
-      throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+    let beganAt = 0;
+    const begin = async () => {
+      const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
+      if (!/\[OTA:BEGIN,OK,/.test(beginResp))
+        throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+      beganAt = performance.now();   // the board's session timeout runs from here
+    };
+    await begin();
 
     // 3b) Raise the transfer baud (best-effort). Only AFTER BEGIN, so the board's 30 s
     //     OTA timeout will restore its baud if anything strands the session. The board
@@ -1776,24 +1812,55 @@ async function boardOtaSerial(n) {
       termLog(n, '[OTA] shared port — transfer runs at 115200; expect a few minutes', 'sys');
     }
     if (OTA_XFER_BAUD !== 115200 && conn.port && typeof conn.port.reconfigure === 'function') {
-      const br = await conn.sendAndCollect(cmd(`BAUD,${OTA_XFER_BAUD}`), 3000, '[OTA:BAUD,');
-      if (/\[OTA:BAUD,OK,/.test(br)) {
+      const ladder = _otaBaudLadder(conn);
+      for (let i = 0; i < ladder.length; i++) {
+        const rate = ladder[i];
+        const br = await conn.sendAndCollect(cmd(`BAUD,${rate}`), 3000, '[OTA:BAUD,');
+        if (!/\[OTA:BAUD,OK,/.test(br)) {
+          // Board declined (old firmware / no active session) — both sides stay at 115200.
+          termLog(n, '[OTA] board declined baud raise — staying at 115200', 'sys');
+          break;
+        }
         // The board switches its UART the instant it ACKs — independent of us — so once
         // we see OK we are COMMITTED. Set `bumped` BEFORE switching our side so a setBaud
         // failure runs the outer catch's 115200 restore, and make that failure FATAL:
-        // streaming DATA at 115200 into a board now at 921600 just garbles + stalls, so
-        // abort immediately rather than silently continuing at a mismatched baud.
+        // streaming DATA at 115200 into a board now at a raised rate just garbles + stalls,
+        // so abort immediately rather than silently continuing at a mismatched baud.
         bumped = true;
         await sleep(40);                     // let the board finish switching its UART
         try {
-          await conn.setBaud(OTA_XFER_BAUD);   // switch our side to match
+          await conn.setBaud(rate);          // switch our side to match
         } catch (e) {
           throw new Error(`could not match the board's raised baud (${e?.message ?? e}) — aborting OTA`);
         }
-        termLog(n, `[OTA] transfer baud raised to ${OTA_XFER_BAUD}`, 'sys');
-      } else {
-        // Board declined (old firmware / no active session) — both sides stay at 115200.
-        termLog(n, '[OTA] board declined baud raise — staying at 115200', 'sys');
+        // Prove the rate before streaming: the board must answer STATUS at it.
+        const proof = await conn.sendAndCollect(cmd('STATUS'), OTA_BAUD_PROOF_MS, 'Session:');
+        if (/Session:\s+ACTIVE/.test(proof)) {
+          _otaBaudRemember(conn, rate);
+          termLog(n, `[OTA] transfer baud raised to ${rate}`, 'sys');
+          break;
+        }
+        // No answer: this USB serial driver cannot carry `rate` to this bridge. Back to
+        // 115200 on our side, and wait out the board's session timeout without sending;
+        // the timeout restores the board to 115200 and ends the session.
+        const next = ladder[i + 1] ?? 115200;
+        _otaBaudRemember(conn, next);
+        try { await conn.setBaud(115200); } catch (_) {}
+        bumped = false;
+        const waitMs = Math.max(0, beganAt + OTA_SESSION_TIMEOUT_MS + 1500 - performance.now());
+        termLog(n, `[OTA] no answer at ${rate} — this USB serial driver cannot carry it; waiting ` +
+                   `${Math.ceil(waitMs / 1000)} s for the board to return to 115200, then trying ${next}`, 'sys');
+        setFlashStatus(n, `No answer at ${rate} — waiting for the board…`);
+        await sleep(waitMs);
+        // The failed proof reached the board as junk bytes with no line end; the board keeps
+        // them, and they would prefix the next command so it was not recognised. A bare CR
+        // ends that line first.
+        try { await conn.send('\r'); } catch (_) {}
+        await sleep(200);
+        const idle = await conn.sendAndCollect(cmd('STATUS'), 4000, 'Session:');
+        if (!/Session:\s+idle/.test(idle))
+          throw new Error(`the board did not return to 115200 after the failed ${rate} raise — unplug it, reconnect and retry`);
+        await begin();                       // the timeout ended the session
       }
     }
 
