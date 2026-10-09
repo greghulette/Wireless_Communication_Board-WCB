@@ -5,7 +5,9 @@ import time
 from .serialdev import ExpectTimeout
 
 PROBE_BAUD = 921600
-PROBE_MIN_VERSION = 5           # v5 holds a re-bound channel's TX line high (tracker #79): every byte-exact test needs it
+PROBE_MIN_VERSION = 8           # v8 binds a listen-only tap on a soft channel that once had a TX pin (v5-7 failed it
+                                # with "software serial begin failed", so a tap worked or not by the channel's past);
+                                # v5 holds a re-bound channel's TX line high (tracker #79)
 PROBE_BAD_VERSIONS = ("6",)     # v6 panic-loops whenever a wired WCB reboots (a soft-RX level arm survives a CPU reset, #78)
 PROBE_TXSKEW_VERSION = 4        # TXSKEW (tracker #78); only softrx.* needs it, and skips on an older probe
 PROBE_LEVELRX_VERSION = 6       # soft channels on level-triggered RX (tracker #78): two receiving at once are exact

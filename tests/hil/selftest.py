@@ -1896,7 +1896,7 @@ def t_rule16_espnow_send_wrapped(tmp):
     assert rule16_problems(copy) == []
 
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
-PROBE_BOOT = "BOOT wcb_probe 7 mac=AA:BB:CC:DD:EE:01"
+PROBE_BOOT = "BOOT wcb_probe 8 mac=AA:BB:CC:DD:EE:01"
 
 
 class FakeProbeDev:
@@ -12664,7 +12664,7 @@ class WireProbe(FakeProbeDev):
         with self.lk:
             if verb == "HELLO":
                 self.sent.append(text)
-                self._rx(f"HELLO wcb_probe 7 mac={self.mac} mesh=0")
+                self._rx(f"HELLO wcb_probe 8 mac={self.mac} mesh=0")
             elif verb == "BIND":
                 self.sent.append(text)
                 answer = self._bind(tok)

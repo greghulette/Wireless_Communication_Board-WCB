@@ -27,8 +27,8 @@ def link_out(bench):
             expected = text.encode() + b"\r"
         try:
             m = l.mark()
-            WCB(bench.dev(console)).send(cmd)
+            bench.links.fire(console, cmd)
             l.expect(expected, timeout=3, since=m)
         except AssertionError as e:
-            bad.append(f"{l.key} via {console}: {e}")
+            bad.append(f"{l.key} via {console or 'the device behind it'}: {e}")
     assert not bad, "; ".join(bad)

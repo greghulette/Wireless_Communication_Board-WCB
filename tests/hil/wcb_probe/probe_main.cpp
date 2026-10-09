@@ -57,6 +57,7 @@
 
 #include <Arduino.h>
 #include <atomic>
+#include <new>     // placement new - bindChannel rebuilds a soft channel for a listen-only bind
 #include "src/EspSoftwareSerial/SoftwareSerial.h"   // the WCB's patched copy (tracker #78), not the stock library
 #include <WCB_Client.h>
 #include "driver/gpio.h"   // gpio_install_isr_service - soft-channel edge priority, see setup()
@@ -64,13 +65,14 @@
 #include "esp_log.h"
 #include "soc/gpio_struct.h"   // GPIO.out_w1ts / out_w1tc - TXSKEW writes both pins in one store
 
-// 7: setup() disarms every header pin's interrupt before the ISR service goes in, MESH LEAVE unbinds everything before
-// it restarts, and a released pin is left disarmed - v6 boot-looped on interrupt-WDT panics after a CPU-only reset left
-// a soft-RX level arm with no handler (disarmPinIrq, tracker #78). 6: soft channels receive on level-triggered
-// interrupts (the WCB's patched EspSoftwareSerial, tracker #78). 5: an unbound channel's TX line stays high
-// (unbindChannel, tracker #79). 4: TXSKEW (tracker #78). 3: GPIO ISR service at level 3 (setup()). Otherwise the USB
-// protocol is unchanged from 2.
-static const char *PROBE_VERSION = "7";
+// 8: a listen-only (RXONLY) bind on a soft channel that once had a TX pin no longer fails (bindChannel). 7: setup()
+// disarms every header pin's interrupt before the ISR service goes in, MESH LEAVE unbinds everything before it
+// restarts, and a released pin is left disarmed - v6 boot-looped on interrupt-WDT panics after a CPU-only reset left a
+// soft-RX level arm with no handler (disarmPinIrq, tracker #78). 6: soft channels receive on level-triggered interrupts
+// (the WCB's patched EspSoftwareSerial, tracker #78). 5: an unbound channel's TX line stays high (unbindChannel,
+// tracker #79). 4: TXSKEW (tracker #78). 3: GPIO ISR service at level 3 (setup()). Otherwise the USB protocol is
+// unchanged from 2.
+static const char *PROBE_VERSION = "8";
 
 // V2.4 header pins — must match wcb_hw_version 24 in Code/WCB/wcb_pin_map.cpp.
 static const int8_t HDR_TX[6] = {-1, 8, 20, 25, 14, 13};
@@ -296,6 +298,14 @@ static const char *bindChannel(Channel &c, int header, uint32_t baud, const Fmt 
     c.hw->setRxBufferSize(4096);
     c.hw->begin(baud, fmt->hw, rx, tx, inv);
   } else {
+    // begin() keeps the object's last pin for an argument of -1, so a listen-only bind on a channel that had a TX pin
+    // came up with that stale TX pin, not yet valid, and failed (operator bool). On the bench C and D always had,
+    // and RXONLY on them failed while E's worked (the Kyber MarcDuino tap, W3 S5, 2026-10-09). Rebuild the object
+    // so a listen-only bind starts with no TX pin, as at boot.
+    if (rxOnly) {
+      c.sw->~SoftwareSerial();
+      new (c.sw) SoftwareSerial();
+    }
     c.sw->begin(baud, fmt->sw, rx, rxOnly ? -1 : tx, inv, 512);
     if (!(*c.sw)) {
       c.sw->end();

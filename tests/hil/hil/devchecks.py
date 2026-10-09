@@ -36,6 +36,33 @@ class Check:
         return f"{self.name}: {self.word} - {self.detail}"
 
 
+def kyber_press(bench, button):
+    """(action, bytes) for bench.json port_stimulus {"kyber_button": n} (hil/links.py stimulus): the action routes the
+    SBUS controller to the Kyber, presses its pad button n and puts the route and the pad channel back; the bytes are
+    that button's MarcDuino line (MDFn, its \\r expanded), which a listen-only tap on the Kyber's MarcDuino TX - W3 S5
+    on this bench, probe 4 header S5 since 2026-10-09 - hears byte for byte. Raises AssertionError when the Kyber
+    config has no such button."""
+    from hil.runner import Skip
+    from suites import s52_kyber_device as k
+    try:
+        cfg = k.kyber_config()
+    except Skip as e:
+        raise AssertionError(str(e)) from None
+    ch, released, values = k.pad_ladder(cfg)
+    line = k.marcduino_cmds(cfg).get(button)
+    if not (ch and released and button in values and line):
+        raise AssertionError(f"the Kyber config has no pad button {button} with a MarcDuino line")
+
+    def action():
+        try:
+            ctl = k._ctl(bench)
+        except Skip as e:
+            raise AssertionError(str(e)) from None
+        with k.KyberPad(bench, ctl, ch, released, k._pad_rest(bench, ch) or released) as pad:
+            pad.press(values[button])
+    return action, line.encode()
+
+
 def _sbus_a(bench):
     name = "SBUS A: controller S5 -> NaviCore SBUS IN"
     if not (bench.has("sbus") and bench.has("navicore")):

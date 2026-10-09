@@ -581,7 +581,7 @@ class LinkManager:
             console, cmd, expected = self.stimulus(link.wcb, link.port)
             try:
                 m = link.mark()
-                WCB(self.bench.dev(console)).send(cmd)
+                self.fire(console, cmd)
                 link.expect(expected, timeout=3, since=m)
                 link.verified = True
                 break
@@ -609,7 +609,7 @@ class LinkManager:
             console, cmd, expected = self.stimulus(link.wcb, link.port)
             try:
                 m = link.mark()
-                WCB(self.bench.dev(console)).send(cmd)
+                self.fire(console, cmd)
                 link.expect(expected, timeout=3, since=m)
                 return True
             except AssertionError:
@@ -718,9 +718,17 @@ class LinkManager:
     def stimulus(self, wcb, port, text=None):
         """(console device, command, bytes expected on the wire) that make W<wcb> <port> transmit.
         A WCB with its own USB cable is driven there with a local ;S; any other goes through wcb1
-        as ;W<n>;S over the mesh. Ports with a real device use bench.json's port_stimulus."""
+        as ;W<n>;S over the mesh. Ports with a real device use bench.json's port_stimulus: a console command and the
+        bytes it puts on the wire ({"send", "expect"}), or a device that sends INTO the port - {"kyber_button": n}, the
+        real Kyber's pad button n pressed through the SBUS controller, whose MarcDuino line is what a tap on the port
+        hears (hil/devchecks.kyber_press). For that kind the console is None and the command a callable: fire() runs
+        either."""
         console = self.console_for(wcb)
         override = self.bench.cfg.get("port_stimulus", {}).get(f"W{wcb}{port}")
+        if override and "kyber_button" in override:
+            from .devchecks import kyber_press
+            action, expected = kyber_press(self.bench, int(override["kyber_button"]))
+            return None, action, expected
         if override:
             return console, override["send"], bytes.fromhex(override["expect"])
         payload = text or "U" * 16   # 0x55: an edge on every bit
@@ -728,6 +736,13 @@ class LinkManager:
         local = console != "wcb1" or wcb == self.bench.usb_wcb_number()
         cmd = f";S{n}{payload}" if local else f";W{wcb};S{n}{payload}"
         return console, cmd, payload.encode() + b"\r"
+
+    def fire(self, console, cmd):
+        """Send a stimulus() pair: `cmd` typed on WCB `console`, or, with console None, the device action `cmd` run."""
+        if console is None:
+            cmd()
+        else:
+            WCB(self.bench.dev(console)).send(cmd)
 
     def discover(self, log=print):
         """Find every wire: each WCB port in turn (below), then NaviCore's own pins (_discover_navicore). The WCB half
@@ -760,13 +775,17 @@ class LinkManager:
                     if self.device_only(w, port):
                         notes.append(f"W{w}{port}: skipped — {self.device_on(w, port).get('kind', 'a device')} on it and no port_stimulus")
                     continue
-                console, cmd, _ = self.stimulus(w, port)
+                try:
+                    console, cmd, _ = self.stimulus(w, port)
+                except AssertionError as e:          # a device stimulus that cannot run here (no Kyber config)
+                    notes.append(f"W{w}{port}: skipped — its port_stimulus cannot run: {e}")
+                    continue
                 time.sleep(0.1)
                 for p in probes.values():
                     p.edges_read()
                 time.sleep(0.3)
                 base = {n: p.edges_read() for n, p in probes.items()}
-                WCB(bench.dev(console)).send(cmd)
+                self.fire(console, cmd)
                 over_mesh = console == "wcb1" and w != bench.usb_wcb_number()
                 time.sleep(0.9 if over_mesh else 0.45)
                 hit = {n: p.edges_read() for n, p in probes.items()}
@@ -775,7 +794,10 @@ class LinkManager:
                     for h in HEADERS:
                         for which in ("tx", "rx"):
                             v, b = hit[n][h][which], base[n][h][which]
-                            if isinstance(v, int) and isinstance(b, int) and v >= 6 and b == 0:
+                            # A device's stimulus (console None: the Kyber's pad) runs for seconds with the SBUS
+                            # controller routed to it; only a header no wire took yet can be its tap.
+                            claimed = console is None and (n, h) in {(l.probe_name, l.header) for l in found.values()}
+                            if isinstance(v, int) and isinstance(b, int) and v >= 6 and b == 0 and not claimed:
                                 cands.append((v, n, h, which))
                             elif b == "storm" or (isinstance(b, int) and b > 0):
                                 prev = noisy.get((n, h, which))
@@ -798,7 +820,7 @@ class LinkManager:
             console, cmd, expected = self.stimulus(link.wcb, link.port)
             try:
                 m = link.mark()
-                WCB(bench.dev(console)).send(cmd)
+                self.fire(console, cmd)
                 link.expect(expected, timeout=3, since=m)
                 link.verified = True
             except AssertionError as e:

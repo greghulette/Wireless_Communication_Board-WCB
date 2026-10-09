@@ -10,13 +10,13 @@
     "probe1": {
       "port": "COM11",
       "kind": "probe",
-      "note": "V2.4 board on WCB1's ports, formerly WLED2 (probe2 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "note": "V2.4 board on WCB1's ports, formerly WLED2 (probe2 until 2026-10-08); wcb_probe 8 (since 2026-10-09). Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
       "mac": "0C:8B:95:B3:37:48"
     },
     "probe2": {
       "port": "/dev/cu.SLAB_USBtoUART20",
       "kind": "probe",
-      "note": "V2.4 board on WCB2's ports (probe4 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "note": "V2.4 board on WCB2's ports (probe4 until 2026-10-08); wcb_probe 8 (since 2026-10-09). Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
       "mac": "14:2B:2F:AE:21:E8"
     },
     "navicore": {
@@ -41,13 +41,13 @@
     "probe3": {
       "port": "COM16",
       "kind": "probe",
-      "note": "V2.4 board on NaviCore's own pins (D-NC37), formerly the MgmtRelay (WCB19) (probe1 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "note": "V2.4 board on NaviCore's own pins (D-NC37), formerly the MgmtRelay (WCB19) (probe1 until 2026-10-08); wcb_probe 8 (since 2026-10-09). Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
       "mac": "0C:8B:95:B4:01:00"
     },
     "probe4": {
       "port": "/dev/cu.SLAB_USBtoUART18",
       "kind": "probe",
-      "note": "V2.4 board on WCB3's ports, formerly a WCB 6.2.0 (probe3 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "note": "V2.4 board on WCB3's ports, formerly a WCB 6.2.0 (probe3 until 2026-10-08); wcb_probe 8 (since 2026-10-09). Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
       "mac": "0C:8B:95:B4:02:04"
     }
   },
@@ -68,6 +68,11 @@
       "wcb": 3,
       "port": "S2",
       "why": "A real Kyber's Maestro port (115200, ?KYBER,LOCAL,S2): the probe only listens to what W3 sends back to it."
+    },
+    {
+      "wcb": 3,
+      "port": "S5",
+      "why": "The Kyber's MarcDuino TX into W3 S5 (9600), tapped on probe 4 header S5 since 2026-10-09: the probe only listens to what the Kyber sends."
     }
   ],
   "port_stimulus": {
@@ -78,6 +83,10 @@
     "W3S2": {
       "send": ";S2UUUUUUUUUUUUUUUU",
       "expect": "555555555555555555555555555555550D"
+    },
+    "W3S5": {
+      "kyber_button": 3,
+      "why": "The Kyber sends into this port: its pad button 3, pressed through the SBUS controller, puts its MarcDuino line (;w3;s3track1) on the wire (hil/devchecks.py kyber_press)."
     }
   },
   "maestros": [
