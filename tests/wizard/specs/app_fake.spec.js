@@ -632,11 +632,19 @@ test('wizard.app_fake_hub_flash_refused a flash or an erase on the shared port i
     expect.soft([r.flashed, r.outcome], mode).toEqual([0, { ok: false, aborted: true, reason: 'push did not run' }]);
   }
   // This tab leads, but another tab waits on the hub's Web Lock: borrowing would hand it the port mid-flash.
-  await page.evaluate(() => {
+  // Wait until the lock manager shows the lock held and the second request pending before the attempt: requested and
+  // tried at once, the Wizard's check once found nothing pending and went on to borrow the port (20261009-082225).
+  await page.evaluate(async () => {
     boardConnections[1]._hub.role = 'leader';
     const name = boardConnections[1]._hub.lockName;
     navigator.locks.request(name, () => new Promise((r) => { window.__releaseLock = r; }));
     navigator.locks.request(name, () => {});
+    for (let i = 0; i < 100; i++) {
+      const q = await navigator.locks.query();
+      if ((q.held || []).some((l) => l.name === name) && (q.pending || []).some((l) => l.name === name)) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('the lock manager never showed the waiting request');
   });
   const r = await attempt('flash');
   expect(r.toasts).toContain('is sharing this board');
