@@ -8,16 +8,16 @@
       "note": "HW 1.0 (LilyGO T7), CH9102"
     },
     "probe1": {
-      "port": "COM16",
-      "kind": "probe",
-      "note": "V2.4 board, formerly the MgmtRelay (WCB19)",
-      "mac": "0C:8B:95:B4:01:00"
-    },
-    "probe2": {
       "port": "COM11",
       "kind": "probe",
-      "note": "V2.4 board, formerly WLED2",
+      "note": "V2.4 board on WCB1's ports, formerly WLED2 (probe2 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
       "mac": "0C:8B:95:B3:37:48"
+    },
+    "probe2": {
+      "port": "/dev/cu.SLAB_USBtoUART20",
+      "kind": "probe",
+      "note": "V2.4 board on WCB2's ports (probe4 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "mac": "14:2B:2F:AE:21:E8"
     },
     "navicore": {
       "port": "COM5",
@@ -39,16 +39,16 @@
       "note": "HW 3.2 (ESP32-S3, 16 MB), CH343. Status LED on GPIO48: set ?LED,PIN,48 once (saved in NVS) - the firmware default for HW 3.1/3.2 is 38 (wcb_pin_map.cpp), where this board has no LED"
     },
     "probe3": {
-      "port": "/dev/cu.SLAB_USBtoUART18",
+      "port": "COM16",
       "kind": "probe",
-      "note": "V2.4 board on NaviCore's own pins (D-NC37), formerly a WCB 6.2.0; wcb_probe 7",
-      "mac": "0C:8B:95:B4:02:04"
+      "note": "V2.4 board on NaviCore's own pins (D-NC37), formerly the MgmtRelay (WCB19) (probe1 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "mac": "0C:8B:95:B4:01:00"
     },
     "probe4": {
-      "port": "/dev/cu.SLAB_USBtoUART20",
+      "port": "/dev/cu.SLAB_USBtoUART18",
       "kind": "probe",
-      "note": "V2.4 board on WCB3's ports; wcb_probe 7",
-      "mac": "14:2B:2F:AE:21:E8"
+      "note": "V2.4 board on WCB3's ports, formerly a WCB 6.2.0 (probe3 until 2026-10-08); wcb_probe 7. Renamed by role 2026-10-08 after the bench rebuild (names follow the wiring the tests assume).",
+      "mac": "0C:8B:95:B4:02:04"
     }
   },
   "mesh_only_wcbs": [],
