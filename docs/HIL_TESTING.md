@@ -257,7 +257,7 @@ SBUS OUT on a probe header is busy in all of them.
 `bench.json` already plans them (`wiring_plan` `"3": "probe4"`; `port_devices` `W3S2`/`W3S5` `kyber`; a tap on
 `W3S2`), so the Wiring tab lists every wire before the boards are plugged in.
 
-**WCB3 is a HW 3.2 board (ESP32-S3).** It runs the S3 build of the WCB firmware
+**WCB3 is a HW 3.2 board (ESP32-S3).** Its status LED (the RGB LED on the module board) is on GPIO48, while the firmware's HW 3.1/3.2 pin map says 38 (`wcb_pin_map.cpp`), so it stays dark until `?LED,PIN,48` is set once (saved in NVS; it re-initialises the LED at once). The firmware's "NeoPixel initialized successfully" boot line does not prove the pin: it reads back its own colour buffer. It runs the S3 build of the WCB firmware
 (`esp32:esp32:esp32s3:PartitionScheme=min_spiffs`), not the image W1 and W2 run: WCB number 3, the bench's mesh
 password and ETM settings, `?WCBQ,3` on W3. W1 and W2 can stay at 2: they learn WCB3 by WDP, and the tests restore
 whatever baseline they find. Its S-header pads are those of V2.4 (5V, GND, TX, RX), 3.3 V,

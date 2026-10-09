@@ -36,7 +36,7 @@
       "port": "/dev/cu.wchusbserial5B7B0602571",
       "kind": "wcb",
       "wcb": 3,
-      "note": "HW 3.2 (ESP32-S3, 16 MB), CH343"
+      "note": "HW 3.2 (ESP32-S3, 16 MB), CH343. Status LED on GPIO48: set ?LED,PIN,48 once (saved in NVS) - the firmware default for HW 3.1/3.2 is 38 (wcb_pin_map.cpp), where this board has no LED"
     },
     "probe3": {
       "port": "/dev/cu.SLAB_USBtoUART18",
