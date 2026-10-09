@@ -64,7 +64,10 @@ SEQ_FRAG, SEQVAL_FRAG = 14, 16          # PACKET_TYPE_SEQ_FRAG / SEQVAL_FRAG: a 
 ETM_RUN_MAX_S = 60.0                    # W2's characterization with one peer took about 4 s (run 20260929-025701)
 ETM_REPLY_WAIT_S = 3.0                  # after W2's last frag, for NaviCore's [MGMT:ETM,2] line
 ACK_SETTLE_S = 0.8                      # after a TEST_ACTION's ACK, room for a second run's (fragment_reassembly_edges)
-FRAG_GAP_MIN_S = 0.12                   # FRAG_PACING_MS 150 (rc_telemetry.h:529) less the host's line stamping
+FRAG_GAP_MIN_S = 0.075                  # half FRAG_PACING_MS 150 (rc_telemetry.h:529): an unpaced burst arrives ms apart,
+                                        # while a paced gap measured at W1's USB carries tens of ms of mesh and USB
+                                        # delivery jitter (0.166-0.168 s on WCH's driver; 0.107 s once on Apple's,
+                                        # 20261009-082225, which failed the old 0.12)
 PACKET_MAX = 185                        # a bridged WCB_STATUS / MESH_STATS page must fit this (rc_telemetry.h:1590)
 OFFLINE_S = 50.0                        # WCB_Client: 10 s heartbeat x 5 missed (WCB_Client.h:1097-1098)
 STALL_MS = 3000                         # the #L90 stall remote_cli_order_and_drop uses on a hook image
