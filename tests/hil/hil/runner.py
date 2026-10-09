@@ -437,7 +437,7 @@ def missing(bench, t):
     return miss
 
 
-_CAFFEINATE = None   # macOS: the `caffeinate -i` process holding idle sleep off while tests run
+_CAFFEINATE = None   # macOS: the `caffeinate -d -i` process holding idle and display sleep off while tests run
 
 
 def _keep_awake(on):
@@ -445,12 +445,14 @@ def _keep_awake(on):
     port vanished at once, which failed 12 tests. SetThreadExecutionState is per thread, so this is called on the thread
     that runs the tests (the GUI's worker, or the CLI's main thread). It cannot veto a lid close, the power button or a
     critical-battery hibernate - _awake_s() and host_usb_loss() catch those after the fact. On macOS a `caffeinate -i`
-    does the same; `-w` ends it with this process, so a killed run never leaves the Mac unable to sleep."""
+    does the same, and `-d` keeps the display on too: when it slept, the screen locked, and the Realtek menu clicks the
+    WiFi tests make (hil/wlan.py) cannot land on a locked screen. `-w` ends it with this process, so a killed run never
+    leaves the Mac unable to sleep."""
     global _CAFFEINATE
     if sys.platform == "darwin":
         try:
             if on and (_CAFFEINATE is None or _CAFFEINATE.poll() is not None):
-                _CAFFEINATE = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())],
+                _CAFFEINATE = subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())],
                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif not on and _CAFFEINATE is not None:
                 _CAFFEINATE.terminate()

@@ -654,7 +654,18 @@ def realtek_ready():
         return "the Realtek WiFi utility (StatusBarApp) is not running"
     if not os.path.exists(QUARTZ_PYTHON):
         return f"no Python with pyobjc's Quartz at {QUARTZ_PYTHON}: the menu needs a real mouse event"
+    if screen_locked():
+        return ("the Mac's screen is locked: the menu needs a real mouse event on an unlocked screen (a run keeps the "
+                "display awake, hil/runner.py _keep_awake, but it cannot unlock a screen that locked before the run)")
     return None
+
+
+def screen_locked():
+    """True when the macOS login session's screen is locked (ioreg's CGSSessionScreenIsLocked). System Events then sees
+    no window or menu, and a click lands nowhere: on 2026-10-09 the display slept, the screen locked, and a resume
+    dialog sat unanswerable."""
+    out = _run(["ioreg", "-n", "Root", "-d1", "-a"]) or ""
+    return bool(re.search(r"<key>CGSSessionScreenIsLocked</key>\s*<true/>", out))
 
 
 def _realtek_menu(want, timeout=20):
