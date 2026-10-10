@@ -138,10 +138,13 @@ def _kyber(bench):
         if scripts and s1:
             sn, (maestro, script) = scripts[0]
             s1.listen()
-            m = s1.mark()
-            pad.press(values[sn])
-            time.sleep(k.MAESTRO_S)
-            maestro_frames = k.script_frames(s1.received(m), maestro)
+            for _ in range(2):   # WCB3 -> W1 is an unacknowledged broadcast: one lost frame is pressed again, as s44 does
+                m = s1.mark()
+                pad.press(values[sn])
+                time.sleep(k.MAESTRO_S)
+                maestro_frames = k.script_frames(s1.received(m), maestro)
+                if maestro_frames:
+                    break
     maestro_ok = None if maestro_frames is None else bool(maestro_frames)
     if maestro_ok is None:
         maestro = Check(names[1], None, "no Maestro 1 script button, or no wire on W1 S1")

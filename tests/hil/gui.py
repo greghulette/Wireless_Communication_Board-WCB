@@ -2341,6 +2341,20 @@ class App:
         self.root.destroy()
 
 
+def _hold_display_awake(bench):
+    """macOS, on a bench whose WiFi tests click the Realtek menu (bench.json wifi_switch "realtek"): keep the display on
+    while this window is open. A run already does (runner._keep_awake), but between runs the display slept and the
+    screen locked, and the next run's 30 WiFi tests skipped: a click cannot land on a locked screen, and only a person
+    can unlock it (run 20261010-004124). `-w` ends it with the GUI, so closing the window lets the Mac sleep again."""
+    if sys.platform != "darwin" or (bench.cfg.get("wifi_switch") or "") != "realtek":
+        return None
+    try:
+        return subprocess.Popen(["caffeinate", "-d", "-w", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
 def main():
     global THEME, GREEN, AMBER, RED, BLUE, GREY, PURPLE, STATUS_COLOR
     if "--light" in sys.argv[1:]:
@@ -2355,6 +2369,7 @@ def main():
     root = tk.Tk()
     mac_no_zoom(root)
     app = App(root)
+    _hold_display_awake(app.bench)
     _dark_titlebar(root)
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     # gui.py --run <glob> [<glob> ...] opens with those tests queued and starts them, so a run launched

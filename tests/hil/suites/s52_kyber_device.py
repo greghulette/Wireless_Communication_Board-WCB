@@ -277,7 +277,12 @@ def device_pad_maestro(bench):
     its Kyber port reads to the mesh (broadcast, or targeted at the board hosting that Maestro), and W1, Maestro_Remote,
     writes them to its S1, where probe 1 stands in for Maestro 1. While it hears the radio the Kyber also streams the
     pass-through channels' setTargets, so the frames are looked for among them (script_frames). W2's real Maestro 2 sees
-    the same broadcast: it ignores device 1's frames, but the pass-through ones may centre its servos."""
+    the same broadcast: it ignores device 1's frames, but the pass-through ones may centre its servos.
+
+    The mesh hop is an unacknowledged broadcast, so W1 can miss it (button 1 reached nothing in run 20261010-004124, its
+    last test, after passing in probe.device_links at the start). As s44's Wires does, a button whose frame W1 S1 did
+    not get is judged by the W2 S1 tap, the other Maestro_Remote board's copy of the same broadcast: there, W1 missed
+    it (noted); nowhere, the button is pressed once more (noted) before it fails."""
     cfg = kyber_config()
     ch, released, values = pad_ladder(cfg)
     buttons = {n: ms for n, ms in maestro_script_buttons(cfg).items() if ms[0] == 1 and n in values}
@@ -287,18 +292,30 @@ def device_pad_maestro(bench):
     ctl = _ctl(bench)
     s1 = link(bench, 1, "S1")
     s1.listen()
-    problems, seen = [], []
+    w2 = bench.links.get(2, "S1")             # the other Maestro_Remote board's copy of the broadcast, if wired
+    if w2 is not None:
+        w2.listen()
+    problems, seen, lost = [], [], []
     try:
         with KyberPad(bench, ctl, ch, released, _pad_rest(bench, ch) or released) as pad:
             m0 = s1.mark()
             time.sleep(1.0)
             idle = s1.received(m0)
             for n, (maestro, script) in buttons.items():
-                m = s1.mark()
-                pad.press(values[n])
-                time.sleep(MAESTRO_S)
-                got = s1.received(m)
-                frames = script_frames(got, maestro)
+                for attempt in (1, 2):
+                    m, mw = s1.mark(), (w2.mark() if w2 is not None else None)
+                    pad.press(values[n])
+                    time.sleep(MAESTRO_S)
+                    got = s1.received(m)
+                    frames = script_frames(got, maestro)
+                    if frames:
+                        break
+                    if w2 is not None and script_frames(w2.received(mw), maestro):
+                        lost.append(f"button {n}: W1 S1 missed the broadcast {w2.key} got")
+                        frames = script_frames(w2.received(mw), maestro)
+                        break
+                    if attempt == 1:
+                        lost.append(f"button {n}: no board got its frame; pressed once more")
                 seen.append(f"button {n} (CH{ch} {values[n]}, Maestro {maestro} script {script}): {len(got)} bytes on "
                             f"W1 S1, restartScript frames {frames or 'none'}")
                 if not frames:
@@ -309,10 +326,14 @@ def device_pad_maestro(bench):
             if script_frames(idle, 1):
                 problems.append(f"with the pad Released a restartScript frame reached W1 S1: {script_frames(idle, 1)}")
     finally:
-        try:
-            s1.release()
-        except Exception:  # noqa: BLE001 - the runner releases it too
-            pass
+        for l in (s1, w2):
+            try:
+                if l is not None:
+                    l.release()
+            except Exception:  # noqa: BLE001 - the runner releases it too
+                pass
+    if lost:
+        bench.note("unacknowledged Kyber broadcast: " + "; ".join(lost))
     bench.note(f"kyber.device_pad_maestro ({targeting or 'targeting mode not printed'}): " + "; ".join(seen)
                + f"; {len(idle)} bytes on W1 S1 in the 1 s before the first press (the pass-through setTargets)")
     assert not problems, "; ".join(problems)
