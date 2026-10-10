@@ -256,7 +256,7 @@ class Watch11:
     other Maestro_Remote board, which s44's Wires reads too) and W3's Kyber Maestro-port tap (W3 S2) - a step where W1
     S1 only missed frames a witness got exactly is noted in `lost`, not failed: NaviCore sent the right frame. A step
     can't be sent again as s44 does; a stick already at its value sends nothing. More than one such step in a test is a
-    problem (lost_problem)."""
+    problem (lost_problem). Each step expects NaviCore's settle resend as well (step())."""
 
     def __init__(self, l11, nc, dev, chans, wire, witnesses=()):
         self.l11, self.nc, self.dev, self.chans, self.wire = l11, nc, dev, set(chans), wire
@@ -271,6 +271,9 @@ class Watch11:
                 + "; ".join(self.lost)] if len(self.lost) > 1 else []
 
     def step(self, action, want, where, quiet=0.6, timeout=2.5):
+        # NaviCore's settle resend (navicore-fix9, KNOB_SETTLE_RESEND_MS): every setTarget a knob sends to this remote
+        # slot goes out once more when the knob has been still 250 ms, in the same order; speed and accel do not.
+        want = list(want) + [f for f in want if f[0] == CMD_TARGET]
         m11, nm = self.l11.mark(), self.nc.dev.mark()
         mws = [w.mark() for w in self.witnesses]
         action()
@@ -1062,12 +1065,16 @@ def knob_auto_release(bench):
                 nc.set_config({"chRateHz": g.before.get("chRateHz", 5)})
                 time.sleep(2.5 * rel / 1000)
                 got = _frames(l11, m11, dev, {x})
-                if got != [(tgt, x, knob_pos(v, 4000, 8000))]:
+                mv = (tgt, x, knob_pos(v, 4000, 8000))
+                # The settle resend may or may not go out: the save lands about 250 ms after the move, where the resend
+                # is due, and a config apply drops a resend not yet sent. What counts is that no release follows.
+                if got not in ([mv], [mv, mv]):
                     problems.append(f"{what}: W1 S1 got {got}; the save must drop the pending release")
                 return
-            got = _wait_frames(l11, m11, dev, {x}, 2, (rel + 1500) / 1000)
-            if got != [(tgt, x, knob_pos(v, 4000, 8000)), (tgt, x, 0)]:
-                problems.append(f"{what}: W1 S1 got {got}, expected the move and then Set Target 0")
+            mv = (tgt, x, knob_pos(v, 4000, 8000))
+            got = _wait_frames(l11, m11, dev, {x}, 3, (rel + 1500) / 1000)
+            if got != [mv, mv, (tgt, x, 0)]:      # the move, NaviCore's settle resend 250 ms on, then the release
+                problems.append(f"{what}: W1 S1 got {got}, expected the move, its settle resend and then Set Target 0")
                 return
             t_move = _probe_ms(l11, m11, _pololu(dev, tgt, x, knob_pos(v, 4000, 8000)))
             t_rel = _probe_ms(l11, m11, _pololu(dev, tgt, x, 0))
@@ -1086,6 +1093,61 @@ def knob_auto_release(bench):
             sticks.center()
             time.sleep(rel / 1000 + 0.5)
     bench.note("released after the move (probe clock): " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+@test("sbus.knob_settle_resend", "A remote passthrough knob's last setTarget goes out once more when the knob has "
+      "been still 250 ms (its stream is an unacknowledged broadcast): one move puts its frame and the same frame again "
+      "200-450 ms later on W1 S1, three quick moves put three frames and one resend of the last, and an auto-release "
+      "(100 ms) before the resend is due drops it (remote slot 4: nothing moves)", needs=["sbus", "navicore", "wcb1"],
+      links=["W1S1"])
+def knob_settle_resend(bench):
+    """NaviCore KNOB_SETTLE_RESEND_MS (navicore-fix9, NaviCore 131c18d): processKnobs arms a resend for each output it
+    sends to a remote slot, and knobResendTick writes the frame once more after 250 ms still, unless the channel was
+    written or released since. Added because W1 missed single knob frames W3 forwarded, which left the servo at the
+    previous position until the next move (WCB runs 20261009-182550, 20261010-000816). The resend is the frame alone,
+    so auto-release still times from the move (sbus.knob_auto_release)."""
+    ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, (x,), wire = _knob_rig(bench)
+    problems, notes = [], []
+
+    def frame(v):
+        return (CMD_TARGET, x, knob_pos(v, 4000, 8000))
+
+    def check(what, moves, want, gap_of=None, gap_s=0.08):
+        m = l11.mark()
+        for v in moves:
+            sticks.set("rx", v)
+            time.sleep(gap_s)
+        time.sleep(1.2)
+        got = _frames(l11, m, dev, {x})
+        gap = None
+        if gap_of is not None:
+            data = _pololu(dev, CMD_TARGET, x, knob_pos(gap_of, 4000, 8000))
+            t0, t1 = _probe_ms(l11, m, data, 0), _probe_ms(l11, m, data, 1)
+            gap = None if t0 is None or t1 is None else t1 - t0
+        notes.append(f"{what}: {[f[2] for f in got]}" + (f", resend +{gap} ms" if gap_of is not None else ""))
+        if got != want:
+            problems.append(f"{what}: W1 S1 got {got}, expected {want}")
+        elif gap_of is not None and (gap is None or not 200 <= gap <= 450):
+            problems.append(f"{what}: the resend came {gap} ms after the frame, not about 250 ms")
+    with nc_guard(bench) as g:
+        nc = g.nc
+        knobs = _free_knobs(g.before)
+        if not knobs:
+            raise Skip("no free knob to borrow")
+        try:
+            nc.set_config({"knobs": {knobs[0]: _knob(ch, outputs=[_out(x, target=slot)])}})
+            time.sleep(1.2)
+            check("one move", [1500], [frame(1500), frame(1500)], gap_of=1500)
+            check("three moves 80 ms apart", [1300, 1100, 900], [frame(1300), frame(1100), frame(900), frame(900)],
+                  gap_of=900)
+            nc.set_config({"knobs": {knobs[0]: _knob(ch, outputs=[_out(x, target=slot, releaseIdleMs=100)])}})
+            time.sleep(1.2)
+            check("auto-release at 100 ms", [1400], [frame(1400), (CMD_TARGET, x, 0)])
+        finally:
+            sticks.center()
+            time.sleep(0.8)
+    bench.note("; ".join(notes))
     assert not problems, "; ".join(problems)
 
 
@@ -1134,8 +1196,11 @@ def knob_easing_resolve(bench):
             fr = _frames(l11, m11, dev, {x})
             if [f for f in fr if f[0] != CMD_TARGET]:
                 problems.append(f"stick moves re-sent easing: {[f for f in fr if f[0] != CMD_TARGET]}")
-            if len([f for f in fr if f[0] == CMD_TARGET]) != 3:
-                problems.append(f"3 stick moves gave targets {[f for f in fr if f[0] == CMD_TARGET]}")
+            # Each move 0.4 s apart, so each is followed by NaviCore's settle resend (navicore-fix9) 250 ms on.
+            targets = [f for f in fr if f[0] == CMD_TARGET]
+            want_t = [(CMD_TARGET, x, knob_pos(v, 4000, 8000)) for v in (1500, 1300, 1100) for _ in (0, 1)]
+            if targets != want_t:
+                problems.append(f"3 stick moves gave targets {targets}, expected each one and its settle resend")
             m11 = l11.mark()
             nc.set_config({"smoothProfiles": with_speed(s2)})
             time.sleep(1.8)

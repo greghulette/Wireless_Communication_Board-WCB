@@ -4254,8 +4254,9 @@ def t_run_lost_marker(tmp):
 def t_watch11_witness(tmp):
     """s42 Watch11: the remote Maestro stream is an unacknowledged broadcast, so a step where W1 S1 only MISSED frames
     another forwarding board's tap got exactly is noted in `lost`, not failed (sbus.knob_passthrough_remote, runs
-    20261009-182550 and 20261010-000816). W1 missing a frame no witness got, W1 getting a wrong frame, and a second
-    lost step in one test are still problems."""
+    20261009-182550 and 20261010-000816). Each step expects NaviCore's settle resend too (navicore-fix9): W1 holding
+    only the resend is a lost original, noted; a step with no resend anywhere fails. W1 missing a frame no witness
+    got, W1 getting a wrong frame, and a second lost step in one test are still problems."""
     from suites import s42_navicore_sbus_engine as K
 
     class Wire:
@@ -4289,16 +4290,22 @@ def t_watch11_witness(tmp):
             for wire, data in pairs:
                 wire.data += data
         return act
-    w.step(feed((l11, A), (w2, A), (w3, A)), want_a, "all got it", quiet=0, timeout=0.05)
-    assert not w.problems and not w.lost
-    w.step(feed((w3, A)), want_a, "only W3", quiet=0, timeout=0.05)
+    AA = A + A                                      # a setTarget and NaviCore's settle resend (navicore-fix9)
+    w.step(feed((l11, AA), (w2, AA), (w3, AA)), want_a, "all got it", quiet=0, timeout=0.05)
+    assert not w.problems and not w.lost, (w.problems, w.lost)
+    w.step(feed((l11, A), (w2, AA)), want_a, "W1 got only the resend", quiet=0, timeout=0.05)
+    assert not w.problems and len(w.lost) == 1 and "W2S1" in w.lost[0], (w.problems, w.lost)
+    w.lost.clear()
+    w.step(feed((w3, AA)), want_a, "only W3", quiet=0, timeout=0.05)
     assert not w.problems and len(w.lost) == 1 and "W3S2" in w.lost[0], w.lost
     w.step(feed(), want_a, "nobody", quiet=0, timeout=0.05)
     assert len(w.problems) == 1 and "nobody" in w.problems[0], w.problems
-    w.step(feed((l11, B), (w3, A)), want_a, "wrong frame", quiet=0, timeout=0.05)
+    w.step(feed((l11, B), (w3, AA)), want_a, "wrong frame", quiet=0, timeout=0.05)
     assert len(w.problems) == 2 and "wrong frame" in w.problems[1], w.problems
+    w.step(feed((l11, A), (w3, A)), want_a, "no resend anywhere", quiet=0, timeout=0.05)
+    assert len(w.problems) == 3 and "no resend anywhere" in w.problems[2], w.problems
     assert w.lost_problem() == []
-    w.step(feed((w2, A)), want_a, "only W2", quiet=0, timeout=0.05)
+    w.step(feed((w2, AA)), want_a, "only W2", quiet=0, timeout=0.05)
     assert len(w.lost) == 2 and w.lost_problem() and "2 steps" in w.lost_problem()[0], w.lost_problem()
 
 

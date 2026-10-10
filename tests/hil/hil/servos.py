@@ -112,6 +112,7 @@ SERVO_TESTS = {
     "sbus.knob_passthrough_remote": "moves the rx stick; the knob drives remote slot 4",
     "sbus.knob_mode_aware": "moves the rx stick and changes the mode twice over the mesh: J2 and J4 move",
     "sbus.knob_auto_release": "moves the rx stick; the knob drives remote slot 4",
+    "sbus.knob_settle_resend": "moves the rx stick; the knob drives remote slot 4",
     "sbus.knob_easing_resolve": "moves the rx stick; the knob drives remote slot 4",
     "sbus.knob_hcr_volume": "moves the rx stick; the knob sends HCR channel B volumes to the HCR's WCB",
     "sbus.calibration_mutes_knobs": "moves the rx stick; the knob drives remote slot 4",
