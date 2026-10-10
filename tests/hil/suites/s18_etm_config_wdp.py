@@ -2079,8 +2079,14 @@ def controller_no_readopt_no_override(bench):
     w = usb_wcb(bench)
     bad = []
     with config_guard(bench, 1) as before:
-        if "?CONTROLLER,ON,20" not in before[1] or _row(_dump(w), 20) is None:
-            raise Skip("controller 20 is not enabled, or NaviCore is not in W1's WDP table")
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        if _row(_dump(w), 20) is None:
+            # W1 restarted 9 s earlier (stats.rpt_large_ram_only) and had relearned only W2, so NaviCore's row was not
+            # there yet (run 20261010-060621). Ask for it as (b) does; a first learn with controller 20 enabled adopts
+            # nothing, so (a) starts as it always did.
+            if not _poll_learned(w, 20, w.dev.mark()) and _row(_dump(w), 20) is None:
+                raise Skip("NaviCore is not in W1's WDP table and did not answer three polls")
         _require_id_free(w, 14)
         _require_id_free(w, 17)
         try:
