@@ -232,22 +232,57 @@ def _wait_frames(l11, since, dev, chans, n, timeout=2.0):
         time.sleep(0.05)
 
 
+def _witnesses(bench):
+    """The probe wires on the other boards that forward NaviCore's remote Maestro stream: W2 S1 (Maestro_Remote) and
+    W3 S2 (W3's Kyber Maestro port, ?KYBER,LOCAL); missing ones are left out."""
+    return [bench.links.get(2, "S1"), bench.links.get(3, "S2")]
+
+
+def _missed_only(got, want):
+    """`got` is `want` with one or more frames left out and nothing else changed."""
+    it = iter(want)
+    return len(got) < len(want) and all(any(f == w for w in it) for f in got)
+
+
 class Watch11:
     """W1 S1's Pololu frames for one Maestro device and a set of its channels, with NaviCore's own DBG_WIRE copy quoted
     on a hook image when they disagree. step(action, want) marks, runs the action and checks that exactly `want`
-    follows, in order (none, for an empty `want`, within `quiet` s)."""
+    follows, in order (none, for an empty `want`, within `quiet` s).
 
-    def __init__(self, l11, nc, dev, chans, wire):
+    The remote Maestro stream is an unacknowledged ESP-NOW broadcast (NaviCore wcb_config.h), so a receiver can miss a
+    frame no one resends: W1 S1 lost the 'reverse, 1200' frame of sbus.knob_passthrough_remote while W3 forwarded it
+    (run 20261009-182550; 0 of 135 lost in a bench measurement after), and W1 and W2 both lost a save's frame W3
+    forwarded (run 20261010-000816). With `witnesses` - the other boards that forward the stream: the W2 S1 tap (the
+    other Maestro_Remote board, which s44's Wires reads too) and W3's Kyber Maestro-port tap (W3 S2) - a step where W1
+    S1 only missed frames a witness got exactly is noted in `lost`, not failed: NaviCore sent the right frame. A step
+    can't be sent again as s44 does; a stick already at its value sends nothing. More than one such step in a test is a
+    problem (lost_problem)."""
+
+    def __init__(self, l11, nc, dev, chans, wire, witnesses=()):
         self.l11, self.nc, self.dev, self.chans, self.wire = l11, nc, dev, set(chans), wire
-        self.problems = []
+        self.witnesses = [w for w in witnesses if w is not None]
+        for w in self.witnesses:
+            w.listen()
+        self.problems, self.lost = [], []
+
+    def lost_problem(self):
+        """[] or the one problem a test with more than one W1-only lost broadcast has."""
+        return [f"W1 S1 missed broadcasts a witness received in {len(self.lost)} steps: "
+                + "; ".join(self.lost)] if len(self.lost) > 1 else []
 
     def step(self, action, want, where, quiet=0.6, timeout=2.5):
         m11, nm = self.l11.mark(), self.nc.dev.mark()
+        mws = [w.mark() for w in self.witnesses]
         action()
         if want:
             _wait_frames(self.l11, m11, self.dev, self.chans, len(want), timeout)
         time.sleep(quiet)
         got = _frames(self.l11, m11, self.dev, self.chans)
+        if got != list(want) and _missed_only(got, want):
+            heard = [w.key for w, m in zip(self.witnesses, mws) if _frames(w, m, self.dev, self.chans) == list(want)]
+            if heard:
+                self.lost.append(f"{where}: W1 S1 got {got}, {' and '.join(heard)} got all of {list(want)}")
+                return got
         if got != list(want):
             note = ""
             if self.wire:
@@ -901,7 +936,7 @@ def knob_passthrough_remote(bench):
     flipped position at once, since lastKnobRaw survives the save; one that changes only the endpoints sends nothing
     until the stick moves. The frames are read on W1 S1."""
     ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, (x,), wire = _knob_rig(bench)
-    w = Watch11(l11, nc, dev, [x], wire)
+    w = Watch11(l11, nc, dev, [x], wire, witnesses=_witnesses(bench))
     tgt = CMD_TARGET
     with nc_guard(bench) as g:
         nc = w.nc = g.nc
@@ -935,6 +970,9 @@ def knob_passthrough_remote(bench):
         finally:
             sticks.center()
             time.sleep(0.5)
+    if w.lost:
+        bench.note("an unacknowledged broadcast lost at W1 only: " + "; ".join(w.lost))
+    w.problems += w.lost_problem()
     assert not w.problems, "; ".join(w.problems)
 
 
@@ -954,7 +992,7 @@ def knob_mode_aware(bench):
     ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, chans, wire = _knob_rig(bench, 4)
     ch2 = _stick(nc, cfg, ncfg, "ry")
     x1, x2, x3, x4 = chans
-    w = Watch11(l11, nc, dev, chans, wire)
+    w = Watch11(l11, nc, dev, chans, wire, witnesses=_witnesses(bench))
     w1 = usb_wcb(bench)
     nid = nc.wcb_status()["self"]
     tgt = CMD_TARGET
@@ -990,6 +1028,9 @@ def knob_mode_aware(bench):
             sticks.center()
             if nc.mode() != m0:
                 setmode(m0)
+    if w.lost:
+        bench.note("an unacknowledged broadcast lost at W1 only: " + "; ".join(w.lost))
+    w.problems += w.lost_problem()
     assert not w.problems, "; ".join(w.problems)
 
 

@@ -4200,6 +4200,108 @@ def t_run_glued_sentinel(tmp):
         pass
 
 
+def t_run_lost_marker(tmp):
+    """WCB.run: a ;S0 end marker that never comes back is asked for once more (W2 lost one console line behind a whole
+    ?backup in run 20261009-182550). The second marker ends the read with the output intact and the loss is logged
+    by verb only (some commands carry a password); a board that echoes neither still fails, with the first marker's
+    error."""
+    import re as _re
+    from hil import wcb as W
+
+    class Dev:
+        name = "wcb2"
+
+        def __init__(self, drop):
+            self.lines, self.drop, self.logged = [], drop, []
+
+        def log(self, name, direction, text):
+            self.logged.append((name, direction, text))
+
+        def mark(self):
+            return len(self.lines)
+
+        def send(self, text, eol=None):
+            if text.startswith(";S0,"):
+                if self.drop > 0:
+                    self.drop -= 1
+                    return
+                self.lines.append((0.0, text[4:]))
+            else:
+                self.lines += [(0.0, "out 1"), (0.0, "out 2")]
+
+        def expect(self, pattern, timeout=3.0, since=None):
+            rx = _re.compile(pattern)
+            for _, x in self.lines[since or 0:]:
+                if rx.search(x):
+                    return rx.search(x)
+            raise AssertionError(f"wcb2: no line matching /{pattern}/ within {timeout}s")
+
+        def since(self, mark):
+            return [x for _, x in self.lines[mark:]]
+
+    one = Dev(drop=1)
+    assert W.WCB(one).run("?WIFI,secretpw", timeout=0.1) == ["out 1", "out 2"]
+    assert len(one.logged) == 1 and "CONSOLE LINE LOST" in one.logged[0][2], one.logged
+    assert "'?WIFI'" in one.logged[0][2] and "secretpw" not in one.logged[0][2], one.logged
+    both = Dev(drop=2)
+    e = _raises(lambda: W.WCB(both).run("?backup", timeout=0.1))
+    first = [t for t in both.since(0)]
+    assert "no line matching /^HILEND" in str(e) and not both.logged, (e, both.logged, first)
+    ok = Dev(drop=0)
+    assert W.WCB(ok).run("?STATS") == ["out 1", "out 2"] and not ok.logged
+
+
+def t_watch11_witness(tmp):
+    """s42 Watch11: the remote Maestro stream is an unacknowledged broadcast, so a step where W1 S1 only MISSED frames
+    another forwarding board's tap got exactly is noted in `lost`, not failed (sbus.knob_passthrough_remote, runs
+    20261009-182550 and 20261010-000816). W1 missing a frame no witness got, W1 getting a wrong frame, and a second
+    lost step in one test are still problems."""
+    from suites import s42_navicore_sbus_engine as K
+
+    class Wire:
+        def __init__(self, key):
+            self.key, self.data, self.listening = key, b"", False
+
+        def listen(self):
+            self.listening = True
+
+        def mark(self):
+            return len(self.data)
+
+        def received(self, m):
+            return self.data[m:]
+
+    class Nc:
+        class dev:
+            @staticmethod
+            def mark():
+                return 0
+
+    A = bytes([0xAA, 4, 0x04, 5, 0x70, 0x2E])       # (4, 5, 6000)
+    B = bytes([0xAA, 4, 0x04, 5, 0x20, 0x1F])
+    want_a = [(0x04, 5, 6000)]
+    l11, w2, w3 = Wire("W1S1"), Wire("W2S1"), Wire("W3S2")
+    w = K.Watch11(l11, Nc, 4, [5], False, witnesses=[w2, None, w3])
+    assert w.witnesses == [w2, w3] and w2.listening and w3.listening
+
+    def feed(*pairs):
+        def act():
+            for wire, data in pairs:
+                wire.data += data
+        return act
+    w.step(feed((l11, A), (w2, A), (w3, A)), want_a, "all got it", quiet=0, timeout=0.05)
+    assert not w.problems and not w.lost
+    w.step(feed((w3, A)), want_a, "only W3", quiet=0, timeout=0.05)
+    assert not w.problems and len(w.lost) == 1 and "W3S2" in w.lost[0], w.lost
+    w.step(feed(), want_a, "nobody", quiet=0, timeout=0.05)
+    assert len(w.problems) == 1 and "nobody" in w.problems[0], w.problems
+    w.step(feed((l11, B), (w3, A)), want_a, "wrong frame", quiet=0, timeout=0.05)
+    assert len(w.problems) == 2 and "wrong frame" in w.problems[1], w.problems
+    assert w.lost_problem() == []
+    w.step(feed((w2, A)), want_a, "only W2", quiet=0, timeout=0.05)
+    assert len(w.lost) == 2 and w.lost_problem() and "2 steps" in w.lost_problem()[0], w.lost_problem()
+
+
 def t_intellex_stage_filter(tmp):
     """hil/intellex.py's stage filter drops the tool bundles, downloaded data, caches, the build stamp and zips from a
     staged src/, and KEEPS src/wiki.html and src/wikidocs.py - source the host imports, which a 'wiki*' glob dropped
@@ -11834,7 +11936,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_wizard_abort_kills_tree, t_nctool_pipe_bridge, t_cli_ask_and_handler,
          t_ctrl_c_during_checks_cancels, t_pause_file_old_mtime, t_redaction_free_text, t_added_tests_listed,
          t_finished_run_with_dropped, t_start_closes_recording_ports, t_vendored_softserial_in_lockstep,
-         t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_device_sends_tap_hidden, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
+         t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_device_sends_tap_hidden, t_run_lost_marker, t_watch11_witness, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,

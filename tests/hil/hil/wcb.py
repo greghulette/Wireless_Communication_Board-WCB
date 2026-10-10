@@ -357,7 +357,25 @@ class WCB:
         # the WiFi task's '[ETM] WCBn came ONLINE' (HIL_TEST_AUDIT.md F18) arrived as 'HILEND<hex>[ETM] WCB2 came
         # ONLINE ...' (run 20260925-092255). So the sentinel only has to START its line. The ^ stays: with ?DEBUG on,
         # 'Sent to USB: HILEND<hex>' carries it mid-line, before the echo itself.
-        self.dev.expect(rf"^{end}(?![0-9A-F])", timeout=timeout, since=m)
+        try:
+            self.dev.expect(rf"^{end}(?![0-9A-F])", timeout=timeout, since=m)
+        except AssertionError as first:
+            # A second marker tells one lost console line from a board that stopped answering. W2 printed a whole
+            # ?backup and never echoed the ;S0 marker sent right behind it (maestro.fallback_broadcast_unconfigured,
+            # run 20261009-182550); 600 repeats lost none. The test it landed in tests something else, so the read
+            # goes on, and the session log says a line was lost. A board that answers neither still fails here.
+            again = "HILEND" + secrets.token_hex(4).upper()
+            self.dev.send(f";S0,{again}")
+            try:
+                self.dev.expect(rf"^{again}(?![0-9A-F])", timeout=3.0, since=m)
+            except AssertionError:
+                raise first from None
+            log = getattr(self.dev, "log", None)
+            if log:
+                verb = command.split(",")[0][:20]          # never the arguments: some carry a password
+                log(self.dev.name, "#", f"CONSOLE LINE LOST: the end marker after {verb!r} never came back; a second "
+                                        f"one did")
+            end = again
         lines = self.dev.since(m)
         # Drop relayed telemetry. While a host holds W1's RC relay window open (any ;W20,{json} does, for
         # 20 s), NaviCore's rc_ch/rc_hb/rc_trig arrive on W1's USB at up to 5 Hz, tagged {"sys":1,...}, and

@@ -2,7 +2,7 @@
 from hil.runner import Skip, test
 
 
-@test("probe.hello", "Every probe answers and runs wcb_probe v5 or newer (v6 is refused: it panic-loops when a WCB reboots)", links=[])
+@test("probe.hello", "Every probe answers and runs wcb_probe v8 or newer (PROBE_MIN_VERSION: v8 binds a listen-only tap on any soft channel)", links=[])
 def probe_hello(bench):
     names = bench.probe_names()
     if not names:

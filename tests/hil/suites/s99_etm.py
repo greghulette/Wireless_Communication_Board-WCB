@@ -320,6 +320,9 @@ def char_loaded(bench):
     # share means the broadcasts were never transmitted, not lost: sendESPNowMessage returns
     # early for target 0 while the global lastReceivedViaESPNOW is latched (WCB.ino:2549), and
     # processETMChar runs from loop() outside any command snapshot. See docs/HIL_TESTING.md §5.
+    # 4% (1 of 27) or 7% on W3, the peer that gets the last unicast, in every run until WCB ff7eedd: NaviCore ACKs
+    # every broadcast unasked, its ACKs counted toward the phase's completion, and the phase ended as soon as its last
+    # message went out (run 20261009-182550). W3's console had logged an ACK for every phase 3 message.
     rows = _char(bench)["rows"]
     rows = [r for r in rows if r[0] == 3]
     assert rows, "no phase 3 rows in ?ETM,CHAR output"
