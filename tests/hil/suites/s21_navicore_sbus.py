@@ -1120,8 +1120,17 @@ def probe_temp_peer_not_learned(bench):
     nm = nc.dev.mark()
     with probe_in_mesh(bench, "probe1", pid):
         time.sleep(10)
-        status = nc.wcb_status()
-        row = {int(r["N"]): r for r in nc.wdp_dump()}.get(pid)
+        deadline = time.monotonic() + 30
+        while True:
+            status = nc.wcb_status()
+            row = {int(r["N"]): r for r in nc.wdp_dump()}.get(pid)
+            if row or time.monotonic() >= deadline:
+                break
+            # The probe's join advert is one unacknowledged broadcast: NaviCore missed it in run 20261010-060621 (its
+            # table held 20, 1, 2, 3 ten seconds on). A WDP poll asks every client to advertise again, as the WDP
+            # tests do for the same loss (s18 _poll_fresh); joining or persisting it is still never allowed below.
+            WCB(bench.dev("wcb1")).run("?WDP,POLL")
+            time.sleep(3)
     gone, deadline = False, time.monotonic() + 240
     while time.monotonic() < deadline:
         time.sleep(20)

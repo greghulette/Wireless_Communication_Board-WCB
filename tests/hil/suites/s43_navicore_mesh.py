@@ -894,6 +894,11 @@ def fragment_reassembly_edges(bench):
     sess = [envs_for(x, pad=150, sid=sid) for x, sid in zip(tags, sorted(sids))]
     pm, nm, wm = l12.mark(), nc.dev.mark(), w1.dev.mark()
     send_fragments(w1, [s[0] for s in sess], target=nid)                     # three open sessions, then a fourth
+    # Hold the three open before completing them: sent 1 ms behind the fourth's first part, session 1's last part
+    # completed it (NaviCore 52 ms on) before the fourth was judged, so the pool had room and no line was due (run
+    # 20261010-060621). A fifth of FRAG_TIMEOUT_S (1 s on the bench) covers a delayed or retried relay and leaves the
+    # three well inside their timeout.
+    time.sleep(min(1.0, ncmesh.FRAG_TIMEOUT_S * 0.2))
     send_fragments(w1, [x for s in sess[:3] for x in s[1:]], target=nid)     # the three complete
     _wait_all(l12, pm, tags[:3], 4.0)
     send_fragments(w1, sess[3], target=nid)                                  # the fourth, whole, now there is room

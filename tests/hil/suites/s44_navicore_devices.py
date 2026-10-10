@@ -590,7 +590,7 @@ def mae_verb_no_alias(bench):
     if prof is not None:
         aliased.append((f"restartScript,300,p{prof}", pololu(dev, CMD_SUB, 44), "subroutine 44"))
     wrapped = []
-    with nc.debug(DBG_MAESTRO):
+    with nc.debug(DBG_MAESTRO | (DBG_WIRE if w.hook else 0)):   # the [WIRE] copy is what lets Wires send a lost one again
         w.step(lambda: nc.test_action(_maestro(slot, "setTarget,5,6000")), pololu(dev, CMD_TARGET, 5, 6000),
                "control setTarget,5,6000")
         if w.problems:
@@ -629,7 +629,10 @@ def mae_subroutine_msb(bench):
     w = Wires(nc, dev, (l11,), _hooks(nc))
     bad = []
     try:
-        with nc.debug(DBG_MAESTRO):
+        # DBG_WIRE too: without NaviCore's [WIRE] copy Wires cannot tell a lost broadcast from a frame never written,
+        # and the control failed on one W1 S1 missed while NaviCore logged 'Broadcast (Kyber) 4 bytes - OK' (run
+        # 20261010-060621)
+        with nc.debug(DBG_MAESTRO | (DBG_WIRE if w.hook else 0)):
             w.step(lambda: nc.test_action(_maestro(slot, f"restartScript,100,p{prof}")), pololu(dev, CMD_SUB, 100),
                    "control restartScript,100")
             if w.problems:
