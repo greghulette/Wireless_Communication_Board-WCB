@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_071423ROCT2026                                  *****////
+///*****                                          Version 6.2.1_100000ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_071423ROCT2026";
+String SoftwareVersion = "6.2.1_100000ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2026,6 +2026,14 @@ void processETMCharAck(int senderWCB, const String &originalCmd, unsigned long s
     else if (originalCmd.startsWith("ETMCHAR_P2")) phase = 1;
     else if (originalCmd.startsWith("ETMCHAR_P3")) phase = 2;
     if (phase < 0) return;
+
+    // Only a board this phase sent to is being characterised. A WCB_Client controller (NaviCore, WCB20) ACKs every
+    // broadcast without being asked (see the ACK loop's expectAckFrom note), and phase 3 broadcasts every third
+    // message: its 13 ACKs went into etmCharBoardResults[2][19], the phase's completion sum (totalAcked >= totalSent)
+    // counted them, and the phase ended as soon as its last message went out - that message's ACK, and sometimes the
+    // one before, never counted. W3 (peers[1], which gets the last unicast) showed 4% or 7% missed in every run while
+    // its console logged an ACK for every phase 3 message (etm.char_loaded, HIL run 20261009-182550).
+    if (etmCharBoardResults[phase][boardIdx].sent == 0) return;
 
     int mIdx = originalCmd.substring(originalCmd.lastIndexOf('M') + 1).toInt();
     if (mIdx < 0 || mIdx >= ETM_CHAR_MAX_MSGS) return;  // guard against out-of-bounds sentTime read
