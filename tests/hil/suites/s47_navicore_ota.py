@@ -914,3 +914,124 @@ def relay_full_to_w2(bench):
     bench.note("relay OTA to W2 via NaviCore: " + "; ".join(
         f"{p['secs']:.0f} s, {p['frames']} frames, END ACK {p['end']}" for p in passes))
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ an image that is not one
+def _begin_4k(nc, problems, nxt):
+    """A 4 KB ?OTALOCAL,BEGIN accepted -> the mark before it (ncota.local_begin_abort_timeout's begin)."""
+    begin_ok = f"[OTA] BEGIN ok: session 1, 4096 B -> partition '{nxt['label']}' @0x{nxt['addr']:06x} ({nxt['size']} B)"
+    m = nc.dev.mark()
+    nc.dev.send("?OTALOCAL,BEGIN,4096,1")
+    got = ncflash._await(nc.dev, m, ncflash.M_BEGIN_DONE, 40, 0.5)
+    if not got or got.group(1) != "OK":
+        raise AssertionError(f"a 4 KB BEGIN was not accepted: {got.group(0) if got else 'no answer in 40 s'} "
+                             f"({_ota(nc.dev.since(m))[:4]})")
+    if begin_ok not in [x.rstrip() for x in nc.dev.since(m)]:
+        problems.append(f"no {begin_ok!r} line")
+    return m
+
+
+def _junk(size=4096, magic=False):
+    """`size` random bytes that are no app image: the first byte is never 0xE9 (ESP_IMAGE_HEADER_MAGIC), or is exactly
+    that with `magic`, so the chunks are written and the image fails at END instead."""
+    data = bytearray(os.urandom(size))
+    data[0] = 0xE9 if magic else (0x00 if data[0] == 0xE9 else data[0])
+    return bytes(data)
+
+
+@test("ncota.local_bad_image_refused", "OPT-IN (navicore_ota_erase): a 4 KB ?OTALOCAL session fed an image that is not "
+      "one is refused twice over: bytes with no image magic are rejected at the first DATA (esp_ota_write validate "
+      "failed, the session torn down, [OTA:NAK,0], END then 'no matching active session'), and a magic byte over "
+      "junk is written whole and rejected at END ('verify FAILED ... current app intact', [OTA:END,ERR]); the "
+      "running slot and App SHA256 never change", needs=["navicore"], links=[], opt_in="navicore_ota_erase")
+def local_bad_image_refused(bench):
+    """otaWrite (navicore_ota.h:165-182) hands each chunk to esp_ota_write, which refuses a first chunk whose first
+    byte is not the image magic (ESP_ERR_OTA_VALIDATE_FAILED) - '[OTA] esp_ota_write failed @0: ...' and
+    otaTeardown, so the local driver answers '[OTA] DATA rejected at offset 0 (write cursor at 0)' and [OTA:NAK,0]
+    (:297-313) and END finds no session ('[OTA] END: no matching active session', [OTA:END,ERR], :206-208, :325-331).
+    With the magic byte in place every chunk is written and ACKed at its cursor; esp_ota_end's validation then fails
+    (:218-224: '[OTA] END verify FAILED: <err> (image rejected, current app intact)', [OTA:END,ERR]) and the boot
+    partition never moves. BEGIN erases the next slot's first 4 KB (ncota.local_begin_abort_timeout): the opt-in."""
+    nc = _nc(bench)
+    st0 = _idle(nc)
+    nxt = st0["next"]
+    junk, headed = _junk(), _junk(magic=True)
+    problems, notes = [], []
+    first = end1 = acks = end2 = st1 = st2 = None
+    try:
+        _begin_4k(nc, problems, nxt)
+        first = _cli(nc, f"?OTALOCAL,DATA,0,{_b64(junk[:1024])}")
+        st1 = _status(nc)
+        end1 = _cli(nc, "?OTALOCAL,END")
+        _begin_4k(nc, problems, nxt)
+        acks = [_cli(nc, f"?OTALOCAL,DATA,{off},{_b64(headed[off:off + 1024])}") for off in range(0, 4096, 1024)]
+        st2 = _status(nc)
+        end2 = _cli(nc, "?OTALOCAL,END")
+    finally:
+        nc.dev.send("?OTALOCAL,ABORT")          # silent when idle
+        time.sleep(0.3)
+    st3, v3 = _status(nc), nc.ping()
+    notes.append(f"no magic: {first}; END then {end1}; a magic byte over junk: {[a[-1] for a in acks or []]} then {end2}")
+    if not first or not any(x.startswith("[OTA] esp_ota_write failed @0:") for x in first) or "[OTA:NAK,0]" not in first:
+        problems.append(f"bytes with no image magic were not rejected at the first DATA: {first}")
+    if st1 and st1["active"]:
+        problems.append("the session stayed open after the rejected first chunk")
+    if end1 != ["[OTA] END: no matching active session", "[OTA:END,ERR]"]:
+        problems.append(f"END after the torn-down session printed {end1}")
+    for i, a in enumerate(acks or []):
+        if f"[OTA:ACK,{(i + 1) * 1024}]" not in a:
+            problems.append(f"chunk {i} of the magic-headed junk was not ACKed at {(i + 1) * 1024}: {a}")
+    if not st2 or st2["session"] != {"id": 1, "written": 4096, "size": 4096}:
+        problems.append(f"STATUS before END shows session {st2 and st2['session']}, not ACTIVE id=1 4096 / 4096")
+    if not end2 or not any(x.startswith("[OTA] END verify FAILED:") and "current app intact" in x for x in end2) \
+            or "[OTA:END,ERR]" not in end2:
+        problems.append(f"END of the magic-headed junk printed {end2}; expected 'verify FAILED ... (image rejected, "
+                        f"current app intact)' and [OTA:END,ERR]")
+    if st3["active"] or st3["running"]["addr"] != st0["running"]["addr"] or st3["app_sha"] != st0["app_sha"]:
+        problems.append(f"afterwards NaviCore runs {_slot(st3['running'])} {st3['app_sha']} with session "
+                        f"{st3['session']}; before {_slot(st0['running'])} {st0['app_sha']}")
+    bench.note(f"ncota.local_bad_image_refused: {'; '.join(notes)}; PONG {v3}")
+    assert not problems, "; ".join(problems)
+
+
+@test("ncota.relay_small_to_navicore", "OPT-IN (navicore_ota_erase): W1 relays a 4 KB ?OTA session to NaviCore: BEGIN "
+      "ACKed OK at 0, the 192-byte DATA frames ACKed in step to 4096 (NaviCore prints 4096 / 4096 B), and END refused "
+      "by NaviCore's verify ('END verify FAILED ... current app intact' on its console, ACK ERR to W1); the running "
+      "slot and App SHA256 never change", needs=["navicore", "wcb1"], links=[], opt_in="navicore_ota_erase")
+def relay_small_to_navicore(bench):
+    """The relayed transport (navicore_ota.h:371-460): W1's ?OTA,BEGIN/DATA/END to board 20 reach handleOtaBeginPacket,
+    handleOtaDataPacket and handleOtaEndPacket, which drive the same otaBegin/otaWrite/otaEnd as USB and send their
+    ACK back through the relay (handleOtaAckRelay), where W1 prints [OTA:ACK,20,<session>,<cursor>,<status>] (s47
+    _relay_stream, the Wizard's loop). A magic byte over junk is written whole - the progress line at 4096 / 4096 B -
+    and esp_ota_end refuses it, so END's ACK carries status ERR and _relay_stream raises; the boot partition never
+    moves. BEGIN erases the next slot's first 4 KB: the opt-in. The junk is random: a session id W1 has not seen."""
+    nc, w1 = _nc(bench), WCB(bench.dev("wcb1"))
+    st0 = _idle(nc)
+    nid = nc.wcb_status()["self"]
+    data, session = _junk(magic=True), _session_id()
+    problems, notes = [], []
+    outcome = res = None
+    nm = nc.dev.mark()
+    with _quiet_relay(w1.dev):
+        try:
+            res = _relay_stream(w1.dev, data, nid, session, NAVICORE_FAMILY, nudge=False, note=notes.append)
+        except AssertionError as e:
+            outcome = _line1(e)
+    lines = _flushed(nc, nm, settle=1.0)
+    st1 = _status(nc)
+    nc.dev.send("?OTALOCAL,ABORT")
+    time.sleep(0.3)
+    notes.append(f"relay: {outcome or res}")
+    if res is not None:
+        problems.append(f"NaviCore accepted the junk at END: {res}")
+    elif not (outcome or "").startswith(f"END to WCB{nid} was answered"):
+        problems.append(f"the relay ended with {outcome!r}; expected END refused")
+    if "[OTA] 4096 / 4096 B (100%)" not in lines:
+        problems.append("NaviCore never printed '[OTA] 4096 / 4096 B (100%)': the relayed chunks did not all land")
+    if not any(x.startswith("[OTA] END verify FAILED:") and "current app intact" in x for x in lines):
+        problems.append("NaviCore printed no '[OTA] END verify FAILED: ... current app intact' line")
+    if st1["active"] or st1["running"]["addr"] != st0["running"]["addr"] or st1["app_sha"] != st0["app_sha"]:
+        problems.append(f"afterwards NaviCore runs {_slot(st1['running'])} {st1['app_sha']} with session "
+                        f"{st1['session']}; before {_slot(st0['running'])} {st0['app_sha']}")
+    bench.note("ncota.relay_small_to_navicore: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)

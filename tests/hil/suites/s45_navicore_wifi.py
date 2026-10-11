@@ -1641,3 +1641,54 @@ def usb_editload_with_socket(bench):
         f"socket's whole session (navicore_wsserver.h:526-530), so a USB download is cut to 512 events a range, a "
         f"whole clip over 3000 is refused, and the stream stops waiting for USB room (navicore_record.h:809-812); "
         f"decide 'relayed' from the transport the line came in on")
+
+
+# ============================================================ a save over the socket
+SAVE_ID_WS = 4242           # ws_set_config's saveId: the ACK echoes it on the socket and in USB's mirror
+
+
+@test("ncwifi.ws_set_config", "OPT-IN (navicore_wifi): a SET_CONFIG over the WebSocket is applied and ACKed on the socket "
+      "with its saveId, the ACK is mirrored to USB, USB's GET_CONFIG then shows the value, and a socket SET_CONFIG "
+      "with no data is refused as USB's is ('missing data'); nc_guard puts the config back over USB",
+      needs=["navicore"], links=[], opt_in="navicore_wifi")
+def ws_set_config(bench):
+    """Both transports feed processInputLine (NaviCore.ino:3793-4287; navicore_wsserver.h:545), so the SET_CONFIG
+    handler (:3917-3958) runs for a socket line as for a USB one: the data applied, /config.json rewritten, the ACK
+    with the request's saveId printed to Serial, which the socket's tee carries to the socket while USB keeps it
+    too. The socket is a direct transport: the WCB bridge's strip of the radio fields (_applyReassembled,
+    rc_telemetry.h) is not its; a plain field is enough here, maeGateMs, which nothing on the bench reads live. A
+    SET_CONFIG with no data answers ok:false 'missing data' (:3922-3925) on either transport. The save is made with
+    nc_guard holding the before-config, restored over USB afterwards (INF3). The line goes in one frame (the
+    config tool paces only 512 B chunks of a whole config)."""
+    problems, notes = [], []
+    with nc_guard(bench) as g:
+        before = g.before.get("maeGateMs")
+        want = 300 if before != 300 else 350
+        with _on_ap(bench, problems) as (nc, cfg, _):
+            ws = _open(bench)
+            try:
+                wnc = NaviCore(ws)
+                _sync(ws)
+                um = _sync(nc.dev)
+                got = wnc.json_cmd({"type": "SET_CONFIG", "saveId": SAVE_ID_WS, "data": {"maeGateMs": want}},
+                                   r'^\{"type":"ACK","of":"SET_CONFIG"', timeout=10.0)
+                ack = json.loads(got.string)
+                _sync(ws)
+                _sync(nc.dev)
+                mirrored = [x.rstrip() for x in nc.dev.since(um) if x.startswith('{"type":"ACK","of":"SET_CONFIG"')]
+                after = nc.config()
+                _sync(ws)
+                refused = wnc.ack_line({"type": "SET_CONFIG"})
+            finally:
+                ws.close()
+    notes.append(f"maeGateMs {before} -> {want}: socket ACK {ack}; {len(mirrored)} SET_CONFIG ACK line(s) on USB")
+    if ack != {"type": "ACK", "of": "SET_CONFIG", "ok": True, "saveId": SAVE_ID_WS}:
+        problems.append(f"the socket's SET_CONFIG ACK was {ack}")
+    if not any(f'"saveId":{SAVE_ID_WS}' in x for x in mirrored):
+        problems.append(f"the socket save's ACK (saveId {SAVE_ID_WS}) was not mirrored to USB")
+    if after.get("maeGateMs") != want:
+        problems.append(f"after the socket save USB's GET_CONFIG shows maeGateMs {after.get('maeGateMs')}, not {want}")
+    if '"ok":false' not in refused or "missing data" not in refused:
+        problems.append(f"a socket SET_CONFIG with no data answered {refused!r}; expected ok:false 'missing data'")
+    bench.note("ncwifi.ws_set_config: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)

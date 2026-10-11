@@ -2315,13 +2315,16 @@ GATED = {
        for t in ("ncboot.banner_order", "ncboot.reboot_resets_ram_state", "ncboot.wcbs_see_reboot",
                  "ncboot.new_peer_after_boot", "ncboot.roll_call_missing_board", "ncboot.mesh_reboot",
                  "ncboot.boardtype2_mismatch", "ncboot.reboots_clean", "sbus.boot_quiet",
-                 "ncota.recovery_hard_reset")},
+                 "ncota.recovery_hard_reset", "ncboot.new_peer_fires_once")},
     "ncboot.bad_device_id": ("navicore_identity", "takes NaviCore off the mesh with a saved invalid deviceId until it "
                                                   "is restored over USB; attended only"),
     "ncota.recovery_esptool": ("navicore_esptool", "resets NaviCore into ROM download mode and writes its app0 and "
                                                    "otadata with esptool; watched runs only"),
     "ncota.local_begin_abort_timeout": ("navicore_ota_erase", "every accepted BEGIN erases 4 KB of NaviCore's inactive "
                                                               "app slot, which nothing restores"),
+    **{f"ncota.{n}": ("navicore_ota_erase", "every accepted BEGIN erases 4 KB of NaviCore's inactive app slot, which "
+                                            "nothing restores")
+       for n in ("local_bad_image_refused", "relay_small_to_navicore")},      # 2026-10-11
     "ncota.local_full_same_image": ("navicore_ota_full", "rewrites NaviCore's inactive app slot and switches its boot "
                                                          "slot twice"),
     "ncota.relay_full_via_w1": ("navicore_ota_relay_full", "rewrites NaviCore's inactive app slot through W1's relay "
@@ -2330,6 +2333,7 @@ GATED = {
                                                 "twice"),
     # NC-WP6 (suites/s43_navicore_mesh.py), 2026-09-28
     "ncmesh.wdp_learn_forget": ("navicore_nvs", "writes NaviCore's learned-peer list to its NVS four times"),
+    "ncmesh.forget_peer_all": ("navicore_nvs", "writes NaviCore's learned-peer list to its NVS four times"),   # 2026-10-11
     # NC-WP7 (suites/s44_navicore_devices.py), 2026-09-28
     **{f"ncdev.{n}": ("navicore_aux_tx", "sends HCR, MP3 Trigger, DFPlayer and WLED bytes out NaviCore's own serial "
                                          "ports, where nothing records what is attached")
@@ -2345,7 +2349,8 @@ GATED = {
     **{f"ncwifi.{n}": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s")
        for n in ("pc_joins_ws_ping", "ws_parity", "ws_console_mirror", "ws_multi_client", "ws_line_framing",
                  "ws_utf8_and_latch", "ws_wizard_surface", "mesh_coexist", "ws_capture_slot", "ap_boot_lines",
-                 "refuse_short_password", "ws_line_trim", "ws_stalled_client", "usb_editload_with_socket")},
+                 "refuse_short_password", "ws_line_trim", "ws_stalled_client", "usb_editload_with_socket",
+                 "ws_set_config")},
     "ncwifi.ws_ping_soak": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 6 "
                                              "minutes while NaviCore streams to it"),
     # NC-WP13 (suites/s49_navicore_tool.py), 2026-09-29
@@ -2358,7 +2363,7 @@ GATED = {
     # NC-WP12 (suites/s48_navicore_rec.py), 2026-09-29: every test that writes a clip file
     **{f"ncrec.{n}": ("navicore_clip_write", "writes and removes HIL* clips on NaviCore's clips partition")
        for n in ("record_save_list_rm", "stop_semantics", "play_timing_markers", "replay_interpolation_remote",
-                 "backstop_60s")},
+                 "backstop_60s", "loop_playback", "auto_named_take")},
     # IX-WP9 (suites/s33_intellex_bench.py, s35_intellex_wifi.py), 2026-09-29: the spare adapter joins NaviCore's AP
     # (INTELLEX.md DX34); the link loss also needs navicore_wifi, checked in its body
     **{f"intellex.{n}": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 30 s")
@@ -8901,7 +8906,7 @@ def _run_boot_suite(tmp, ids=None, mut=(), tag="all"):
         import suites.s46_navicore_boot as S46
         import suites.s47_navicore_ota as S47
         mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith(("ncboot.", "ncota.")) and
-                (ids is None or t["id"] in ids)]
+                t["id"] not in NCBOOT_BENCH_ONLY and (ids is None or t["id"] in ids)]
     finally:
         runner.REGISTRY[:] = saved_reg
     for t in mine:
@@ -8933,6 +8938,12 @@ def _run_boot_suite(tmp, ids=None, mut=(), tag="all"):
     b.close()
     return ({r["id"]: r for r in ck.data["results"]}, model,
             dict(builds=builds, bench_img=bench_img, w2_img=w2_img, log=log, count=len(mine)))
+
+
+# s46/s47 tests the model cannot host (2026-10-11): a W2 console silenced across a restart (NaviBootModel's W2 script
+# has no ETM or WDP verbs), and junk images refused by esp_ota_write's magic check and esp_ota_end's verify, which
+# the model's OTA does not validate. They run on the bench only.
+NCBOOT_BENCH_ONLY = {"ncboot.new_peer_fires_once", "ncota.local_bad_image_refused", "ncota.relay_small_to_navicore"}
 
 
 def t_ncboot_ncota_against_model(tmp):
@@ -11173,6 +11184,11 @@ class NaviRecModel(NaviModel):
         return [self.info()]
 
 
+# ncrec tests the model cannot host: live_stick_keyframes needs the SBUS controller and the knob rig (s42 _knob_rig);
+# NaviRecModel records no stick. They run on the bench only.
+NCREC_BENCH_ONLY = {"ncrec.live_stick_keyframes"}
+
+
 def _run_rec_suite(tmp, ids=None, mut=(), cap_ms=6000):
     """A fake bench for s48: NaviRecModel(mut) behind NaviCore and W1, its DevLinks as the W1 S1 and S2 wires, every
     opt-in on, the 60 s cap cut to `cap_ms` and the take's gaps shortened (the model keeps real time). Runs the ncrec
@@ -11191,7 +11207,8 @@ def _run_rec_suite(tmp, ids=None, mut=(), cap_ms=6000):
         runner.REGISTRY[:] = []
         sys.modules.pop("suites.s48_navicore_rec", None)
         import suites.s48_navicore_rec as S48
-        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncrec.") and (ids is None or t["id"] in ids)]
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncrec.") and t["id"] not in NCREC_BENCH_ONLY
+                and (ids is None or t["id"] in ids)]
     finally:
         runner.REGISTRY[:] = saved_reg
     for t in mine:
@@ -11291,7 +11308,7 @@ def t_ncrec_suite_against_model(tmp):
     res, model, x = _run_rec_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCREC_SHOULD else 'PASS'}) {r['detail'][:500]}"
            for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCREC_SHOULD else "PASS")]
-    assert len(res) == x["count"] == 12, (len(res), x["count"])
+    assert len(res) == x["count"] == 14, (len(res), x["count"])   # every ncrec test but NCREC_BENCH_ONLY
     assert not bad, "\n".join(bad)
     for tid, dnc in NCREC_SHOULD.items():
         assert f"(should, {dnc})" in res[tid]["detail"], (tid, res[tid]["detail"][:300])

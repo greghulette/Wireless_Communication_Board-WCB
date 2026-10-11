@@ -905,3 +905,95 @@ def boot_quiet(bench):
         facts["switch"] = "none: no switch tier broadcasts a marker onto a wired port"
     bench.note(f"boot with the controller held: {facts}")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ a new peer after the grace
+from hil import ncmesh  # noqa: E402  (the W2 row of GET_WCB_STATUS)
+from suites.common import config_guard  # noqa: E402
+from suites.s18_etm_config_wdp import _etm  # noqa: E402
+from suites.s40_navicore_config import _flushed  # noqa: E402
+from suites.s43_navicore_mesh import _w2  # noqa: E402
+
+W2_HB_SILENT_S = 3600            # ?ETM,HB,<s>: W2's heartbeat stretched past the whole test (range 1-3600)
+W1_OFFLINE_S = 55                # (10 + 1) x 5 s: W1 marks a silent W2 offline after this (ncmesh.online_tracking_flip)
+
+
+@test("ncboot.new_peer_fires_once", "OPT-IN (navicore_reboot, ~60 s): a WCB silent through NaviCore's boot grace and "
+      "heard after it IS a new peer: with W2's heartbeat stretched to an hour and its WDP off across a NaviCore "
+      "restart, W2's WDP back on and W1's ?WDP,POLL past the grace make W2 advertise, NaviCore prints '[PEER] New "
+      "WCB 2' and runs the configured action once (a ;S2 marker to W1S2); a second POLL fires nothing; W2's settings "
+      "go back (NaviCore restarts)", needs=["navicore", "wcb1", "wcb2"], links=["W1S2"], opt_in="navicore_reboot")
+def new_peer_fires_once(bench):
+    """The other half of ncboot.new_peer_after_boot (D-NC25). drainPeerEvents (NaviCore.ino:5755-5790) records a board
+    silently when its advert lands inside PEER_GRACE_MS of the join, or when it is ETM-online the moment the grace
+    closes; a board heard first after that - its advert queued by the WDP neighbour callback (:5740-5750), real WCB
+    peers only, never a client - fires the passive alert ('[PEER] New WCB <n>[ <alias>] detected', the LED pulse) and
+    the configured peer actions through the normal dispatch (rcExecuteAction), once per board per session
+    (g_peerSeenMask). NaviCore marks a board online only on its heartbeat or boot announce
+    (ncmesh.online_tracking_flip), so W2 with '?ETM,HB,3600' on its own console sends none across the restart, and
+    '?WDP,OFF' keeps it from answering NaviCore's join-time solicit, whose adverts the grace is there to swallow (an
+    advert inside the grace marks the board seen, silently). After the grace W2's WDP goes back on and W1's ?WDP,POLL
+    makes every WCB advertise within 600 ms (WCB_WDP.cpp:366-372). Both W2 settings go back in a finally, and
+    config_guard(bench, 2) proves W2's config as it was. W1 marks W2 offline only after W1_OFFLINE_S of silence; the
+    silence is noted."""
+    s12 = link(bench, 1, "S2")
+    nc, w1, w2 = _nc(bench), WCB(bench.dev("wcb1")), _w2(bench)
+    _restartable(nc)
+    if not (ncmesh.status_rows(nc.wcb_status()).get(2) or {}).get("online"):
+        raise Skip("NaviCore does not have W2 online to begin with")
+    mk = marker("NEWP")
+    problems, notes = [], []
+    online, first, second, n1, n2, silent_s = set(), [], [], 0, 0, 0.0
+    with nc_guard(bench, nc=nc) as g, config_guard(bench, 2) as before:
+        hb0 = _etm(before[2])["HB"]
+        g.nc.set_config({"peerEvent": {"alert": True, "actions": [{"type": "wcb_unicast", "target": "1",
+                                                                   "cmd": f";S2{mk}"}]}})
+        t_hb = None
+        try:
+            if not any(f"ETM heartbeat set to {W2_HB_SILENT_S} sec" in x for x in w2.run(f"?ETM,HB,{W2_HB_SILENT_S}")):
+                raise AssertionError(f"W2 did not take ?ETM,HB,{W2_HB_SILENT_S}")
+            t_hb = time.monotonic()
+            if not any("[WDP] disabled" in x for x in w2.run("?WDP,OFF")):
+                raise AssertionError("W2 did not take ?WDP,OFF")
+            pm = s12.mark()
+            m, _, _ = _restart(g.nc, "json")
+            t_join = _line_time(g.nc.dev, m, JOINED) or time.monotonic()
+            time.sleep(max(0.0, t_join + PEER_GRACE_S + 1.5 - time.monotonic()))
+            online = set(g.nc.online_ids())
+            w2.run("?WDP,ON")
+            gm = g.nc.dev.mark()
+            w1.run("?WDP,POLL", timeout=6)
+            time.sleep(ADVERT_WAIT_S)
+            first = _flushed(g.nc, gm)
+            n1 = s12.received(pm).count(mk.encode())
+            gm2 = g.nc.dev.mark()
+            w1.run("?WDP,POLL", timeout=6)
+            time.sleep(ADVERT_WAIT_S)
+            second = _flushed(g.nc, gm2)
+            n2 = s12.received(pm).count(mk.encode())
+        finally:
+            silent_s = time.monotonic() - t_hb if t_hb else 0.0
+            for cmd, want in (("?WDP,ON", None), (f"?ETM,HB,{hb0}", f"ETM heartbeat set to {hb0} sec")):
+                for _ in range(2):
+                    try:
+                        got = w2.run(cmd)
+                        if want is None or any(want in x for x in got):
+                            break
+                    except AssertionError:
+                        time.sleep(0.5)
+    ev1 = sorted({int(p.group(1)) for x in first for p in [PEER_NEW.match(x)] if p})
+    ev2 = sorted({int(p.group(1)) for x in second for p in [PEER_NEW.match(x)] if p})
+    notes.append(f"online {PEER_GRACE_S + 1.5:.1f} s after the join: {sorted(online)}; first POLL: [PEER] New WCB "
+                 f"{ev1}, markers {n1}; second POLL: {ev2}, {n2 - n1} more; W2 silent {silent_s:.0f} s")
+    if 2 in online:
+        problems.append("W2 was online when the grace closed although its heartbeat was stretched: the premise failed")
+    if ev1 != [2]:
+        problems.append(f"after the first POLL past the grace the [PEER] New WCB lines name {ev1}; expected [2] alone")
+    if n1 != 1:
+        problems.append(f"the peer action ran {n1} time(s) after the first POLL; expected once")
+    if ev2 or n2 != n1:
+        problems.append(f"the second POLL fired again: [PEER] New WCB {ev2}, {n2 - n1} more marker(s)")
+    if silent_s > W1_OFFLINE_S:
+        notes.append(f"W1 may have marked W2 offline meanwhile (over {W1_OFFLINE_S} s silent)")
+    bench.note("ncboot.new_peer_fires_once: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)

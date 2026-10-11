@@ -2576,3 +2576,143 @@ def w_route_chains(bench):
     except AssertionError:
         problems.append(f"the control: ;M2,getErrors sent to W2 never put {frame.hex(' ')} on W2 S1")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ forget every learned peer
+@test("ncmesh.forget_peer_all", "OPT-IN (navicore_nvs): FORGET_PEER with all:true drops every learned peer at once - "
+      "the probe learned as a permanent client and the bench's own WCBs above the floor (W2, W3: quantity is 1) - "
+      "with 'cleared all learned peers' and an ACK saying all:true, PEERS falls to the floor's count; W1's ?WDP,POLL "
+      "then makes the WCBs advertise and NaviCore learns them back, PEERS as before; a FORGET_PEER naming neither an "
+      "id nor all is refused", needs=["navicore", "wcb1", "probe2"], links=[], opt_in="navicore_nvs")
+def forget_peer_all(bench):
+    """FORGET_PEER over USB (NaviCore.ino:4493-4512): all:true calls doForgetPeer(0), which clears every learned peer
+    (clearLearnedPeers, WCB_Client.cpp:1802) and prints '[WCB] cleared all learned peers'; the ACK is
+    {"ok":true,"all":true}. Neither id nor all answers ok:false 'id 0 out of range (1-20) or set all:true'. On this
+    bench the floor (quantity) is 1, so W2 and W3 are learned peers themselves (auto-joined on their adverts, like the
+    probe), and the clear drops them too: ?WDP,CFG's PEERS (the ESP-NOW peer table: the floor's boards plus the
+    learned) falls to the floor's count, and the WDP rows lose their PEER 2 flag. W1's ?WDP,POLL makes every WCB
+    advertise within 600 ms (WCB_WDP.cpp:366-372); a non-temporary advert counted twice re-learns the board
+    (WCB_Client.cpp:2165-2170), so two polls bring W2 and W3 back, and the test ends with PEERS as it found it. The
+    probe leaves before the re-learn (else it would be learned a second time); W1 and W2 learned it too and forget it
+    in the finally (s18 _forget_everywhere). NVS writes on NaviCore: the learn, the clear, each re-learn - the
+    opt-in."""
+    nc, w1 = _nc(bench), usb_wcb(bench)
+    n = _free_id(nc, (13, 12, 14, 11))
+    if _row_of(_wcb_view(w1), n) is not None:
+        raise Skip(f"W1 has a WDP row for WCB{n}: the id is in use")
+    problems, notes = [], []
+
+    def peer_flag(i=None):
+        return (_row_of(nc.wdp_view(), n if i is None else i) or {}).get("PEER")
+
+    def peers():
+        p = (nc.wdpcfg() or {}).get("PEERS", "")
+        return int(p) if str(p).isdigit() else None
+
+    def learned_ids():
+        """The boards NaviCore's WDP view flags PEER 2 (learned), the probe aside."""
+        view = nc.wdp_view()
+        return sorted(int(r["N"]) for r in view["rows"] if r.get("PEER") == "2" and str(r.get("N", "")).isdigit()
+                      and int(r["N"]) != n)
+    p0 = peers()
+    learned0 = learned_ids()
+    floor = int((nc.config().get("wcbNetwork") or {}).get("quantity") or 0)
+    ack = lines = refused = flag = p1 = None
+    learned1, back, p2 = [], [], None
+    try:
+        nm = nc.dev.mark()
+        with _joined(bench, "probe2", n, temporary=False, forget=False) as probe:
+            try:
+                _nav_regex(nc, nm, rf"^\[WCB_Client\] auto-joined WCB{n}$", 12.0, f"'auto-joined WCB{n}' line")
+            except AssertionError:
+                w1.run("?WDP,POLL")
+                _nav_regex(nc, nm, rf"^\[WCB_Client\] auto-joined WCB{n}$", 8.0, f"'auto-joined WCB{n}' line")
+            time.sleep(1.0)
+            if peer_flag() != "2" or peers() != (p0 or 0) + 1:
+                problems.append(f"after the join: PEER={peer_flag()}, PEERS={peers()} (before {p0})")
+            refused = nc.ack_line({"type": "FORGET_PEER"})
+            nm = nc.dev.mark()
+            ack = nc.ack({"type": "FORGET_PEER", "all": True}, of="FORGET_PEER")
+            lines = _flushed(nc, nm, settle=0.5)
+            flag, p1, learned1 = peer_flag(), peers(), learned_ids()
+            probe.mesh_leave()
+        # bring the bench's own learned boards back: two advert rounds
+        rm = nc.dev.mark()
+        for _ in range(2):
+            w1.run("?WDP,POLL")
+            time.sleep(1.5)
+        for b in learned0:
+            try:
+                _nav_regex(nc, rm, rf"^\[WCB_Client\] auto-joined WCB{b}$", 15.0, f"'auto-joined WCB{b}' line")
+                back.append(b)
+            except AssertionError:
+                pass
+        time.sleep(1.0)
+        p2 = peers()
+    finally:
+        _forget_everywhere(bench, n, navicore=True)
+    notes.append(f"probe as WCB{n}; learned before {learned0}, PEERS {p0} (floor {floor}) -> +1 -> {p1} after the clear "
+                 f"(learned {learned1}) -> {p2} once {back} re-joined")
+    if ack != {"type": "ACK", "of": "FORGET_PEER", "ok": True, "all": True}:
+        problems.append(f"FORGET_PEER all:true: ACK {ack}")
+    if "[WCB] cleared all learned peers" not in (lines or []):
+        problems.append("FORGET_PEER all:true: no '[WCB] cleared all learned peers' line")
+    if flag == "2" or learned1:
+        problems.append(f"after FORGET_PEER all:true the WDP view still flags learned peers: probe PEER={flag}, "
+                        f"boards {learned1}")
+    if p1 != max(floor - 1, 0) and p1 != (p0 or 0) - len(learned0):
+        problems.append(f"after FORGET_PEER all:true PEERS={p1}; expected the floor's boards alone ({floor - 1}, or "
+                        f"{(p0 or 0) - len(learned0)} = before the join less the {len(learned0)} learned)")
+    if sorted(back) != learned0 or p2 != p0:
+        problems.append(f"the bench's learned boards {learned0} did not all come back on W1's polls (back {back}, "
+                        f"PEERS {p2}, before {p0}): NaviCore's peer table is not as found")
+    if refused is None or '"ok":false' not in refused or "set all:true" not in refused:
+        problems.append(f"FORGET_PEER with neither id nor all answered {refused!r}; expected ok:false 'set all:true'")
+    bench.note("ncmesh.forget_peer_all: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ the clips list through W1
+@test("ncmesh.bridged_rec_ls", "The clips list through a WCB: ;W20,?REC,LS typed on W1 comes back as [TERM:20] lines "
+      "equal, in order, to NaviCore's own ?REC,LS ([CLIPFS], '[REC] clips:', [CLIPLIST:BEGIN], every [CLIPITEM], END), "
+      "cut into RTERM's 160-byte pieces the same way, and the items are the ones ?REC,LS over USB lists",
+      needs=["navicore", "wcb1"], links=[])
+def bridged_rec_ls(bench):
+    """A relayed '?' line runs through drainRemoteCli with Serial teed to the RTERM sink (ncmesh.remote_cli_order_and_drop):
+    ?REC,LS prints the partition's [CLIPFS] line, '[REC] clips:', [CLIPLIST:BEGIN], one [CLIPITEM] per clip and
+    [CLIPLIST:END] (listClips, navicore_record.h; NaviCore.ino's ?REC,LS), each a packet W1 prints as [TERM:20]<text>
+    (navicore_rterm.h:48-62; WCB_RemoteTerm.cpp:178-207), long items cut at 160 bytes (ncmesh.rterm_pieces). The
+    config tool's bridged Clips panel reads exactly these (nctool.clips_list_forms). The USB listing afterwards is the
+    reference for the items."""
+    nc, w1 = _nc(bench), usb_wcb(bench)
+    nid = _nid(nc)
+    problems, notes = [], []
+    nm, wm = nc.dev.mark(), w1.dev.mark()
+    w1.send(f";W{nid},?REC,LS")
+    try:
+        w1.dev.expect(rf"^\[TERM:{nid}\]\[CLIPLIST:END\]", timeout=8, since=wm)
+    except AssertionError:
+        problems.append(f"no [TERM:{nid}][CLIPLIST:END] line on W1")
+    _flushed(nc, nm, settle=0.5)
+    own = [x.rstrip("\r\n") for x in nc.dev.since(nm) if x.startswith(("[CLIP", "[REC] clips"))]
+    want, got = ncmesh.rterm_pieces(own), _term_lines(w1, wm, nid)
+    items = [x for x in own if x.startswith("[CLIPITEM]")]
+    usb = nc.rec_ls()
+    notes.append(f"?REC,LS: {len(own)} lines ({len(items)} clips), {len(want)} pieces expected, {len(got)} came")
+    if got != want:
+        problems.append(f"?REC,LS over RTERM: {len(got)} [TERM:{nid}] lines differ from the {len(want)} NaviCore's own "
+                        f"console predicts (first difference at "
+                        f"{next((k for k, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))})")
+    names = []
+    for x in items:
+        try:
+            names.append(json.loads(x[len("[CLIPITEM]"):])["name"])
+        except (ValueError, KeyError, TypeError):
+            problems.append(f"a relayed [CLIPITEM] does not parse: {x[:80]!r}")
+    if sorted(names) != sorted(c[0] for c in usb):
+        problems.append(f"the relayed listing names {sorted(names)}; USB's ?REC,LS lists {sorted(c[0] for c in usb)}")
+    lost = _relay_lost(w1, wm)
+    if lost:
+        problems.append(f"W1 dropped relayed lines: {lost}")
+    bench.note("ncmesh.bridged_rec_ls: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
