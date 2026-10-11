@@ -343,11 +343,14 @@ def ack_lost_retry_fail(bench):
                 if sent is None or len(retries) != 3 or failed is None:
                     bad.append(f"{label}: sent {sent is not None}, {len(retries)} retries, failed {failed is not None}")
                 else:
+                    # Host-stamped console lines: a retry's line can read early against the Sent line when the Sent
+                    # line itself was held in the USB pipe, so the early side gets 100 ms, the late side the same 250
+                    # (run 20261011-171424: offsets [500, 1003, 1449] at 500 - the third 1 ms under the old -50 floor).
                     offsets = [round((r - sent) * 1000) for r in retries]
-                    if any(not k * spacing - 50 <= o <= k * spacing + 250 for k, o in enumerate(offsets, 1)):
+                    if any(not k * spacing - 100 <= o <= k * spacing + 250 for k, o in enumerate(offsets, 1)):
                         bad.append(f"{label}: retry offsets {offsets} ms at TIMEOUT {spacing}")
                     fail_ms = round((failed - sent) * 1000)
-                    if not 4 * spacing - 50 <= fail_ms <= 4 * spacing + 600:
+                    if not 4 * spacing - 100 <= fail_ms <= 4 * spacing + 600:
                         bad.append(f"{label}: failure line {fail_ms} ms after Sent")
                 if _has([line for _, line in entries], "ACK received from WCB2"):
                     bad.append(f"{label}: an ACK got through to a deafened W1")
