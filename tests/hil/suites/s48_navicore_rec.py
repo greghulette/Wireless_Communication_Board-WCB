@@ -60,8 +60,10 @@ from hil.nc_guard import nc_guard
 from hil.runner import Skip, test
 from suites.common import link, marker, nonce
 from suites.s40_navicore_config import _flushed, _hooks, _inert_keys
-from suites.s41_navicore_engine import _act, _probe_ms, _remote_slot, _wait_all
-from suites.s42_navicore_sbus_engine import CMD_ACCEL, CMD_SPEED, CMD_TARGET, DBG_WIRE, PAYLOAD, _free_channels
+from hil.sbus import SBUS_CENTER
+from suites.s41_navicore_engine import _act, _count, _probe_ms, _remote_slot, _wait_all
+from suites.s42_navicore_sbus_engine import (CMD_ACCEL, CMD_SPEED, CMD_TARGET, DBG_WIRE, PAYLOAD, _free_channels, _free_knobs,
+                                            _knob, _knob_rig, _out, knob_pos)
 from suites.s44_navicore_devices import wire_log
 
 REC_MAX_MS = 60000          # the capture cap, navicore_record.h:115 (checkRecordBackstop :1012-1021)
@@ -80,6 +82,12 @@ RAMP = ((0, 6000), (1000, 6100), (1500, 6050))   # replay_interpolation_remote's
 MIN_BETWEEN = 10            # distinct interpolated targets its first segment must hold, the keyframes not counted
 SPAN_EARLY_MS, SPAN_LATE_MS = 60, 250   # the replayed ramp's first-to-last span against the clip's
 POSE = 6400                 # replay_only_clip_channels: the pose a channel outside the clip is given
+LOOP_GAP_S = 0.8            # loop_playback's two markers
+LOOP_CYCLES = 3             # cycles loop_playback watches before stopping the replay
+LOOP_LATE_MS = 400          # a cycle may run this much past the clip's length (the restart at loop()'s next pass)
+STICK_STEPS = ((600, 0.6), (1500, 0.6), (992, 0.6))   # live_stick_keyframes: (rx value, hold s)
+STICK_TOL_MS = 120          # a keyframe's spacing against the host's between the stick moves
+RAMP_TOL = 60               # a replayed ramp's end points against the keyframes (quarter-us)
 ACTION_TYPES = ("wcb_unicast", "wcb_broadcast", "maestro_local", "maestro", "serial", "hcr", "mp3", "dfplayer", "wled",
                 "record", "play", "stop")   # the JSON types actionToJson writes (rc_config.h:970-1061)
 SAVED = re.compile(r"^\[REC\] saved clip '(.*)'$")      # navicore_record.h:1038; ?REC,SAVE NaviCore.ino:3481
@@ -1304,3 +1312,222 @@ def editcancel_empties(bench):
                         f"(clearClip clears only when idle, navicore_record.h:308; the CLI prints 'cleared' "
                         f"regardless, NaviCore.ino:3605)")
     assert not problems, "(should, D-NC66) " + "; ".join(problems)
+
+
+# ============================================================ loop playback
+def _times(l, since, text):
+    """Probe millis() of every occurrence of `text` in Link `l`'s stream since `since`, in order (_probe_ms per
+    occurrence)."""
+    out = []
+    while True:
+        t = _probe_ms(l, since, text, nth=len(out))
+        if t is None:
+            return out
+        out.append(t)
+
+
+@test("ncrec.loop_playback", "OPT-IN (navicore_clip_write): a play action with fn 1 replays the clip again each time "
+      "it ends (an idle animation): its two markers land on W1 S2 cycle after cycle at the clip's length, no "
+      "'playback complete' prints meanwhile, and ?REC,STOP ends it with 'replay stopped' and no marker after",
+      needs=["navicore", "wcb1"], links=["W1S2"], opt_in="navicore_clip_write")
+def loop_playback(bench):
+    """RA_PLAY passes a.fn != 0 as the loop flag (NaviCore.ino:2438; requestPlay, navicore_record.h:342-344), and
+    startReplay keeps it (:474-477). When the cursor passes the last event, replayTick restarts the stream instead of
+    ending it: _cursor 0, _replayStart now, the curves rewound (:502-504); _doneFlag is never set, so loop() prints no
+    '[REC] ▶ playback complete' (:505-508; takeReplayDone :515). ?REC,STOP ends a replay ('[REC] replay stopped',
+    NaviCore.ino:3464-3467) and never saves. The take: two W1 S2 markers LOOP_GAP_S apart; its first event is at
+    t 0 and the clip's length is the second's t, so one cycle is that long plus the restart's loop() pass."""
+    l12 = link(bench, 1, "S2")
+    nc = _nc(bench)
+    problems, notes = [], []
+    with rec_guard(bench, nc) as rg:
+        name = rg.name("L")
+        ms = [marker("L0"), marker("L1")]
+        _markers_take(nc, l12, name, ms, (LOOP_GAP_S,))
+        if _toggle_save(nc, name) != name:
+            raise AssertionError(f"the take was not saved as {name}")
+        evs = nc.rec_download(name)
+        dur = evs[-1]["t"] - evs[0]["t"]
+        pm, nm = l12.mark(), nc.dev.mark()
+        _ack_ok(nc.test_action({"type": "play", "cmd": name, "fn": 1}), "play action, fn 1")
+        time.sleep(LOOP_CYCLES * (dur + LOOP_LATE_MS) / 1000 + 0.5)
+        mid = _state(nc)
+        done = nc.lines(nm, PLAYBACK_DONE)
+        stopped = _cli_stop(nc)
+        time.sleep(0.3)
+        at_stop = [_count(l12.received(pm), m) for m in ms]
+        time.sleep((dur + LOOP_LATE_MS) / 1000 + 0.5)
+        after = [_count(l12.received(pm), m) for m in ms]
+        times = _times(l12, pm, ms[0])
+        state_after = _state(nc)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    notes.append(f"clip {dur} ms; marker 0 landed {len(times)} times, cycle gaps {gaps} ms; counts at the stop {at_stop}")
+    if mid[0] != "REPLAYING":
+        problems.append(f"{LOOP_CYCLES} cycles in, the recorder is {mid[0]}; a looping replay stays REPLAYING")
+    if done:
+        problems.append(f"'playback complete' printed {len(done)} time(s) while looping; a loop never completes")
+    if any(n < LOOP_CYCLES for n in at_stop):
+        problems.append(f"the markers landed {at_stop} times before the stop; expected at least {LOOP_CYCLES} each")
+    bad = [g for g in gaps if not dur - EARLY_MS <= g <= dur + LOOP_LATE_MS]
+    if bad:
+        problems.append(f"cycle gaps {bad} ms are not the clip's {dur} ms (allowed -{EARLY_MS}/+{LOOP_LATE_MS})")
+    if stopped != "[REC] replay stopped":
+        problems.append(f"?REC,STOP answered {stopped!r} while looping")
+    if after != at_stop:
+        problems.append(f"markers kept landing after the stop: {at_stop} became {after}")
+    if state_after[0] != "idle":
+        problems.append(f"after ?REC,STOP the recorder is {state_after[0]}")
+    bench.note("ncrec.loop_playback: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ the stick in a take
+def _fold(values):
+    """`values` with each run of equal neighbours folded to one (the settle resend repeats a position)."""
+    out = []
+    for v in values:
+        if not out or out[-1] != v:
+            out.append(v)
+    return out
+
+
+def ramp_shape_problems(targets, keys, tol=RAMP_TOL):
+    """Problems with a replayed stream of targets for keyframes `keys` (three positions, up then down): it starts near
+    the first, peaks near the second, ends near the third, rises then falls."""
+    if len(targets) < 6:
+        return [f"only {len(targets)} targets replayed; a curve follower sends a dense ramp"]
+    a, b, c = keys
+    out = []
+    if abs(targets[0] - a) > tol:
+        out.append(f"the replay starts at {targets[0]}, not near the first keyframe {a}")
+    if abs(max(targets) - b) > tol:
+        out.append(f"the replay peaks at {max(targets)}, not near the second keyframe {b}")
+    if abs(targets[-1] - c) > tol:
+        out.append(f"the replay ends at {targets[-1]}, not near the last keyframe {c}")
+    peak = targets.index(max(targets))
+    if any(y < x for x, y in zip(targets[:peak], targets[1:peak + 1])):
+        out.append("the ramp up to the peak is not monotonic")
+    if any(y > x for x, y in zip(targets[peak:], targets[peak + 1:])):
+        out.append("the ramp down from the peak is not monotonic")
+    return out
+
+
+@test("ncrec.live_stick_keyframes", "A take captures the stick: a passthrough knob on remote slot 4 moved to three "
+      "values while recording leaves three Maestro keyframes in the buffer (slot, channel, the knob's exact positions, "
+      "at the moves' spacing) and no action; ?REC,STOP keeps it unsaved, and a replay of the buffer ramps W1 S1 "
+      "through those positions in order (RAM only; remote slot: nothing moves)",
+      needs=["sbus", "navicore", "wcb1"], links=["W1S1"])
+def live_stick_keyframes(bench):
+    """processKnobs dispatches a knob position once per move of 5 counts or more (s42 knob_passthrough_remote), and
+    while RECORDING each dispatch is captured as a REC_KF_MAESTRO keyframe with the slot, channel and quarter-us
+    position (the module docstring: NaviCore.ino's knob dispatch calls the recorder's keyframe capture). The settle
+    resend 250 ms after the stick stops (KNOB_SETTLE_RESEND_MS, navicore-fix9) repeats the position, so equal
+    neighbours are folded before the positions are compared. The bare ?REC,EDITLOAD streams the unsaved take
+    (parse_resident). ?REC,PLAY with no name replays the buffer as it is (NaviCore.ino:3468-3474): _buildCurveIndex
+    resets the channel and sends no anchor (navicore_record.h:365-399), and the curve follower eases through the
+    keyframes (_updateCurves :425-456), so W1 S1 sees the first position, a ramp up to the second and down to the
+    third, where it holds. The broadcast is unacknowledged: a frame W1 S1 misses leaves a gap in the ramp, which the
+    shape check tolerates; its end points are judged within RAMP_TOL."""
+    ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, (x,), wire = _knob_rig(bench)
+    problems, notes = [], []
+    with nc_guard(bench) as g:
+        nc = g.nc
+        knobs = _free_knobs(g.before)
+        if not knobs:
+            raise Skip("no free knob to borrow")
+        lab = knobs[0]
+        with rec_guard(bench, nc) as rg:
+            try:
+                nc.set_config({"knobs": {lab: _knob(ch, outputs=[_out(x, target=slot)])}})
+                time.sleep(SAVE_SETTLE_S)
+                sticks.set("rx", SBUS_CENTER)
+                time.sleep(0.8)
+                name = rg.name("K")
+                _rec_start(nc, name)
+                hosts = []
+                for v, hold in STICK_STEPS:
+                    hosts.append(sticks.set("rx", v))
+                    time.sleep(hold)
+                stopped = _cli_stop(nc)
+                hdr, evs = _resident(nc)
+                nc.mae_set(slot, x, 0)
+                time.sleep(0.3)
+                m11, nm = l11.mark(), nc.dev.mark()
+                started = _play(nc)
+                _await_line(nc, nm, PLAYBACK_DONE, (hdr.get("durationMs") or 3000) / 1000 + 4)
+                time.sleep(0.6)
+                frames = timed_frames(l11.bursts(m11), dev, {x})
+            finally:
+                sticks.center()
+                time.sleep(0.5)
+                nc.mae_set(slot, x, 0)
+    want = [knob_pos(v, 4000, 8000) for v, _ in STICK_STEPS]
+    kfs = [e for e in evs if e.get("k") == REC_KF_MAESTRO]
+    mine = [e for e in kfs if (e.get("slot"), e.get("ch")) == (slot, x)]
+    others = [e for e in evs if e not in mine]
+    got = _fold([e.get("pos") for e in mine])
+    targets = [v for _, c, _, v in frames if c == CMD_TARGET]
+    notes.append(f"slot {slot} (device {dev}) ch {x}, knob {lab} on CH{ch}; {len(evs)} events captured, {len(mine)} "
+                 f"keyframes on the channel folding to {got}; {len(targets)} targets replayed")
+    if stopped.startswith("[REC] replay stopped") or not stopped.startswith("[REC] state="):
+        problems.append(f"?REC,STOP answered {stopped!r} for a take")
+    if got != want:
+        problems.append(f"the take's keyframes on the channel fold to {got}; expected {want} (knob_pos of the stick values)")
+    if others:
+        shape = [(e.get("k"), e.get("type"), e.get("slot"), e.get("ch")) for e in others][:6]
+        problems.append(f"the take holds {len(others)} event(s) that are not this channel's keyframes: {shape}")
+    firsts = []
+    for p in want:
+        firsts += [e["t"] for e in mine if e.get("pos") == p][:1]
+    if len(firsts) == 3 and len(hosts) == 3:
+        for i in (1, 2):
+            dt, dh = firsts[i] - firsts[i - 1], round((hosts[i] - hosts[i - 1]) * 1000)
+            notes.append(f"keyframe {i}: {dt} ms after the one before in the take, the stick moved {dh} ms apart")
+            if abs(dt - dh) > STICK_TOL_MS:
+                problems.append(f"keyframe {i} is {dt} ms after the one before but the stick moved {dh} ms apart "
+                                f"(more than {STICK_TOL_MS} ms off)")
+    if not started.startswith("[REC] replaying"):
+        problems.append(f"?REC,PLAY of the buffer answered {started!r}")
+    problems += [f"W1 S1: {p}" for p in ramp_shape_problems(targets, want)]
+    bench.note("ncrec.live_stick_keyframes: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ a take with no name
+def next_auto_names(listed, n):
+    """The `n` names _autoClipName (navicore_record.h:1012-1020) gives in turn with `listed` on flash: rec_<k> for the
+    lowest k, 1 up, that no clip on flash or already given has."""
+    out, have = [], set(listed)
+    for _ in range(n):
+        k = next(k for k in range(1, 10000) if f"rec_{k}" not in have)
+        out.append(f"rec_{k}")
+        have.add(f"rec_{k}")
+    return out
+
+
+@test("ncrec.auto_named_take", "OPT-IN (navicore_clip_write): a record action with no clip name starts a take that the "
+      "toggle saves as rec_<N>, the lowest number no clip on flash has; a second such take takes the next number",
+      needs=["navicore", "wcb1"], links=["W1S2"], opt_in="navicore_clip_write")
+def auto_named_take(bench):
+    """RA_RECORD with an empty cmd asks for the toggle with no name (requestRecordToggle, navicore_record.h:332-334);
+    pollControl latches '' and the save falls back to _autoClipName (_takeName :1005-1009; :1012-1020): rec_1, rec_2,
+    ... the first that _clipFS does not hold, printed by '[REC] saved clip'. The guard is told the names in advance
+    (from ?REC,LS, next_auto_names), so it removes them, or a leftover, as its own."""
+    l12 = link(bench, 1, "S2")
+    nc = _nc(bench)
+    problems = []
+    with rec_guard(bench, nc) as rg:
+        expect = next_auto_names(_ls(nc), 2)
+        rg.made += expect
+        saved, listed = [], []
+        for i, n in enumerate(expect):
+            ms = [marker(f"A{i}{j}") for j in range(2)]
+            _markers_take(nc, l12, "", ms, (0.5,))
+            saved.append(_toggle_save(nc, ""))
+            listed.append(_ls(nc).get(n))
+    if saved != expect:
+        problems.append(f"the takes saved as {saved}; expected {expect} (rec_<N> for the lowest N no clip has)")
+    for n, item in zip(expect, listed):
+        if not item or item[2] != 2:
+            problems.append(f"?REC,LS lists {n} as {item} after its save; expected a 2-event clip")
+    assert not problems, "; ".join(problems)

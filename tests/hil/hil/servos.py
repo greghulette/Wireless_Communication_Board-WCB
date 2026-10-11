@@ -196,6 +196,10 @@ SERVO_TESTS = {
                                          "every channel NaviCore has moved since boot (D-NC64)",
     "ncrec.replay_only_clip_channels": "replays a one-marker take to show that its reset reaches every channel NaviCore "
                                        "has moved since boot (D-NC64)",
+    "ncrec.loop_playback": "replays a two-marker clip in a loop: the replay's reset reaches every channel NaviCore has moved "
+                           "since boot (D-NC64)",
+    "ncrec.live_stick_keyframes": "replays the stick's keyframes on remote slot 4: the replay's reset reaches every channel "
+                                  "NaviCore has moved since boot (D-NC64)",
     "ncrec.busy_load_not_missing": "replays a two-marker take: the replay's reset reaches every channel NaviCore has "
                                    "moved since boot (D-NC64)",
     # NC-WP11, SBUS faults (s50), through the SBUS controller's INF8 test verbs. Every one changes the stream NaviCore
