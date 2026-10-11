@@ -142,6 +142,9 @@ _L1 = (
     ("cmdlib_sync", "A library file imported is a private board that persists and composes; Save to NaviCore sends SET_CMDLIB (sys first, the store as data) and keeps the ACK's hash; a fresh browser hears of the different library, Load from NaviCore brings the board back and the next connect is in sync; its ✕ removes it"),
     ("cmdlib_fetch", "Unconnected, Load and Save are disabled with a reason; Fetch reads a DroidNet manifest from the URL typed and each board file relative to it, logs each, keeps going past a failing board, the boards are session-only but compose and Use; a manifest without boards is reported"),
     ("seq_source_parity", "A sequence-keyed command's field is a dropdown read off the mesh (GET_WCB_SEQ per board), a pick previews the verb and shows the body (GET_WCB_SEQVAL) with its comment, manual entry, ⟳ re-reads, Use writes the unicast and Change re-opens with the key selected"),
+    ("timeline_edit_tools", "The timeline's editing tools: a dot selected and deleted (Delete, a right-click), Undo and Ctrl+Z over the history, Trim refused at 0, an easing pair Shift-picked and applied (a non-adjacent pair refused), Smooth on the focused channel keeping the ends, zoom, and the discard confirm on close"),
+    ("timeline_length_tracks_actions", "Trim start moves everything to 0; a longer length holds the last pose, a shorter one asks and deletes past the end (declined, the field goes back); + Maestro adds an empty track; + Action's popover needs a command, lands on a free time, edits pre-filled and deletes; no servo keyframes refuses the export"),
+    ("timeline_preview_export", "Live frees each Maestro channel and sends the pose at the cursor, Preview streams ?MAE to the end and lands on the last pose, Live off stops the stream; the script export downloads a Maestro script with the keyframes reduced to frames"),
 )
 for _key, _title in _L1:
     def _l1(bench, _id=f"nctool.{_key}"):
