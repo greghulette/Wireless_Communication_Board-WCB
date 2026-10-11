@@ -196,6 +196,8 @@ SERVO_TESTS = {
                                          "every channel NaviCore has moved since boot (D-NC64)",
     "ncrec.replay_only_clip_channels": "replays a one-marker take to show that its reset reaches every channel NaviCore "
                                        "has moved since boot (D-NC64)",
+    "ncwire.maestro_bus_live_baud": "sends one ?MAE query at 115200 baud on the bus Maestro 1 reads at its own rate: "
+                                    "the mis-framed bytes could form a compact-protocol command",
     "ncrec.loop_playback": "replays a two-marker clip in a loop: the replay's reset reaches every channel NaviCore has moved "
                            "since boot (D-NC64)",
     "ncrec.live_stick_keyframes": "replays the stick's keyframes on remote slot 4: the replay's reset reaches every channel "

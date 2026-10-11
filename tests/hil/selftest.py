@@ -2350,7 +2350,7 @@ GATED = {
        for n in ("pc_joins_ws_ping", "ws_parity", "ws_console_mirror", "ws_multi_client", "ws_line_framing",
                  "ws_utf8_and_latch", "ws_wizard_surface", "mesh_coexist", "ws_capture_slot", "ap_boot_lines",
                  "refuse_short_password", "ws_line_trim", "ws_stalled_client", "usb_editload_with_socket",
-                 "ws_set_config")},
+                 "ws_set_config", "ws_ota_small", "ap_ssid_change_at_boot")},
     "ncwifi.ws_ping_soak": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's access point for about 6 "
                                              "minutes while NaviCore streams to it"),
     # NC-WP13 (suites/s49_navicore_tool.py), 2026-09-29
@@ -2386,7 +2386,7 @@ GATED = {
     **{f"ncwire.{n}": ("navicore_wire", "needs probe 3 wired to NaviCore's own pins as docs/hil_plan/NAVICORE.md D-NC37 "
                                         "has it")
        for n in ("aux_bytes", "soft_tx_integrity", "s3_console_quiet", "tx_interleave", "rx_monitor_bcast_in",
-                 "sbus_out_tee", "maestro_bus_tap")},
+                 "sbus_out_tee", "maestro_bus_tap", "maestro_bus_live_baud")},
 }
 
 
@@ -8405,8 +8405,8 @@ class NaviBootModel(NaviModel):
 
     def merge(self, d):
         super().merge(d)
-        if "boardtype_clamped" in getattr(self, "mut", ()) and self.c["boardType"] > 1:
-            self.c["boardType"] = 0                  # the D-NC19 fix: clamp to 0-1 on input
+        if "boardtype_unclamped" not in getattr(self, "mut", ()) and self.c["boardType"] > 1:
+            self.c["boardType"] = 0                  # D-NC19, fixed: clamp to 0-1 on input (the mutation is the old bug)
 
     # ------------------------------------------------------------ restarts
     def on_reset(self):
@@ -8772,7 +8772,7 @@ class NaviBootModel(NaviModel):
         return 0, "Hash of data verified.\nLeaving...\nHard resetting via RTC WDT..."
 
 
-NCBOOT_SHOULD = {"ncboot.new_peer_after_boot", "ncboot.mesh_reboot", "ncboot.boardtype2_mismatch"}
+NCBOOT_SHOULD = {"ncboot.new_peer_after_boot", "ncboot.mesh_reboot"}   # boardtype2_mismatch: D-NC19 fixed 2026-10-11
 
 
 def t_ncboot_helpers(tmp):
@@ -8999,7 +8999,7 @@ NCBOOT_MUTATIONS = (
     ("ncota.local_begin_abort_timeout", "reaper_refresh", "FAIL", "rejected chunks refreshed the window"),
     ("ncboot.new_peer_after_boot", "grace_fixed", "PASS", ""),
     ("ncboot.mesh_reboot", "reboot_acked", "PASS", ""),
-    ("ncboot.boardtype2_mismatch", "boardtype_clamped", "PASS", ""),
+    ("ncboot.boardtype2_mismatch", "boardtype_unclamped", "FAIL", "boardType 2 is stored as sent"),
 )
 
 
@@ -9008,13 +9008,14 @@ def t_ncboot_mutations(tmp):
     outlive a restart, a banner with the wrong S4 baud, a relayed DATA ACKed OK with no session (the #70 twin), a
     USB-Serial/JTAG reset that does nothing, a bootloader that refuses the new image, rejected chunks that keep a local
     session alive - the test fails and says why; and with each D-NC fix in the model (the new-peer grace, an ACKed and
-    deferred mesh REBOOT, boardType clamped on input) its (should) test passes. Each runs alone on a fresh model."""
+    deferred mesh REBOOT) its (should) test passes, and with D-NC19 undone (boardType stored unclamped) its fixed test
+    fails again. Each runs alone on a fresh model."""
     for tid, mut, want, why in NCBOOT_MUTATIONS:
         res, model, _ = _run_boot_suite(tmp, ids={tid}, mut={mut}, tag=mut)
         r = res[tid]
         assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
-        if mut == "boardtype_clamped":
-            assert model.restarts == [], f"a clamped boardType still restarted NaviCore: {model.restarts}"
+        if mut == "boardtype_unclamped":
+            assert model.restarts, "an unclamped boardType 2 should have made the test restart NaviCore onto it"
 
 
 # ---------------------------------------------------------------------------- NC-WP6: NaviCore on the mesh (s43)
@@ -11058,8 +11059,15 @@ class NaviRecModel(NaviModel):
                 self.set_target(*key, pos)
                 cv["last"] = pos
         if self.state == "REPLAYING" and (self.cursor >= len(self.buf) or el > self.buf[-1]["t"] + 1000):
-            self.state = "idle"
-            out.append("[REC] ▶ playback complete")
+            if self.loop_play and self.buf:
+                # the idle-animation loop (replayTick, navicore_record.h:502-504): the stream restarts, the curve
+                # follower rewinds to the first keyframe from where it stands, and the done flag is never raised
+                self.cursor, self.replay_start = 0, time.monotonic()
+                for cv in self.curves.values():
+                    cv["next"], cv["tprev"] = 0, 0
+            else:
+                self.state = "idle"
+                out.append("[REC] ▶ playback complete")
         return out
 
     # ------------------------------------------------------------ ?REC and ?MAE
@@ -13151,6 +13159,11 @@ NCWIRE_FAST = {"SETTLE_S": 0.05, "QUIET_S": 0.3, "SBUS_WINDOW_S": 0.6, "LINE_PAI
 NCWIRE_SHOULD = {}
 
 
+# s51 tests the wire model cannot host (2026-10-11): a Maestro baud saved live re-opens Serial2 at the new rate and the
+# tap is re-bound there; NaviWireModel keeps one rate per port. Bench only.
+NCWIRE_BENCH_ONLY = {"ncwire.maestro_bus_live_baud"}
+
+
 def _run_wire_suite(tmp, ids=None, mut=(), opt_in=None, wired=None, keep_links=False):
     """The s51 tests named in `ids` (default all), whole, through the runner, against a fresh NaviWireModel(mut) with
     probe 3 wired as D-NC37 has it -> (results by id, the model, facts: the config text before, session.log, the
@@ -13166,7 +13179,8 @@ def _run_wire_suite(tmp, ids=None, mut=(), opt_in=None, wired=None, keep_links=F
         runner.REGISTRY[:] = []
         sys.modules.pop("suites.s51_navicore_wire", None)
         import suites.s51_navicore_wire as S51
-        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncwire.") and (ids is None or t["id"] in ids)]
+        mine = [dict(t) for t in runner.REGISTRY if t["id"].startswith("ncwire.") and t["id"] not in NCWIRE_BENCH_ONLY
+                and (ids is None or t["id"] in ids)]
     finally:
         runner.REGISTRY[:] = saved_reg
     for t in mine:

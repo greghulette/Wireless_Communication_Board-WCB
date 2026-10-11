@@ -69,7 +69,10 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # D76's navicore-fix4 (57c83d3, 4dbe0b305ce57a22) and D45's navicore-hil1, 6925773). The tests that flash NaviCore
 # flash only this image and end on it, verified by its App SHA256 (suites/s47_navicore_ota.py); ncota.image_identity
 # fails when the board runs anything else. A new image changes this one line. KNOWN_GOOD above stays the rollback.
-BENCH_IMAGE = "navicore-fix9"
+# navicore-fix10 since 2026-10-11 16:30: NaviCore main 47eb28e (the SoftAP waits for its AP start before clearing the
+# DHCP gateway option, found by ncwifi.ap_ssid_change_at_boot) with the hooks, App SHA 4208afb865c1328b,
+# v0.2.0_111618QOCT26, built and flashed on the Mac; navicore-fix9 is kept beside it.
+BENCH_IMAGE = "navicore-fix10"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.

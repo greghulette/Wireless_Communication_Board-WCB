@@ -652,16 +652,18 @@ def _hwrev_after(w1, nid, since):
     return (row or {}).get("HWREV"), fresh
 
 
-@test("ncboot.boardtype2_mismatch", "(should) boardType 2 is refused or clamped to 0-1 on the way in; today it is stored "
-      "and boots the v2 pins while the WDP advert names 'WCB 3.2', which the test shows after one restart on it and "
-      "then puts right (NaviCore restarts twice)", needs=["navicore", "wcb1"], links=[], opt_in="navicore_reboot")
+@test("ncboot.boardtype2_mismatch", "boardType 2 is clamped to 0-1 on the way in (D-NC19, fixed): a SET_CONFIG of 2 "
+      "reads back as 0 or 1 and NaviCore is not restarted; were it ever stored as sent, the test would restart on it "
+      "to show the v2 pins booting under a WDP advert naming 'WCB 3.2', and put it right (NaviCore restarts twice "
+      "only then)", needs=["navicore", "wcb1"], links=[], opt_in="navicore_reboot")
 def boardtype2_mismatch(bench):
-    """NAVICORE.md D-NC19. SET_CONFIG stores boardType unchecked (rc_config.h:1532), and three readers disagree on 2:
-    applyBoardProfile takes only 1 as WCB HW 3.2 (NaviCore.ino:3199-3218), so 2 boots the v2 pins, and #L01 names the
-    applied profile the same way (:3621-3622); the WDP identity takes anything but 0 as 'WCB 3.2' (:4905-4907), and so do
-    the aux port labels (auxPortLabel :274-279). Safe on this board: 2 boots exactly the pins 0 does. It is never 1,
-    whose pins differ: a stored value other than 2 is written back without a restart. After a restart on 2 the snapshot
-    goes back and NaviCore restarts onto it however the body ended (_put_back), which also re-advertises 'NaviCore v2'."""
+    """NAVICORE.md D-NC19, fixed: SET_CONFIG clamps boardType on the way in, so the three readers that disagreed on 2
+    never see it - applyBoardProfile takes only 1 as WCB HW 3.2 (NaviCore.ino:3199-3218), so 2 booted the v2 pins, and
+    #L01 named the applied profile the same way (:3621-3622), while the WDP identity took anything but 0 as 'WCB 3.2'
+    (:4905-4907), as did the aux port labels (auxPortLabel :274-279). The test keeps the whole path: a stored value
+    other than 2 is written back without a restart (the fixed case, today's); a stored 2 would be safe on this board
+    (it boots exactly the pins 0 does, never 1's), so the test would restart on it, read the banner, #L01 and the
+    advert, then put the snapshot back and restart onto it however the body ended (_put_back)."""
     nc, w1 = _nc(bench), WCB(bench.dev("wcb1"))
     _restartable(nc)
     evidence, stored, notes = {}, None, []
@@ -700,7 +702,7 @@ def boardtype2_mismatch(bench):
         raise AssertionError(f"after the restore and a restart W1 still holds HWREV {evidence['hwrev_after_restore']!r} "
                              f"for NaviCore")
     assert stored in (0, 1), (
-        f"(should, D-NC19) boardType 2 is stored as sent (rc_config.h:1532); after a restart on it NaviCore booted "
+        f"(D-NC19 regressed) boardType 2 is stored as sent (rc_config.h:1532); after a restart on it NaviCore booted "
         f"{evidence.get('banner')!r}, #L01 said {evidence.get('l01')!r} and its WDP advert says HWREV "
         f"{evidence.get('hwrev')!r} (NaviCore.ino:4905-4907): clamp it to 0-1 on input")
 

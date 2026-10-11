@@ -55,7 +55,7 @@ from hil.runner import Skip, test
 from hil.wcb import PULL_MAX, WCB, pull_config
 from hil.wlan import (NOT_WINDOWS_SKIP, SPARE_ONLY_SKIP, default_routes, internet_adapter, networks, pc_on_ap,
                       pick_adapter)
-from suites.common import Console, link, marker, usb_wcb
+from suites.common import Console, link, marker, nonce, usb_wcb
 from suites.s02_navicore import _bench_wcb_ids
 from suites.s03_wcb import _factory_reply, _reply_problems
 from suites.s20_ota import _crc, _crun, _session_id
@@ -1691,4 +1691,146 @@ def ws_set_config(bench):
     if '"ok":false' not in refused or "missing data" not in refused:
         problems.append(f"a socket SET_CONFIG with no data answered {refused!r}; expected ok:false 'missing data'")
     bench.note("ncwifi.ws_set_config: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ the OTA driver over the socket
+from suites.s47_navicore_ota import _b64, _begin_4k, _junk  # noqa: E402
+from suites.s47_navicore_ota import _cli as _ota_cli, _idle as _ota_idle, _slot as _ota_slot  # noqa: E402
+from suites.s47_navicore_ota import _status as _ota_status  # noqa: E402
+
+
+@test("ncwifi.ws_ota_small", "OPT-IN (navicore_wifi, and navicore_ota_erase): the ?OTALOCAL driver over the WebSocket: "
+      "a 4 KB BEGIN accepted, four 1 KB DATA chunks of a magic-headed junk image ACKed in step, END refused by the "
+      "verify ('END verify FAILED ... current app intact', [OTA:END,ERR]), every line mirrored to USB; the running "
+      "slot and App SHA256 never change", needs=["navicore"], links=[], opt_in="navicore_wifi")
+def ws_ota_small(bench):
+    """navicore_ota.h:13-16: the direct ?OTALOCAL transport serves USB-CDC and the SoftAP alike, through
+    processInputLine's CLI path (NaviCore.ino:3773); the socket's drain runs one line a pass and the tee mirrors each
+    reply to USB (navicore_wsserver.h:512-558). The config tool's 'Update over WiFi' is this path with the real
+    image; here ncota.local_bad_image_refused's magic-headed junk, so the next slot's head is erased (the
+    navicore_ota_erase opt-in) but the boot pointer never moves. A 1 KB chunk is a 1368-character line, within the
+    socket's line budget (ncwifi.ws_line_framing)."""
+    if not _opted(bench, "navicore_ota_erase"):
+        raise Skip(optin.skip_reason("navicore_ota_erase"))
+    problems, notes = [], []
+    acks, end, st1, st2, usb = [], None, None, None, []
+    with _on_ap(bench, problems) as (nc, cfg, _):
+        ws = _open(bench)
+        try:
+            wnc = NaviCore(ws)
+            _sync(ws)
+            st0 = _ota_idle(wnc)
+            nxt = st0["next"]
+            headed = _junk(magic=True)
+            um = _sync(nc.dev)
+            try:
+                _begin_4k(wnc, problems, nxt)
+                acks = [_ota_cli(wnc, f"?OTALOCAL,DATA,{off},{_b64(headed[off:off + 1024])}")
+                        for off in range(0, 4096, 1024)]
+                st1 = _ota_status(wnc)
+                end = _ota_cli(wnc, "?OTALOCAL,END")
+            finally:
+                ws.send("?OTALOCAL,ABORT")          # silent when idle
+                time.sleep(0.3)
+            _sync(ws)
+            _sync(nc.dev)
+            usb = [x.rstrip() for x in nc.dev.since(um)]
+            st2 = _ota_status(wnc)
+        finally:
+            ws.close()
+    notes.append(f"chunks: {[a[-1] for a in acks]}; END: {end}")
+    for i, a in enumerate(acks):
+        if f"[OTA:ACK,{(i + 1) * 1024}]" not in a:
+            problems.append(f"chunk {i} over the socket was not ACKed at {(i + 1) * 1024}: {a}")
+    if not st1 or st1["session"] != {"id": 1, "written": 4096, "size": 4096}:
+        problems.append(f"STATUS over the socket before END shows session {st1 and st1['session']}, not ACTIVE id=1 "
+                        f"4096 / 4096")
+    if not end or not any(x.startswith("[OTA] END verify FAILED:") and "current app intact" in x for x in end) \
+            or "[OTA:END,ERR]" not in end:
+        problems.append(f"END over the socket printed {end}; expected 'verify FAILED ... (image rejected, current app "
+                        f"intact)' and [OTA:END,ERR]")
+    for want in ("[OTA] BEGIN ok: session 1, 4096 B", "[OTA:ACK,4096]", "[OTA] END verify FAILED:", "[OTA:END,ERR]"):
+        if not any(x.startswith(want) for x in usb):
+            problems.append(f"USB did not mirror a line starting {want!r}")
+    if st2 and (st2["active"] or st2["running"]["addr"] != st0["running"]["addr"] or st2["app_sha"] != st0["app_sha"]):
+        problems.append(f"afterwards NaviCore runs {_ota_slot(st2['running'])} {st2['app_sha']} with session "
+                        f"{st2['session']}; before {_ota_slot(st0['running'])} {st0['app_sha']}")
+    bench.note("ncwifi.ws_ota_small: " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ the access point's name at boot
+SSID_SCAN_WAIT_S = 40.0     # ap_ssid_change_at_boot: scans asked again this long for the new name to show
+
+
+def _ssid_listed(adapter, ssid, wait_s=SSID_SCAN_WAIT_S):
+    """Whether the PC's scan lists `ssid`, asked again for up to `wait_s` -> (listed, how the list was taken, its
+    size). Windows: wlan.networks on `adapter`; the Mac: the Realtek menu (wlan.realtek_scan, names only). The name is
+    compared, never printed."""
+    end = time.monotonic() + wait_s
+    while True:
+        if adapter is not None:
+            nets, fresh = networks(adapter["name"])
+            names, how = [n["ssid"] for n in nets], "fresh" if fresh else "cached"
+        else:
+            names, fresh = wlan.realtek_scan()
+            how = "fresh (Realtek menu)" if fresh else "the Realtek utility's own list (no Scan item)"
+        if ssid in names or time.monotonic() >= end:
+            return ssid in names, how, len(names)
+        time.sleep(5.0)
+
+
+@test("ncwifi.ap_ssid_change_at_boot", "OPT-IN (navicore_wifi, and navicore_reboot): a new wifiSsid saved over USB is "
+      "not the access point's name until a restart: after a REBOOT the banner's SoftAP line carries the new name, with "
+      "the DHCP gateway cleared as ever, and the PC's scan lists it (a name the PC has no password saved for is never "
+      "joined); the saved name written back and a second restart bring the old access point back, which the PC joins "
+      "and PINGs over the socket (NaviCore restarts twice; the names are compared, never shown)",
+      needs=["navicore"], links=[], opt_in="navicore_wifi")
+def ap_ssid_change_at_boot(bench):
+    """NAVICORE.md nc.cfg.wifi_fields and nc.wifi.ap_bringup: rcConfigFromJSON stores wifiSsid as sent, and setup()
+    alone raises the SoftAP under it (NaviCore.ino:4711-4729), so a save changes nothing live (ncwifi.ws_set_config
+    saves over the socket without losing it) and the next boot brings up the new name, which ap_block checks in the
+    banner against the config, hashed, and the PC's scan then lists. The first boot after a changed name is also the
+    one where the DHCP gateway option used to stay set: softAP() returns before the AP start event, and the driver's
+    rewrite of its own NVS copy of the AP config stretched that gap past the readiness check (NaviCore 47eb28e waits
+    for it; found by this test on navicore-fix9, both restarts). The new name is HILAP<nonce>, well inside 32 bytes,
+    and the password stays; joining it would need that password typed into the PC's WiFi UI, so the proof of the new
+    name is the scan. nc_guard writes the old config back over USB; the second restart applies it, and the old access
+    point is joined again (_join_and_ping) to prove the bench as found."""
+    _reboot_too(bench)
+    if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
+        raise Skip("off Windows the scan and the join need the Realtek adapter (bench.json wifi_switch: realtek)")
+    adapter = _spare_adapter(bench) if wlan.ON_WINDOWS else None
+    nc = _nc(bench)
+    _restartable(nc)
+    problems, facts = [], {}
+    new_ssid = f"HILAP{nonce()}"
+    with nc_guard(bench, nc=nc) as g:
+        if ap_of(g.before) is None:
+            raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
+        version = g.nc.ping()
+        g.nc.set_config({"wifiSsid": new_ssid})
+        new_cfg = dict(g.before, wifiSsid=new_ssid)
+        _, lines, _ = _restart(g.nc, "json")
+        banner = banner_lines(lines)
+        if not banner:
+            problems.append("no boot banner arrived after the first REBOOT")
+        else:
+            got, facts = ap_block(banner, new_cfg)
+            problems += [f"after the first restart: {p}" for p in got]
+        listed, how, n = _ssid_listed(adapter, new_ssid)
+        facts.update(scan=how, visible=n, new_name_listed=listed)
+        if not listed:
+            problems.append(f"the PC's scan ({how}, {n} networks) never listed the access point under its new name "
+                            f"within {SSID_SCAN_WAIT_S:.0f} s (not quoted)")
+    _, lines, _ = _restart(nc, "json")              # the guard wrote the old name back: this applies it
+    banner = banner_lines(lines)
+    if not banner:
+        problems.append("no boot banner arrived after the second REBOOT")
+    else:
+        got, _ = ap_block(banner, g.before)
+        problems += [f"after the restore: {p}" for p in got]
+    facts["join_old_s"] = _join_and_ping(bench, problems, g.before, version, "the restored access point")
+    bench.note(f"ncwifi.ap_ssid_change_at_boot: {facts}")
     assert not problems, "; ".join(problems)

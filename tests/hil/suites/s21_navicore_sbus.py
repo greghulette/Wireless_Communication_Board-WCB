@@ -1058,10 +1058,11 @@ def cli_codes(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("navicore.l1_names_board_profile", "(should) #L1 names the configured board profile, not always 'WCB HW 3.2'", needs=["navicore"], links=[])
+@test("navicore.l1_names_board_profile", "#L1 names the configured board profile ('NaviCore v2' on boardType 0), not always 'WCB HW 3.2' (fixed)", needs=["navicore"], links=[])
 def l1_names_board_profile(bench):
-    """#L01 prints 'NaviCore — WCB HW 3.2' whatever rcConfig.boardType is (NaviCore.ino:3599 vs applyBoardProfile
-    3180-3198), so on a NaviCore v2 profile the diagnostic names the wrong hardware."""
+    """#L01 once printed 'NaviCore — WCB HW 3.2' whatever rcConfig.boardType was (NaviCore.ino:3599 vs applyBoardProfile
+    3180-3198); it now names the applied profile (:3621-3622), so on a NaviCore v2 profile the diagnostic names the
+    right hardware. Kept as the regression check."""
     nc = _nc(bench)
     if nc.config().get("boardType") == 1:
         raise Skip("the board profile is WCB HW 3.2, where the line is right")

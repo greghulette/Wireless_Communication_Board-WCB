@@ -1716,3 +1716,88 @@ def reconfig_parked_tap_cleared(bench):
     fired = [x for x, t in (("the old mapping", a), ("the new mapping", b)) if _count(got, t)]
     assert not trigs and not fired, (f"the tap parked across the save fired on release: rc_trig {[t for _, t in trigs]}, "
                                      f"{', '.join(fired) or 'no marker'}")
+
+
+# ------------------------------------------------------------------ the knob's easing against the switch's
+@test("sbus.knob_ease_switch_override", "A knob with its own easing profile keeps it when the switch sets another "
+      "(setEasing on its Maestro resends only the knob's values), unless the knob opts in with easeSwitchOverride: "
+      "then the switch's profile goes out at the save, and setEasing,release hands the knob its own back; each change "
+      "is a speed/accel pair and its two repeats on W1 S1 (remote slot 4: nothing moves)",
+      needs=["sbus", "navicore", "wcb1"], links=["W1S1"])
+def knob_ease_switch_override(bench):
+    """resolveKnobEasing (NaviCore.ino:1133-1139): a passthrough knob's own smoothProfile wins unless easeSwitchOverride
+    is set AND the switch's easing for that Maestro is not EASE_RELEASED; a setEasing action (:1509-1522, the verb a
+    switch tier uses, here a TEST_ACTION) stores g_switchEasing and re-applies at once (reapplyMaestroEasing
+    :1284-1309, cache-gated: speed/accel are written only where the effective easing changed) and schedules the two
+    unconditional repeats 500 ms apart (scheduleEasingRepeat; sbus.knob_easing_resolve). A free knob on the rx stick
+    with its own free profile P1 = (slot, X) speed s1 / accel a1; a second free profile P2 = s2 / a2 for the switch,
+    the values random per run so a cache left by an earlier run cannot hide a write. The Kyber broadcast is best
+    effort: a count on W1 S1 is at most what NaviCore sent. The slot's switch easing is released in the finally."""
+    ctl, nc, cfg, ncfg, sticks, ch, l11, slot, dev, (x,), wire = _knob_rig(bench)
+    s1, s2 = random.randint(100, 300), random.randint(301, 500)
+    a1, a2 = random.randint(5, 30), random.randint(31, 60)
+    problems, notes = [], []
+
+    def easing(since):
+        return [f for f in _frames(l11, since, dev, {x}) if f[0] in (CMD_SPEED, CMD_ACCEL)]
+
+    def set_easing(arg):
+        ack = nc.test_action({"type": "maestro", "target": str(slot), "cmd": f"setEasing,{arg}"})
+        if not ack.get("ok"):
+            problems.append(f"setEasing,{arg}: ACK {ack}")
+    with nc_guard(bench) as g:
+        nc = g.nc
+        knobs, p1 = _free_knobs(g.before), _free_profile(g.before)
+        if not knobs or p1 is None:
+            raise Skip("no free knob or smoothing profile to borrow")
+        taken = dict(g.before, knobs=dict(g.before.get("knobs") or {}, _hil={"smoothProfile": p1}))
+        p2 = _free_profile(taken)
+        if p2 is None:
+            raise Skip("no second free smoothing profile to borrow")
+        lab = knobs[0]
+        profiles = [dict(p) for p in g.before.get("smoothProfiles") or []]
+        profiles[p1] = dict(profiles[p1], entries=[{"mid": slot, "ch": x, "spd": s1, "acc": a1}])
+        profiles[p2] = dict(profiles[p2], entries=[{"mid": slot, "ch": x, "spd": s2, "acc": a2}])
+        own, sw = {(CMD_SPEED, x, s1), (CMD_ACCEL, x, a1)}, {(CMD_SPEED, x, s2), (CMD_ACCEL, x, a2)}
+        steps = []
+        try:
+            m11 = l11.mark()
+            nc.set_config({"smoothProfiles": profiles,
+                           "knobs": {lab: _knob(ch, smoothProfile=p1, outputs=[_out(x, target=slot)])}})
+            time.sleep(1.8)
+            got = set(easing(m11))
+            steps.append(f"save: {sorted(got)}")
+            if not own <= got or got - own:
+                problems.append(f"after the save W1 S1 got {sorted(got)}; expected the knob's own profile {sorted(own)}")
+            m11 = l11.mark()
+            set_easing(f"p{p2}")
+            time.sleep(1.8)
+            got = set(easing(m11))
+            steps.append(f"setEasing,p{p2}: {sorted(got)}")
+            if got - own:
+                problems.append(f"setEasing,p{p2} with the knob's own profile winning sent {sorted(got - own)}; only the "
+                                f"knob's own values may be repeated")
+            m11 = l11.mark()
+            nc.set_config({"knobs": {lab: _knob(ch, smoothProfile=p1, easeSwitchOverride=True,
+                                                  outputs=[_out(x, target=slot)])}})
+            time.sleep(1.8)
+            got = set(easing(m11))
+            steps.append(f"opt-in save: {sorted(got)}")
+            if not sw <= got or got - sw:
+                problems.append(f"after opting in W1 S1 got {sorted(got)}; expected the switch's profile {sorted(sw)}")
+            m11 = l11.mark()
+            set_easing("release")
+            time.sleep(1.8)
+            got = set(easing(m11))
+            steps.append(f"release: {sorted(got)}")
+            if not own <= got or got - own:
+                problems.append(f"after setEasing,release W1 S1 got {sorted(got)}; expected the knob's own profile back "
+                                f"{sorted(own)}")
+        finally:
+            try:
+                set_easing("release")
+            finally:
+                sticks.center()
+                time.sleep(0.5)
+    bench.note(f"slot {slot} ch {x}, knob {lab}: own P{p1} {s1}/{a1}, switch P{p2} {s2}/{a2}; " + "; ".join(steps))
+    assert not problems, "; ".join(problems)

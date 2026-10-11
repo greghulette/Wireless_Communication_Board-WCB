@@ -828,3 +828,86 @@ def maestro_bus_tap(bench):
     bench.note(f"maestro_bus_tap: slot {slot} (device {dev}) at {bauds['MAE']} baud: {'; '.join(answers)}"
                + ("" if hook else "; not a hook image: the DBG_WIRE copy was not compared"))
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ the Maestro bus at a new baud, live
+LIVE_BAUD = 115200    # maestro_bus_live_baud's rate: the clamp's top (rcSanBaud 1200-115200), a hardware rate on the probe
+
+
+@test("ncwire.maestro_bus_live_baud", "OPT-IN (navicore_wire): a saved Maestro baud takes effect live: the save prints "
+      "'[Serial2] Local Maestro re-open @ <baud> baud', a ?MAE query's frame then reaches the bus tap byte-exact at the "
+      "new baud (the real Maestro, still at its own rate, answers nothing), and the guard's restore re-opens at the old "
+      "baud, where the frame reads again and the Maestro answers (one query at the wrong rate: Maestro 1 may read it as "
+      "a stray command)", needs=["navicore"], links=["N20MAE"], opt_in="navicore_wire")
+def maestro_bus_live_baud(bench):
+    """applyConfigSideEffects re-opens Serial2 when auxBaud.maestro changes (NaviCore.ino:3245-3270; the line s40's
+    REOPEN matches, printed by applySerialBauds :3429-3465 as '[Serial2] Local Maestro re-open @ <baud> baud  TX=GPIO6',
+    :3657). ncwire.maestro_bus_tap reads the bus at GET_CONFIG's baud; here auxBaud.maestro is saved as LIVE_BAUD inside
+    nc_guard, the tap re-bound at it, and one ?MAE,GET frame must arrive byte-exact there (query_frame), while the
+    Maestro keeps its own rate and answers nothing (parse_mae's timeout). The guard's restore is a second save: the
+    re-open line at the old baud, the tap back there, the frame readable and the Maestro answering again. The one
+    query at the new rate reaches Maestro 1 as mis-framed bytes it could read as a compact-protocol command: listed
+    in hil/servos.py for that."""
+    nc = _nc(bench)
+    cfg = nc.config()
+    slots = NaviCore.local_slots(cfg)
+    if not slots:
+        raise Skip("NaviCore has no local (type 1) Maestro slot: nothing writes its Maestro bus")
+    slot, dev = slots[0][0], int(slots[0][1])
+    bauds = nc_bauds(cfg)
+    old = bauds["MAE"]
+    new = LIVE_BAUD if old != LIVE_BAUD else 57600
+    want = query_frame("pos", dev, 0)
+    reopen = "[Serial2] Local Maestro re-open @ {} baud"
+    problems, notes = [], []
+    time.sleep(SETTLE_S)
+    l = _wire(bench, "MAE", bauds)
+    try:
+        with nc_guard(bench) as g:
+            nc = g.nc
+            nm = nc.dev.mark()
+            nc.set_config({"auxBaud": dict(cfg.get("auxBaud") or {}, maestro=new)})
+            lines = _trace(nc, nm, 1.8)
+            if not any(x.startswith(reopen.format(new)) for x in lines):
+                problems.append(f"after the save no '{reopen.format(new)}' line "
+                                f"({[x for x in lines if x.startswith('[Serial2]')]})")
+            m = l.mark()
+            nc.cli(f"?MAE,GET,{slot},0")
+            time.sleep(0.4)
+            at_old = l.received(m)
+            _release(l)
+            l = bench.links.nc_require("MAE").listen(new)
+            m, nm2 = l.mark(), nc.dev.mark()
+            nc.cli(f"?MAE,GET,{slot},0")
+            _await_bytes(l, m, [want], 1.0)
+            time.sleep(0.2)
+            got = l.received(m)
+            val = parse_mae("\n".join(_trace(nc, nm2, 0.05)), slot, "pos", 0)
+            notes.append(f"at {new} baud: the tap got {got.hex(' ') or 'nothing'}, the Maestro answered {val}; at the "
+                         f"old rate it read {at_old.hex(' ') or 'nothing'}")
+            if got != want:
+                problems.append(f"at {new} baud the tap got {got.hex(' ') or 'nothing'}, expected {want.hex(' ')}")
+            if at_old == want:
+                problems.append(f"the tap still at {old} baud read the frame byte-exact after the change to {new}: "
+                                f"the bus did not re-open")
+            _release(l)
+            l = bench.links.nc_require("MAE").listen(old)
+            nm3 = nc.dev.mark()
+        lines = _trace(nc, nm3, 1.8)
+        if not any(x.startswith(reopen.format(old)) for x in lines):
+            problems.append(f"after the restore no '{reopen.format(old)}' line")
+        m, nm4 = l.mark(), nc.dev.mark()
+        nc.cli(f"?MAE,GET,{slot},0")
+        _await_bytes(l, m, [want], 1.0)
+        time.sleep(0.2)
+        got = l.received(m)
+        val = parse_mae("\n".join(_trace(nc, nm4, 0.05)), slot, "pos", 0)
+        notes.append(f"back at {old} baud: the tap got {got.hex(' ') or 'nothing'}, the Maestro answered {val}")
+        if got != want:
+            problems.append(f"back at {old} baud the tap got {got.hex(' ') or 'nothing'}, expected {want.hex(' ')}")
+        if not isinstance(val, int):
+            problems.append(f"after the restore the Maestro did not answer ({val})")
+    finally:
+        _release(l)
+    bench.note(f"maestro_bus_live_baud: slot {slot} (device {dev}): " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
