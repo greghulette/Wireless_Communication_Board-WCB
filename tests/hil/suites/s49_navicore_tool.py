@@ -147,6 +147,9 @@ _L1 = (
     ("timeline_preview_export", "Live frees each Maestro channel and sends the pose at the cursor, Preview streams ?MAE to the end and lands on the last pose, Live off stops the stream; the script export downloads a Maestro script with the keyframes reduced to frames"),
     ("wcb_network_tools", "The WCB Network tab's tools: Reboot and Send gated until connected, the MAC octets as hex, password, ID and channel edit the config (REBOOT PENDING stays after a Save), Reboot clean asks plainly and sends REBOOT, dirty warns about NVS, Send validates and sends WCB_SEND, a profile deleted behind a confirm and one edited in place, the new-peer alert and actions saved as peerEvent"),
     ("mesh_stats_modal", "Mesh stats: the paged MESH_STATS reply merges into a line under each chip and the glance, a duplicate page is ignored and a gap waits for a fresh cycle, the stats checkbox hides the lines and stops the sub-poll, the modal's table, Refresh, auto-poll every 5 s until it closes, Reset behind a confirm then a re-read, unconnected it says to connect"),
+    ("share_param_autoconnect", "Opened with ?share=1 while another tab holds the WCB, the tool joins that port as a follower by itself: no picker, no click, the handshake through the owner, the config loaded"),
+    ("share_param_no_leader", "?share=1 with no tab holding a port and no port granted ends with the notice to click Connect and pick the tethered WCB; nothing is sent"),
+    ("cosmetic_toggles", "The theme button flips and is remembered, the SBUS / PWM unit prints the live values and labels either way and is remembered, the sidebar collapses, expands and resizes by its handle within 180-520 px, the terminal resizes by its handle, the Config window reopens on its last tab"),
 )
 for _key, _title in _L1:
     def _l1(bench, _id=f"nctool.{_key}"):
