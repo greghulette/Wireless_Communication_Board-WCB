@@ -238,6 +238,18 @@ def _witnesses(bench):
     return [bench.links.get(2, "S1"), bench.links.get(3, "S2")]
 
 
+def _with_resends(got, moves):
+    """`got` is `moves` in order, each followed by its settle resend or, when that broadcast was lost, not."""
+    i = 0
+    for m in moves:
+        if got[i:i + 1] != [m]:
+            return False
+        i += 1
+        if got[i:i + 1] == [m]:
+            i += 1
+    return i == len(got)
+
+
 def _missed_only(got, want):
     """`got` is `want` with one or more frames left out and nothing else changed."""
     it = iter(want)
@@ -263,7 +275,7 @@ class Watch11:
         self.witnesses = [w for w in witnesses if w is not None]
         for w in self.witnesses:
             w.listen()
-        self.problems, self.lost = [], []
+        self.problems, self.lost, self.resend_lost = [], [], []
 
     def lost_problem(self):
         """[] or the one problem a test with more than one W1-only lost broadcast has."""
@@ -272,8 +284,12 @@ class Watch11:
 
     def step(self, action, want, where, quiet=0.6, timeout=2.5):
         # NaviCore's settle resend (navicore-fix9, KNOB_SETTLE_RESEND_MS): every setTarget a knob sends to this remote
-        # slot goes out once more when the knob has been still 250 ms, in the same order; speed and accel do not.
-        want = list(want) + [f for f in want if f[0] == CMD_TARGET]
+        # slot goes out once more when the knob has been still 250 ms, in the same order; speed and accel do not. The
+        # resend is itself one unacknowledged broadcast and can be lost (every receiver missed one NaviCore logged as
+        # sent, run 20261010-174513), so a step whose originals all arrived without it is noted in `resend_lost`, not
+        # failed; sbus.knob_settle_resend is the test that requires it.
+        first = list(want)
+        want = first + [f for f in first if f[0] == CMD_TARGET]
         m11, nm = self.l11.mark(), self.nc.dev.mark()
         mws = [w.mark() for w in self.witnesses]
         action()
@@ -281,6 +297,9 @@ class Watch11:
             _wait_frames(self.l11, m11, self.dev, self.chans, len(want), timeout)
         time.sleep(quiet)
         got = _frames(self.l11, m11, self.dev, self.chans)
+        if len(want) > len(first) and got == first:
+            self.resend_lost.append(where)
+            return got
         if got != list(want) and _missed_only(got, want):
             heard = [w.key for w, m in zip(self.witnesses, mws) if _frames(w, m, self.dev, self.chans) == list(want)]
             if heard:
@@ -975,6 +994,8 @@ def knob_passthrough_remote(bench):
             time.sleep(0.5)
     if w.lost:
         bench.note("an unacknowledged broadcast lost at W1 only: " + "; ".join(w.lost))
+    if w.resend_lost:
+        bench.note("settle resend not received (the originals were): " + "; ".join(w.resend_lost))
     w.problems += w.lost_problem()
     assert not w.problems, "; ".join(w.problems)
 
@@ -1033,6 +1054,8 @@ def knob_mode_aware(bench):
                 setmode(m0)
     if w.lost:
         bench.note("an unacknowledged broadcast lost at W1 only: " + "; ".join(w.lost))
+    if w.resend_lost:
+        bench.note("settle resend not received (the originals were): " + "; ".join(w.resend_lost))
     w.problems += w.lost_problem()
     assert not w.problems, "; ".join(w.problems)
 
@@ -1073,7 +1096,10 @@ def knob_auto_release(bench):
                 return
             mv = (tgt, x, knob_pos(v, 4000, 8000))
             got = _wait_frames(l11, m11, dev, {x}, 3, (rel + 1500) / 1000)
-            if got != [mv, mv, (tgt, x, 0)]:      # the move, NaviCore's settle resend 250 ms on, then the release
+            # The move, NaviCore's settle resend 250 ms on (one more unacknowledged broadcast: noted if lost), the release.
+            if got == [mv, (tgt, x, 0)]:
+                notes.append(f"{what}: settle resend not received")
+            elif got != [mv, mv, (tgt, x, 0)]:
                 problems.append(f"{what}: W1 S1 got {got}, expected the move, its settle resend and then Set Target 0")
                 return
             t_move = _probe_ms(l11, m11, _pololu(dev, tgt, x, knob_pos(v, 4000, 8000)))
@@ -1113,13 +1139,20 @@ def knob_settle_resend(bench):
     def frame(v):
         return (CMD_TARGET, x, knob_pos(v, 4000, 8000))
 
-    def check(what, moves, want, gap_of=None, gap_s=0.08):
+    def check(what, moves, want, gap_of=None, gap_s=0.08, again=True):
         m = l11.mark()
         for v in moves:
             sticks.set("rx", v)
             time.sleep(gap_s)
         time.sleep(1.2)
         got = _frames(l11, m, dev, {x})
+        if again and gap_of is not None and len(got) == len(want) - 1 and got == want[:-1]:
+            # The resend is one unacknowledged broadcast and was lost: the case once more, from a different position, so
+            # its moves dispatch again (noted).
+            notes.append(f"{what}: resend not received, once more")
+            sticks.set("rx", SBUS_CENTER)
+            time.sleep(1.0)
+            return check(what, moves, want, gap_of, gap_s, again=False)
         gap = None
         if gap_of is not None:
             data = _pololu(dev, CMD_TARGET, x, knob_pos(gap_of, 4000, 8000))
@@ -1198,8 +1231,8 @@ def knob_easing_resolve(bench):
                 problems.append(f"stick moves re-sent easing: {[f for f in fr if f[0] != CMD_TARGET]}")
             # Each move 0.4 s apart, so each is followed by NaviCore's settle resend (navicore-fix9) 250 ms on.
             targets = [f for f in fr if f[0] == CMD_TARGET]
-            want_t = [(CMD_TARGET, x, knob_pos(v, 4000, 8000)) for v in (1500, 1300, 1100) for _ in (0, 1)]
-            if targets != want_t:
+            moves = [(CMD_TARGET, x, knob_pos(v, 4000, 8000)) for v in (1500, 1300, 1100)]
+            if not _with_resends(targets, moves):
                 problems.append(f"3 stick moves gave targets {targets}, expected each one and its settle resend")
             m11 = l11.mark()
             nc.set_config({"smoothProfiles": with_speed(s2)})

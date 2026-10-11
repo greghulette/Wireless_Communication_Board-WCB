@@ -4255,8 +4255,9 @@ def t_watch11_witness(tmp):
     """s42 Watch11: the remote Maestro stream is an unacknowledged broadcast, so a step where W1 S1 only MISSED frames
     another forwarding board's tap got exactly is noted in `lost`, not failed (sbus.knob_passthrough_remote, runs
     20261009-182550 and 20261010-000816). Each step expects NaviCore's settle resend too (navicore-fix9): W1 holding
-    only the resend is a lost original, noted; a step with no resend anywhere fails. W1 missing a frame no witness
-    got, W1 getting a wrong frame, and a second lost step in one test are still problems."""
+    only the resend is a lost original, noted; a step whose originals arrived without the resend is noted in
+    resend_lost (the resend is one more unacknowledged broadcast; run 20261010-174513 lost one on every receiver). W1
+    missing a frame no witness got, W1 getting a wrong frame, and a second lost step in one test are still problems."""
     from suites import s42_navicore_sbus_engine as K
 
     class Wire:
@@ -4293,9 +4294,9 @@ def t_watch11_witness(tmp):
     AA = A + A                                      # a setTarget and NaviCore's settle resend (navicore-fix9)
     w.step(feed((l11, AA), (w2, AA), (w3, AA)), want_a, "all got it", quiet=0, timeout=0.05)
     assert not w.problems and not w.lost, (w.problems, w.lost)
-    w.step(feed((l11, A), (w2, AA)), want_a, "W1 got only the resend", quiet=0, timeout=0.05)
-    assert not w.problems and len(w.lost) == 1 and "W2S1" in w.lost[0], (w.problems, w.lost)
-    w.lost.clear()
+    w.step(feed((l11, A), (w2, AA)), want_a, "W1 got one copy", quiet=0, timeout=0.05)   # either copy: W1 ends right
+    assert not w.problems and not w.lost and w.resend_lost == ["W1 got one copy"], (w.problems, w.lost, w.resend_lost)
+    w.resend_lost.clear()
     w.step(feed((w3, AA)), want_a, "only W3", quiet=0, timeout=0.05)
     assert not w.problems and len(w.lost) == 1 and "W3S2" in w.lost[0], w.lost
     w.step(feed(), want_a, "nobody", quiet=0, timeout=0.05)
@@ -4303,7 +4304,7 @@ def t_watch11_witness(tmp):
     w.step(feed((l11, B), (w3, AA)), want_a, "wrong frame", quiet=0, timeout=0.05)
     assert len(w.problems) == 2 and "wrong frame" in w.problems[1], w.problems
     w.step(feed((l11, A), (w3, A)), want_a, "no resend anywhere", quiet=0, timeout=0.05)
-    assert len(w.problems) == 3 and "no resend anywhere" in w.problems[2], w.problems
+    assert len(w.problems) == 2 and w.resend_lost == ["no resend anywhere"], (w.problems, w.resend_lost)
     assert w.lost_problem() == []
     w.step(feed((w2, AA)), want_a, "only W2", quiet=0, timeout=0.05)
     assert len(w.lost) == 2 and w.lost_problem() and "2 steps" in w.lost_problem()[0], w.lost_problem()
