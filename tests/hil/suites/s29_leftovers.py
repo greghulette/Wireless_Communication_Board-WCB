@@ -146,7 +146,11 @@ def help_corrected_pages(bench):
     board's own address and its peers' are set at boot (setup(), esp_wifi_set_mac)."""
     w = usb_wcb(bench)
     checks = (("?DEBUG?", ["  MAESTRO,ON        Enable Maestro and Kyber frame debug",
-                           "  ?DMON / ?DMOFF         - Maestro/Kyber debug (also ?DKON / ?DKOFF)"]),
+                           "  ?DMON / ?DMOFF         - Maestro/Kyber debug (also ?DKON / ?DKOFF)",
+                           # the verbs the parser takes and the page left out (coverage re-scan 2026-10-12)
+                           "  HCR,ON            Enable HCR debug: the status polls sent and every",
+                           "  MGMT,ON           Enable mesh management debug: config pulls,",
+                           "  RAW,ON            Enable raw serial forwarding debug"]),
               ("?BAUD?", ["  - Configure a Maestro with ?MAESTRO,M<id>:W<wcb>S<port>:<baud> (see ?MAESTRO)"]),
               ("?LABEL?", ["  ?SLCSx        - Clear label (e.g. ?SLCS1)"]),
               ("?ETM?", ["  - CHKSM adds 12 bytes overhead, reducing max command to 187 chars"]),

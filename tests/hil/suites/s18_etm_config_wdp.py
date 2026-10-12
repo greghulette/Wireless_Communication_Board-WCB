@@ -275,6 +275,68 @@ def led_query_invalid(bench):
     assert _has(w.run("?LED,PIN,-1"), "Invalid LED pin -1. Valid GPIO range: 0-48")
 
 
+_LED_PIN_LINE = re.compile(r"^LED pin: GPIO(\d+)$")
+_LED_REFUSED_LINE = re.compile(r"^Not usable for the LED on this board: GPIO (.*)$")
+
+
+def _ranges(text):
+    """'1, 3, 6-11' -> {1, 3, 6, 7, 8, 9, 10, 11}."""
+    out = set()
+    for part in filter(None, (p.strip() for p in text.split(","))):
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+@test("misc.led_pin_refusals", "?LED,PIN refuses what would lock a board out, on each WCB's own chip: text and an empty pin (they read as GPIO0), the console UART's pins, a pin with no output, and on the ESP32-S3 its flash and USB pins; ?LED lists every pin the board refuses, and nothing refused is saved or applied", needs=["wcb1"], links=[])
+def led_pin_refusals(bench):
+    """Coverage re-scan 2026-10-12, led.non_numeric_pin_quirk / led.pin. ?LED,PIN saves the pin and every boot drives
+    it (loadStatusLEDPin, initStatusLEDWithRetry: pinMode OUTPUT, then the NeoPixel), and the handler checked only
+    0-48: 'abc' became GPIO0, and a flash pin would crash the board at every boot until a reflash with an NVS erase.
+    ledPinRefusal (WCB_Storage.cpp) refuses by chip: no output on the pin (GPIO_IS_VALID_OUTPUT_GPIO), UART0's TX/RX
+    (the USB console), the pins the IDF reserved for its flash and PSRAM, and on the S3 GPIO19/20 (USB) and 26-32 (SPI
+    flash). ?LED prints the refused set, and this test only ever sends a pin that set holds - the handler refuses with
+    the same function - so no pin that could be applied leaves the harness. Every WCB on USB is checked."""
+    problems, notes = [], []
+    for name in ("wcb1", "wcb2", "wcb3"):
+        if name != "wcb1" and not bench.has(name):
+            continue
+        w = WCB(bench.dev(name))
+        q = [x.rstrip() for x in w.run("?LED")]
+        pin = next((int(m.group(1)) for m in map(_LED_PIN_LINE.match, q) if m), None)
+        listed = next((m.group(1) for m in map(_LED_REFUSED_LINE.match, q) if m), None)
+        if pin is None:
+            problems.append(f"{name}: ?LED printed {q}")
+            continue
+        if listed is None:
+            raise Skip(f"{name}'s firmware predates the LED pin check (no 'Not usable' line in ?LED)")
+        refused = _ranges(listed)
+        s3 = 43 in refused and 44 in refused and 1 not in refused
+        must = ({19, 20, 43, 44, 22, 23, 24, 25} | set(range(26, 33))) if s3 else \
+               ({1, 3, 24, 28, 29, 30, 31} | set(range(34, 49)))
+        if must - refused:
+            problems.append(f"{name}: ?LED does not list {sorted(must - refused)} as refused ({listed})")
+        if pin in refused:
+            problems.append(f"{name}: its own LED pin GPIO{pin} is in the refused list")
+        notes.append(f"{name} ({'S3' if s3 else 'ESP32'}) LED GPIO{pin}, refuses {listed}")
+        sends = [("abc", "Invalid LED pin 'abc'. Use: ?LED,PIN,<gpio_number>"),
+                 ("", "Invalid LED pin ''. Use: ?LED,PIN,<gpio_number>"),
+                 ("-1", "Invalid LED pin -1. Valid GPIO range: 0-48")]
+        for p in sorted({44 if s3 else 3, 30 if s3 else 34, 22 if s3 else 24} & refused):
+            sends.append((str(p), f"GPIO{p} cannot carry the LED on this board:"))
+        for arg, want in sends:
+            out = [x.rstrip() for x in w.run(f"?LED,PIN,{arg}")]
+            if not any(x.startswith(want) for x in out):
+                problems.append(f"{name}: ?LED,PIN,{arg} printed {out}, expected {want!r}")
+            if any("saved to NVS" in x or "LED pin changed" in x for x in out):
+                problems.append(f"{name}: ?LED,PIN,{arg} was saved or applied")
+        after = next((int(m.group(1)) for m in map(_LED_PIN_LINE.match, (x.rstrip() for x in w.run("?LED"))) if m), None)
+        if after != pin:
+            problems.append(f"{name}: the LED pin is GPIO{after} after the refusals, was GPIO{pin}")
+    bench.note("; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
 # ============================================================ ETM delivery (W1 deafened by a live ?MAC,3 change)
 def _timed(dev, since):
     """[(host monotonic time, line)] after the mark."""

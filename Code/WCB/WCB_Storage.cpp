@@ -4,6 +4,9 @@
 #include "WCB_Storage.h"
 #include "WCB_SeqStore.h"  // stored sequences: a file of their own, not NVS
 #include <sdkconfig.h>   // CONFIG_IDF_TARGET_ESP32S3 (hwVersionFitsChip)
+#include "driver/gpio.h"                    // GPIO_IS_VALID_OUTPUT_GPIO (ledPinRefusal)
+#include "soc/uart_pins.h"                  // U0TXD_GPIO_NUM / U0RXD_GPIO_NUM: the USB console's UART
+#include "esp_private/esp_gpio_reserve.h"   // esp_gpio_is_reserved: the flash and PSRAM pins the IDF claimed at boot
 #include <Preferences.h>
 #include <nvs.h>             // ?NVS usage and the whole-store erase
 #include "WCB_PWM.h"
@@ -147,6 +150,40 @@ if (wcb_hw_version != 0 && !hwVersionFitsChip(wcb_hw_version)) {
 updatePinMap();
 }
 
+// Why GPIO `pin` cannot carry the status LED on this chip, or nullptr when it can. ?LED,PIN saves the pin and every
+// boot drives it (pinMode OUTPUT, then the NeoPixel's RMT), so a pin wired to the SPI flash crashes the board at each
+// boot until a USB reflash with an NVS erase, and the console UART's pins cut the USB console off for good. The range
+// check alone let any of them through (coverage re-scan 2026-10-12, led.non_numeric_pin_quirk). The flash pins differ
+// by module - W1's HW 2.4 is an ESP32-PICO with its flash off GPIO7/8 - so they come from the IDF, which reserves the
+// pins its flash and PSRAM use before setup() runs; the S3's fixed SPI pins 26-32 are refused as well in case it did
+// not.
+const char *ledPinRefusal(int pin) {
+  if (pin < 0 || pin > 48) return "outside 0-48";
+  if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) return "this chip has no output on that GPIO";
+  if (pin == U0TXD_GPIO_NUM || pin == U0RXD_GPIO_NUM) return "it is the USB console's UART";
+#if CONFIG_IDF_TARGET_ESP32S3
+  if (pin == 19 || pin == 20) return "it is the ESP32-S3's USB";
+  if (pin >= 26 && pin <= 32) return "it is wired to the flash";
+#endif
+  if (esp_gpio_is_reserved(BIT64(pin))) return "it is wired to the flash or PSRAM";
+  return nullptr;
+}
+
+// "1, 3, 6-11, 20, 24, 28-31, 34-39, 40-48" style: every GPIO in 0-48 that ledPinRefusal refuses.
+String ledPinRefusedList() {
+  String out;
+  for (int p = 0; p <= 48; ) {
+    if (!ledPinRefusal(p)) { p++; continue; }
+    int q = p;
+    while (q + 1 <= 48 && ledPinRefusal(q + 1)) q++;
+    if (out.length()) out += ", ";
+    out += String(p);
+    if (q > p) out += "-" + String(q);
+    p = q + 1;
+  }
+  return out;
+}
+
 void saveStatusLEDPin(int pin) {
     preferences.begin("led_config", false);
     preferences.putInt("led_pin", pin);
@@ -159,6 +196,12 @@ void loadStatusLEDPin() {
     int savedPin = preferences.getInt("led_pin", -1);
     preferences.end();
     if (savedPin >= 0) {
+        // Saved by firmware that checked the range only: a pin this chip cannot drive is left alone, as a wrong ?HW is.
+        if (const char *why = ledPinRefusal(savedPin)) {
+            Serial.printf("[LED] Saved LED pin GPIO%d cannot carry the LED here (%s) - ignored. "
+                          "Set another with ?LED,PIN,<gpio>.\n", savedPin, why);
+            return;
+        }
         STATUS_LED_PIN = savedPin;
         Serial.printf("LED pin override from NVS: GPIO%d\n", savedPin);
     }
@@ -691,8 +734,10 @@ void recallCommandSlot(const String &key, int sourceID) {
         return;
     }
 
-    // A recalled body may itself be a ?SEQ,SAVE / ?CS / ?MGMT chain whose value holds ';t'.
-    const bool viaTimer = isTimerCommand(stripped) && !chainCarriesValueVerb(stripped);
+    // A recalled body may itself be a ?SEQ,SAVE / ?CS / ?MGMT chain whose value holds ';t'. A body runs grouped only
+    // when one of its tokens IS a timer token: a ';t' inside a payload (;S1set;temp) used to send it to the timer
+    // engine, which replaced a timer chain already running (coverage re-scan 2026-10-12).
+    const bool viaTimer = chainHasTimerToken(stripped) && !chainCarriesValueVerb(stripped);
     const bool onLoop   = seqOnLoopTask();
 
     // A NESTED recall (a ;C inside a running body) must not partly fill the command queue. Reusing a sub-sequence

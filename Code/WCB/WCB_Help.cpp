@@ -33,6 +33,14 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ETM,ON            Enable ETM packet/ACK/retry debug"));
         Serial.println(F("                      Shows sequence numbers, ACKs, retries"));
         Serial.println(F("  ETM,OFF           Disable ETM debug"));
+        Serial.println(F("  HCR,ON            Enable HCR debug: the status polls sent and every"));
+        Serial.println(F("                      frame the HCR answers ([HCR-DBG] / [HCR-RX])"));
+        Serial.println(F("  HCR,OFF           Disable HCR debug"));
+        Serial.println(F("  MGMT,ON           Enable mesh management debug: config pulls,"));
+        Serial.println(F("                      pushes and relays, on the relay and the target"));
+        Serial.println(F("  MGMT,OFF          Disable MGMT debug"));
+        Serial.println(F("  RAW,ON            Enable raw serial forwarding debug"));
+        Serial.println(F("  RAW,OFF           Disable raw serial debug"));
         Serial.println(F("\nTest knobs (mesh config pull, see ?MGMT?):"));
         Serial.println(F("  PULLFAULT,OOM     The next config pull this board accepts fails its"));
         Serial.println(F("                      reply buffer allocation and answers CFGERR"));

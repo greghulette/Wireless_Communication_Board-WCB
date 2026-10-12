@@ -124,6 +124,8 @@ extern SerialMonitorMapping serialMonitorMappings[MAX_SERIAL_MONITOR_MAPPINGS];
 void saveHWversion(int wcb_hw_version_f);
 void loadHWversion();
 void printHWversion();
+const char *ledPinRefusal(int pin);   // why this chip cannot drive the LED on `pin`, or nullptr
+String ledPinRefusedList();           // the GPIOs 0-48 ledPinRefusal refuses, as ranges
 void saveStatusLEDPin(int pin);
 void loadStatusLEDPin();
 void saveMACPreferences();
@@ -150,6 +152,8 @@ bool isTimerCommand(const String &input);
 // Defined in WCB.ino: true when a chain carries a verb whose value may contain the delimiter
 // (?SEQ,SAVE / ?CS / ?MGMT,), which must keep it away from the timer splitter.
 bool chainCarriesValueVerb(const String &data);
+// Defined in WCB.ino: true when a delimited token of the chain is a timer token (;T<digit> / ;t<digit>).
+bool chainHasTimerToken(const String &data);
 
 // A stored-sequence key is at most this long: the ESP32 NVS key limit. NVS also compares only this many characters
 // of a lookup, so every path that reads, recalls or erases by a user-given key must refuse a longer one — otherwise

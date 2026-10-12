@@ -138,6 +138,51 @@ def timer_replaced_mid_run(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("serial.timer_payload_semicolon_t", "A command whose text merely holds ';t' is not a timer chain: ;S0x;t<m> typed, or recalled from a stored sequence, while a timer chain waits prints its text and leaves the chain running - its second write still comes, and nothing says 'replaced mid-run'", needs=NEEDS)
+def timer_payload_semicolon_t(bench):
+    """Coverage re-scan 2026-10-12, timer.loose_semicolon_t_detect. isTimerChain (WCB.ino) and the sequence recall
+    (WCB_Storage.cpp, viaTimer) used isTimerCommand, which matched ';t' or ';T' ANYWHERE in the line, so a ;S whose
+    payload held one went to parseCommandGroups and replaced the running timer chain (serial.timer_replaced_mid_run),
+    whose remaining groups never ran. Now a chain is a timer chain only when one of its delimited tokens is a timer
+    token (;T or ;t then a digit, chainHasTimerToken). Typed: ;S1<a>^;T2000^;S1<b>, then ;S0x;t<c> 400 ms after a.
+    Recalled: the same with ;C<key>, whose body is ;S0y;t<d>. Both payloads print on W1's console; b arrives each time,
+    about 2 s after a."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    problems = []
+    key = "HILTP"
+    d = marker("d")
+    with config_guard(bench, 1):
+        try:
+            out = w.run(f"?SEQ,SAVE,{key},;S0y;t{d}")
+            assert any(f"Stored: Key='{key}'" in x for x in out), f"setup: the sequence was not stored: {out[-2:]}"
+            for arm, second, text in (("typed", lambda c: f";S0x;t{c}", "x;t"), ("recalled", lambda c: f";C{key}", "y;t")):
+                a, b, c = marker("a"), marker("b"), marker("c")
+                want = f"{text}{c}" if arm == "typed" else f"y;t{d}"
+                m, wm = probe.dev.mark(), w.dev.mark()
+                w.send(f";S1{a}^;T2000^;S1{b}")
+                probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+                time.sleep(0.4)
+                w.send(second(c))
+                try:
+                    probe.expect_bytes(ch, b.encode(), timeout=4, since=m)
+                except Exception:
+                    problems.append(f"{arm}: the timer chain's second write never came after {second(c)!r}")
+                else:
+                    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
+                    if not 1.8 <= gap <= 2.6:
+                        problems.append(f"{arm}: the second write came {gap:.2f} s after the first, not ~2 s")
+                lines = [x.rstrip() for x in w.dev.since(wm)]
+                if want not in lines:
+                    problems.append(f"{arm}: W1 did not print {want!r}")
+                said = [x for x in lines if "replaced mid-run" in x]
+                if said:
+                    problems.append(f"{arm}: {said[0]!r}")
+        finally:
+            w.run(f"?SEQ,CLEAR,{key}")
+    assert not problems, "; ".join(problems)
+
+
 @test("serial.timer_inline_payload", ";T<ms>,<command> starts a group whose first command is the payload: ;S1a^;T600,;S1b^;S1c puts b about 600 ms after a, and c right after b", needs=NEEDS)
 def timer_inline_payload(bench):
     """WCB-WP29 row 4 (timer.inline_payload_timing). parseCommandGroups (command_timer.cpp) splits ;T<ms>,<command>

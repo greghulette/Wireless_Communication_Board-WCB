@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_100000ROCT2026                                  *****////
+///*****                                          Version 6.2.1_121909ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_100000ROCT2026";
+String SoftwareVersion = "6.2.1_121909ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2733,11 +2733,11 @@ bool chainCarriesValueVerb(const String &data) {
   return false;
 }
 
-// For a chain that starts with the function identifier: true when some delimited token is a timer token
-// (<cmdChar>T or t, then a digit: ;T800, ;t300,<cmd>) and no token is a checksum (<funcChar>CHK / ?CHK - a verified
-// chain goes through the checksum gate, which the timer path skips). Walked in place: a config restore is a ?-first
-// chain of a few KB and this runs for every line.
-static bool funcFirstChainIsTimed(const String &data) {
+// True when some delimited token is a timer token (<cmdChar>T or t, then a digit: ;T800, ;t300,<cmd>). With
+// checksumBars, a checksum token (<funcChar>CHK / ?CHK) makes it false: a verified chain goes through the checksum
+// gate, which the timer path skips. Walked in place: a config restore is a ?-first chain of a few KB and this runs for
+// every line.
+static bool chainTimerTokenScan(const String &data, bool checksumBars) {
   bool timed = false;
   const int n = data.length();
   for (int i = 0; i <= n; ) {
@@ -2748,7 +2748,7 @@ static bool funcFirstChainIsTimed(const String &data) {
     if (end - k >= 3 && data[k] == CommandCharacter && (data[k + 1] == 'T' || data[k + 1] == 't') &&
         isdigit((unsigned char)data[k + 2]))
       timed = true;
-    if (end - k >= 4 && (data[k] == LocalFunctionIdentifier || data[k] == '?') &&
+    if (checksumBars && end - k >= 4 && (data[k] == LocalFunctionIdentifier || data[k] == '?') &&
         toupper((unsigned char)data[k + 1]) == 'C' && toupper((unsigned char)data[k + 2]) == 'H' &&
         toupper((unsigned char)data[k + 3]) == 'K')
       return false;
@@ -2757,16 +2757,26 @@ static bool funcFirstChainIsTimed(const String &data) {
   return timed;
 }
 
+// A chain starting with the function identifier: a timer token and no checksum token.
+static bool funcFirstChainIsTimed(const String &data) { return chainTimerTokenScan(data, true); }
+
+// Any other chain, and a recalled sequence body: a delimited token that IS a timer token. The test this replaced
+// (isTimerCommand) matched ';t' or ';T' anywhere in the line, so a plain ;S1 whose payload held ';t' (';S1set;temp')
+// went to the timer engine, and that replaced a timer chain already running, dropping its remaining groups (coverage
+// re-scan 2026-10-12, timer.loose_semicolon_t_detect).
+bool chainHasTimerToken(const String &data) { return chainTimerTokenScan(data, false); }
+
 // Does this chain belong to the timer engine (parseCommandGroups) rather than the plain splitter, which has no ;T - a
 // ;T there printed 'Invalid Serial Command' and the rest of the chain ran at once? Every path that takes a chain asks
 // this one question: the console and WebSocket reader, both ESP-NOW receive paths and the FRAG reassembly. A chain
-// carrying a value verb (?SEQ,SAVE / ?CS / ?MGMT) never does - a ;T in a value is stored, not run. A ;-first chain
-// keeps the loose test it always had. A chain starting with the function identifier needs a real timer token and no
-// checksum; it used to be refused outright, so ?VERSION^;S1a^;T800^;S1b ran both writes together (WCB coverage re-scan
-// #10), as did a multi-chunk FRAG or fragmented client unicast, which skipped the gate altogether.
+// carrying a value verb (?SEQ,SAVE / ?CS / ?MGMT) never does - a ;T in a value is stored, not run. Any other chain
+// needs a real timer token: a ;-first one a delimited ;T<digit> token (until 2026-10-12 ';t' anywhere in the line was
+// enough, chainHasTimerToken), and one starting with the function identifier no checksum as well; that one used to be
+// refused outright, so ?VERSION^;S1a^;T800^;S1b ran both writes together (WCB coverage re-scan #10), as did a
+// multi-chunk FRAG or fragmented client unicast, which skipped the gate altogether.
 bool isTimerChain(const String &data) {
   if (chainCarriesValueVerb(data)) return false;
-  if (data.length() == 0 || data[0] != LocalFunctionIdentifier) return isTimerCommand(data);
+  if (data.length() == 0 || data[0] != LocalFunctionIdentifier) return chainHasTimerToken(data);
   return funcFirstChainIsTimed(data);
 }
 
@@ -7171,9 +7181,23 @@ void processLocalCommand(const String &message) {
     // --- ?LED,PIN,x ---
     if (rootUpper == "LED") {
         if (argsUpper.startsWith("PIN,")) {
-            int pin = args.substring(4).toInt();
+            // A number only: toInt() read 'abc' (or nothing) as GPIO0, which was saved and driven at every boot.
+            String num = args.substring(4);
+            num.trim();
+            bool numeric = num.length() > 0;
+            for (unsigned i = 0; i < num.length(); i++)
+                if (!isdigit((unsigned char)num[i]) && !(i == 0 && num[i] == '-' && num.length() > 1)) numeric = false;
+            if (!numeric) {
+                Serial.printf("Invalid LED pin '%s'. Use: ?LED,PIN,<gpio_number>\n", num.c_str());
+                return;
+            }
+            int pin = num.toInt();
             if (pin < 0 || pin > 48) {
                 Serial.printf("Invalid LED pin %d. Valid GPIO range: 0-48\n", pin);
+                return;
+            }
+            if (const char *why = ledPinRefusal(pin)) {
+                Serial.printf("GPIO%d cannot carry the LED on this board: %s. Nothing changed.\n", pin, why);
                 return;
             }
             saveStatusLEDPin(pin);
@@ -7184,6 +7208,7 @@ void processLocalCommand(const String &message) {
             return;
         }
         Serial.printf("LED pin: GPIO%d\nUse: ?LED,PIN,<gpio_number>\n", STATUS_LED_PIN);
+        Serial.printf("Not usable for the LED on this board: GPIO %s\n", ledPinRefusedList().c_str());
         return;
     }
 
