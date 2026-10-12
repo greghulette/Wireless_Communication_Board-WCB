@@ -916,13 +916,17 @@ from suites.s18_etm_config_wdp import _etm  # noqa: E402
 from suites.s40_navicore_config import _flushed  # noqa: E402
 from suites.s43_navicore_mesh import _w2  # noqa: E402
 
-W2_HB_SILENT_S = 3600            # ?ETM,HB,<s>: W2's heartbeat stretched past the whole test (range 1-3600)
+W2_HB_SILENT_S = 60              # ?ETM,HB,<s>: W2's heartbeat stretched past NaviCore's restart and grace (~30 s). The
+                                 # timer keeps its schedule until the next beat, so a restore after a longer stretch
+                                 # would leave W2 silent that long (an hour at 3600, run 20261011-224226): 60 s, as
+                                 # ncmesh.online_tracking_flip uses, has it back within a minute of the restore.
 W1_OFFLINE_S = 55                # (10 + 1) x 5 s: W1 marks a silent W2 offline after this (ncmesh.online_tracking_flip)
 W2_ONLINE_WAIT_S = 30            # W2's heartbeat lands within this of a NaviCore restart (9-11 s apart; a miss or two)
+W2_LAST_BEAT_S = 12              # the heartbeat W2 scheduled before ?ETM,HB,3600 still goes out within a period (9-11 s)
 
 
-@test("ncboot.new_peer_fires_once", "OPT-IN (navicore_reboot, ~60 s): a WCB silent through NaviCore's boot grace and "
-      "heard after it IS a new peer: with W2's heartbeat stretched to an hour and its WDP off across a NaviCore "
+@test("ncboot.new_peer_fires_once", "OPT-IN (navicore_reboot, ~75 s): a WCB silent through NaviCore's boot grace and "
+      "heard after it IS a new peer: with W2's heartbeat stretched to a minute and its WDP off across a NaviCore "
       "restart, W2's WDP back on and W1's ?WDP,POLL past the grace make W2 advertise, NaviCore prints '[PEER] New "
       "WCB 2' and runs the configured action once (a ;S2 marker to W1S2); a second POLL fires nothing; W2's settings "
       "go back (NaviCore restarts)", needs=["navicore", "wcb1", "wcb2"], links=["W1S2"], opt_in="navicore_reboot")
@@ -933,10 +937,13 @@ def new_peer_fires_once(bench):
     peers only, never a client - fires the passive alert ('[PEER] New WCB <n>[ <alias>] detected', the LED pulse) and
     the configured peer actions through the normal dispatch (rcExecuteAction), once per board per session
     (g_peerSeenMask). NaviCore marks a board online only on its heartbeat or boot announce
-    (ncmesh.online_tracking_flip), so W2 with '?ETM,HB,3600' on its own console sends none across the restart, and
+    (ncmesh.online_tracking_flip), so W2 with '?ETM,HB,60' on its own console, its scheduled beat waited out, sends
+    none across the restart (W2_HB_SILENT_S on why not longer), and
     '?WDP,OFF' keeps it from answering NaviCore's join-time solicit, whose adverts the grace is there to swallow (an
     advert inside the grace marks the board seen, silently). After the grace W2's WDP goes back on and W1's ?WDP,POLL
-    makes every WCB advertise within 600 ms (WCB_WDP.cpp:366-372). Both W2 settings go back in a finally, and
+    makes every WCB advertise within 600 ms (WCB_WDP.cpp:366-372); W2 also advertises the moment its WDP is switched
+    back on (run 20261011-224940 fired on that advert), so the console is read from before that. Both W2 settings
+    go back in a finally, and
     config_guard(bench, 2) proves W2's config as it was. W1 marks W2 offline only after W1_OFFLINE_S of silence; the
     silence is noted."""
     s12 = link(bench, 1, "S2")
@@ -964,16 +971,19 @@ def new_peer_fires_once(bench):
             t_hb = time.monotonic()
             if not any("[WDP] disabled" in x for x in w2.run("?WDP,OFF")):
                 raise AssertionError("W2 did not take ?WDP,OFF")
+            # W2's next heartbeat was scheduled before the stretch and still goes out within a period: let it, or it
+            # lands in NaviCore's grace and W2 is online when the grace closes (run 20261011-224226).
+            time.sleep(W2_LAST_BEAT_S)
             pm = s12.mark()
             m, _, _ = _restart(g.nc, "json")
             t_join = _line_time(g.nc.dev, m, JOINED) or time.monotonic()
             time.sleep(max(0.0, t_join + PEER_GRACE_S + 1.5 - time.monotonic()))
             online = set(g.nc.online_ids())
+            gm = g.nc.dev.mark()          # before W2's WDP goes back on: it advertises at once, and that can be the fire
             w2.run("?WDP,ON")
-            gm = g.nc.dev.mark()
             w1.run("?WDP,POLL", timeout=6)
             time.sleep(ADVERT_WAIT_S)
-            first = _flushed(g.nc, gm)
+            first = _flushed(g.nc, gm)                                   # W2's WDP-on advert or the POLL, either
             n1 = s12.received(pm).count(mk.encode())
             gm2 = g.nc.dev.mark()
             w1.run("?WDP,POLL", timeout=6)
