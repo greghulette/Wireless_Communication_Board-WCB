@@ -918,6 +918,7 @@ from suites.s43_navicore_mesh import _w2  # noqa: E402
 
 W2_HB_SILENT_S = 3600            # ?ETM,HB,<s>: W2's heartbeat stretched past the whole test (range 1-3600)
 W1_OFFLINE_S = 55                # (10 + 1) x 5 s: W1 marks a silent W2 offline after this (ncmesh.online_tracking_flip)
+W2_ONLINE_WAIT_S = 30            # W2's heartbeat lands within this of a NaviCore restart (9-11 s apart; a miss or two)
 
 
 @test("ncboot.new_peer_fires_once", "OPT-IN (navicore_reboot, ~60 s): a WCB silent through NaviCore's boot grace and "
@@ -941,8 +942,14 @@ def new_peer_fires_once(bench):
     s12 = link(bench, 1, "S2")
     nc, w1, w2 = _nc(bench), WCB(bench.dev("wcb1")), _w2(bench)
     _restartable(nc)
-    if not (ncmesh.status_rows(nc.wcb_status()).get(2) or {}).get("online"):
-        raise Skip("NaviCore does not have W2 online to begin with")
+    # The s46 tests before this one restart NaviCore, whose fresh ETM table lists W2 online only on W2's next
+    # heartbeat, up to ~11 s on (ncmesh.online_tracking_flip): wait for it before deciding (run 20261011-171424 skipped
+    # here 0.1 s after the previous test's restart).
+    end = time.monotonic() + W2_ONLINE_WAIT_S
+    while not (ncmesh.status_rows(nc.wcb_status()).get(2) or {}).get("online"):
+        if time.monotonic() >= end:
+            raise Skip(f"NaviCore does not have W2 online to begin with ({W2_ONLINE_WAIT_S:.0f} s)")
+        time.sleep(2.0)
     mk = marker("NEWP")
     problems, notes = [], []
     online, first, second, n1, n2, silent_s = set(), [], [], 0, 0, 0.0
