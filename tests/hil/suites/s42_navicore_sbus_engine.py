@@ -433,8 +433,11 @@ def matrix_logical_band(bench):
 
 def _blips(ctl, nc, i, mode, slot, tries, tap_ms, max_ms=12.0):
     """`tries` presses of button `i` of about 4 ms on the host, each followed by the tap window -> (commits among the
-    valid tries, valid tries, the host-held times). A try whose press ran past max_ms (the host was descheduled between
-    the two writes) is not counted."""
+    valid tries, valid tries, the host-held times). A try whose press ran past max_ms on the host is not counted. The
+    hold is timed from the return of each write: the controller sees the press from the first write to the second, so
+    a stall inside the release's send (its log line, the port lock, the write call) lengthens the press the same as a
+    stall between the two sleeps does. Timing the release BEFORE its write hid such a stall: on 2026-10-12 a press
+    clocked at 10 ms on the host was held long enough for four frames at debounce 4 (run 20261012-020744)."""
     commits = valid = 0
     held = []
     for _ in range(tries):
@@ -442,8 +445,8 @@ def _blips(ctl, nc, i, mode, slot, tries, tap_ms, max_ms=12.0):
         ctl.button(i, True)
         t0 = time.monotonic()
         time.sleep(0.004)
-        t1 = time.monotonic()
         ctl.button(i, False)
+        t1 = time.monotonic()
         ms = (t1 - t0) * 1000
         held.append(round(ms, 1))
         time.sleep(tap_ms / 1000 + 0.35)
