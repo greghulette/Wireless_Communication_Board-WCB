@@ -221,8 +221,9 @@ function plannedVerbs(page, n) {
     c.variables = getVariablesFromUI(n) ?? c.variables;
     const g = (id) => document.getElementById(id);
     c.espnowPassword = g('g-password').value || 'change_me_or_risk_takeover';
-    c.macOctet2 = g('g-mac2').value?.toUpperCase() || '00';
-    c.macOctet3 = g('g-mac3').value?.toUpperCase() || '00';
+    const macs = _pushMacOctets(n);           // as boardGo reads them: padded, and a bad one stops the push
+    if (!macs) return [];
+    [c.macOctet2, c.macOctet3] = macs;
     c.meshChannel = parseInt(g('g-meshch')?.value) || 1;
     c.delimiter = g('g-delimiter').value || '^';
     c.funcChar = g('g-funcchar').value || '?';

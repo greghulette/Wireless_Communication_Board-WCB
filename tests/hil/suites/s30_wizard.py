@@ -202,6 +202,28 @@ for _key, _title in _FAKE_MORE:
     test(f"wizard.{_key}", f"{_title} (no board: fake boards in the page)")(_fake_more)
 
 
+# The untested high-risk Wizard paths of the 2026-10-12 coverage re-scan (docs/hil_plan/RESCAN_2026-10-12.md; rows in
+# docs/hil_plan/rescan_2026-10-12/wizard.json, named at the end of each title): the push guards and the flash and erase
+# paths (specs/push_flash_fake.spec.js), the read loop's reconnect, the shared-port decision and the setup wizard's
+# Connect & Push step (specs/connect_wizard_fake.spec.js). No board and no real port (a fake navigator.serial), so CI
+# runs them too. wizard.wiz_fake_connect_step is its row's fakeable half: a reset pressed on a real board stays attended.
+_FAKE_RESCAN = (
+    ("push_fake_var_guard", "A variable row with an invalid name stops the push, the relay push and the export before anything is sent, so the diff cannot clear the variable it renamed; a temporary row is never in the config (var.push_export_guard)"),
+    ("push_fake_mac_validate", "(should) A General MAC octet that is not hex turns red when left and a single digit is padded; a push, direct or through a relay, checks the octets itself and sends nothing for a bad one (general.mac_validate)"),
+    ("flash_fake_entry_snapshot", "Flash, Update and Factory close the port first, show Flashing... while flashFirmware runs with appOnly for Update and eraseNvs for Factory, and put the card back after a flash that worked or failed (flash.entry_snapshot)"),
+    ("flash_fake_post_success", "After a flash the port is reopened and the firmware waited for: Flash pushes the whole pre-flash config with its General fields, Update pulls (pushes in the setup wizard), Factory unchecked pulls, a borrowed shared port is given back, a board that never returns is said to (flash.post_success)"),
+    ("flash_fake_erase_path", "The erase sends ?ERASE,NVS, keeps the port open 4 s, reopens it, waits for the firmware and pushes the whole pre-erase config with its General fields; Erase NVS Only pulls instead (flash.erase_path)"),
+    ("connect_fake_port_loss_reconnect", "A port that drops on its own is reopened (10 x 1.5 s), the relay's boards re-armed (not one now on USB) and the board pulled 3 s later outside the setup wizard; a MgmtRelay that never returns loses its card (connect.port_loss_reconnect)"),
+    ("connect_fake_establish_autoshare", "The first board connected is the shared port unless another tab leads or the bulk detect opted out, two at once share one, a dead share falls back to direct; a busy port joins another tab's share only when it is surely that port, and backs out on a VID/PID mismatch (connect.establish_autoshare)"),
+    ("wiz_fake_watch_push_verify", "The setup wizard's watcher pushes the wizard's config whole, waits for the reconnect, verifies with up to three pulls and reports Done (next WCB, auto-close), Not pushed, Push incomplete, Unverified or No reconnect (wiz.watch_push_verify)"),
+    ("wiz_fake_connect_step", "The setup wizard's Connect & Push row: Detect ignores the drain's resets and takes the port reset after it, a connect clears a stale baseline so the push waits for the pull; Select by COM#, Authorize, Cancel, Reconnect, the 30 s timeout (wiz.connect_step, fakeable half)"),
+)
+for _key, _title in _FAKE_RESCAN:
+    def _fake_rescan(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their

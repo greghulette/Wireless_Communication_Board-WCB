@@ -1321,17 +1321,37 @@ function onMeshChannelChange() {
   _notifyGeneralChanged();
 }
 
+// The General MAC octet fields, on blur: anything but 0-2 hex digits turns the field red with an error; a single digit
+// is padded ('5' -> '05') and mirrored into the config the input handler already updated. This only marks the field:
+// a push checks the octets again itself (_pushMacOctets), since nothing stops one with the field still red.
 function validateMacOctet(input) {
   const val = input.value.trim().toUpperCase();
-  const valid = /^[0-9A-F]{0,2}$/.test(val);
-  if (!valid || (val.length > 0 && val.length < 2)) {
+  if (!/^[0-9A-F]{0,2}$/.test(val)) {
     input.style.borderColor = 'var(--red)';
     showToast(`Invalid hex value "${val}" — must be 00–FF`, 'error');
-  } else {
-    input.style.borderColor = '';
-    // Pad single digit to two chars
-    if (val.length === 1) input.value = '0' + val;
+    return;
   }
+  input.style.borderColor = '';
+  if (val.length === 1) {
+    input.value = '0' + val;
+    _mirrorGeneral(onGeneralMacChange);   // the '5' was already announced as a pending change; no second toast
+  }
+}
+
+// The General MAC octets as a push sends them, [octet2, octet3]: two hex digits each, a single digit padded, empty
+// '00' (as the push has always defaulted). null, with a toast naming the octet, when either is not hex - the firmware
+// saves whatever ?MAC,<n>,<value> carries (?MAC,2,ZZ included), so such a push must send nothing at all.
+function _pushMacOctets(n) {
+  const out = [];
+  for (const k of [2, 3]) {
+    const v = (document.getElementById(`g-mac${k}`)?.value ?? '').trim().toUpperCase();
+    if (!/^[0-9A-F]{0,2}$/.test(v)) {
+      showToast(`WCB ${n}: MAC octet ${k} "${v}" is not a hex value 00–FF — fix it in General first. Nothing was sent.`, 'error', 8000);
+      return null;
+    }
+    out.push(v.padStart(2, '0'));
+  }
+  return out;
 }
 
 // srcEl is the General input the user just typed into (index.html passes `this`). Only a user's edit is checked
@@ -6205,7 +6225,11 @@ async function establishConnection(n, port, usedPorts = new Set(), allowShare = 
   // parallel connect already claimed the slot; and (d) NO other same-origin tab already
   // leads the shared hub — else we'd join as a follower and relay to THAT tab's port
   // instead of opening the one the user picked (silently configuring the wrong board).
-  if (allowShare && !_hasSharedPort() && !_autoShareClaimed && !(await _anotherTabLeadsShare())) {
+  // The claim is checked again AFTER the lock query's await: two connects started together both pass the first
+  // check before either resumes, and without the second both took the share (the second sharedConnect then tore
+  // the first board's share down).
+  if (allowShare && !_hasSharedPort() && !_autoShareClaimed && !(await _anotherTabLeadsShare())
+      && !_hasSharedPort() && !_autoShareClaimed) {
     _autoShareClaimed = true;                 // claim synchronously → parallel connects go direct
     try {
       const conn = await sharedConnect(n, port);
@@ -8067,6 +8091,10 @@ async function boardGo(n, opts = {}) {
               boardBaselines[n] = null;   // force full push — board NVS is blank
               populateUIFromConfig(n, boardConfigs[n]);   // re-sync DOM to wizard config
             }
+            // The General fields as they were before the erase, as the wizard branch above and the flash path
+            // (postFlashGeneralSnapshot) restore them: a pull meanwhile can have put the erased board's defaults
+            // there, and this push would then send them - the default password and MACs - to a blank board.
+            restoreGeneralDOMSnapshot(preEraseGeneralSnapshot);
             boardGo(n, { mode: 'configure' });
           })();
         }
@@ -8116,10 +8144,16 @@ async function boardGo(n, opts = {}) {
       btn.textContent = 'Push Config';
       return;
     }
+    const macOctets = _pushMacOctets(n);
+    if (!macOctets) {
+      boardPushOutcome[n].reason = 'invalid MAC octet — nothing was sent';
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
     config.variables     = uiVariables;
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
-    config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
-    config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
+    [config.macOctet2, config.macOctet3] = macOctets;
     config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
     config.delimiter      = document.getElementById('g-delimiter').value || '^';
     config.funcChar       = document.getElementById('g-funcchar').value  || '?';
@@ -8533,13 +8567,19 @@ async function boardGoRemote(n, opts = {}) {
   if (uiVariables === null) {
     // Invalid variable name — getVariablesFromUI already showed the toast.
     // Abort before the diff can emit a destructive VAR,CLEAR.
+    boardPushOutcome[n].reason = 'invalid variable name — nothing was sent';
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
+  const macOctets = _pushMacOctets(n);
+  if (!macOctets) {
+    boardPushOutcome[n].reason = 'invalid MAC octet — nothing was sent';
     if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
     return;
   }
   config.variables      = uiVariables;
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
-  config.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase() || '00';
-  config.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase() || '00';
+  [config.macOctet2, config.macOctet3] = macOctets;
   config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
   config.delimiter      = document.getElementById('g-delimiter').value || '^';
   config.funcChar       = document.getElementById('g-funcchar').value  || '?';
