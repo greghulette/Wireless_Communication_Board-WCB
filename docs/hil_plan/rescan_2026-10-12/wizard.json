@@ -107,9 +107,11 @@
   "area": "general",
   "behaviour": "A MAC octet that is not 00-FF turns the input red with an error toast; a single hex digit is zero-padded on blur.",
   "where": "Wizard/app.js:1324-1335",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Never asserted. Note the check is blur-only: boardGo still pushes whatever the input holds (?MAC,2,ZZ), which the firmware saves (WCB.md s3 #5).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_mac_validate"
+  ],
+  "gap": "closed 2026-10-12 by wizard.push_fake_mac_validate (WCB 7b37f32, GUI run 20261012-193704); Wizard fixed: the blur pads a single digit and a push refuses a non-hex octet (_pushMacOctets)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1118,9 +1120,11 @@
   "area": "var",
   "behaviour": "A row with an invalid name aborts the push, the remote push and the export (so the diff cannot send a destructive VAR,CLEAR); temporary rows are left out of the config.",
   "where": "Wizard/app.js:5449-5465, 8108-8118, 8532-8538, 9543-9549",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "The toast on a bad name is asserted for updateVariable only; nothing asserts that boardGo/boardGoRemote/exportSystemFile stop and send nothing with such a row present.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_var_guard"
+  ],
+  "gap": "closed 2026-10-12 by wizard.push_fake_var_guard (WCB 7b37f32, GUI run 20261012-193704)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "H",
@@ -1189,12 +1193,13 @@
   "area": "connect",
   "behaviour": "The first board of a page becomes the shared port unless another tab leads the hub or bulk auto-detect opted out; a share that never opens falls back to direct; an open failure joins another tab's share only when the port is unambiguous, and rolls back on a VID/PID mismatch.",
   "where": "Wizard/app.js:6195-6297",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.push_reboot_path",
-   "wizard.push_reboot_path_direct"
+   "wizard.push_reboot_path_direct",
+   "wizard.connect_fake_establish_autoshare"
   ],
-  "gap": "Only \"first board is shared\" and the allowShare=false direct path are asserted on the bench; the open-failure join, the single-grant/wasSharedHere gates, the mismatch rollback and the parallel-connect claim are not.",
+  "gap": "closed 2026-10-12 by wizard.connect_fake_establish_autoshare (WCB 7b37f32, GUI run 20261012-193704)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "H",
@@ -1221,9 +1226,11 @@
   "area": "connect",
   "behaviour": "When the read loop ends unexpectedly the Wizard reconnects (10 x 1.5 s), re-arms the boards the relay managed, auto-pulls after 3 s outside the wizard, and frees a relay card it could not recover.",
   "where": "Wizard/app.js:6085-6137",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Only the managed reboot path (_rebootManaged) is exercised; an unplug or spontaneous reset is not.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.connect_fake_port_loss_reconnect"
+  ],
+  "gap": "closed 2026-10-12 by wizard.connect_fake_port_loss_reconnect (WCB 7b37f32, GUI run 20261012-193704)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "H",
@@ -1979,9 +1986,11 @@
   "area": "flash",
   "behaviour": "Flash/Update/Factory snapshot the board config and the General DOM, close the port, show Flashing..., and call flashFirmware with appOnly for Update and eraseNvs for Factory.",
   "where": "Wizard/app.js:7727-7791",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "flashFirmware is tested on its own; boardGo's flash entry (snapshot, closeForReconnect, the argument mapping, the Flashing UI) is never driven.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.flash_fake_entry_snapshot"
+  ],
+  "gap": "closed 2026-10-12 by wizard.flash_fake_entry_snapshot (WCB 7b37f32, GUI run 20261012-193704)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "H",
@@ -1992,12 +2001,14 @@
   "area": "flash",
   "behaviour": "After a flash the Wizard closes and reconnects the port, re-shares it if borrowed, then: Update pulls (or pushes in the wizard); Flash/Factory wait for the firmware and full-push the pre-flash config with General restored (or only pull when push was unchecked); a failed reconnect toasts.",
   "where": "Wizard/app.js:7796-7911",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No spec reaches any post-flash branch.",
+  "status": "partial",
+  "tested_by": [
+   "wizard.flash_fake_post_success"
+  ],
+  "gap": "closed 2026-10-12 by wizard.flash_fake_post_success (WCB 7b37f32, GUI run 20261012-193704); still open: the failed-flash branch (\"already on the target firmware, push anyway\") is not driven",
   "testable": "unattended",
   "bench_needs": "none",
-  "risk": "H",
+  "risk": "L",
   "how": "With flashFirmware stubbed to succeed and a fake answering ?backup: assert reconnect, waitForBoardReady probes, baseline null then a full push of the snapshot; with pushConfig false assert a pull and no push."
  },
  {
@@ -2018,12 +2029,14 @@
   "area": "flash",
   "behaviour": "Erase (wizard \"already installed\") sends ?ERASE,NVS, waits 4 s, closes and reconnects, waits for the firmware and full-pushes the pre-erase config; Factory Reset modal's Erase NVS Only does the same but only pulls.",
   "where": "Wizard/app.js:7991-8086, 10266-10310",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "partial",
+  "tested_by": [
+   "wizard.flash_fake_erase_path"
+  ],
+  "gap": "closed 2026-10-12 by wizard.flash_fake_erase_path (WCB 7b37f32, GUI run 20261012-193704); still open: the erase path's failed reconnect is not driven",
   "testable": "unattended",
   "bench_needs": "none",
-  "risk": "H",
+  "risk": "L",
   "how": "On a fake conn run boardGo(1,{mode:\"erase\"}): assert ?ERASE,NVS, the 4 s wait before close, reconnect, then a full push with boardBaselines null; run doFactoryResetEraseOnly and assert a pull instead."
  },
  {
@@ -2618,9 +2631,11 @@
   "area": "wiz",
   "behaviour": "Connect & Push runs one board at a time: the active row offers Detect (all free ports, 3 s drain, RTCWDT absorb, POWERON_RESET or Reset reason, 30 s), + Authorize and Select by COM#; a pick connects, clears the stale baseline, pulls after 3 s and starts the watcher; Cancel disconnects and offers Reconnect.",
   "where": "Wizard/app.js:12289-12811",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "partial",
+  "tested_by": [
+   "wizard.wiz_fake_connect_step"
+  ],
+  "gap": "closed 2026-10-12 by wizard.wiz_fake_connect_step (WCB 7b37f32, GUI run 20261012-193704); still open: attended half: a real reset press, Chrome's DTR reset on open, an RTCWDT board re-enumerating mid-drain; Detect's retry after a port drops mid-drain",
   "testable": "attended",
   "bench_needs": "none",
   "risk": "H",
@@ -2631,12 +2646,14 @@
   "area": "wiz",
   "behaviour": "Once a wizard board is connected and pulled, the watcher restores the wizard config, full-pushes it, waits for the reconnect, verifies with up to three pulls, reports Done / Not pushed / Push incomplete / No reconnect / Unverified, advances to the next WCB slot and auto-closes 2.5 s after all succeed (or shows Close).",
   "where": "Wizard/app.js:12813-12955",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "partial",
+  "tested_by": [
+   "wizard.wiz_fake_watch_push_verify"
+  ],
+  "gap": "closed 2026-10-12 by wizard.wiz_fake_watch_push_verify (WCB 7b37f32, GUI run 20261012-193704); still open: the watcher's 90 s \"Timed out\" outcome is not driven",
   "testable": "unattended",
   "bench_needs": "none",
-  "risk": "H",
+  "risk": "L",
   "how": "On a fake conn with a baseline: run wizardWatchForConnect(1, snapshot, general) and assert boardGo ran with baseline null, the verify pull, the \"Done\" status and connectSeqN advanced; make boardGo abort and assert \"Not pushed\"."
  },
  {
@@ -2821,5 +2838,18 @@
   "bench_needs": "none",
   "risk": "L",
   "how": "showToast(\"<b>\", \"error\", 100): assert the literal text, the copy button, and that it is still present after 11 s."
+ },
+ {
+  "id": "wiz.connect_tip_use_button",
+  "area": "wiz",
+  "behaviour": "The Connect & Push tip says 'Or click Use → to pick a port directly', but nothing calls wizPortUse any more: the panel offers Detect, + Authorize and Select by COM# only.",
+  "where": "Wizard/app.js Connect & Push tip; wizPortUse",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Found 2026-10-12 building wizard.wiz_fake_connect_step. Product call: restore the port list or drop the sentence.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Once decided, pin the tip text or the Use button in wiz_fake_connect_step."
  }
 ]
