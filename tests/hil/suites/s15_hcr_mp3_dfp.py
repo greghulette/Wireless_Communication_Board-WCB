@@ -1150,15 +1150,20 @@ def _inject(c2, src, s3, data, wait=0.8):
 DFP_FINISH_5 = _dfp(0x3D, 5)
 
 
-@test("dfp.config_frames", "DFPlayer on W2 S5: config lines, W1 auto-learns, every ;D verb's exact 10-byte frame and diag line, rejects, re-config", needs=["wcb1"], links=["W2S5"])
+@test("dfp.config_frames", "DFPlayer on W2 S5: config lines, W1 auto-learns, every ;D verb's exact 10-byte frame and diag line, VOLUP's ceiling at 30 and VOLDN's floor at 0 (from both sides of the step), rejects, re-config", needs=["wcb1"], links=["W2S5"])
 def dfp_config_frames(bench):
+    """VOLUP and VOLDN send an absolute volume frame two steps from the shadow, clamped to 0-30 (WcbDfPlayer.cpp
+    VOLUP/VOLDN: 28 and 29 step to 30, 30 stays; 1 and 2 step to 0, 0 stays), and every one of them prints
+    '[DFP] Volume → n' even when the value did not move. Re-scan 2026-10-12 dfp.verbs_frames: the clamps were never
+    sent."""
     s5 = link(bench, 2, "S5")
     w = usb_wcb(bench)
+    volumes = [("VOL,30", 30), ("VOLUP", 30), ("VOL,29", 29), ("VOLUP", 30), ("VOL,20", 20), ("VOLUP", 22), ("VOLDN", 20),
+               ("VOL,1", 1), ("VOLDN", 0), ("VOL,2", 2), ("VOLDN", 0), ("VOLDN", 0), ("VOL,20", 20)]
     ok_verbs = [("PLAY,5", 0x03, 5), ("PLAY,2999", 0x03, 2999), ("FOLDER,1,5", 0x0F, 0x0105), ("FOLDER,99,255", 0x0F, 0x63FF),
                 ("MP3FOLDER,9999", 0x12, 9999), ("STOP", 0x16, 0), ("NEXT", 0x01, 0), ("PREV", 0x02, 0), ("PAUSE", 0x0E, 0),
-                ("RESUME", 0x0D, 0), ("RANDOM", 0x18, 0), ("RESET", 0x0C, 0), ("VOL,30", 0x06, 30), ("VOL,20", 0x06, 20),
-                ("VOLUP", 0x06, 22), ("VOLDN", 0x06, 20), ("LOOP,5", 0x08, 5), ("LOOPALL,1", 0x11, 1), ("LOOPFOLDER,2", 0x17, 2),
-                ("EQ,5", 0x07, 5), ("STATUS", 0x42, 0)]
+                ("RESUME", 0x0D, 0), ("RANDOM", 0x18, 0), ("RESET", 0x0C, 0)] + [(v, 0x06, n) for v, n in volumes] + \
+               [("LOOP,5", 0x08, 5), ("LOOPALL,1", 0x11, 1), ("LOOPFOLDER,2", 0x17, 2), ("EQ,5", 0x07, 5), ("STATUS", 0x42, 0)]
     rejects = ["PLAY,0", "PLAY,3000", "FOLDER,100,1", "FOLDER,1,256", "FOLDER,1", "VOL,31", "LOOPALL,2", "EQ,6", "FOO"]
     problems = []
     with _w2_audio(bench, "DFP", "S5", "S5") as c2:
@@ -1181,8 +1186,8 @@ def dfp_config_frames(bench):
         if diag != want:
             problems.append(f"diag lines {diag}")
         vols = [x for x in lines if x.startswith("[DFP] Volume → ")]
-        if vols != [f"[DFP] Volume → {v}" for v in (30, 20, 22, 20)]:
-            problems.append(f"volume lines {vols}")
+        if vols != [f"[DFP] Volume → {n}" for _, n in volumes]:
+            problems.append(f"volume lines {vols}, expected {[n for _, n in volumes]}")
         problems += [f"no rejection line for {r}" for r in rejects if f"[DFP] Unknown or invalid command: {r}" not in lines]
         m = c2.send("?DFP,S5:V25")
         c2.expect(r"\[DFP\] Configured: S5 at 9600 baud  default volume=25", since=m)

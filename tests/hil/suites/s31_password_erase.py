@@ -368,7 +368,7 @@ def _sequences_into_nvs(w):
     return True
 
 
-@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): on the sequence store's NVS fallback (?DEBUG,SEQNVS), W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9). Then persistent variables until one is refused: no ACK for it, and after a reboot W1 holds what it reported (re-scan #13; 2 reboots)", needs=["wcb1"], links=[], opt_in="nvs_fill")
+@test("seq.nvs_full_consistency", "OPT-IN (nvs_fill): on the sequence store's NVS fallback (?DEBUG,SEQNVS), W1's NVS is filled with throwaway sequences until a save is refused; the refusal names NVS and leaves nothing behind (no listed key, no hidden value), a clear on the full store deletes cleanly, and once all are removed stored_cmds is back to its size before (F9). Then persistent variables until one is refused: no ACK for it, an edit of an existing one on the full store either sticks or is refused with its old value back in RAM, and after a reboot W1 holds what it reported (re-scan #13; 2 reboots)", needs=["wcb1"], links=[], opt_in="nvs_fill")
 def nvs_full_consistency(bench):
     """saveStoredCommandsToPreferences / eraseStoredCommandByName (WCB_Storage.cpp). Before 2026-09-24 a failed write
     of the sequence list went unchecked: a clear on a full store left the key listed with no value, and a save could
@@ -451,11 +451,30 @@ def nvs_full_consistency(bench):
                     problems.append(f"?VAR,SET,{name} printed {out}")
                     break
                 made.append(name)
+            # An EDITED persistent variable on the full store (re-scan 2026-10-12, var.nvs_write_failure): every
+            # persistent write rewrites the whole blob, and NVS needs room for the new copy before it drops the old,
+            # so a same-size rewrite can be refused too. A refused edit prints the ERROR and no ACK, and puts the old
+            # value back in RAM (WCB_Variables.cpp:189-192); the reboot below must hold the old value as well
+            # (reported, compared after the boot). When NVS does fit the rewrite, the edit is simply acknowledged.
+            edit = None
+            if "hilnvc" in made and var_refused:
+                out = w.run("?VAR,SET,hilnvc,8")
+                if _has(out, "[VAR] ERROR"):
+                    edit = "refused"
+                    if _has(out, "[VAR] hilnvc = 8  [persistent]"):
+                        problems.append("the refused edit of hilnvc printed the ERROR and then the '[persistent]' ACK")
+                    if not _has(w.run("?VAR,GET,hilnvc"), "[VAR] hilnvc = 7"):
+                        problems.append("the refused edit of hilnvc did not put 7 back in RAM")
+                elif _has(out, "[VAR] hilnvc = 8  [persistent]"):
+                    edit = "stored (the rewrite fitted)"
+                else:
+                    problems.append(f"?VAR,SET,hilnvc,8 on the full store printed {out}")
             if "hilnvc" in made:
                 out = w.run("?VAR,CLEAR,hilnvc")
                 if _has(out, "[VAR] ERROR") and _has(out, "[VAR] Cleared 'hilnvc'"):
                     problems.append("?VAR,CLEAR,hilnvc printed the ERROR and then 'Cleared'")
-            bench.note(f"{len(made)} persistent variable(s) set; refused: {var_refused or 'none - the blob still fit'}")
+            bench.note(f"{len(made)} persistent variable(s) set; refused: {var_refused or 'none - the blob still fit'}; "
+                       f"the edit of hilnvc on the full store: {edit or 'not tried (nothing was refused)'}")
             reported = _hil_vars(w)
             # A label and a baud on the full store (re-scan #20, WCB-WP42 row 3). A refused label is not set - no
             # 'label set to' line, the chain keeps the old one; a refused baud still runs, with a warning, and ?config

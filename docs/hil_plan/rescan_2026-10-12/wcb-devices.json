@@ -2028,13 +2028,13 @@
   "area": "dfp",
   "behaviour": ";D PLAY,n (1-2999), FOLDER,f,t, MP3FOLDER,n, STOP, NEXT, PREV, PAUSE, RESUME, RANDOM, RESET, VOL,n (0-30), VOLUP/VOLDN (±2 absolute), LOOP,n, LOOPALL,0|1, LOOPFOLDER,f, EQ,0-5, DEVICE,1-5, STATUS write their exact 10-byte frames with checksum and a '[DFP] cmd=' diag line; out-of-range or unknown verbs print the help and write nothing.",
   "where": "WcbCmd/src/WcbDfPlayer.cpp:16-171; Code/WCB/WCB_DFP.cpp:70-93",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "dfp.config_frames",
    "dfp.device_verb",
    "ncdev.dfp_remote"
   ],
-  "gap": "VOLUP's ceiling clamp at 30 (from 29/30) and VOLDN's floor at 0 (from 1/2) are not exercised (only 20->22->20).",
+  "gap": "closed: VOLUP ceiling (29->30, 30 stays) and VOLDN floor (1/2->0, 0 stays) added 2026-10-12; passed in run 20261012-135536.",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "H",

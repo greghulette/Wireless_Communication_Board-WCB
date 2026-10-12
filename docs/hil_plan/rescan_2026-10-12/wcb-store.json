@@ -123,10 +123,10 @@
   "tested_by": [
    "seq.nvs_full_consistency"
   ],
-  "gap": "Only the created-variable rollback (GET says not set) and the refused clear are asserted; the edited-variable rollback to its old value (:189-192) and the '[VAR] ERROR: could not open NVS' line (:99) are not. Opt-in nvs_fill, on the SEQNVS fallback boot.",
+  "gap": "the edit of an existing persistent variable on the full store added 2026-10-12: refused, old value back in RAM and after the reboot (run 20261012-135536). The could-not-open-NVS line stays unasserted (needs a fault knob). Remaining: the [VAR] ERROR: could not open NVS line (:99), which needs a fault knob.",
   "testable": "opt-in",
   "bench_needs": "none",
-  "risk": "H",
+  "risk": "L",
   "how": "On the full store (seq.nvs_full_consistency's fill) ?VAR,SET an EXISTING persistent variable to a new value: expect the ERROR line, ?VAR,GET still the old value, and the old value after a reboot."
  },
  {
