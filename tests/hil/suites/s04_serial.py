@@ -169,9 +169,9 @@ def timer_payload_semicolon_t(bench):
                 except Exception:
                     problems.append(f"{arm}: the timer chain's second write never came after {second(c)!r}")
                 else:
-                    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
-                    if not 1.8 <= gap <= 2.6:
-                        problems.append(f"{arm}: the second write came {gap:.2f} s after the first, not ~2 s")
+                    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)   # probe millis()
+                    if not 1900 <= gap <= 2400:
+                        problems.append(f"{arm}: the second write came {gap} ms after the first, not ~2000")
                 lines = [x.rstrip() for x in w.dev.since(wm)]
                 if want not in lines:
                     problems.append(f"{arm}: W1 did not print {want!r}")
