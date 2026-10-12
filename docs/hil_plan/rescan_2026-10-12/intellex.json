@@ -2271,5 +2271,44 @@
   "risk": "L",
   "how": "Simulated only.",
   "blocked_by": "known: INTELLEX.md 4.2 (real GitHub throttling)"
+ },
+ {
+  "id": "host.bridge.attach_detach_window",
+  "area": "host",
+  "behaviour": "Bridge.attach publishes the transport, then re-takes the lock to record the spec and set _want = True; a detach landing between the two sections is undone and the reconnect loop reattaches.",
+  "where": "Intellex src/host.py ~214-251",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Found 2026-10-12 while building intellex.bridge_superseded_attach; a window of microseconds, never raced.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "In bridge_units.py, block between the two locked sections with a patched lock or event and land a detach there: the bridge must stay detached and the reconnect loop must not reattach."
+ },
+ {
+  "id": "host.api.superseded_last_error",
+  "area": "host",
+  "behaviour": "After an attach is superseded, api_attach writes lastError 'superseded by a newer attach' after the winning attach cleared it, so /_api/status shows an error while the newer link is attached.",
+  "where": "Intellex src/host.py api_attach",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Seen 2026-10-12 by intellex.bridge_superseded_attach (recorded as a note, not asserted). Cosmetic; a product call whether the loser may set lastError.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Extend intellex.bridge_superseded_attach: after the race, /_api/status lastError is empty while the second target is attached."
+ },
+ {
+  "id": "shim.crlf_split_across_chunks",
+  "area": "shim",
+  "behaviour": "A CRLF split across two write chunks goes out as two frames ('...\\r' and '\\n'); the shim's comment calls it harmless.",
+  "where": "Intellex src/intellex_shim.js (line framing)",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Characterisation not pinned by intellex.shim_line_framing.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "In ui_shim.spec.js write 'abc\\r' then '\\ndef\\n' and pin the frames the host sees."
  }
 ]
