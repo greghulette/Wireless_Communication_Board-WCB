@@ -70,6 +70,9 @@ test.describe('the calibration wizard', () => {
     live.matrixVal = 1811; live.btn = 1;
     await expect(status(page)).toHaveText(/B1 captured at .*Auto-advancing/);
     live.matrixVal = 992; live.btn = 0;      // released before the advance: B2 would capture the same press otherwise
+    // The frames come in real time while the advance timer runs on the fake clock: wait for the release to be seen
+    // before firing the timer (full run 20261011-171424 under load: the stale press was captured again).
+    await expect(liveValue(page)).toHaveText(/Detected: none/);
     await page.clock.fastForward(1000);
     await expect.poll(() => current(page)).toBe('B2');
     expect(await page.evaluate(() => config.thresholds[0])).toEqual(expect.objectContaining({ id: 1, minPwm: 1801, maxPwm: 1821 }));
@@ -81,6 +84,7 @@ test.describe('the calibration wizard', () => {
     live.matrixVal = 1770; live.btn = 3;
     await expect(status(page)).toHaveText(/B2 captured at .*Click Next → to continue\. \(FW saw .* — corrected\)/);
     live.matrixVal = 992; live.btn = 0;
+    await expect(liveValue(page)).toHaveText(/Detected: none/);   // the release seen before the forced capture
     await page.clock.fastForward(1000);
     expect(await current(page)).toBe('B2');
     await capture(page);
