@@ -13,6 +13,12 @@ Wizard's own flasher does (Wizard/flasher.js:245-260 comparePartitionTable, :465
 writes the app alone and never reads the table (Intellex wcb_flash.py:302-307), while its header claims parity with
 flasher.js (:11-14). The fake esptool answers a read of 0x8000 with the table the case chooses; a fix that reads the
 table some other way than `esptool read-flash` may need this case taught its spelling.
+
+group "partition_edges" (intellex.flash_update_partition_edges): the rest of Update FW's partition check
+(wcb_flash.py:372-393 update_needs_full, :523-535 flash). A table that cannot be read keeps the update app-only while
+the app fits the legacy layout's 0x140000 slot, and is refused ('Use Flash FW instead') one byte past it; a build with
+no _part.bin skips the check without reading the board; a differing table that needs a bootloader the build does not
+have is refused. Every refusal writes nothing and restarts the board out of its ROM loader (boot_app).
 """
 import os
 import subprocess
@@ -277,6 +283,108 @@ def update_escalates(ctx):
     finally:
         proc.run, proc.popen = run0, popen0
     check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "partition_edges"
+class _EsptoolEdge(_Esptool):
+    """_Esptool with every esptool run kept as its verb and flags, and a read of 0x8000 that can fail the way a board
+    that will not talk does: exit 2, esptool's own last line."""
+
+    def __init__(self, table, read_rc=0):
+        super().__init__(table)
+        self.read_rc, self.runs = read_rc, []
+
+    def run(self, cmd, **kw):
+        verb = next((c for c in cmd if c in ("flash-id", "flash_id", "read-flash", "read_flash")), "?")
+        self.runs.append((verb, cmd[cmd.index("--after") + 1] if "--after" in cmd else None))
+        if verb in ("read-flash", "read_flash") and self.read_rc:
+            self.reads.append(None)
+            return subprocess.CompletedProcess(cmd, self.read_rc, stdout="",
+                                               stderr="A fatal error occurred: Failed to connect to ESP32: No serial "
+                                                      "data received.")
+        return super().run(cmd, **kw)
+
+
+def _update(ctx, branch, files, table, read_rc=0):
+    """wcb_flash.flash(app_only=True) on a fake 4 MB ESP32 against a cache seeded for `branch` with `files` -> (esptool,
+    the log lines, the FlashError text or None)."""
+    import flash
+    import proc
+    import wcb_flash
+    seed_cache(ctx, "wcb", branch, files)
+    e = _EsptoolEdge(table, read_rc)
+    run0, popen0 = proc.run, proc.popen
+    lines, err = [], None
+    proc.run, proc.popen = e.run, e.popen
+    try:
+        wcb_flash.flash("COMFAKE", app_only=True, erase_nvs=False, log=lines.append, branch=branch)
+    except flash.FlashError as x:
+        err = str(x)
+    finally:
+        proc.run, proc.popen = run0, popen0
+    return e, lines, err
+
+
+def _restarted(e):
+    """Whether boot_app restarted the board after a refusal: a flash-id run ended by --after hard-reset."""
+    return any(v in ("flash-id", "flash_id") and after == "hard-reset" for v, after in e.runs)
+
+
+@case("an Update whose partition-table read fails stays app-only while the app fits the legacy 0x140000 slot",
+      group="partition_edges")
+def unreadable_table_app_fits(ctx):
+    import wcb_flash
+    slot = wcb_flash.LEGACY_APP_SLOT
+    e, log, err = _update(ctx, "u-unread-fit", {wcb("ESP32.bin"): blob("app", slot), wcb("ESP32_part.bin"): BUILD_TABLE,
+                                                wcb("ESP32_boot.bin"): blob("boot", 128)}, BUILD_TABLE, read_rc=2)
+    check(err is None, f"a {slot}-byte app (the slot exactly) was refused: {err}")
+    check(e.reads == [None], f"the table was read {len(e.reads)} time(s), expected one failed read")
+    check(e.writes == [[0xE000, 0x10000]], f"Update wrote {[[hex(a) for a in w] for w in e.writes]}, expected the app "
+                                           f"alone (otadata, 0x10000)")
+    check(any("Could not read the partition table -- migration check skipped, app only." in x for x in log),
+          "the log does not say the check was skipped")
+    check(any("could not read it:" in x and "Failed to connect" in x for x in log),
+          "the log does not carry esptool's own reason the read failed")
+
+
+@case("an Update whose partition-table read fails is refused, nothing written and the board restarted, once the app "
+      "is larger than the legacy slot: 'Use Flash FW instead'", group="partition_edges")
+def unreadable_table_app_too_big(ctx):
+    import wcb_flash
+    size = wcb_flash.LEGACY_APP_SLOT + 1
+    e, log, err = _update(ctx, "u-unread-big", {wcb("ESP32.bin"): blob("app", size), wcb("ESP32_part.bin"): BUILD_TABLE,
+                                                wcb("ESP32_boot.bin"): blob("boot", 128)}, BUILD_TABLE, read_rc=2)
+    check(err is not None and "Use Flash FW instead" in err and "Could not read the board's partition table" in err,
+          f"a {size}-byte app onto an unreadable table: {'accepted' if err is None else err[:200]!r}, expected the "
+          f"'Use Flash FW instead' refusal (wcb_flash.py:387-391)")
+    check(e.writes == [], f"a refused Update still wrote {[[hex(a) for a in w] for w in e.writes]}")
+    check(_restarted(e), f"the refusal left the board in its ROM loader: esptool runs {e.runs} (boot_app)")
+
+
+@case("a build with no partition table skips the check without reading the board, and updates the app alone",
+      group="partition_edges")
+def no_table_in_build(ctx):
+    e, log, err = _update(ctx, "u-nopart", {wcb("ESP32.bin"): blob("app", 256), wcb("ESP32_boot.bin"): blob("boot", 128)},
+                          BOARD_DEFAULT_TABLE)
+    check(err is None, f"an Update from a build with no table was refused: {err}")
+    check(e.reads == [] and not any(v in ("read-flash", "read_flash") for v, _ in e.runs),
+          f"the board's table was read although the build has none to compare: {e.runs}")
+    check(e.writes == [[0xE000, 0x10000]], f"Update wrote {[[hex(a) for a in w] for w in e.writes]}")
+    check(any("No partition table in this build -- migration check skipped, app only." in x for x in log),
+          "the log does not say the check was skipped for want of a table")
+
+
+@case("an Update onto a board whose table differs is refused, nothing written and the board restarted, when the build "
+      "has no bootloader to escalate with", group="partition_edges")
+def escalation_without_bootloader(ctx):
+    e, log, err = _update(ctx, "u-noboot", {wcb("ESP32.bin"): blob("app", 256), wcb("ESP32_part.bin"): BUILD_TABLE},
+                          BOARD_DEFAULT_TABLE)
+    check(err is not None and "has to write the bootloader and table as well" in err
+          and f"no bootloader ({wcb('ESP32_boot.bin')}) in this build" in err,
+          f"a differing table with no bootloader in the build: {'accepted' if err is None else err[:240]!r}")
+    check(e.reads and e.reads[0] == (0x8000, 0x200), f"the table was not read before the refusal: {e.reads}")
+    check(e.writes == [], f"a refused escalation still wrote {[[hex(a) for a in w] for w in e.writes]}")
+    check(_restarted(e), f"the refusal left the board in its ROM loader: esptool runs {e.runs} (boot_app)")
 
 
 if __name__ == "__main__":

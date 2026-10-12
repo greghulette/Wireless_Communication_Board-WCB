@@ -160,13 +160,21 @@ class WsEndpoint:
     '{"type":"PING"}' line with `pong` - and it can vanish the way an access point whose board restarts does:
     go_silent() closes the listening socket, so a new connect is refused (what Intellex's liveness probe sees of a dead
     AP), and every open connection stays open with nothing read or sent - no FIN, no close frame, nothing a peer could
-    notice but silence. close() ends it all. Standard library; a thread per connection."""
+    notice but silence. close() ends it all. Standard library; a thread per connection.
+
+    For intellex.reconnect_idle_gate it can also stall the way an access point does while its board erases flash for an
+    OTA: close_listener() refuses new connects (the probe fails) while the open connections are still served, and
+    trickle() sends a byte frame on each every `period` s - traffic, the proof of life Intellex's idle gate trusts."""
 
     def __init__(self, host="127.0.0.2", port=80, pong='{"type":"PONG","version":"v-endpoint"}'):
         self.host, self.port, self.pong = host, port, pong
         self.accepted = 0
         self.upgraded = 0
         self._conns = []
+        self._live = []                         # (conn, its send lock): every upgraded connection still served
+        self.last_sent = None                   # time.monotonic() of the latest trickle frame
+        self.trickled = 0
+        self._trickle = None                    # (thread, stop event) while trickle() runs
         self._lock = threading.Lock()
         self._silent = threading.Event()
         self._stopped = threading.Event()
@@ -230,8 +238,10 @@ class WsEndpoint:
                         if line.split(b":", 1)[0].strip().lower() == b"sec-websocket-key"), "")
             conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                           f"Sec-WebSocket-Accept: {accept_key(key)}\r\n\r\n").encode())
+            slock = threading.Lock()            # replies here and trickle() frames share the socket
             with self._lock:
                 self.upgraded += 1
+                self._live.append((conn, slock))
             while not self._stopped.is_set():
                 if self._silent.is_set():
                     time.sleep(0.1)             # hold it open; read nothing, answer nothing
@@ -249,14 +259,62 @@ class WsEndpoint:
                 op, payload, used = got
                 buf = buf[used:]
                 if op == 0x9:
-                    conn.sendall(server_frame(payload, opcode=0xA))
+                    with slock:
+                        conn.sendall(server_frame(payload, opcode=0xA))
                 elif op == 0x8:
-                    conn.sendall(server_frame(payload[:2], opcode=0x8))
+                    with slock:
+                        conn.sendall(server_frame(payload[:2], opcode=0x8))
                     return
                 elif op == 0x1 and payload.strip() == b'{"type":"PING"}':
-                    conn.sendall(server_frame((self.pong + "\n").encode()))
+                    with slock:
+                        conn.sendall(server_frame((self.pong + "\n").encode()))
         except OSError:
             return
+        finally:
+            with self._lock:
+                self._live = [x for x in self._live if x[0] is not conn]
+
+    def close_listener(self):
+        """Refuse new connects - a TCP probe of the port fails at once - while every open connection is still served."""
+        try:
+            self._lsock.close()
+        except OSError:
+            pass
+
+    def trickle(self, period=2.0, payload=b"."):
+        """Send `payload` as one TEXT frame on every open connection now and every `period` s after, until
+        stop_trickle() (or go_silent / close); last_sent is when the latest went out."""
+        self.stop_trickle()
+        stop = threading.Event()
+
+        def run():
+            while not stop.is_set() and not self._stopped.is_set() and not self._silent.is_set():
+                with self._lock:
+                    live = list(self._live)
+                sent = False
+                for conn, slock in live:
+                    try:
+                        with slock:
+                            conn.sendall(server_frame(payload))
+                        sent = True
+                    except OSError:
+                        pass
+                if sent:
+                    self.last_sent = time.monotonic()
+                    self.trickled += 1
+                stop.wait(period)
+        t = threading.Thread(target=run, name=f"ws-endpoint-trickle:{self.host}", daemon=True)
+        self._trickle = (t, stop)
+        t.start()
+
+    def stop_trickle(self):
+        """Stop trickle() and wait for its thread -> last_sent: when the final frame went out (None if none did)."""
+        if self._trickle is not None:
+            t, stop = self._trickle
+            stop.set()
+            t.join(5)
+            self._trickle = None
+        return self.last_sent
 
     def go_silent(self):
         """Vanish without a word: refuse new connects, and fall silent on the open ones (kept open)."""
@@ -269,6 +327,7 @@ class WsEndpoint:
     def close(self):
         self._stopped.set()
         self._silent.set()
+        self.stop_trickle()
         try:
             self._lsock.close()
         except OSError:

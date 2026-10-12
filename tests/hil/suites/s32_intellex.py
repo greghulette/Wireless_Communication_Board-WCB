@@ -607,6 +607,62 @@ def settings_branch_dotdot(bench):
                           f"settings.tool_base()'s URL path (settings.py:104-110)")
 
 
+@test("intellex.gh_proxy_ref_dotdot", "The GitHub proxy refuses a ref that is not a branch name: offline a ref of "
+      "'..' or '.' serves no listing or image from outside the branch's own cache directory (files planted at the cache "
+      "root and the product directory), and online no such ref is fetched or written; a cached branch is still served "
+      "(plan finding 20; IX re-scan host.api.gh_proxy_ref_unchecked)")
+def gh_proxy_ref_dotdot(bench):
+    """INTELLEX.md finding 20. Intellex src/ghproxy.py contents() and raw() handed the page's ref to fwcache, whose _key
+    (fwcache.py:81-89) flattens only '/' and '\\': a ref of '..' made the cache directory src/firmware/wcb/.., the cache
+    root, and '.' the product directory. Offline the proxy served a listing.json or an image from there; online it
+    wrote them there, and raw() put the ref in the raw.githubusercontent.com URL path ('../../<owner>/<repo>/<branch>'
+    left the firmware repository). Here the HTTP half runs against a staged host with files planted where '..' and
+    '.' reach, beside a real cached branch; tests/intellex/py/ghproxy_units.py group ref then runs the online half on
+    the same stage, GitHub stood in for (flash.reachable, flash._get)."""
+    require(bench)
+    owner, repo, path = "greghulette", "Wireless_Communication_Board-WCB", "Code/bin"
+    branch = "hil-cache"
+    sd = stage(bench, "intellex.gh_proxy_ref_dotdot", tools="none")
+    seed_firmware(sd, "wcb", branch, _fw_files()["wcb"])
+    planted_name = "WCB_9.9.9_010000RJAN2026_planted_ESP32.bin"
+    planted = b"PLANTED-OUTSIDE-ANY-BRANCH;" * 8
+    fw = os.path.join(sd, "src", "firmware")
+    for d in (fw, os.path.join(fw, "wcb")):              # where '..' and '.' land: the cache root, the product dir
+        with open(os.path.join(d, planted_name), "wb") as f:
+            f.write(planted)
+        with open(os.path.join(d, "listing.json"), "w", encoding="utf-8") as f:
+            json.dump([{"name": planted_name, "path": f"{path}/{planted_name}", "type": "file", "size": len(planted),
+                        "download_url": f"https://raw.githubusercontent.com/{owner}/{repo}/x/{path}/{planted_name}"}], f)
+    before = _snapshot(fw)
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        q = urllib.parse.urlencode({"owner": owner, "repo": repo, "path": path, "ref": branch})
+        st, hdr, _ = host.http("GET", f"/_api/gh/contents?{q}", timeout=30)
+        if st != 200 or _hdr(hdr, "x-intellex-source") != "cache":
+            problems.append(f"control: the cached branch {branch}: {st}")
+        for ref in ("..", "."):
+            for what, query in (("contents", {"owner": owner, "repo": repo, "path": path, "ref": ref}),
+                                ("raw", {"owner": owner, "repo": repo, "ref": ref, "name": planted_name})):
+                st, _, body = host.http("GET", f"/_api/gh/{what}?{urllib.parse.urlencode(query)}", timeout=30)
+                try:
+                    msg = json.loads(body.decode("utf-8")).get("message", "") if st != 200 else ""
+                except (ValueError, AttributeError):
+                    msg = ""
+                if st == 200 or planted in body or planted_name.encode() in body:
+                    problems.append(f"{what} ref {ref!r}: {st}, served what was planted "
+                                    f"{'at the cache root' if ref == '..' else 'in the product directory'}")
+                elif st != 502 or "not a branch name" not in msg:
+                    problems.append(f"{what} ref {ref!r}: {st} {msg[:120]!r}, not refused as a ref that is no branch")
+    changed = sorted(k for k in set(before) | set(_snapshot(fw)) if before.get(k) != _snapshot(fw).get(k))
+    if changed:
+        problems.append(f"offline requests changed the firmware cache: {changed[:4]}")
+    try:
+        run_intellex_py(bench, "intellex.gh_proxy_ref_dotdot", "ghproxy_units.py", args={"group": "ref"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"online (ghproxy_units.py): {e}")
+    assert not problems, "; ".join(problems)
+
+
 # ------------------------------------------------------------------ IX-WP3: Intellex's modules under its venv
 @test("intellex.flash_rules_unit", "Intellex's flash rules, as pure functions under its venv: one anchored app image or a "
       "refusal, the size-matched ESP32-S3 bootloader, no full flash without a bootloader and table, sorted write lists "
@@ -680,6 +736,46 @@ def identify_direct_pong(bench):
     src/discover.py:221-222) though its docstring says only a direct one counts (:154-158). A fake pyserial Serial
     answers the PING, so no port is opened (tests/intellex/py/discover_units.py)."""
     run_intellex_py(bench, "intellex.identify_direct_pong", "discover_units.py", args={"group": "direct_pong_should"})
+
+
+@test("intellex.flash_update_partition_edges", "Update FW's partition check where the board's table cannot be read or "
+      "the build lacks a piece: app-only while the app fits the legacy 0x140000 slot and refused ('Use Flash FW "
+      "instead') one byte past it; no table in the build, no read and app-only; a differing table with no bootloader in "
+      "the build refused; every refusal writes nothing and restarts the board (fake esptool; IX re-scan "
+      "flash.wcb.update_escalates)")
+def flash_update_partition_edges(bench):
+    """tests/intellex/py/flash_units.py group partition_edges: Intellex src/wcb_flash.py:372-393 (update_needs_full) and
+    :523-535 (flash), the branches intellex.flash_update_partition_escalates leaves out. esptool is patched in-process
+    (proc.run, proc.popen): a 4 MB ESP32, a read of 0x8000 that answers the case's table or exits 2."""
+    run_intellex_py(bench, "intellex.flash_update_partition_edges", "flash_units.py",
+                    args={"group": "partition_edges"})
+
+
+@test("intellex.bridge_superseded_attach", "An attach still inside open() when a newer attach or a detach lands closes "
+      "what it opened and raises 'superseded' instead of publishing over the newer link, and the bridge's lock is free "
+      "while open() blocks; through POST /_api/attach the first of two racing attaches answers 502 and the second's "
+      "target is the one attached (in-process fakes; IX re-scan host.bridge.superseded_attach)")
+def bridge_superseded_attach(bench):
+    """tests/intellex/py/bridge_units.py group superseded: Intellex src/host.py Bridge.attach/detach (:214-251), whose
+    generation count is what stops a slow open() from leaking a transport nothing can close (a held COM port with its
+    reader still feeding bytes). A transport whose open() waits on an Event stands in for the slow port or handshake;
+    the HTTP case runs Intellex's real build_app() in the venv process, its rebuild() handing out such transports."""
+    run_intellex_py(bench, "intellex.bridge_superseded_attach", "bridge_units.py", args={"group": "superseded"})
+
+
+@test("intellex.attach_identify_role", "A serial attach asks the port what it is before it answers: a NaviCore gets "
+      "the PING alone and is role navicore; a WCB - also one mirroring NaviCore's mesh PONG - gets ?RELAY,WIFI and "
+      "?WDP,DUMP and is role wcb with its WDP number as relayId; a relay is role relay, relayId 19; a silent port stays "
+      "''; an unidentified port is asked again when the loop reattaches it, an identified one is not (in-process fakes; "
+      "IX re-scan host.api.attach_serial_identify_role)")
+def attach_identify_role(bench):
+    """tests/intellex/py/bridge_units.py group identify: Intellex src/host.py _identify_attached_serial (:1152-1231),
+    api_attach (:1304) and reconnect_loop (:1797), on its real build_app() in the venv process with the reconnect loop
+    running. A scripted fake COM port answers as each kind of board would (discover.classify reads the answers). The
+    row's bench half - W1 and NaviCore's own ports - is not here: intellex.nc_via_usb_doorway covers its effect on the
+    NaviCore tool through W1."""
+    run_intellex_py(bench, "intellex.attach_identify_role", "bridge_units.py", args={"group": "identify"},
+                    timeout=300)
 
 
 # ------------------------------------------------------------------ found on the bench in IX-WP9: a link whose far end vanished
@@ -786,6 +882,121 @@ def link_drop_no_stall(bench):
     problems, facts = drop_stall_problems(samples, seen.get("verdict"))
     facts["accepted"] = ep.accepted
     bench.note(f"intellex.link_drop_no_stall: {facts}")
+    assert not problems, "; ".join(problems)
+
+
+IDLE_TRICKLE_S = 2.0          # a byte from the far end every 2 s: never PROBE_IDLE_S (6 s) of silence
+IDLE_HOLD_S = 40.0            # the row: still attached after 40 s of bytes over a port TCP cannot reach
+IDLE_VERDICT_MIN_S = 8.0      # PROBE_IDLE_S, then three failed probes one loop pass (1 s) apart: ~8-9 s, never at once
+IDLE_VERDICT_MAX_S = 14.0     # and well before the keepalive (5 s ping, 10 s to answer) could have dropped it instead
+
+
+@test("intellex.reconnect_idle_gate", "A WebSocket link whose far end TCP cannot reach but which still sends a byte every "
+      "2 s - an access point stalled by an OTA erase - stays attached for 40 s with no 'link is dead' verdict; once the "
+      "bytes stop, the verdict comes 8 to 14 s after the last one and /_api/status shows the link until then; a "
+      "stand-in endpoint on 127.0.0.2:80 (IX re-scan host.reconnect.idle_probe)")
+def reconnect_idle_gate(bench):
+    """Intellex src/host.py reconnect_loop (:1707-1754): on a ws link the loop TCP-probes the far end's port 80 only after
+    PROBE_IDLE_S (6 s) without a byte (bridge.last_rx, set by every chunk the transport hands up), and drops the link
+    after PROBE_FAILS_NEEDED (3) failures in a row. Traffic is its proof of life, because an ESP32 writing flash can
+    stall both cores and fail a probe on a healthy board. intellex.link_drop_no_stall proves the verdict and that it
+    does not stall the host; this proves the gate. The far end is hil/ws.py WsEndpoint on 127.0.0.2:80: after the attach
+    its listener closes, so a probe would fail at once, while the open connection is still served (pings answered) and
+    gets a one-byte TEXT frame every 2 s. Then the frames stop - the pings are still answered, so only the probe can
+    end the link - and the verdict must wait for the idle gate. The host's own idle figure in its line is checked too."""
+    import threading
+    import time
+    require(bench)
+    try:
+        ep = WsEndpoint("127.0.0.2", 80)
+    except OSError as e:
+        raise Skip(f"nothing can listen on 127.0.0.2:80 here ({e}): the stand-in needs port 80, the one Intellex's "
+                   f"liveness probe uses (host.py reconnect_loop)")
+    sd = stage(bench, "intellex.reconnect_idle_gate", tools="none")
+    problems, facts = [], {}
+    try:
+        with IntellexHost(bench, sd) as host:
+            host.attach({"kind": "ws", "host": "127.0.0.2", "role": "navicore"}, timeout=20)
+            st, body = host.json("GET", "/_api/status", timeout=5)
+            if not (isinstance(body, dict) and body.get("attached")):
+                raise AssertionError(f"the host did not attach to the stand-in endpoint: {st} {body}")
+            ep.close_listener()
+            ep.trickle(IDLE_TRICKLE_S)
+            t0 = time.monotonic()
+            down, polls = [], 0
+            while time.monotonic() - t0 < IDLE_HOLD_S:
+                try:
+                    st, body = host.json("GET", "/_api/status", timeout=2.0)
+                    att = st == 200 and isinstance(body, dict) and body.get("attached") is True
+                except OSError:
+                    att = False
+                polls += 1
+                if not att:
+                    down.append(round(time.monotonic() - t0, 1))
+                time.sleep(0.5)
+            dead = [x for x in host.lines if "link is dead" in x]
+            facts.update(hold_polls=polls, trickled=ep.trickled, upgraded=ep.upgraded)
+            if down:
+                problems.append(f"with a byte every {IDLE_TRICKLE_S:g} s the link read as lost at {down[:5]} s: the idle "
+                                f"gate let the probe drop a link that was still sending")
+            if dead:
+                problems.append(f"the host gave a 'link is dead' verdict while bytes still flowed: {dead[0]!r}")
+            if ep.upgraded != 1:
+                problems.append(f"the endpoint saw {ep.upgraded} WebSocket upgrades: the link was rebuilt meanwhile")
+            if ep.trickled < IDLE_HOLD_S / IDLE_TRICKLE_S - 2:
+                problems.append(f"the endpoint sent only {ep.trickled} frames in {IDLE_HOLD_S:g} s")
+            seen = {}
+            stop = threading.Event()
+            last = ep.stop_trickle()
+
+            def watch():                              # when the verdict line arrives, to 50 ms
+                while not stop.is_set():
+                    line = next((x for x in list(host.lines) if "link is dead" in x), None)
+                    if line and "verdict" not in seen:
+                        seen["verdict"], seen["line"] = time.monotonic() - last, line
+                    time.sleep(0.05)
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            early, lost = [], None
+            try:
+                while time.monotonic() - last < IDLE_VERDICT_MAX_S + 6:
+                    now = time.monotonic() - last
+                    try:
+                        st, body = host.json("GET", "/_api/status", timeout=1.0)
+                        att = bool(body.get("attached")) if st == 200 and isinstance(body, dict) else None
+                    except OSError:
+                        att = None
+                    if att is False and lost is None:
+                        lost = time.monotonic() - last
+                    if att is not True and now < IDLE_VERDICT_MIN_S - 0.5:
+                        early.append(round(now, 1))
+                    if lost is not None and "verdict" in seen:
+                        break
+                    time.sleep(0.25)
+            finally:
+                stop.set()
+                watcher.join(1.0)
+            verdict = seen.get("verdict")
+            m = re.search(r"unreachable after (\d+)s idle", seen.get("line", ""))
+            facts.update(verdict_s=None if verdict is None else round(verdict, 1),
+                         lost_s=None if lost is None else round(lost, 1), idle_reported=m and int(m.group(1)))
+            if verdict is None:
+                problems.append(f"no 'link is dead' verdict within {IDLE_VERDICT_MAX_S + 6:g} s of the last byte: the "
+                                f"probe never fired on a far end that went quiet")
+            elif not IDLE_VERDICT_MIN_S <= verdict <= IDLE_VERDICT_MAX_S:
+                problems.append(f"the verdict came {verdict:.1f} s after the last byte, outside {IDLE_VERDICT_MIN_S:g}-"
+                                f"{IDLE_VERDICT_MAX_S:g} s (PROBE_IDLE_S 6 s, then 3 failed probes 1 s apart)")
+            if m and int(m.group(1)) < IDLE_VERDICT_MIN_S:
+                problems.append(f"the host judged the link dead after {m.group(1)} s idle, under "
+                                f"{IDLE_VERDICT_MIN_S:g} s: {seen['line']!r}")
+            if early:
+                problems.append(f"/_api/status stopped showing the link {early[:3]} s after the last byte, before the "
+                                f"idle gate could have opened")
+            if verdict is not None and lost is None:
+                problems.append("the verdict came but /_api/status never showed the link lost")
+    finally:
+        ep.close()
+    bench.note(f"intellex.reconnect_idle_gate: {facts}")
     assert not problems, "; ".join(problems)
 
 
@@ -916,3 +1127,27 @@ def ui_shell(bench):
 def ui_wiki(bench):
     """Intellex src/wiki.html, src/wikidocs.py, host.py _WIKI_CSP; the wiki is tests/intellex/fixtures/wiki."""
     run_intellex_test(bench, "intellex.ui_wiki", wiki=True)
+
+
+@test("intellex.shim_line_framing", "The shim's fake port puts ONE /_link message per line: CR, LF and CRLF (once) "
+      "lines out of one chunk, a tail held until its terminator, a 1500-byte line written in 512-byte chunks that split "
+      "an 'é' arriving whole as one frame, and an unterminated tail flushed by close() (Playwright, nothing attached; "
+      "IX re-scan shim.line_framing)")
+def shim_line_framing(bench):
+    """Intellex src/intellex_shim.js:152-221, through navigator.serial in the NaviCore config tool on /; the frames are
+    read off Playwright's websocket events (tests/intellex/specs/ui_shim.spec.js). bridge_terminators_w1 checks the
+    host's side of the same contract without the shim."""
+    run_intellex_test(bench, "intellex.shim_line_framing")
+
+
+@test("intellex.shim_native_flash", "The config tool's flash buttons through the shim: a cancelled Full Wipe confirm "
+      "sends nothing; an accepted one POSTs eraseNvs true, locks the flash, OTA and connect buttons while it runs, "
+      "appends each log line once and ends 'failed: E'; Update Firmware asks nothing and ends 'complete ✓ - board is "
+      "running <v>'; a 409 shows the host's words, a 404 or 405 the stale-host message (Playwright, /_api/flash "
+      "fulfilled; IX re-scan shim.start_native_flash)")
+def shim_native_flash(bench):
+    """Intellex src/intellex_shim.js:670-738 startNativeFlash, reached through the shim's capture-phase click handler on
+    the tool's own buttons (wireNativeFlash :574-607); /_api/flash and /_api/flash-status are fulfilled in the page, so
+    nothing is flashed (tests/intellex/specs/ui_shim.spec.js). intellex.flash_navicore_app runs the Update path on the
+    bench."""
+    run_intellex_test(bench, "intellex.shim_native_flash")
