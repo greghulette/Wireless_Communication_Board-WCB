@@ -1,0 +1,2825 @@
+[
+ {
+  "id": "init.boot_steps",
+  "area": "init",
+  "behaviour": "Page init runs each step isolated (a throw in one does not skip the rest), shows the splash, stamps the UI_VERSION footer.",
+  "where": "Wizard/app.js:142-164",
+  "status": "partial",
+  "tested_by": [
+   "wizard.smoke"
+  ],
+  "gap": "smoke only asserts the page loads with no page errors; splash open, footer text and step isolation unasserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Load the page: assert #splash-overlay has .open and #footer-ui-version equals UI_VERSION; stub one init step to throw and assert the terminal resize still binds."
+ },
+ {
+  "id": "init.browser_warning",
+  "area": "init",
+  "behaviour": "Without navigator.serial the WebSerial warning banner is shown.",
+  "where": "Wizard/app.js:309-313",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted anywhere.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Add an init script deleting navigator.serial before load; assert #browser-warning lacks .hidden."
+ },
+ {
+  "id": "init.theme_mode_prefs",
+  "area": "init",
+  "behaviour": "Theme toggle and Simple/Advanced mode persist in localStorage and restore on load; Advanced reveals .advanced-only sections and the ETM detail only when ETM is enabled.",
+  "where": "Wizard/app.js:329-402",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "No spec touches setMode/toggleTheme (every spec runs in Simple mode with the General ETM/char fields hidden).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click Advanced: assert WiFi/char fields visible, etm-detail visible iff g-etm-enabled; reload and assert the mode persisted."
+ },
+ {
+  "id": "init.splash_choice",
+  "area": "init",
+  "behaviour": "Splash: Setup Wizard opens the guided setup; Config Tool closes the splash.",
+  "where": "Wizard/app.js:316-327",
+  "status": "partial",
+  "tested_by": [
+   "wizard.smoke"
+  ],
+  "gap": "Every spec clicks splashGoConfig (openWizard helper) but never asserts it; splashGoWizard untested.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click the Setup Wizard splash button and assert #wizard-modal.open with the welcome step."
+ },
+ {
+  "id": "init.stale_branch_warning",
+  "area": "init",
+  "behaviour": "A leftover wcb_fw_branch localStorage override raises a persistent warning toast; a /dev/<branch>/Wizard preview URL stays silent.",
+  "where": "Wizard/app.js:348-359",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_fw_check"
+  ],
+  "gap": "Override toast asserted; the preview-URL silence and the persistent (duration 0) nature of the toast are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Serve the page under /dev/x/Wizard/ with the key set and assert no toast; assert the toast survives 15 s on /Wizard/."
+ },
+ {
+  "id": "general.wcbq_change",
+  "area": "general",
+  "behaviour": "WCB Quantity: More... expands the select to 20; a pick sets the floor, re-renders the grid and widens every board's WCB# dropdown to max(qty, own number).",
+  "where": "Wizard/app.js:1276-1296, 1246-1273",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_system_file_reload",
+   "wizard.app_fake_wcb_number_above_floor"
+  ],
+  "gap": "Only the loaded value is asserted; the More... expansion, the grid growing/shrinking on a user change and the per-board dropdown re-population are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Set g-wcbq to _more then 9: assert 20 options, 9 sections, and b5-wcb-number offers 1..9; set it back to 2 and assert section 5 (pulled, WCB 5) survives."
+ },
+ {
+  "id": "general.password_mac_channel",
+  "area": "general",
+  "behaviour": "Password, MAC octets and mesh channel edits mirror into systemConfig and every boardConfigs entry, move the General baseline and flag General dirty.",
+  "where": "Wizard/app.js:1298-1322, 1369-1372",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_general_fields",
+   "wizard.app_fake_pull_leaves_nothing_pending"
+  ],
+  "gap": "A push reading the DOM is asserted; the handlers' mirroring into every board, the mesh-channel handler and the dirty/amber state after a user edit are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull two fake boards, edit g-meshch to 6: assert both boardConfigs.meshChannel 6, generalSettingsDirty true, Push All amber, and each push sends ?WCBCH,6."
+ },
+ {
+  "id": "general.mac_validate",
+  "area": "general",
+  "behaviour": "A MAC octet that is not 00-FF turns the input red with an error toast; a single hex digit is zero-padded on blur.",
+  "where": "Wizard/app.js:1324-1335",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Never asserted. Note the check is blur-only: boardGo still pushes whatever the input holds (?MAC,2,ZZ), which the firmware saves (WCB.md s3 #5).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Type ZZ then blur: assert the toast and red border; type 5 then blur: assert 05; then push and assert what ?MAC carries."
+ },
+ {
+  "id": "general.cmd_chars_refuse",
+  "area": "general",
+  "behaviour": "Typing a delimiter/function/command character the firmware refuses (comma, letter, digit, a prefix, the delimiter) is put back to the last good value with a toast.",
+  "where": "Wizard/app.js:1341-1354",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_delimiter"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "general.cmd_chars_mirror",
+  "area": "general",
+  "behaviour": "A legal character edit mirrors into systemConfig and every boardConfigs entry; a pull mirrors the board's characters with no check (a legacy comma delimiter shows as is).",
+  "where": "Wizard/app.js:1355-1365, 9178-9182",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_delimiter"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "general.etm_toggle_checksum",
+  "area": "general",
+  "behaviour": "ETM Enabled and Packet Checksum toggles mirror into every board; the push then sends ETM,OFF / ETM,ON (checksum is always pushed ON).",
+  "where": "Wizard/app.js:1374-1391; Wizard/parser.js:1645-1659",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "No spec flips g-etm-enabled or g-etm-chksm; the builder's ETM,OFF and forced CHKSM,ON are only reached by full-push fixtures.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board, uncheck g-etm-enabled: assert boardConfigs[1].etm.enabled false and the push sends exactly ?ETM,OFF; re-check it and assert ?ETM,ON plus the detail lines."
+ },
+ {
+  "id": "general.etm_fields",
+  "area": "general",
+  "behaviour": "ETM numeric fields: delay keeps 0 and clamps to 0-5000, count clamps to 10-200, the others fall back to firmware defaults; every field mirrors into all boards.",
+  "where": "Wizard/app.js:1393-1425",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_etm_delay"
+  ],
+  "gap": "Delay 0 and the 5000 clamp are asserted; the count clamp (10-200) and the timeout/hb/miss/boot fallbacks are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Set g-etm-count to 3 and 999: assert boardConfigs count 10 and 200 and the push line; clear g-etm-hb and assert 10."
+ },
+ {
+  "id": "general.controller_switch",
+  "area": "general",
+  "behaviour": "The Controller selector stashes each controller's board roles, restores them on the way back, resets roles otherwise, writes the controller only into WCB slots and clears orphaned Kyber labels.",
+  "where": "Wizard/app.js:1427-1563",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_controller"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "general.navicore_id",
+  "area": "general",
+  "behaviour": "The NaviCore ID select propagates the id into every WCB slot (never a client) and the pushed ?CONTROLLER,ON,<id>.",
+  "where": "Wizard/app.js:1565-1575",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_controller"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "general.derive_controller",
+  "area": "general",
+  "behaviour": "On a pull or file load the global controller is derived from the boards: any specialPeer board means navicore (with its id), else a local/remote Kyber means kyber, else none.",
+  "where": "Wizard/app.js:1554-1563, 9198-9212",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_controller"
+  ],
+  "gap": "Only the kyber derivation is asserted; a pulled CONTROLLER,ON,15 board deriving navicore with id 15, and none, are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a fake board with CONTROLLER,ON,15: assert systemConfig.general.controller navicore, specialPeerId 15 and #g-navicore-id 15."
+ },
+ {
+  "id": "general.mismatch_modal",
+  "area": "general",
+  "behaviour": "A later pull whose General fields differ opens the keep/use modal naming each field; Keep writes the baseline into that board (unsaved); Use rewrites General (NaviCore included) and flags every other board unsaved. Factory-default MAC 00:00 and an open setup wizard suppress it.",
+  "where": "Wizard/app.js:1577-1671, 6671-6782, 7473-7486, 9065-9078",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_general_fields",
+   "wizard.pull_fake_usb_guards",
+   "wizard.push_fake_general_wcbq"
+  ],
+  "gap": "Keep/Use on the password and the WCBQ row are asserted. Unasserted: the 00:00 suppression, the _wizardOpen suppression, Use applying the NaviCore id/controller and marking the other boards unsaved, the \"loaded file\" source label.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake WCB2 with MAC 00/00 and assert no modal; pull one with CONTROLLER,ON,15 and click Use: assert controller navicore, id 15, and b1-unsaved-badge visible."
+ },
+ {
+  "id": "general.dirty_flag",
+  "area": "general",
+  "behaviour": "Any General edit sets generalSettingsDirty and turns Push All amber; a first pull or file load does not (mirrored); Push All clears it.",
+  "where": "Wizard/app.js:1215-1237, 3532-3539, 9439-9441",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_pull_leaves_nothing_pending",
+   "wizard.push_fake_all_staged"
+  ],
+  "gap": "The pull and the clear are asserted; a user edit setting the flag and the amber class is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Edit g-password: assert generalSettingsDirty and #btn-push-all.btn-pending."
+ },
+ {
+  "id": "general.peerslive_badge",
+  "area": "general",
+  "behaviour": "A pulled PEERSLIVE value shows the \"mesh: N live peers\" badge next to the quantity; absent, the badge hides.",
+  "where": "Wizard/app.js:9154-9164; Wizard/parser.js:532-537",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a fake board with PEERSLIVE,3: assert #g-peerslive text and display; pull one without and assert it hides."
+ },
+ {
+  "id": "grid.reconcile",
+  "area": "grid",
+  "behaviour": "The board grid is the WCBQ floor plus mesh-discovered numbers plus live connections, minus relay slots, in ascending order; a section with a live or mid-flash connection is never evicted.",
+  "where": "Wizard/app.js:478-527",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_mesh_tick",
+   "wizard.app_fake_relay_card",
+   "wizard.pull_fake_usb_guards"
+  ],
+  "gap": "Sections for discovered boards and the relay exclusion are asserted; the never-evict rule for a live/flashing board when the floor shrinks, and DOM ordering, are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull fake WCB5 (wcbq 5), set g-wcbq to 2: assert section-board-5 stays and its config survives; set _boardFlashing[5] with the connection closed and assert the same."
+ },
+ {
+  "id": "grid.jump_nav",
+  "area": "grid",
+  "behaviour": "The WCB jump nav shows one button per rendered board (alias in the caption), scrolls to its section, and highlights the section most in view.",
+  "where": "Wizard/app.js:410-476, 2218-2241",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Render three boards with aliases: assert #wcb-nav buttons and captions; click one and assert scrollY moved."
+ },
+ {
+  "id": "grid.add_section",
+  "area": "grid",
+  "behaviour": "A new section keeps a config that already exists for the slot, renders it, applies Advanced mode and reflects a live connection.",
+  "where": "Wizard/app.js:652-691",
+  "status": "partial",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards",
+   "wizard.app_fake_mesh_tick"
+  ],
+  "gap": "Config preservation on migration is implied by (d); rendering an existing disconnected config and the connected-state reflection are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Set boardConfigs[7] with a label before addDiscoveredBoards([7]): assert #b7-s1-label shows it."
+ },
+ {
+  "id": "grid.slot_type",
+  "area": "grid",
+  "behaviour": "A slot flipped to WCB_Client hides the WCB body, shows the client pane and alias (24 chars), keeps the WCB config, is never pushed and exports as ?CLIENT.",
+  "where": "Wizard/app.js:2243-2282; Wizard/parser.js:502-507, 1754-1758",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_identity",
+   "wizard.app_fake_system_file"
+  ],
+  "gap": "Specs set cfg.type directly; the radio handler onSlotTypeChange, onClientAliasChange and the flip-back restoring the WCB card are not driven.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click the client radio on a pulled card, type an alias, flip back: assert the body returns with the pulled values intact."
+ },
+ {
+  "id": "identity.wcb_number",
+  "area": "identity",
+  "behaviour": "The WCB# dropdown offers up to max(quantity, own number); a pick writes wcbNumber and the push sends ?WCB,n with a reboot.",
+  "where": "Wizard/app.js:2171-2181, 3290-3300",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_identity",
+   "wizard.app_fake_wcb_number_above_floor"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "identity.alias",
+  "area": "identity",
+  "behaviour": "The alias is cut at 24 and ^ , ; ? CR LF and the live delimiter become _; the header suffix and nav caption follow it; the push sends ?ALIAS / ?ALIAS,CLEAR.",
+  "where": "Wizard/app.js:2186-2241; Wizard/parser.js:1328-1337",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_identity",
+   "wizard.push_fake_card_edits"
+  ],
+  "gap": "Cleaning and the push are asserted; replacing a non-default live delimiter and the header/nav text are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Set g-delimiter to | then type a|b: assert a_b and #b1-alias-label \"(a_b)\"."
+ },
+ {
+  "id": "identity.hw_version",
+  "area": "identity",
+  "behaviour": "The HW select shows the LED pin group for 3.1/3.2, marks the board unsaved only on a user change (never on load), and the builder never pushes HW,0.",
+  "where": "Wizard/app.js:2286-2310; Wizard/parser.js:1312-1314",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_identity",
+   "wizard.push_fake_reboot_path"
+  ],
+  "gap": "LED group and the no-pending load are asserted; that a board with HW 0 pushes no ?HW line is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board with HW,0, edit a label: assert the push carries only ?LABEL."
+ },
+ {
+  "id": "identity.led_pin",
+  "area": "identity",
+  "behaviour": "The LED pin takes a preset or a custom 0-48 (out of range ignored) and is pushed only for 3.1/3.2 when it differs from the baseline.",
+  "where": "Wizard/app.js:2312-2331; Wizard/parser.js:1316-1323",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_identity",
+   "wizard.push_fake_one_edit"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "identity.sw_version",
+  "area": "identity",
+  "behaviour": "The firmware version comes from the boot banner sniff or ?version after a pull, and shows up to date / update / dev / mismatch against GitHub.",
+  "where": "Wizard/app.js:249-307, 5913-5917, 7583-7597",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_fw_check"
+  ],
+  "gap": "Display states are asserted; fetchBoardVersion (?version, \"End of Version\" sentinel) and the boot-banner sniff setting fwVersion are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Give the fake a ?version reply and pull: assert #b1-sw-version; feed a \"Software Version:\" line and assert the same."
+ },
+ {
+  "id": "identity.identify",
+  "area": "identity",
+  "behaviour": "Identify sends ?IDENTIFY directly, or wrapped in a one-chunk MGMT FRAG through the relay, with a toast.",
+  "where": "Wizard/app.js:10200-10232",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted (the bench camera could see the blink but no spec sends it).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click #b1-btn-identify on a fake USB board and a relayed board: assert the sends."
+ },
+ {
+  "id": "serial.table_baud_options",
+  "area": "serial",
+  "behaviour": "S3-S5 offer bauds up to 57600 but always include the configured value (marked (!)); every port shows baud, in/out broadcast toggles and a 30-char label.",
+  "where": "Wizard/app.js:790-826",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_noop",
+   "wizard.pull"
+  ],
+  "gap": "Pulled values are shown and a no-op push sends nothing for the fixtures used; a pulled S3 at 115200 (the (!) option) is never pulled, so the blank-select fallback is unproven.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board with BAUD,S4,115200: assert the select value 115200 with the (!) option and a no-op push sends nothing."
+ },
+ {
+  "id": "serial.sync_rules",
+  "area": "serial",
+  "behaviour": "syncSerialUIToConfig keeps the configured baud when the select is blank and reads broadcast toggles only for unclaimed or soft-claimed ports.",
+  "where": "Wizard/app.js:3267-3287",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_serial_claims",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "serial.claim_ui",
+  "area": "serial",
+  "behaviour": "Each claim type locks or frees the row's controls with its note (Kyber, Marcduino, Maestro, PWM, MP3, HCR, DFP, WLED, kyber-reserved soft, serial-map soft with destinations).",
+  "where": "Wizard/app.js:828-923",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_serial_claims"
+  ],
+  "gap": "Only the MP3 claim's unchecked boxes are asserted; the note texts, lock states and the two soft claims are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a fixture with Maestro, PWM, serial map and Kyber remote: assert each row's claim note, disabled flags and that soft-claim rows stay editable."
+ },
+ {
+  "id": "serial.label_combobox",
+  "area": "serial",
+  "behaviour": "Port label inputs get a type-to-filter device-name popup (device-labels.js) with arrow/Enter/Escape; a pick fires the same change path as typing.",
+  "where": "Wizard/app.js:693-787; Wizard/device-labels.js",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Focus #b1-s1-label, type \"mae\", press ArrowDown+Enter: assert the value Maestro and boardConfigs label updated."
+ },
+ {
+  "id": "wifi.ui",
+  "area": "wifi",
+  "behaviour": "The per-board WiFi radios reveal AP/Join fields, show the mesh-channel note, store mode and credentials, and mark the board unsaved.",
+  "where": "Wizard/app.js:932-976, 3341-3351",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_one_edit"
+  ],
+  "gap": "Only a join-passphrase edit on a pulled JOIN board is asserted; the mode radios, AP fields, note text and the Off transition are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board, click Host AP, type SSID/pass: assert the fields show, the note names the channel and the push sends one ?WIFI,AP line."
+ },
+ {
+  "id": "wifi.parser",
+  "area": "wifi",
+  "behaviour": "WIFI JOIN (comma passphrase), AP and OFF parse and round-trip; one line is sent only on a change and needs a reboot.",
+  "where": "Wizard/parser.js:648-672, 1484-1503",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[model.test.js: WiFi]",
+   "wizard.push_fake_reboot_matchers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "kyber.mode_radio",
+  "area": "kyber",
+  "behaviour": "The Kyber radio clears auto labels/claims; Local claims the port with label Kyber Maestro and the Marcduino port at 9600 with broadcasts on; wraps show for Local; the board is marked unsaved.",
+  "where": "Wizard/app.js:978-1044",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_controller",
+   "wizard.app_fake_setup_wizard"
+  ],
+  "gap": "Roles are set through the controller stash and the setup wizard, never through the radio handler itself.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board, click the Local radio: assert S2 label Kyber Maestro, claim kyber, wraps visible, and the push sends ?KYBER,LOCAL,S2 after the port rows."
+ },
+ {
+  "id": "kyber.port_dropdown",
+  "area": "kyber",
+  "behaviour": "The Kyber port select offers S1/S2 only, hides a port claimed by anything but Kyber or kyber-reserved, keeps the current port, shows a legacy S3-S5 port disabled, and says when both are taken.",
+  "where": "Wizard/app.js:1107-1148",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull Kyber local S2 with a Maestro on S1: assert only S2 offered; pull KYBER,LOCAL,S4 and assert the disabled option; claim both and assert the both-in-use option."
+ },
+ {
+  "id": "kyber.baud",
+  "area": "kyber",
+  "behaviour": "A Kyber baud change mirrors into the Kyber port's serial baud so the push carries ?BAUD,S<port>.",
+  "where": "Wizard/app.js:1092-1105, 2333-2353",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull Kyber local S2 at 115200, set b1-kyber-baud 57600: assert the push sends ?BAUD,S2,57600."
+ },
+ {
+  "id": "kyber.marc_port",
+  "area": "kyber",
+  "behaviour": "Moving the Marcduino port relabels (no ?KYBER line), sets 9600 and broadcasts on, and the dropdown excludes the Kyber port.",
+  "where": "Wizard/app.js:1150-1213",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_card_edits"
+  ],
+  "gap": "The relabel is asserted; the 9600/broadcast-on write for the new port and the dropdown exclusion are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull Kyber local S2 with S4 at 57600 bcast off, pick marc port 4: assert ?BAUD,S4,9600 and BCAST ON lines in the push."
+ },
+ {
+  "id": "kyber.targets_auto",
+  "area": "kyber",
+  "behaviour": "A local Kyber's targets are every connected board's Maestros plus remembered targets of unconnected boards; remote boards are left alone.",
+  "where": "Wizard/app.js:10109-10142",
+  "status": "tested",
+  "tested_by": [
+   "wizard.kyber_auto_targets"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "kyber.targets_info",
+  "area": "kyber",
+  "behaviour": "The Kyber Targets panel lists every board's Maestros (id, WCB, port, baud) or says none are configured.",
+  "where": "Wizard/app.js:10088-10105",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull two fake boards with Maestros: assert #b1-kyber-targets-info names both."
+ },
+ {
+  "id": "kyber.release_order",
+  "area": "kyber",
+  "behaviour": "Leaving or moving a local Kyber sends the release ahead of the port rows and re-sends them; a targets-only diff on a remote board sends no release; REMOTE->local releases S1 before a device on it.",
+  "where": "Wizard/parser.js:1408-1446, 1632-1643",
+  "status": "tested",
+  "tested_by": [
+   "wizard.kyber_release_order",
+   "wizard.kyber_local_frees_other_port"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "kyber.repush_warning",
+  "area": "kyber",
+  "behaviour": "A Maestro edit on another board reminds the user to re-push the Kyber-local board (once per 30 s).",
+  "where": "Wizard/app.js:10068-10078, 3772-3776",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a Kyber-local WCB1 and WCB2; add a Maestro on WCB2 and assert the re-push toast names WCB 1."
+ },
+ {
+  "id": "navicore.remote_radio",
+  "area": "navicore",
+  "behaviour": "Under the NaviCore controller the per-board None/Remote radio drives kyber.mode through the canonical radio, the status text names the id, and only the active controller's section shows.",
+  "where": "Wizard/app.js:2355-2421",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not driven by any spec.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Select navicore, click b1 Remote: assert boardConfigs[1].kyber.mode remote, status text, and the push sends ?MAESTRO,REMOTE."
+ },
+ {
+  "id": "navicore.reconcile_maestros",
+  "area": "navicore",
+  "behaviour": "Removing a board's last Maestro drops it out of remote; adding one under NaviCore sets remote.",
+  "where": "Wizard/app.js:2427-2436, 3761-3767",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Under navicore add a Maestro row with a port: assert kyber.mode remote; remove it and assert none."
+ },
+ {
+  "id": "audio.toggle_and_mode",
+  "area": "audio",
+  "behaviour": "Each audio device (MP3, HCR, DFP) has an enable box that shows its block and defaults to Local; Local claims a port, Remote picks a host, off clears the host and (on a delta) the route.",
+  "where": "Wizard/app.js:2438-2459, 2462-2507, 2634-2682, 2851-2897",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_one_edit",
+   "wizard.push_fake_card_edits",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "Only volume/poll edits on an already-enabled device are driven; enabling, disabling (-> CLEAR, REMOTE,OFF) and switching to Remote through the UI are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a fake board, check b1-hcr-enable, pick S4: assert the push sends ?HCR,PORT,S4:9600 and ?HCR,POLL; uncheck and assert ?HCR,CLEAR; pick Remote host 2 and assert ?HCR,REMOTE,W2."
+ },
+ {
+  "id": "audio.port_dropdowns",
+  "area": "audio",
+  "behaviour": "Device port selects offer only unclaimed ports or the device's own; a port change refreshes every other picker; MP3/HCR bauds above 57600 hide on S3-S5 and clamp.",
+  "where": "Wizard/app.js:2509-2555, 2581-2600, 2684-2753, 2785-2826, 2899-2930",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a board with a Maestro on S1: assert S1 absent from b1-mp3-port; set HCR port 4 with baud 115200 and assert the clamp to 57600 on both the HCR and S4 selects."
+ },
+ {
+  "id": "audio.clamps",
+  "area": "audio",
+  "behaviour": "MP3 volume clamps to 0-64, DFP volume to 0-30, HCR poll to 0 or 3-3600 (reflected in the input), both on edit and again at push time.",
+  "where": "Wizard/app.js:2564-2572, 2602-2628, 2717-2725, 2939-2950, 2952-2974",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Type 99 into b1-mp3-vol and 1 into b1-hcr-poll: assert config 64 and 3 and the push lines carry them."
+ },
+ {
+  "id": "audio.route_host_dropdown",
+  "area": "audio",
+  "behaviour": "The Remote host select lists the mesh's WCB numbers minus this board and never defaults to the board's own number.",
+  "where": "Wizard/app.js:2830-2849",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "On WCB2 pick MP3 Remote: assert option 2 absent and the value is the first other board."
+ },
+ {
+  "id": "audio.parser",
+  "area": "audio",
+  "behaviour": "MP3/DFP/HCR host, ONERR, REMOTE route and CLEAR parse as separate axes and the push sends only the changed device.",
+  "where": "Wizard/parser.js:714-795, 1505-1554",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[devices.test.js: MP3 / DFP / HCR]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "audio.hcr_status_button",
+  "area": "audio",
+  "behaviour": "The HCR Status button shows only when HCR is enabled on the board and is enabled only when the board is reachable.",
+  "where": "Wizard/app.js:13082-13091",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted (the modal is; the button is not).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a board with HCR,PORT and one without: assert #b1-btn-hcr-status display per board."
+ },
+ {
+  "id": "wled.rows",
+  "area": "wled",
+  "behaviour": "Add picks the lowest free id (local and remote ids excluded, 1-8 offered), the port select offers unclaimed-or-mine ports, bauds cap on S3-S5, Remove renumbers.",
+  "where": "Wizard/app.js:2985-3073, 3104-3115",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_one_edit"
+  ],
+  "gap": "Add/edit/remove through the row is asserted for the push; the free-id default, the port filtering and the baud cap are not. Note appendWLEDRow caps S3-S5 at 57600 while onWLEDPortChange caps at 9600.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull WLED 1 local and WLED 2 remote: addWLEDRow and assert id 3; pick port 4 and assert the baud options end at 9600 (and decide which cap is right)."
+ },
+ {
+  "id": "wled.sync_reserve",
+  "area": "wled",
+  "behaviour": "A WLED row reserves its port (label WLED <id>, broadcasts off, baud) only when the table differs from the baseline; a released port goes back to the baseline or loses only its auto label.",
+  "where": "Wizard/app.js:3141-3208",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_one_edit",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "wled.remote_rows",
+  "area": "wled",
+  "behaviour": "A WLED hosted on another board shows as a read-only dim row with a lock, is never pushed, and is offered as a live-control target.",
+  "where": "Wizard/app.js:3087-3102, 3212-3227",
+  "status": "partial",
+  "tested_by": [
+   "wizard.parser[devices.test.js: WLED]"
+  ],
+  "gap": "The parser side (never pushed) is asserted; the read-only row and the target list including remote ids are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull WLED,2:W2S0:115200: assert a data-remote row with no selects and #b1-wled-target offers 2."
+ },
+ {
+  "id": "wled.live_controls",
+  "area": "wled",
+  "behaviour": "On/Off/Toggle/Preset/Brightness send ;L<id>,<verb> directly or through the relay; a preset under 1 is refused; brightness clamps to 0-255.",
+  "where": "Wizard/app.js:3231-3265",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_live_controls"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "maestro.rows",
+  "area": "maestro",
+  "behaviour": "Add gives id 1 at 115200, the port select offers free ports or ones held only by a stray Maestro claim (kyber-reserved allowed), bauds cap at 57600 on S3-S5, Remove renumbers and reconciles remote mode.",
+  "where": "Wizard/app.js:3611-3724, 3851-3861",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_fake_one_edit"
+  ],
+  "gap": "Add/edit/remove are driven for the push; the port filtering (HCR/WLED/Kyber/other-row ports hidden, S1 kept under kyber-reserved) and the baud cap are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull a board with HCR on S4 and Maestro REMOTE: addMaestroRow and assert S4 absent, S1 present; pick S3 and assert the baud list ends at 57600."
+ },
+ {
+  "id": "maestro.sync_labels_baud",
+  "area": "maestro",
+  "behaviour": "A Maestro new on its port gets label Maestro <id> unless the port has a custom label; a port follows its row's baud only when the table changed; released ports go back to the baseline.",
+  "where": "Wizard/app.js:3782-3849",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_one_edit",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "maestro.routing_table",
+  "area": "maestro",
+  "behaviour": "Any Maestro edit rebuilds every board's maestroTable (and a local Kyber's targets), flags boards whose table changed unsaved and toasts how many need a re-push.",
+  "where": "Wizard/app.js:3733-3780",
+  "status": "partial",
+  "tested_by": [
+   "wizard.parser[roundtrip.test.js: W-4]"
+  ],
+  "gap": "The builder treating the same table as no change is asserted; the propagation, the unsaved badges on other boards and the toast are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull WCB1 and WCB2, add a Maestro on WCB2: assert boardConfigs[1].maestroTable holds it, b1-unsaved-badge visible, and WCB1's push sends the full ?MAESTRO table."
+ },
+ {
+  "id": "maestro.parser",
+  "area": "maestro",
+  "behaviour": "Maestro slots key on (id, port); the same id on another board is a Kyber target; a push sends targeted CLEARs for moved slots or CLEAR,ALL.",
+  "where": "Wizard/parser.js:843-886, 1591-1630",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[devices.test.js: Maestro]",
+   "wizard.parser[parser.test.js: Maestros]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "mapping.rows",
+  "area": "mapping",
+  "behaviour": "Add Mapping builds a card; the type switch hides Raw/Bidir for PWM and rebuilds destination ports (S0 only for Serial); the source list offers unclaimed, PWM or serial-map ports; destination WCBs span the floor, discovered boards and the configured value.",
+  "where": "Wizard/app.js:3877-3978, 4243-4294",
+  "status": "partial",
+  "tested_by": [
+   "wizard.editors_fake_mappings",
+   "wizard.mapping_bidir_relay"
+  ],
+  "gap": "Rows are built through the controls for Serial and PWM; the S0 option rule, the type switch rebuilding destinations, and the destination list covering a WCB above the floor are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Pull MAP,SERIAL,S2,W9S3 with wcbq 2: assert the dest select holds WCB 9 and the config keeps it; switch the type to PWM and assert S0 vanishes."
+ },
+ {
+  "id": "mapping.sync",
+  "area": "mapping",
+  "behaviour": "syncMappingsToConfig rebuilds config.mappings from the rows (claiming PWM sources), keeps pwmOutputPorts, and a touched-but-unchanged row is not a change.",
+  "where": "Wizard/app.js:3992-4034; Wizard/parser.js:1871-1878",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_bidir",
+   "wizard.parser[roundtrip.test.js: W-5]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "mapping.save",
+  "area": "mapping",
+  "behaviour": "Save sends the ?MAP line at once (direct or FRAG), moves the baseline, pulls the board (2 s, 9 s after a PWM), pulls remote PWM destination boards, and clears a remote PWM output that was dropped.",
+  "where": "Wizard/app.js:4296-4425",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_mappings",
+   "wizard.app_fake_partial_ack",
+   "wizard.mapping_bidir_relay"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "mapping.bidir",
+  "area": "mapping",
+  "behaviour": "Bidir mirrors a reverse row on the destination board, pushes the reverse (direct or relay), is re-detected after a pull, and Remove clears the mirror too.",
+  "where": "Wizard/app.js:4091-4241, 4427-4487",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_mappings",
+   "wizard.editors_fake_bidir_remove",
+   "wizard.mapping_bidir_relay"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "mapping.remove",
+  "area": "mapping",
+  "behaviour": "Remove sends ?MAP,<type>,CLEAR,S<src>; with the board unreachable it is removed locally only and no push clears it.",
+  "where": "Wizard/app.js:4036-4088",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_mappings"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "mapping.ghost_rows",
+  "area": "mapping",
+  "behaviour": "Ports a remote board drives as PWM outputs show as locked ghost rows naming the source once that board is loaded.",
+  "where": "Wizard/app.js:4494-4587",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull WCB2 with MAP,PWM,OUT,S5 then WCB1 with MAP,PWM,S1,W2S5: assert WCB2's ghost row names W1 S1."
+ },
+ {
+  "id": "mapping.parser",
+  "area": "mapping",
+  "behaviour": "Serial (raw, local and W<n>S<n> destinations), PWM inputs and PWM output ports parse, round-trip last in the chain; a removed mapping builds nothing.",
+  "where": "Wizard/parser.js:951-1054, 1680-1705",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[model.test.js: mappings]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "seq.textarea_conv",
+  "area": "seq",
+  "behaviour": "Lines convert to a delimiter chain and back (inline and own-line *** comments, IF groups with ;t) and an untouched row gives its stored value back exactly.",
+  "where": "Wizard/app.js:4602-4689, 5033-5052",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_seq_roundtrip"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "seq.validate_if",
+  "area": "seq",
+  "behaviour": "A sequence with IF embedded in a ;t or ;w payload is refused on Test and Save with an explanatory toast.",
+  "where": "Wizard/app.js:4619-4626, 4886-4890, 4933-4934",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Type \";t500,IF,x=1\" into a row, click SAVE/UPDATE: assert nothing is sent and the toast names IF."
+ },
+ {
+  "id": "seq.editor_actions",
+  "area": "seq",
+  "behaviour": "Save, rename (CLEAR old key first), Test local (,L) or mesh-wide, and Remove send their commands at once and patch config and baseline.",
+  "where": "Wizard/app.js:4773-4817, 4880-5031",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_seq_var",
+   "wizard.seq_var_editors"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "seq.relay_chunking",
+  "area": "seq",
+  "behaviour": "A remote save over 198 characters goes as a FRAG session of 179-char chunks; over 16 chunks it is refused.",
+  "where": "Wizard/app.js:4968-5002",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_seq_var",
+   "wizard.seq_var_editors"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "seq.shared_indicator",
+  "area": "seq",
+  "behaviour": "A key that also exists on other boards shows an \"also on Wx\" hint, refreshed on key edits and loads.",
+  "where": "Wizard/app.js:4833-4878",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull two fake boards with SEQ,SAVE,hello: assert the hint under each key names the other."
+ },
+ {
+  "id": "seq.buttons_counts",
+  "area": "seq",
+  "behaviour": "TEST/SAVE are enabled only for a connected or relayed board; key/value character counts track the inputs.",
+  "where": "Wizard/app.js:4691-4713, 4819-4831",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Disconnect the fake board: assert the row buttons disabled; type in the key and assert the n/15 counter."
+ },
+ {
+  "id": "seq.parser",
+  "area": "seq",
+  "behaviour": "Sequence values keep commas and ^ chains; the push sends only changed keys and SEQ,CLEAR for removed ones.",
+  "where": "Wizard/parser.js:911-923, 1661-1678",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[devices.test.js: sequences]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "var.persistent_editor",
+  "area": "var",
+  "behaviour": "Persistent variables: save/rename/remove send VAR,SET / VAR,CLEAR at once (direct or relay); a bad name or non-integer is refused.",
+  "where": "Wizard/app.js:5172-5296",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_seq_var",
+   "wizard.seq_var_editors"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "var.temporary_rows",
+  "area": "var",
+  "behaviour": "A temporary row sets ;V,name,value (never config); CLEAR/REMOVE on it sends VAR,CLEAR.",
+  "where": "Wizard/app.js:5092-5170",
+  "status": "partial",
+  "tested_by": [
+   "wizard.editors_fake_seq_var"
+  ],
+  "gap": "The ;V set is asserted; clearVariableRow (the row's CLEAR) is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Set a temp var, click its REMOVE: assert ?VAR,CLEAR,<name> sent and no config change."
+ },
+ {
+  "id": "var.refresh_list",
+  "area": "var",
+  "behaviour": "Refresh sends ?VAR,LIST (direct, or via relay reading [TERM:n] lines), parses the firmware's lines, refreshes editable rows and their baseline, and adds read-only/temporary rows.",
+  "where": "Wizard/app.js:5307-5432",
+  "status": "partial",
+  "tested_by": [
+   "wizard.editors_fake_seq_var",
+   "wizard.seq_var_editors"
+  ],
+  "gap": "The relay path and the parser are asserted; the direct collect, refreshing an existing editable row's value and baseline, and the \"not in config\" read-only row are only partly covered.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "On a fake USB board reply to ?VAR,LIST with a changed value for an existing row: assert the input and boardBaselines value both update."
+ },
+ {
+  "id": "var.push_export_guard",
+  "area": "var",
+  "behaviour": "A row with an invalid name aborts the push, the remote push and the export (so the diff cannot send a destructive VAR,CLEAR); temporary rows are left out of the config.",
+  "where": "Wizard/app.js:5449-5465, 8108-8118, 8532-8538, 9543-9549",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "The toast on a bad name is asserted for updateVariable only; nothing asserts that boardGo/boardGoRemote/exportSystemFile stop and send nothing with such a row present.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Pull a board with VAR,SET,a,1, add a row named \"bad name\", push: assert nothing sent and the outcome reason; export and assert no download; add a temp row and assert the push carries no VAR,SET for it."
+ },
+ {
+  "id": "var.parser",
+  "area": "var",
+  "behaviour": "Variables parse as ints (TRUE/FALSE accepted), names case-sensitive, per-name diff with VAR,CLEAR for removed ones.",
+  "where": "Wizard/parser.js:926-948, 1574-1589",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[devices.test.js: variables]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "connect.modal_and_button",
+  "area": "connect",
+  "behaviour": "Connect opens the modal (Auto-Detect, manual picker, Authorize, Remote via each connected board, Share port); the same button disconnects a connected board or un-manages a relayed one.",
+  "where": "Wizard/app.js:6390-6524, 6788-6792",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "No spec opens #connect-modal; boardConnect's three branches are not driven.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Click #b2-btn-connect with a fake WCB1 connected: assert the modal lists \"Remote via WCB 1\" and Share; click Remote and assert setRemoteConnected + a pull."
+ },
+ {
+  "id": "connect.manual_picker",
+  "area": "connect",
+  "behaviour": "The port picker lists granted ports with vendor labels and in-use badges, offers per-row Detect (boot signature within 20 s), + Authorize and Select by COM#, and a pick connects then pulls after 3 s.",
+  "where": "Wizard/app.js:6858-7125",
+  "status": "partial",
+  "tested_by": [
+   "wizard.pull",
+   "wizard.push_label",
+   "wizard.terminal_wire"
+  ],
+  "gap": "The bench connects by clicking a picker row (real path); the in-use badge, per-row Detect, Authorize, COM# and cancel are not asserted.",
+  "testable": "attended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "With a fake navigator.serial.getPorts: assert the rows, labels and in-use badge; Detect needs a real reset press (attended)."
+ },
+ {
+  "id": "connect.auto_detect",
+  "area": "connect",
+  "behaviour": "Auto-Detect: with no grant it asks once and connects every granted board direct (reporting busy ports); otherwise it opens every free port and connects the one that resets, with a 45 s timeout and cancel.",
+  "where": "Wizard/app.js:7128-7277",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "attended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Fake navigator.serial with two ports whose readable streams the test feeds: assert the first-time bulk connect, then a reset burst selecting the right slot."
+ },
+ {
+  "id": "connect.establish_autoshare",
+  "area": "connect",
+  "behaviour": "The first board of a page becomes the shared port unless another tab leads the hub or bulk auto-detect opted out; a share that never opens falls back to direct; an open failure joins another tab's share only when the port is unambiguous, and rolls back on a VID/PID mismatch.",
+  "where": "Wizard/app.js:6195-6297",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_reboot_path",
+   "wizard.push_reboot_path_direct"
+  ],
+  "gap": "Only \"first board is shared\" and the allowShare=false direct path are asserted on the bench; the open-failure join, the single-grant/wasSharedHere gates, the mismatch rollback and the parallel-connect claim are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Fake a port whose open() throws \"already open\" while a stub holds the hub lock: assert the join only with one granted port or wcbSharedSlot set, and the rollback toast when the leader's VID/PID differs."
+ },
+ {
+  "id": "connect.disconnect",
+  "area": "connect",
+  "behaviour": "Disconnect stops the managed boards' terminals (RTERM,STOP), leaves a shared hub without closing the port, clears the shared-slot marker, drops a relay card and frees its slot.",
+  "where": "Wizard/app.js:6800-6824",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_relay_card",
+   "wizard.relay_terminal"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "connect.port_loss_reconnect",
+  "area": "connect",
+  "behaviour": "When the read loop ends unexpectedly the Wizard reconnects (10 x 1.5 s), re-arms the boards the relay managed, auto-pulls after 3 s outside the wizard, and frees a relay card it could not recover.",
+  "where": "Wizard/app.js:6085-6137",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Only the managed reboot path (_rebootManaged) is exercised; an unplug or spontaneous reset is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Give the fake a readable stream and close it: assert clearRemoteBoardsForRelay then relayManageOne for each managed board, the reconnect call and the 3 s pull; make reconnect fail and assert the relay card is removed."
+ },
+ {
+  "id": "connect.reconnect_platforms",
+  "area": "connect",
+  "behaviour": "reconnect() closes (retrying on Windows), reopens pulsing DTR, uses a USB connect event or a fresh getPorts handle matching the VID and not another board's port, and can skip the fresh-handle search.",
+  "where": "Wizard/app.js:5549-5729",
+  "status": "partial",
+  "tested_by": [
+   "wizard.push_reboot_path_direct"
+  ],
+  "gap": "The bench proves a direct board comes back on this Mac; the fresh-handle selection (skip other boards' ports), skipFreshPortSearch and the Windows branches are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Fake getPorts returning a stale and a fresh port of the same VID plus another board's port: assert the fresh one is opened and the other board's is never touched."
+ },
+ {
+  "id": "connect.wait_board_ready",
+  "area": "connect",
+  "behaviour": "waitForBoardReady keeps one listener, probes WCB_WEBTOOL_CONFIG_PULL and <fc>backup every 10 s, resolves on End of Backup and gives up at 150 s.",
+  "where": "Wizard/app.js:7290-7358",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted (the flash/erase/OTA paths that use it are not driven).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Fake a board answering only on the third probe: assert the probe cadence and resolve true; answer never and assert false after the timeout (shortened)."
+ },
+ {
+  "id": "connect.send_collect_idle",
+  "area": "connect",
+  "behaviour": "send() serialises writers; sendAndCollect resolves on the sentinel or timeout; sendAndAwaitIdle resolves after 250 ms of quiet with ok=false when nothing answered within the hard cap.",
+  "where": "Wizard/app.js:5758-5845",
+  "status": "partial",
+  "tested_by": [
+   "wizard.remote_pull_fake_edges"
+  ],
+  "gap": "The fakes replace these methods, so the quiet-window and hard-timeout semantics of sendAndAwaitIdle and the sentinel rule of sendAndCollect are never asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "On a BoardConnection with a stub writable/readable: feed one line then silence and assert ok true after ~250 ms; feed nothing and assert ok false at the cap."
+ },
+ {
+  "id": "connect.line_handling",
+  "area": "connect",
+  "behaviour": "_handleLine isolates listeners, drops rc_hb/rc_ch noise, sniffs the boot banner characters and version into the General DOM, routes [TERM:n] to the managed slot and summarises config replies.",
+  "where": "Wizard/app.js:5853-5967",
+  "status": "partial",
+  "tested_by": [
+   "wizard.remote_pull_fake_display",
+   "wizard.app_fake_terminal"
+  ],
+  "gap": "Listener isolation, [TERM:n] routing and summaries are asserted; the boot-banner sniffer (funcChar/delimiter/cmdChar/version -> boardBootChars and the General inputs) is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Feed \"Local Function Identifier: !\" and \"Software Version: 6.2.1\": assert boardBootChars[1], #g-funcchar and #b1-sw-version."
+ },
+ {
+  "id": "hub.protocol",
+  "area": "hub",
+  "behaviour": "serial-hub.js: conditional campaign, leader opens the port with retries, followers relay bytes over BroadcastChannel, failover adopts an unambiguous granted port, a dead port steps down with backoff, leave/releasePortKeepOpen.",
+  "where": "Wizard/serial-hub.js:128-434",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Nothing in this slice drives Wizard/serial-hub.js: nctool.shared_hub_two_pages runs NaviCore's copy and nctool.static only checks protocol parity (both out of slice).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Two pages on one origin with a fake SerialPort: assert the second follows, its send reaches the leader's writer, and closing the leader promotes it; a port whose open() always fails must release the lock."
+ },
+ {
+  "id": "hub.shared_connection",
+  "area": "hub",
+  "behaviour": "A shared BoardConnection reports connected from hub.portOpen, decodes hub bytes through the same splitter, and can become direct (borrow) or shared again (becomeShared, remembering wcbSharedSlot).",
+  "where": "Wizard/app.js:5977-6052",
+  "status": "partial",
+  "tested_by": [
+   "wizard.remote_pull_fake_reader",
+   "wizard.app_fake_hub_flash_refused"
+  ],
+  "gap": "The hub data path is asserted; the state handler driving the card, becomeDirect and becomeShared are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Emit a hub state {portOpen:false}: assert the card shows Not Connected; call becomeShared on a direct fake and assert the hub adopted its port and localStorage wcbSharedSlot."
+ },
+ {
+  "id": "hub.share_rebuild",
+  "area": "hub",
+  "behaviour": "sharedConnect tears down any prior share (and a shared relay's card), rebuilds the hub, and modalSharedConnect tears the slot down again if no tab opens the port.",
+  "where": "Wizard/app.js:6304-6388",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "With a stub hub whose portOpen stays false, run modalSharedConnect: assert boardConnections[n] deleted and the warning toast."
+ },
+ {
+  "id": "hub.flash_borrow",
+  "area": "hub",
+  "behaviour": "Flash/erase on the shared port is refused while this tab follows or another tab waits on the lock; otherwise the port is borrowed open, the op runs direct, and the port is re-shared afterwards.",
+  "where": "Wizard/app.js:7698-7721, 7603-7625",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_hub_flash_refused"
+  ],
+  "gap": "Both refusals are asserted; the successful borrow (releasePortKeepOpen + becomeDirect) and _reshareAfterFlash are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Stub flashFirmware and hub.releasePortKeepOpen: assert becomeDirect ran, then after reconnect that becomeShared was called."
+ },
+ {
+  "id": "hub.rc_open_tool",
+  "area": "hub",
+  "behaviour": "Open in Config Tool hands over ?share=1 when this tab leads, promotes a direct board to shared first (unless another tab leads), or opens the plain URL with a hint.",
+  "where": "Wizard/app.js:13280-13339",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Stub window.open and a direct fake board: assert becomeShared was called and the opened URL ends with share=1."
+ },
+ {
+  "id": "pull.bootstrap_fallback",
+  "area": "pull",
+  "behaviour": "A pull sends WCB_WEBTOOL_CONFIG_PULL first and falls back to <funcChar>backup when it gets no End of Backup.",
+  "where": "Wizard/app.js:7394-7409",
+  "status": "tested",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "pull.incomplete_guard",
+  "area": "pull",
+  "behaviour": "A backup without its end marker changes neither config nor baseline, shows Pull Failed and a toast.",
+  "where": "Wizard/app.js:7411-7425",
+  "status": "tested",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "pull.relay_device",
+  "area": "pull",
+  "behaviour": "A ?RELAY,1 device is anchored at its WCB number as a relay card, seeds no General baseline, gets no numbered section, and warns if a live board holds that number.",
+  "where": "Wizard/app.js:7431-7471",
+  "status": "tested",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards",
+   "wizard.app_fake_relay_card"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "pull.general_seed",
+  "area": "pull",
+  "behaviour": "The first pull seeds General from the board (quantity, password, MACs, channel, chars, ETM, controller) with nothing left pending; later pulls compare against it.",
+  "where": "Wizard/app.js:7473-7486, 9144-9213",
+  "status": "tested",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards",
+   "wizard.app_fake_pull_leaves_nothing_pending",
+   "wizard.push_fake_general_fields"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "pull.wcbq_renders_floor",
+  "area": "pull",
+  "behaviour": "A pulled WCB quantity above 1 renders that many board sections.",
+  "where": "Wizard/app.js:7487",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_system_file"
+  ],
+  "gap": "Sections for WCB 1..2 appear in the system-file test as a side effect; no assertion ties the section count to the pulled quantity.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Pull a fake board with WCBQ,4: assert section-board-1..4 exist."
+ },
+ {
+  "id": "pull.slot_migration",
+  "area": "pull",
+  "behaviour": "A board reporting another number moves slot (connection, config, pane); a duplicate number warns; a conflict with a connected slot keeps the board where it landed.",
+  "where": "Wizard/app.js:7489-7560",
+  "status": "partial",
+  "tested_by": [
+   "wizard.pull_fake_usb_guards"
+  ],
+  "gap": "Migration and the duplicate warning are asserted; the \"slot already connected, keeping here\" branch and the terminal pane migration are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Connect fake slots 1 and 3, let slot 1 report WCB 3: assert it stays in slot 1 with the warning toast and slot 3 untouched."
+ },
+ {
+  "id": "pull.success_state",
+  "area": "pull",
+  "behaviour": "A successful pull stores config and baseline, renders the card, shows Connected and a toast, fetches the version, restores the Pull button, and drops overlapping pulls on the same slot.",
+  "where": "Wizard/app.js:7367-7392, 7550-7578",
+  "status": "partial",
+  "tested_by": [
+   "wizard.pull",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "Config/baseline/render are asserted everywhere; the in-flight guard dropping a second pull and the manual-only \"Board not connected\" toast are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Start two boardPull(1) at once on a slow fake: assert one collect; call boardPull(1,{manual:true}) disconnected and assert the toast."
+ },
+ {
+  "id": "pull.remote_delegation",
+  "area": "pull",
+  "behaviour": "Pull on a relayed board delegates to remoteBoardPull; a slot that is its own relay is refused; Retry resets the badge and pulls again.",
+  "where": "Wizard/app.js:7370-7371, 9129-9142",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "Delegation is implied by the ETM listener pulls; the relay===n refusal and boardRetryPull are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Set remoteRelayForBoard[2]=2 and click Pull: assert the toast and no send; call boardRetryPull(2) on a relayed slot and assert a MGMT,PULL."
+ },
+ {
+  "id": "push.sync_general",
+  "area": "push",
+  "behaviour": "Push reads every card back into the config (ports, Maestros, Kyber, devices, WLEDs, sequences, variables, Kyber targets) and the General inputs, then builds a diff against the baseline (full push with none).",
+  "where": "Wizard/app.js:8098-8130",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_noop",
+   "wizard.push_fake_one_edit",
+   "wizard.push_fake_card_edits",
+   "wizard.push_fake_planned_verbs"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.no_changes",
+  "area": "push",
+  "behaviour": "A pulled board pushed with no edit sends nothing and reports \"no changes to push\".",
+  "where": "Wizard/app.js:8132-8138",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_noop",
+   "wizard.push_fake_kyber_own_maestro"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.char_plan",
+  "area": "push",
+  "behaviour": "Character changes are planned from the board's live characters: a refused order sends nothing; otherwise DELIM/CMDCHAR/FUNCCHAR go first behind the old identifier, ACK-paced, and the switch is remembered for immediate commands without moving the baseline.",
+  "where": "Wizard/app.js:7633-7635, 8140-8185",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_delimiter",
+   "wizard.app_fake_pending_funcchar"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.ack_pacing",
+  "area": "push",
+  "behaviour": "Every command waits for the board to answer and go quiet, retries once, and a command still unanswered fails the push (the rest still sent) and triggers a verify pull.",
+  "where": "Wizard/app.js:8198-8222, 8304-8312",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_partial_ack"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.reboot_direct",
+  "area": "push",
+  "behaviour": "A push that needs a reboot waits 1.5 s, sends ?reboot, closes the port, reconnects (15 x 2 s) and pulls 3 s after it reopens.",
+  "where": "Wizard/app.js:8224-8280",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_reboot_path",
+   "wizard.push_reboot_path_direct"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.reboot_shared",
+  "area": "push",
+  "behaviour": "On the shared port the board stays connected through its reboot and is pulled 3 s after its boot banner (30 s after a restart announce, 4 s with none).",
+  "where": "Wizard/app.js:7646-7664, 8241-8252",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_shared_reboot_repull",
+   "wizard.push_reboot_path"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.reboot_deferred",
+  "area": "push",
+  "behaviour": "With skipReboot the config is applied, the baseline not advanced and the reboot left to the caller (Push All).",
+  "where": "Wizard/app.js:8282-8294",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_all_staged",
+   "wizard.push_fake_relay_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "push.verify_after",
+  "area": "push",
+  "behaviour": "A no-reboot push pulls the board 300 ms later instead of advancing the baseline; a remote PWM destination board is pulled 2.5 s later.",
+  "where": "Wizard/app.js:8296-8331",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_partial_ack",
+   "wizard.push_fake_noop"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "push.reboot_matchers",
+  "area": "push",
+  "behaviour": "The reboot and network-group checks read each command's verb (HW, WCB, MAC, WCBCH, WIFI, KYBER, MAESTRO,REMOTE, MAP,PWM input; MAC/EPASS/WCBCH), never a label or sequence substring.",
+  "where": "Wizard/app.js:9255-9305",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_reboot_matchers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "push.not_connected",
+  "area": "push",
+  "behaviour": "A push on a disconnected board is refused with a toast and a recorded outcome.",
+  "where": "Wizard/app.js:7677-7681",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_partial_ack"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "push.progress_and_history",
+  "area": "push",
+  "behaviour": "The push shows a settings progress bar, clears the controller role history, releases the mesh-poll hold on every exit, and restores the button.",
+  "where": "Wizard/app.js:8201-8205, 8217-8219, 8337-8343, 10189-10197",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_mesh_tick"
+  ],
+  "gap": "The mesh-poll hold is asserted; the progress text/bar, the history reset and the button restore are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Push two changes: assert #b1-flash-status reads \"Pushing... 2/2\" then hides; assert controllerRoleHistory cleared."
+ },
+ {
+  "id": "push.post_flash_general_restore",
+  "area": "push",
+  "behaviour": "A push that follows a flash/erase restores the pre-flash General DOM snapshot before building the chain.",
+  "where": "Wizard/app.js:8090-8096, 9215-9253",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted (flash paths are not driven).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Set postFlashGeneralSnapshot[1] with another password, push: assert the chain carries the snapshot's password."
+ },
+ {
+  "id": "rpush.guards",
+  "area": "rpush",
+  "behaviour": "A remote push refuses with a reason when the board has no relay, the relay is disconnected, or it has no config.",
+  "where": "Wizard/app.js:8509-8529",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "None of the three refusals is asserted directly.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Disconnect the fake relay and push the remote board: assert the toast and boardPushOutcome reason."
+ },
+ {
+  "id": "rpush.size_cap",
+  "area": "rpush",
+  "behaviour": "A relay push over 16 chunks is refused before the confirm, the bootstrap or any send.",
+  "where": "Wizard/app.js:8583-8599",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_relay_cap"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpush.network_group_confirm",
+  "area": "rpush",
+  "behaviour": "A MAC, password or channel change to a remote board asks first; Cancel sends nothing; Confirm (or Push All) sends it.",
+  "where": "Wizard/app.js:8601-8613, 9310-9342",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_relay_push",
+   "wizard.push_fake_relay_reboot",
+   "wizard.push_fake_general_fields"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpush.char_bootstrap",
+  "area": "rpush",
+  "behaviour": "Character changes go to the target first, each 3x as its own one-chunk session in its current characters; a refused order sends nothing; a comma target takes ?D^.",
+  "where": "Wizard/app.js:8556-8566, 8615-8646",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_relay_chars",
+   "wizard.push_fake_relay_push"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpush.session",
+  "area": "rpush",
+  "behaviour": "The chain (plus ^?reboot when needed) is framed in 179-char FRAG chunks of one session to the board's WCB number, the baseline then moves to the pushed config and the outcome is recorded.",
+  "where": "Wizard/app.js:8568-8581, 8657-8691",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_relay_push",
+   "wizard.push_fake_relay_reboot",
+   "wizard.push_all_relay"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "pushall.stages",
+  "area": "pushall",
+  "behaviour": "Push All pushes remote boards (reboot embedded), then direct non-relays, then relays without reboot, then reboots the relays last and clears the General dirty flag.",
+  "where": "Wizard/app.js:9345-9442",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_all_staged",
+   "wizard.push_all_relay"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "pushall.shared_relay",
+  "area": "pushall",
+  "behaviour": "A relay on the shared port is rebooted without being reported lost and pulled when it is back.",
+  "where": "Wizard/app.js:9412-9421",
+  "status": "tested",
+  "tested_by": [
+   "wizard.push_fake_all_shared_relay"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "pushall.exclusions",
+  "area": "pushall",
+  "behaviour": "Push All never pushes a MgmtRelay card or a client slot, and says so when no board is connected.",
+  "where": "Wizard/app.js:9350-9362",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_relay_card",
+   "wizard.app_fake_identity",
+   "wizard.push_fake_all_staged"
+  ],
+  "gap": "Relay and client exclusion are asserted; the \"No boards connected\" toast is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Call boardGoAll with nothing connected: assert the toast and no send."
+ },
+ {
+  "id": "remote.manage_ui",
+  "area": "remote",
+  "behaviour": "Managing a board through a relay enables Pull/Push/Identify/Stats, dims Factory Reset and Update FW with a tooltip, disables the flash radios, shows Remote, opens both panes and starts the terminal session 3x.",
+  "where": "Wizard/app.js:6526-6587",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_relay_card",
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "The RTERM,START x3, the badge and panes are asserted; the button enable/dim states and tooltips are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "After setRemoteConnected(2,1): assert b2-btn-go enabled, b2-btn-erase opacity 0.45 and title, b2-btn-update-fw title."
+ },
+ {
+  "id": "remote.unmanage",
+  "area": "remote",
+  "behaviour": "Un-managing sends RTERM,STOP, restores the buttons, removes the ETM listener when the relay has no other boards, and resets the card.",
+  "where": "Wizard/app.js:6600-6633, 6657-6668",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_relay_card",
+   "wizard.relay_terminal"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "remote.etm_listener",
+  "area": "remote",
+  "behaviour": "A relay's ETM ONLINE edge pulls the board and re-arms its terminal; OFFLINE edges start one verify pull; during an OTA the edges are held.",
+  "where": "Wizard/app.js:8428-8494",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "remote.relay_card",
+  "area": "remote",
+  "behaviour": "A MgmtRelay card lists the WCBs its mesh hears, Manage all arms every one and pulls them one at a time (a repeat only re-arms), and the export leaves it out.",
+  "where": "Wizard/app.js:535-639",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_relay_card"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "remote.manage_one",
+  "area": "remote",
+  "behaviour": "Manage via relay on one board arms it and pulls it, never overriding a board that is on USB.",
+  "where": "Wizard/app.js:545-552",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_relay_card"
+  ],
+  "gap": "Only the pull=false form (from Manage all) runs; the single button (pull=true) and the USB-override guard are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click a card's \"Manage via relay\": assert a MGMT,PULL; connect a fake USB WCB2 and assert the button does nothing."
+ },
+ {
+  "id": "remote.relay_only_refusals",
+  "area": "remote",
+  "behaviour": "Update FW, Factory Reset and OTA-over-USB are refused on a relayed board with a toast.",
+  "where": "Wizard/app.js:1679-1685, 1754-1756, 10237-10241",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "On a relayed fake board call boardUpdateFW, boardFactoryReset, boardOtaSerial: assert the toasts and no send."
+ },
+ {
+  "id": "rpull.protocol",
+  "area": "rpull",
+  "behaviour": "A remote pull sends ?MGMT,PULL,<n>,P and accepts one [MGMT:CONFIG,n] reply or K [MGMT:CFGPART,n] parts (any order, duplicates and other boards ignored), through the direct reader or the hub.",
+  "where": "Wizard/app.js:8779-8927, 9052-9105",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_pull_fake_api",
+   "wizard.remote_pull_fake_legacy",
+   "wizard.remote_pull_fake_parts",
+   "wizard.remote_pull_fake_reader",
+   "wizard.remote_pull",
+   "wizard.remote_pull_parts"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpull.verify_crc",
+  "area": "rpull",
+  "behaviour": "A reply or join failing its checksum, lacking its head or tail, or holding U+FFFD is never stored; UTF-8 failure in two jobs stops the pull.",
+  "where": "Wizard/app.js:8911-8923, 8963-8970",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_pull_fake_legacy_crc",
+   "wizard.remote_pull_fake_errors"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpull.retry_queue_deadline",
+  "area": "rpull",
+  "behaviour": "Each attempt times out after 6 s (restarted per new part), retries after 2.5 s up to 3 times, one attempt per relay with a FIFO, a 40 s cap from the call, CFGERR codes retry or stop, and onComplete fires once with nothing left behind.",
+  "where": "Wizard/app.js:8713-8777, 8839-9046",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_pull_fake_timer",
+   "wizard.remote_pull_fake_fifo",
+   "wizard.remote_pull_fake_deadline",
+   "wizard.remote_pull_fake_errors",
+   "wizard.remote_pull_fake_edges"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpull.display_privacy",
+  "area": "rpull",
+  "behaviour": "Config replies and parts show in the terminal only as lengths (inside [TERM:n] too) and never reach a stats capture.",
+  "where": "Wizard/app.js:9107-9126, 5951-5965",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_pull_fake_display",
+   "wizard.remote_pull"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "rpull.badges",
+  "area": "rpull",
+  "behaviour": "A pull shows Retrying while it retries, Pull Failed with a Retry button when it gives up, and Remote again on success.",
+  "where": "Wizard/app.js:3605-3607, 8943, 8951, 9089",
+  "status": "partial",
+  "tested_by": [
+   "wizard.remote_pull_fake_timer",
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "Retrying and Remote are asserted; the Retry button appearing on failure is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Let a fake pull fail 3 times: assert #b2-btn-retry displayed."
+ },
+ {
+  "id": "flash.entry_snapshot",
+  "area": "flash",
+  "behaviour": "Flash/Update/Factory snapshot the board config and the General DOM, close the port, show Flashing..., and call flashFirmware with appOnly for Update and eraseNvs for Factory.",
+  "where": "Wizard/app.js:7727-7791",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "flashFirmware is tested on its own; boardGo's flash entry (snapshot, closeForReconnect, the argument mapping, the Flashing UI) is never driven.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Stub window.flashFirmware to record its args on a fake conn: run boardGo(1,{mode:\"update\"}) and assert closeForReconnect ran, appOnly true, the connect button read Flashing..., and the UI restored."
+ },
+ {
+  "id": "flash.post_success",
+  "area": "flash",
+  "behaviour": "After a flash the Wizard closes and reconnects the port, re-shares it if borrowed, then: Update pulls (or pushes in the wizard); Flash/Factory wait for the firmware and full-push the pre-flash config with General restored (or only pull when push was unchecked); a failed reconnect toasts.",
+  "where": "Wizard/app.js:7796-7911",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "No spec reaches any post-flash branch.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "With flashFirmware stubbed to succeed and a fake answering ?backup: assert reconnect, waitForBoardReady probes, baseline null then a full push of the snapshot; with pushConfig false assert a pull and no push."
+ },
+ {
+  "id": "flash.failure_recovery",
+  "area": "flash",
+  "behaviour": "A failed flash reconnects on the same handle only; a failed factory reset says NVS was not erased; in the wizard a board already on the target version is pushed without flashing.",
+  "where": "Wizard/app.js:7912-7988",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Stub flashFirmware to throw: assert reconnect called with skipFreshPortSearch, the factory-incomplete toast, and with _wizardOpen and matching versions a configure push."
+ },
+ {
+  "id": "flash.erase_path",
+  "area": "flash",
+  "behaviour": "Erase (wizard \"already installed\") sends ?ERASE,NVS, waits 4 s, closes and reconnects, waits for the firmware and full-pushes the pre-erase config; Factory Reset modal's Erase NVS Only does the same but only pulls.",
+  "where": "Wizard/app.js:7991-8086, 10266-10310",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "On a fake conn run boardGo(1,{mode:\"erase\"}): assert ?ERASE,NVS, the 4 s wait before close, reconnect, then a full push with boardBaselines null; run doFactoryResetEraseOnly and assert a pull instead."
+ },
+ {
+  "id": "flash.factory_modal",
+  "area": "flash",
+  "behaviour": "The Factory Reset button opens the modal (refused on a relayed or disconnected board); Erase NVS + Load Fresh Firmware runs factory mode honouring the push-config checkbox.",
+  "where": "Wizard/app.js:10237-10264",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Click #b1-btn-erase: assert the modal title; uncheck push-config and click the first option with boardGo stubbed: assert mode factory, pushConfig false."
+ },
+ {
+  "id": "flasher.branch",
+  "area": "flasher",
+  "behaviour": "The firmware branch is the /dev/<branch>/Wizard path, else a valid localStorage override, else main; invalid names are dropped.",
+  "where": "Wizard/flasher.js:49-81",
+  "status": "tested",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "flasher.chip_detect",
+  "area": "flasher",
+  "behaviour": "The detected chip overrides the HW selection (re-fetching the right family); S2/C-series are refused; an unidentifiable chip with no HW version is refused, with one keeps the selection.",
+  "where": "Wizard/flasher.js:377-428",
+  "status": "tested",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "flasher.bootloader_size",
+  "area": "flasher",
+  "behaviour": "The S3 bootloader follows the detected flash size (16 or 8 MB, from getFlashSize or the flash id); an unknown size or missing variant refuses any bootloader write.",
+  "where": "Wizard/flasher.js:262-287, 430-461, 607-620",
+  "status": "tested",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "flasher.image_choice",
+  "area": "flasher",
+  "behaviour": "Update stays app-only unless the partition table differs (then one full NVS-preserving flash) or the app no longer fits an unreadable layout (refused); auto-detect flashes full on a blank or corrupted bootloader or an unreadable table; Factory writes full plus NVS; otadata is always erased; a full flash with no bootloader files is refused.",
+  "where": "Wizard/flasher.js:463-653",
+  "status": "partial",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "Asserted: update match/mismatch, factory NVS, unknown-chip fallback, otadata in the write list. Unasserted: the unreadable-table branches (update refusal when the app exceeds 0x140000; auto-detect forceFull), blank 0xFF and corrupted-bootloader auto-detect, the hasBootPart=false refusal, ascending write order.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Fake a loader with no readFlash: assert an app-only update over 0x140000 throws and a plain flash writes the full set; fake flash 0x1000 = 0xAA and assert the full set; drop the _part listing and assert the refusal."
+ },
+ {
+  "id": "flasher.fetch",
+  "area": "flasher",
+  "behaviour": "getBinaryData finds files by suffix on the resolved branch, falls back to the legacy S3 boot name for 16 MB, warns when the 8 MB variant is missing, and on a boot/part fetch failure warns loudly and flashes app only.",
+  "where": "Wizard/flasher.js:115-191",
+  "status": "partial",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "Only a complete listing is served; the legacy-name fallback, the missing-8MB warning and the boot/part failure path are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Serve a listing without _boot_16MB and without _part: assert the legacy boot is used, then hasBootPart false with the warning toast."
+ },
+ {
+  "id": "flasher.write_retry_reset",
+  "area": "flasher",
+  "behaviour": "writeFlash is retried once on failure with a recovery message; progress is weighted per file; after writing the board is hard-reset via afterFlash or a DTR/RTS pulse and the transport disconnected.",
+  "where": "Wizard/flasher.js:655-765",
+  "status": "partial",
+  "tested_by": [
+   "wizard.flasher_fake_helpers"
+  ],
+  "gap": "Writes happen in the spec but the retry, the recovery message, the progress weighting and the reset fallback are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Make the fake writeFlash throw once then succeed: assert two write calls; throw twice and assert the recovery message; remove afterFlash and assert setDTR/setRTS calls."
+ },
+ {
+  "id": "flasher.windows_baud",
+  "area": "flasher",
+  "behaviour": "The loader runs at 115200 on Windows and 460800 elsewhere, with romBaudrate 115200.",
+  "where": "Wizard/flasher.js:351-363",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted (the fake records the loader options).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Assert the recorded loader baudrate per _isWindows."
+ },
+ {
+  "id": "ota.serial_baud_ladder",
+  "area": "ota",
+  "behaviour": "OTA over USB proves each raised baud with STATUS, waits out the session timeout and retries one rate lower when deaf, remembers the rate per USB bridge, and streams at a rate that answers.",
+  "where": "Wizard/app.js:1727-1752, 1804-1865",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_ota_baud_fallback"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "ota.serial_stream",
+  "area": "ota",
+  "behaviour": "OTA over USB reads the chip family, fetches the matching image, streams 1 KB base64 chunks following the board's ACK/NAK cursor (resync, backoff, 60-stall cap, session-loss detection), verifies with END, then reconnects (direct) or waits on the shared port and pulls; on error it sends ABORT and restores 115200.",
+  "where": "Wizard/app.js:1754-1802, 1867-1990",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_ota_baud_fallback"
+  ],
+  "gap": "The happy stream with BEGIN/END is driven; NAK resync, the stall cap, cursor collapse, an END failure, the error ABORT/baud restore, the shared-port wait and the post-OTA reconnect+pull are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Extend the fake: NAK one chunk and assert the resync; answer END,ERR and assert ABORT then setBaud(115200); on a shared conn assert waitForBoardReady then a pull."
+ },
+ {
+  "id": "ota.relay",
+  "area": "ota",
+  "behaviour": "Wireless OTA through a relay streams 192-byte frames with ?OTA,<verb>,<target>,<session> awaiting [OTA:ACK] lines, fails fast on a non-zero status or a collapsed cursor, re-establishes the relay link and pulls with 12 attempts after END.",
+  "where": "Wizard/app.js:1995-2124",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Fake relay replies [OTA:ACK,...] per frame: assert BEGIN/DATA/END framing and cursors; return status 1 and assert the fail-fast toast and ABORT; after END assert remoteBoardPull(relay, n, 1, 12)."
+ },
+ {
+  "id": "ota.suppressed_edges_replay",
+  "area": "ota",
+  "behaviour": "After the last concurrent OTA ends, ETM edges held during it are replayed one board at a time (pull then RTERM,START), skipping the OTA's own target.",
+  "where": "Wizard/app.js:2129-2160",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_etm_listener"
+  ],
+  "gap": "Recording the edges is asserted; the serialised replay is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Seed _suppressedEtmEdges with two relayed boards and run a failing boardOtaRelay: assert one MGMT,PULL at a time followed by RTERM,START."
+ },
+ {
+  "id": "ota.entry_guards",
+  "area": "ota",
+  "behaviour": "The OTA button routes to the relay or USB path; the USB path refuses a relayed or disconnected board.",
+  "where": "Wizard/app.js:1706-1709, 1754-1757",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Call boardOta on a relayed fake and a disconnected one: assert the relay path and the toasts."
+ },
+ {
+  "id": "file.load",
+  "area": "file",
+  "behaviour": "Load File parses the system file, sets a \"file\" General baseline, renders the floor plus any board above it or client slot, fills every card, derives the controller and toasts the droid name and count; a parse failure toasts.",
+  "where": "Wizard/app.js:9446-9514",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_system_file_reload"
+  ],
+  "gap": "Quantity, slots and a re-export identity are asserted; the \"loaded file\" baseline (a later pull's modal label), the controller derivation, the toast and the parse-failure toast are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Load a file with CONTROLLER,ON then pull a fake board with other MACs: assert the modal names \"loaded file\"; load garbage and assert the failure toast."
+ },
+ {
+  "id": "file.export",
+  "area": "file",
+  "behaviour": "Export writes General from the DOM and every known board (floor, discovered, loaded) minus relays as [WCBn] sections with client tokens, and refuses two boards on one number.",
+  "where": "Wizard/app.js:9517-9587",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_system_file",
+   "wizard.app_fake_relay_card"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "file.parser_roundtrip",
+  "area": "file",
+  "behaviour": "A system file round-trips (General, boards, chars, client slot, quantity floor) through buildSystemFile and parseSystemFile.",
+  "where": "Wizard/parser.js:1184-1282, 1715-1773",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[parser.test.js: a system file round-trips]",
+   "wizard.parser[roundtrip.test.js: W-2, W-6]",
+   "wizard.parser[model.test.js: W-17]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "file.wizard_export",
+  "area": "file",
+  "behaviour": "The setup wizard's Export writes its state as a system file that parses back to the same boards.",
+  "where": "Wizard/app.js:12167-12268",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_setup_wizard"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "term.drawer",
+  "area": "term",
+  "behaviour": "The terminal drawer opens/closes, scrolls panes to the bottom on open, resizes by drag (120 px to 80%), pads the page, and Clear All empties every pane.",
+  "where": "Wizard/app.js:9590-9662, 9902-9904",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click Terminal: assert .open and main padding; dispatch pointer events on the handle and assert the height; Clear All empties the panes."
+ },
+ {
+  "id": "term.panes",
+  "area": "term",
+  "behaviour": "A pane per managed board with dot/input state, debug flags reset on disconnect, a visibility chip whose label says USB or via WCB n, and panes migrate when a board changes slot.",
+  "where": "Wizard/app.js:9786-9900",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_terminal"
+  ],
+  "gap": "Visibility and the debug reset are asserted; the chip label, the disabled input when disconnected and migrateTerminalPane are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Relay-manage WCB2: assert #term-vis-label-2 \"via WCB 1\"; pull a board that migrates slot 1 -> 3 and assert the pane text moved and pane 1 is gone."
+ },
+ {
+  "id": "term.debug_toggles",
+  "area": "term",
+  "behaviour": "The six debug buttons send ?DEBUG[,<mode>],ON/OFF directly or through the relay and revert when the send fails.",
+  "where": "Wizard/app.js:9675-9754",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_terminal"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "term.filter",
+  "area": "term",
+  "behaviour": "Discovery dumps, telemetry JSON, fragment envelopes and config-tool traffic are hidden; ?TERMDEBUG reveals them; a hand-typed ?WDP,DUMP shows its rows until [WDP:END.",
+  "where": "Wizard/app.js:9918-9934, 10010-10026",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_terminal"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "term.send_history",
+  "area": "term",
+  "behaviour": "Enter or Send sends the line directly or as a one-chunk FRAG, echoes it, and ArrowUp/Down recall per-board history without duplicates.",
+  "where": "Wizard/app.js:9976-10057",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_terminal",
+   "wizard.terminal_wire",
+   "wizard.relay_terminal"
+  ],
+  "gap": "Sending both ways is asserted; the arrow-key history is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Send two commands, press ArrowUp twice and ArrowDown: assert the input values."
+ },
+ {
+  "id": "term.timestamp_autoscroll",
+  "area": "term",
+  "behaviour": "Timestamps prefix lines when on; auto-scroll pauses when the user scrolls up and resumes at the bottom.",
+  "where": "Wizard/app.js:9756-9769, 9936-9951",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_terminal"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "term.log_routing",
+  "area": "term",
+  "behaviour": "termLog writes only to panes of boards that are connected, relayed or opened by hand; a merely discovered board never sprouts a pane and its lines fall to the first pane.",
+  "where": "Wizard/app.js:9953-9973",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "addDiscoveredBoards([7]) then termLog(7, x): assert no term-pane-7 and the line in pane 1."
+ },
+ {
+  "id": "stats.modal",
+  "area": "stats",
+  "behaviour": "Network Test and ESP-NOW Stats run ?ETM,CHAR / ?STATS directly or ?MGMT,ETM,CHAR / ?MGMT,STATS,<n> through the relay with their sentinels, keep pull replies out, hold the mesh poll, and show only the last ETM summary block.",
+  "where": "Wizard/app.js:12964-12990, 13093-13230",
+  "status": "partial",
+  "tested_by": [
+   "wizard.remote_pull_fake_display",
+   "wizard.app_fake_mesh_tick"
+  ],
+  "gap": "Both capture paths with pull-reply exclusion and the busy hold are asserted; the ETM summary extraction (last banner), the relay timeout returning partial text, the Refresh button and the error text are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Feed an ETM output with two banner lines: assert only the second block is shown; let the relay capture time out with lines and assert they are shown."
+ },
+ {
+  "id": "stats.hcr_modal",
+  "area": "stats",
+  "behaviour": "HCR Status renders the firmware's [HCR:...] line, polls every 3 s only while open, says when HCR is not configured, and declines a relayed board.",
+  "where": "Wizard/app.js:12992-13079",
+  "status": "tested",
+  "tested_by": [
+   "wizard.editors_fake_live_controls"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "wdp.parse",
+  "area": "wdp",
+  "behaviour": "parseWdpDump reads every dump line (WDP with optional PEER, WDPIF, WDPDA with SEEN/AGE, WDPX, WDPPWM, WDPCFG with optional EN), old dumps included.",
+  "where": "Wizard/app.js:13459-13501",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_wdp_panel"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "wdp.render",
+  "area": "wdp",
+  "behaviour": "The mesh table shows each node's kind, platform, firmware, capabilities, Maestros, devices (quiet ones marked), PWM edges, peer state with Forget, age and liveness; the toolbar shows auto-join, live peers, Poll and Clear learned; WDP off is said as such.",
+  "where": "Wizard/app.js:13503-13641",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_wdp_panel"
+  ],
+  "gap": "Row count, quiet device, PWM edge, learned labels and the disabled message are asserted; the empty-mesh message, the self-row tag, capability labels and the peers count are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "renderWdpMesh([], 1, cfg): assert the \"hasn't discovered\" note; render SELF and assert \"this board\" and the HCR/Kyber capability labels."
+ },
+ {
+  "id": "wdp.commands",
+  "area": "wdp",
+  "behaviour": "Forget peer, Clear learned, Auto-join toggle, Poll mesh and Forget device send their ?WDP commands (a device on another board through a FRAG) and refresh the table.",
+  "where": "Wizard/app.js:13677-13725",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_wdp_panel",
+   "wizard.wdp_da_forget"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "W2",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "wdp.refresh_no_board",
+  "area": "wdp",
+  "behaviour": "Refresh with no board connected says so; a failed dump shows the error.",
+  "where": "Wizard/app.js:13655-13673",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Click Refresh with nothing connected: assert the note text."
+ },
+ {
+  "id": "wdp.mesh_tick",
+  "area": "wdp",
+  "behaviour": "The 12 s discovery tick adds unknown WCBs as sections with their advertised alias and no pull, feeds relay cards, gives clients a card, drops a quiet temporary client and marks others Offline, and skips while a push, flash, OTA or stats capture owns the port.",
+  "where": "Wizard/app.js:13814-13884",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_mesh_tick",
+   "wizard.app_fake_relay_card"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "wdp.client_cards",
+  "area": "wdp",
+  "behaviour": "A client's card shows status with age, type (Controller for navicore/sab aliases), firmware and advertised capabilities, seeds the alias, and an rc-capable client feeds the RC panel.",
+  "where": "Wizard/app.js:13743-13798",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_mesh_tick"
+  ],
+  "gap": "Online/Offline and the alias seed are asserted; the capability chips, the Controller kind, the age text and the RC panel feed are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Tick with a client whose CAPTAGS is \"hil rc\": assert the cs-cap chips and #rc-devices-section visible with the card."
+ },
+ {
+  "id": "rc.discovery",
+  "area": "rc",
+  "behaviour": "rc_hb/rc_trig/rc_mode JSON lines on any board create RC cards (model, mode, fw, uptime, last trigger) that expire after 12 s; WDP-only RCs show as \"telemetry off\" and expire after 40 s.",
+  "where": "Wizard/app.js:13257-13268, 13341-13438",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Feed {\"type\":\"rc_hb\",\"id\":3,\"fw\":\"1.0\",\"model\":1} through _handleLine: assert the card text; advance 13 s and assert it is gone."
+ },
+ {
+  "id": "rc.tool_url",
+  "area": "rc",
+  "behaviour": "The RC panel's Open link uses the saved config-tool URL; \"edit Config Tool URL\" prompts and stores it (default removes the key).",
+  "where": "Wizard/app.js:13270-13274, 13897-13916",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Stub window.prompt to return a URL, click the edit link: assert localStorage and the link href."
+ },
+ {
+  "id": "wiz.open_steps",
+  "area": "wiz",
+  "behaviour": "Opening the setup wizard resets state with a random password and MAC octets, builds the step list from the control-system and Maestro choices, and closing clears watchers and detect jobs.",
+  "where": "Wizard/app.js:10439-10490",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_setup_wizard"
+  ],
+  "gap": "buildWizardSteps is exercised from a hand-set state; the random generators, the step list for navicore/other, and closeWizard's cleanup are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "openWizard(): assert password length 14 and two hex octets; set controlSystem navicore and assert the steps include navicore-config."
+ },
+ {
+  "id": "wiz.navigation",
+  "area": "wiz",
+  "behaviour": "Next validates then saves the step, rebuilds the steps, Review becomes Apply & Connect, a card click auto-advances after 200 ms (cancelled by Back or another click), and leaving the Firmware step stamps each WCB slot's flash mode (update/factory/erase/configure).",
+  "where": "Wizard/app.js:10493-10543, 10595-10631, 11580-11628",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "The setup_wizard spec drives validate/apply directly, never wizardNext/wizardBack, the auto-advance timer or the mode stamping.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Click quantity 2: assert the identity step after 200 ms; set needsFirmware true then Next: assert boardFlashMode[1] \"factory\" and none for a client slot."
+ },
+ {
+  "id": "wiz.validate_steps",
+  "area": "wiz",
+  "behaviour": "Validation: a control system must be chosen; network password 8+, hex octets, a character plan from the defaults; identity ids 1-99, unique, not the controller's id, a HW version per WCB; Maestro rows unique by board+port and off the Kyber ports.",
+  "where": "Wizard/app.js:11889-11980",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_setup_wizard",
+   "wizard.push_fake_delimiter"
+  ],
+  "gap": "Identity and the Kyber-port clashes and the network characters are asserted; the password length, hex octets, id range, duplicate board+port and the missing control system are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Render the network step with a 5-char password and \"ZZ\" octet: assert each message; two Maestro rows on Board 1 S1: assert the duplicate message."
+ },
+ {
+  "id": "wiz.save_steps",
+  "area": "wiz",
+  "behaviour": "Saving a step reads its inputs: serial labels equal to the auto owner are stored blank, a port released by a Maestro goes back to 9600 unless the user changed it, ETM fields and checksum, Kyber ports, NaviCore id.",
+  "where": "Wizard/app.js:11748-11886",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "The spec writes wizardState directly.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Render the serial step with a Maestro claim, leave the label as the owner text, save: assert sp.label \"\"; remove the Maestro and save maestro-config: assert the port baud 9600."
+ },
+ {
+  "id": "wiz.step_html",
+  "area": "wiz",
+  "behaviour": "Each step renders its controls: identity tabs with WCB/Client fields and the HW-3.2 USB note, serial rows with claimed ports locked, Kyber ports S1/S2 with the Marcduino list excluding the Kyber port, Maestro rows excluding Kyber ports and client boards, ETM fields, the review summary, firmware choice and the connect rows.",
+  "where": "Wizard/app.js:10665-11504",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_setup_wizard"
+  ],
+  "gap": "Only the identity and maestro-config steps are rendered; the others are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Render each remaining step from a two-board Kyber state and assert its key controls (locked claimed rows, S1/S2 options, review rows)."
+ },
+ {
+  "id": "wiz.apply_config",
+  "area": "wiz",
+  "behaviour": "Apply writes the wizard state onto the config page: quantity, General, each board (Kyber local with every Maestro as a target, other Maestro boards remote, NaviCore remote for Maestro boards, client slots committed), ETM and the controller.",
+  "where": "Wizard/app.js:11992-12164",
+  "status": "partial",
+  "tested_by": [
+   "wizard.app_fake_setup_wizard"
+  ],
+  "gap": "The Kyber path is asserted; the NaviCore path (specialPeer + remote on Maestro boards), client slots and ETM off are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Apply a navicore state with a Maestro on board 2 and a client slot 3: assert boardConfigs[2].kyber.mode remote, specialPeer true, boardConfigs[3].type client."
+ },
+ {
+  "id": "wiz.connect_step",
+  "area": "wiz",
+  "behaviour": "Connect & Push runs one board at a time: the active row offers Detect (all free ports, 3 s drain, RTCWDT absorb, POWERON_RESET or Reset reason, 30 s), + Authorize and Select by COM#; a pick connects, clears the stale baseline, pulls after 3 s and starts the watcher; Cancel disconnects and offers Reconnect.",
+  "where": "Wizard/app.js:12289-12811",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "attended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Fake navigator.serial with a port whose stream the test feeds \"rst:0x1 (POWERON_RESET)\" after 3 s: assert the row connects and a pull is scheduled; Use a port and assert boardBaselines cleared before the pull."
+ },
+ {
+  "id": "wiz.watch_push_verify",
+  "area": "wiz",
+  "behaviour": "Once a wizard board is connected and pulled, the watcher restores the wizard config, full-pushes it, waits for the reconnect, verifies with up to three pulls, reports Done / Not pushed / Push incomplete / No reconnect / Unverified, advances to the next WCB slot and auto-closes 2.5 s after all succeed (or shows Close).",
+  "where": "Wizard/app.js:12813-12955",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "On a fake conn with a baseline: run wizardWatchForConnect(1, snapshot, general) and assert boardGo ran with baseline null, the verify pull, the \"Done\" status and connectSeqN advanced; make boardGo abort and assert \"Not pushed\"."
+ },
+ {
+  "id": "wiz.status_mirror",
+  "area": "wiz",
+  "behaviour": "Flash and push progress is mirrored into the wizard's connect row while it is on screen.",
+  "where": "Wizard/app.js:10166-10197",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "With a wiz-connect-status-1 element present call reportPushProgress(1,1,2): assert its text."
+ },
+ {
+  "id": "version.fetch_display",
+  "area": "version",
+  "behaviour": "The latest-release check reads the version from the bin name on the resolved branch and drives the per-board version badge; GitHub unreachable shows installed.",
+  "where": "Wizard/app.js:167-195, 234-300",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_fw_check"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "version.check_throttle",
+  "area": "version",
+  "behaviour": "The manual check is throttled to one GitHub request per 5 s with every check button disabled meanwhile.",
+  "where": "Wizard/app.js:203-229",
+  "status": "tested",
+  "tested_by": [
+   "wizard.app_fake_fw_check"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": ""
+ },
+ {
+  "id": "version.watch_script",
+  "area": "version",
+  "behaviour": "watch-version.js (dev tool) stamps UI_VERSION in app.js on every Wizard file change; the page shows UI_VERSION in its footer.",
+  "where": "Wizard/watch-version.js; Wizard/app.js:127, 156-157",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "A developer tool, not run by any test; the footer text is not asserted either (see init.boot_steps).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Run the stamper against a copy of app.js in a temp dir and assert the constant changed to today's format."
+ },
+ {
+  "id": "parser.backup_tokens",
+  "area": "parser",
+  "behaviour": "A board backup is read per line (detecting a non-default funcChar/cmdChar), a file or relay reply as a ^?-chain; legacy ;V,name,value lines become VAR,SET either way.",
+  "where": "Wizard/parser.js:243-475",
+  "status": "partial",
+  "tested_by": [
+   "wizard.parser[roundtrip.test.js: W-2]",
+   "wizard.parser[parser.test.js]"
+  ],
+  "gap": "Per-line with a custom funcChar and the chain form are asserted; the legacy ;V peel (per-line and glued to a chain token) is not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Parse a per-line backup with \";V,foo,1\" and a chain \"...?SEQ,SAVE,k,;S1x^;V,bar,2\": assert variables foo 1 and bar 2 and the sequence value intact."
+ },
+ {
+  "id": "parser.tokens_misc",
+  "area": "parser",
+  "behaviour": "Identity/network tokens: HW, WCB (not WCBQ), WCBQ, WCBCH clamped to 1-11, PEERSLIVE, CONTROLLER/SPECIAL with id, ALIAS/CLEAR, EPASS with commas, MAC, LED,PIN, RELAY, BCAST OUT S0, DELIM/FUNCCHAR/CMDCHAR one char (comma allowed).",
+  "where": "Wizard/parser.js:482-645",
+  "status": "partial",
+  "tested_by": [
+   "wizard.parser[parser.test.js]",
+   "wizard.parser[roundtrip.test.js: W-2, W-3]",
+   "wizard.parser[model.test.js]"
+  ],
+  "gap": "Most are asserted; WCBCH clamping, PEERSLIVE, broadcastToS0, the SPECIAL alias and ALIAS with a comma are not.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Parse ?WCBCH,14, ?PEERSLIVE,3, ?BCAST,OUT,S0,ON, ?SPECIAL,ON,5: assert channel 1, livePeerCount 3, broadcastToS0 true, specialPeerId 5."
+ },
+ {
+  "id": "parser.builder",
+  "area": "parser",
+  "behaviour": "buildCommandString emits only changed fields in the board's order (release before ports, Kyber claim late, sequences before the rebooting mapping block) and a full push restates everything.",
+  "where": "Wizard/parser.js:1293-1708",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[parser.test.js]",
+   "wizard.parser[devices.test.js]",
+   "wizard.parser[model.test.js]",
+   "wizard.parser[roundtrip.test.js]",
+   "wizard.kyber_release_order"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "parser.diff_configs",
+  "area": "parser",
+  "behaviour": "diffConfigs sees every field the builder writes (W-11), Kyber targets as a set, mappings without UI keys.",
+  "where": "Wizard/parser.js:1781-1833, 1871-1888",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[model.test.js: diffConfigs]",
+   "wizard.parser[roundtrip.test.js: W-11, W-5]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "parser.char_plan",
+  "area": "parser",
+  "behaviour": "commandCharProblem refuses what the firmware refuses; planCommandCharChange orders DELIM/CMDCHAR/FUNCCHAR against the board's live characters, refuses two-push cases with advice, and sends ?D<x> to a comma board.",
+  "where": "Wizard/parser.js:1903-1984",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[roundtrip.test.js: W-2]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "parser.pull_pieces",
+  "area": "parser",
+  "behaviour": "crc32, the streaming line splitter, parseConfigPart, parseConfigError, verifyConfigReply and the pull collector behave as the firmware's wire forms require.",
+  "where": "Wizard/parser.js:2007-2177",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[pull.test.js]"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": ""
+ },
+ {
+  "id": "parser.port_claims",
+  "area": "parser",
+  "behaviour": "evaluatePortClaims assigns each device, mapping and Kyber claim (bare local = S2, REMOTE reserves S1) and getAvailablePorts lists the rest.",
+  "where": "Wizard/parser.js:1060-1169, 1853-1858",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[model.test.js: evaluatePortClaims]",
+   "wizard.kyber_local_frees_other_port"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ""
+ },
+ {
+  "id": "toast.ui",
+  "area": "toast",
+  "behaviour": "Toasts carry copy and dismiss buttons, errors stay at least 12 s, duration 0 is persistent, and the message is HTML-escaped.",
+  "where": "Wizard/app.js:10313-10347",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Specs read toast text through the fake hook; the buttons, durations and escaping are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "showToast(\"<b>\", \"error\", 100): assert the literal text, the copy button, and that it is still present after 11 s."
+ }
+]

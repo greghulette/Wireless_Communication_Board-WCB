@@ -1,0 +1,1874 @@
+[
+ {
+  "id": "etm.unicast_tracked_acked",
+  "area": "etm",
+  "behaviour": "A ;W<n> unicast (and any ETM unicast) goes out as a 252-byte COMMAND frame with |CRC suffix and a fresh sequence number, is entered in the pending table, and the target's ACK resolves it: ?STATS counts Sent +1, ACKd +1.",
+  "where": "Code/WCB/WCB.ino:3135-3199,1530-1604,1607-1665",
+  "status": "tested",
+  "tested_by": [
+   "mesh.unicast_acked",
+   "map.text_remote_etm",
+   "client_mesh.adopt_identity_route",
+   "ncmesh.etm_ack_sender_side"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "Send ;W2,;S2<marker> from W1; the marker arrives on W2 S2 once and W1's ?STATS row for WCB2 rises by exactly one sent and one ACKd."
+ },
+ {
+  "id": "etm.retry_three_then_fail",
+  "area": "etm",
+  "behaviour": "An unACKed unicast is retried as a unicast up to 3 times at ?ETM,TIMEOUT spacing, then '[ETM] WCBn failed to ACK seq N after 3 retries: <cmd>' prints and the row counts Retries 3, Failed 1; the target still ran it exactly once.",
+  "where": "Code/WCB/WCB.ino:1667-1760",
+  "status": "tested",
+  "tested_by": [
+   "etm.ack_lost_retry_fail",
+   "etm.pending_table_evict",
+   "ident.mac_octet2_live",
+   "etm.controller_unicast_retry"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "Deafen W1 with a live ?MAC,3 flip, send ;W2,;S2<m>: three Retry lines spaced TIMEOUT apart, the failure line, one copy on W2 S2."
+ },
+ {
+  "id": "etm.offline_cancels_retry",
+  "area": "etm",
+  "behaviour": "A peer that goes offline while a send waits on its ACK is dropped from that entry with '[ETM] WCBn offline, canceling retry for seq N' and one Failed count, instead of three retries.",
+  "where": "Code/WCB/WCB.ino:1684-1691",
+  "status": "tested",
+  "tested_by": [
+   "etm.offline_cancels_retry"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "HB 1 / MISS 1, deafen W1 and send in one line; the cancel line prints, no Retry 2, stats Sent 2 ACKd 1 Retries 1 Failed 1."
+ },
+ {
+  "id": "etm.pending_table_evicts_oldest",
+  "area": "etm",
+  "behaviour": "The 11th in-flight tracked send evicts the oldest pending entry ('Pending table full, evicting oldest entry'), counting each of its still-open expectations as Failed.",
+  "where": "Code/WCB/WCB.ino:1530-1554",
+  "status": "tested",
+  "tested_by": [
+   "etm.pending_table_evict"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Eleven ;W2 unicasts in one line while W1 is deaf: exactly one eviction line, failure lines for commands 1-10, 30 retries, WCB2 row Sent 11 Failed 11."
+ },
+ {
+  "id": "etm.dedup_ring_per_sender",
+  "area": "etm",
+  "behaviour": "A receiver remembers the last 16 sequence numbers per sender (ETM_PENDING_MAX + 6): a repeat is ACKed and not executed ('Duplicate seq N from WCBn - ACKd but not executed'), so retries of up to the whole pending table never double-run.",
+  "where": "Code/WCB/WCB.ino:739-756,5569-5594",
+  "status": "partial",
+  "tested_by": [
+   "etm.dedup_ring_covers_pending",
+   "client_mesh.rejoin_seq_reuse",
+   "etm.seq_wrap"
+  ],
+  "gap": "Asserted once-each for 8 and 9 in flight; 10 in flight (the full pending table, the ring's design bound) is sent by etm.pending_table_evict but only 'delivered', not 'exactly once', is asserted for commands 2-11.",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Ten ;W2 unicasts in one line with W1 deaf (as etm.dedup_ring_covers_pending does for 9): every marker on W2 S2 exactly once."
+ },
+ {
+  "id": "etm.seq_counter_skips_zero",
+  "area": "etm",
+  "behaviour": "The 16-bit sequence counter is pre-incremented and steps over 0 on wrap, since 0 marks an empty slot in a receiver's duplicate ring.",
+  "where": "Code/WCB/WCB.ino:702-708",
+  "status": "tested",
+  "tested_by": [
+   "etm.seq_wrap"
+  ],
+  "gap": "",
+  "testable": "opt-in",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Opt-in etm_seq_wrap: ~65,000 JSON broadcasts, then the unicast after 65,535 goes out as a small non-zero seq and runs once on W2."
+ },
+ {
+  "id": "etm.boot_announce_clears_ring",
+  "area": "etm",
+  "behaviour": "A sender's boot announce clears the receiver's duplicate ring for it (once per 4 s, peer or not), so a rebooted or re-joined sender's reused low sequence numbers run instead of being ACKed and dropped.",
+  "where": "Code/WCB/WCB.ino:5498-5513",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.rejoin_seq_reuse",
+   "client_mesh.rejoin_unadopted",
+   "etm.acked_not_executed_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "A client sends 3 commands, leaves, re-joins under the same id and sends 4: all 7 run once on W1 S2, with W1's WDP off so it never adopts the client."
+ },
+ {
+  "id": "etm.chksm_send_limit_187",
+  "area": "etm",
+  "behaviour": "Under ?ETM,CHKSM a command over 187 characters is refused before sending with an ungated '[ETM] Command N chars exceeds the 187-char limit under ?ETM,CHKSM' line; 187 goes and runs. A port broadcast over the limit is still written locally.",
+  "where": "Code/WCB/WCB.ino:3157-3168,3271-3273",
+  "status": "tested",
+  "tested_by": [
+   "etm.chksm_length_limit",
+   "input.bcast_too_long_local_only",
+   "client_mesh.fragmented_unicast_limits"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Send ;W2,;S2 + 184 and + 185 characters: the first lands on W2 S2, the second prints the refusal and never arrives."
+ },
+ {
+  "id": "etm.chksm_rx_gate",
+  "area": "etm",
+  "behaviour": "With CHKSM on, a received COMMAND is ACKed first and then rejected if its |CRC suffix is missing or wrong (debug-gated 'rejected: missing CRC' / 'CRC mismatch (rx .. calc ..)'); a correct suffix is stripped before execution; outbound frames to a client carry '|CRC<8 hex>'.",
+  "where": "Code/WCB/WCB.ino:5600-5620,5542-5567",
+  "status": "tested",
+  "tested_by": [
+   "etm.rx_crc_gate_probe",
+   "etm.chksm_mismatch_silent_loss",
+   "client_mesh.checksum_mismatch_both_ways"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "A checksum-off probe sends a bare, a wrong-CRC and a right-CRC command: the first two are rejected (ACKed), the third runs; W1's reply to it carries |CRC."
+ },
+ {
+  "id": "etm.chksm_setting",
+  "area": "etm",
+  "behaviour": "?ETM,CHKSM,ON|OFF persists and confirms; anything else prints the usage line; the chain carries ?ETM,CHKSM,<state>.",
+  "where": "Code/WCB/WCB.ino:6706-6719",
+  "status": "tested",
+  "tested_by": [
+   "etm.chksm_mismatch_silent_loss",
+   "etm.query_and_validation",
+   "etm.settings_roundtrip"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "?ETM,CHKSM,OFF then ON confirm; ?ETM,CHKSM,MAYBE prints 'Use: ?ETM,CHKSM,ON or ?ETM,CHKSM,OFF'; the chain token follows."
+ },
+ {
+  "id": "etm.best_effort_json",
+  "area": "etm",
+  "behaviour": "A target-0 '{' broadcast is sent as an ETM frame but never tracked; on receive it is not ACKed, never enters the duplicate ring, is never enqueued as a command, and is relayed to USB only inside an RC-relay window.",
+  "where": "Code/WCB/WCB.ino:3180-3185,5554-5567,5578-5585,5654-5684",
+  "status": "partial",
+  "tested_by": [
+   "input.bcast_under_json_flood",
+   "client_mesh.json_broadcast_once",
+   "etm.seq_wrap",
+   "client_mesh.rc_relay_drops_counted"
+  ],
+  "gap": "The no-ACK rule and the ring exemption are not asserted directly: no test reads W1's ?DEBUG,ETM for the absence of 'Sent ACK' after a client JSON broadcast, and no test shows a real command's retry still deduplicating after a JSON burst from the same sender. 'Not enqueued as a command' is only implied (no 'Invalid Serial Command' check under the flood).",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "Client sends an ensured JSON broadcast under ?DEBUG,ETM: W1 prints Received but no 'Sent ACK'; then 20 JSON frames and a retry of an earlier ensured command: the retry is logged Duplicate, and W1's log has no 'Invalid Serial Command'."
+ },
+ {
+  "id": "etm.heartbeat_cadence",
+  "area": "etm",
+  "behaviour": "Heartbeats go every HB +/- 1 s (floor 1 s), the first at a random 1..BOOT s after the ETM block; '[ETM] Heartbeat sent (WCBn)' under debug.",
+  "where": "Code/WCB/WCB.ino:1285-1299,1368-1408",
+  "status": "tested",
+  "tested_by": [
+   "boot.announce_advert_burst",
+   "etm.offline_detection_timing",
+   "persist.flags_and_etm_reboot",
+   "ident.wcb_number_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "After a W1 reboot the first heartbeat lands 1..BOOT s after '[ETM] Heartbeat scheduled'; at HB 4 the next-heartbeat delays read 3000-4999 ms."
+ },
+ {
+  "id": "etm.boot_announce_burst",
+  "area": "etm",
+  "behaviour": "Three PACKET_TYPE_ETM_BOOT broadcasts go 1.5 s after the ETM block, 1.2 s apart; each receiver prints '[ETM] WCBn came ONLINE (boot) (src MAC: ..)' whatever its prior state.",
+  "where": "Code/WCB/WCB.ino:1304-1316,1393-1402,5481-5495,9980-9985",
+  "status": "tested",
+  "tested_by": [
+   "boot.announce_advert_burst",
+   "etm.came_online_outside_backup",
+   "etm.remote_reboot",
+   "etm.w1_reboot_sees_peers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Reboot W1 with W2's ?DEBUG,ETM on: W1 logs three 'Boot announce sent' at ~1.5/2.7/3.9 s, W2 prints one '(boot)' ONLINE edge per announce heard."
+ },
+ {
+  "id": "etm.offline_sweep_threshold",
+  "area": "etm",
+  "behaviour": "A peer (and the special peer) silent for (HB+1) x MISS seconds of this board's settings is swept OFFLINE with '[ETM] WCBn went OFFLINE (no heartbeat for Ns)'; the sweep and the receive-side mark are mutex-guarded so OFFLINE/ONLINE edges alternate.",
+  "where": "Code/WCB/WCB.ino:1410-1429,571-629",
+  "status": "tested",
+  "tested_by": [
+   "etm.offline_detection_timing",
+   "etm.controller_offline_sweep",
+   "ncmesh.w1_tracks_20",
+   "wdp.temp_probe_lifecycle"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "HB 4 / MISS 1: W2's OFFLINE lines come >= 4.85 s after its last packet, edges alternate; a temporary peer never prints OFFLINE."
+ },
+ {
+  "id": "etm.presence_on_any_packet",
+  "area": "etm",
+  "behaviour": "Any valid ETM packet from an active peer or the controller (command, ACK, advert, heartbeat) refreshes its presence; the first packet after an offline edge prints '[ETM] WCBn came ONLINE'.",
+  "where": "Code/WCB/WCB.ino:5477-5496",
+  "status": "tested",
+  "tested_by": [
+   "ncmesh.w1_tracks_20",
+   "etm.controller_offline_sweep",
+   "etm.offline_detection_timing"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "With W1 deaf, NaviCore's 2 s rc_hb no longer refreshes it and the OFFLINE line comes at the window; back on its octet the next packet prints ONLINE within seconds."
+ },
+ {
+  "id": "etm.status_lines_queued_to_loop",
+  "area": "etm",
+  "behaviour": "The came-ONLINE line is queued from the WiFi task and printed by loop() in one write, so it never lands inside a ?backup chain; a full 6-slot ring counts drops and loop() prints '[ETM] N status line(s) dropped - more peers came online at once than the queue holds'.",
+  "where": "Code/WCB/WCB.ino:4573-4640",
+  "status": "partial",
+  "tested_by": [
+   "etm.came_online_outside_backup"
+  ],
+  "gap": "The overflow count line is not asserted (six peers coming online inside one busy loop pass).",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "L",
+  "how": "Hold loop() with ?backup while probe1 and probe2 both join and W2 reboots; if seven edges land in one pass the drop line prints with the count."
+ },
+ {
+  "id": "etm.temporary_peer_eviction",
+  "area": "etm",
+  "behaviour": "A temporary peer silent for 50 s is evicted ('[PEER] temporary WCBn evicted — silent for Ns'): its WDP row, membership, ESP-NOW registration and open ACK expectations go; it never prints OFFLINE; until then every broadcast waits on its ACK and fails after 3 retries.",
+  "where": "Code/WCB/WCB.ino:1431-1459,652-656",
+  "status": "tested",
+  "tested_by": [
+   "wdp.temp_probe_lifecycle",
+   "client_mesh.leave_stale_temp_peer",
+   "etm.forget_clears_pending"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "Probe joins temporary and leaves: a broadcast fails on its ACK, the eviction line comes 38-53 s after the leave, the row and live count are gone."
+ },
+ {
+  "id": "etm.expected_ack_set",
+  "area": "etm",
+  "behaviour": "A tracked send expects ACKs from online active peers only: a unicast from its target, a broadcast from every online peer except learned peers that never ACKed; the controller is expected only for a unicast addressed to it; an offline target gets one untracked try.",
+  "where": "Code/WCB/WCB.ino:1564-1601",
+  "status": "tested",
+  "tested_by": [
+   "etm.broadcast_per_board_ack",
+   "etm.learned_unreciprocated_not_expected",
+   "etm.controller_unicast_tracked",
+   "etm.controller_offline_sweep",
+   "peers.wcbq_live"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "A permanent probe that never ACKed is left out of a broadcast (row stays Sent 0); after its first ACK the next broadcast counts it; a unicast to the controller is tracked, a broadcast leaves the (special) row alone."
+ },
+ {
+  "id": "etm.unexpected_ack_not_counted",
+  "area": "etm",
+  "behaviour": "An ACK the send never asked for is recorded as reachability and promotes a learned peer to reciprocating, but is not counted as delivered, so Delivered never exceeds Attempts.",
+  "where": "Code/WCB/WCB.ino:1607-1627",
+  "status": "tested",
+  "tested_by": [
+   "stats.delivered_not_above_attempts",
+   "etm.controller_unicast_tracked",
+   "etm.learned_unreciprocated_not_expected"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "NaviCore",
+  "risk": "M",
+  "how": "Six plain broadcasts with NaviCore ACKing unasked: ?STATS Delivered <= Transmission Attempts and the WCB20 (special) row is unchanged."
+ },
+ {
+  "id": "etm.ack_queue_overflow",
+  "area": "etm",
+  "behaviour": "ACKs are queued from the WiFi task into a 24-slot ring and applied in loop(); a full ring drops the ACK (a retry re-ACKs).",
+  "where": "Code/WCB/WCB.ino:1469-1528",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "The overflow needs more than 24 ACKs between two loop() passes.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Code review only.",
+  "blocked_by": "known: WCB-WP59 wcb.etm.ack_queue_and_peer_reregister"
+ },
+ {
+  "id": "etm.on_demand_peer_registration",
+  "area": "etm",
+  "behaviour": "etmSendAck, the retry path and the RTERM sender register the destination as an ESP-NOW peer on demand, so a sender above this board's floor (or evicted from the table) still gets its ACK and mirrored lines.",
+  "where": "Code/WCB/WCB.ino:1715-1725,1789-1800; Code/WCB/WCB_RemoteTerm.cpp:123-132",
+  "status": "partial",
+  "tested_by": [
+   "client_mesh.rejoin_unadopted",
+   "peers.controller_off_on",
+   "mesh.rterm_relay_navicore"
+  ],
+  "gap": "Never asserted directly: rejoin_unadopted proves the unadopted client's commands run (the ring would mask a lost ACK), controller_off_on only excuses a missing line when an ACK re-added WCB20, and rterm_relay_navicore notes that WCB20 is normally already W2's controller peer.",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "With W1's WDP off and the probe unadopted (not in W1's peer table), the probe sends one ensured command: its own console shows no retry (ACK received), or W1's ?DEBUG,ETM 'Sent ACK .. result: 0'. For RTERM: ?CONTROLLER,OFF on W2, then ;W2,?RTERM,START,20 must still print [TERM:2] on NaviCore."
+ },
+ {
+  "id": "etm.full_queue_refused_unacked",
+  "area": "etm",
+  "behaviour": "A command whose tokens would not fit the command queue is neither ACKed nor queued; the WiFi task counts it, loop() prints '[ETM] N command(s) refused unacknowledged: the command queue was full (the senders retry)', and ?STATS shows 'ETM: N command(s) refused unacknowledged'.",
+  "where": "Code/WCB/WCB.ino:1221-1227,1503-1514,5557-5565,2195-2201",
+  "status": "partial",
+  "tested_by": [
+   "etm.full_queue_refused_not_lost"
+  ],
+  "gap": "The ?STATS line is not asserted; the test skips when the flood never fills the queue while a marker lands.",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "After a run that printed the loop() refusal line, ?STATS must carry 'ETM: N command(s) refused unacknowledged' with the same N, and ?STATS,RESET must clear it (reportEtmQueueRefusals re-syncs)."
+ },
+ {
+  "id": "etm.restart_imminent_no_ack",
+  "area": "etm",
+  "behaviour": "Once loop() has decided to restart, a received command is neither ACKed nor queued, so a sender retries after the boot instead of seeing an ACK for a command the restart threw away.",
+  "where": "Code/WCB/WCB.ino:1250-1256,5556",
+  "status": "tested",
+  "tested_by": [
+   "etm.acked_not_executed_reboot",
+   "mesh.frag_push_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "Send ;W2,?reboot then ;W2,;S2<m> 0.3 s later: either the marker lands on W2 S2 after the boot or W1 never saw 'fully acknowledged' for it."
+ },
+ {
+  "id": "etm.settings_set_query_range",
+  "area": "etm",
+  "behaviour": "?ETM TIMEOUT 50-10000 / HB 1-3600 / MISS 1-100 / BOOT 1-30 / COUNT (clamped 10-200) / DELAY 0-5000 set and confirm; a bare key queries; out of range prints its refusal; ON/OFF; the legacy ?ETMxxx spellings share the setters and refusals; mixed case is unknown.",
+  "where": "Code/WCB/WCB.ino:6612-6724,7347-7416",
+  "status": "tested",
+  "tested_by": [
+   "etm.settings_roundtrip",
+   "etm.query_and_validation",
+   "etm.unvalidated_setters",
+   "etm.legacy_forms",
+   "etm.legacy_miss0_rejected",
+   "etm.query_range_forms"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Each setter, query and boundary value against its exact line; ?config and the chain tokens follow in order."
+ },
+ {
+  "id": "etm.settings_persist",
+  "area": "etm",
+  "behaviour": "The ETM settings live in NVS etm_config and are reloaded at boot ('ETM: ENABLED' in the banner, ?config and the chain unchanged).",
+  "where": "Code/WCB/WCB_Storage.cpp:2730-2770; Code/WCB/WCB.ino:9976",
+  "status": "tested",
+  "tested_by": [
+   "etm.settings_persist_reboot",
+   "persist.flags_and_etm_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Set HB 12 / TIMEOUT 650 (and MISS/BOOT/COUNT/DELAY), reboot, read them back from ?ETM,HB, ?config and the chain."
+ },
+ {
+  "id": "etm.settings_nvs_heal",
+  "area": "etm",
+  "behaviour": "An out-of-range value in an old etm_config blob (TIMEOUT, BOOT, MISS, DELAY) is healed to its default at load.",
+  "where": "Code/WCB/WCB_Storage.cpp:2755-2763",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "No command can write such a value since the setters were range-checked.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A host test of loadETMSettings with a Preferences shim, or an OTA from a release that wrote 0.",
+  "blocked_by": "known: WCB-WP59 storage.unsettable_and_legacy_loads (the ETM range heal)"
+ },
+ {
+  "id": "etm.off_mode_and_mismatch_gate",
+  "area": "etm",
+  "behaviour": "With ETM off a board sends no heartbeats or adverts, ignores ETM frames ('Received ETM packet but ETM disabled locally'), refuses ?WDP,POLL and ?ETM,CHAR, drops the ETM blocks from ?config/?STATS, and runs on the 249-byte path; an ETM board drops a plain frame ('Dropped non-ETM packet ...') unless it is raw, PWM, '{' JSON or <cmdChar>M.",
+  "where": "Code/WCB/WCB.ino:5393-5425,1391,1668; Code/WCB/WCB_WDP.cpp:375",
+  "status": "tested",
+  "tested_by": [
+   "etm.off_local",
+   "etm.nonetm_whitelist_scope",
+   "etm.off_fleet_normal_path"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "W1 ?ETM,OFF: W2 drops W1's text and runs ;M2,getErrors; both off: unicast, broadcast, one-chunk FRAG, a FRAG timer chain and a ;M get all deliver on the plain path and ?STATS shows the MAC counters."
+ },
+ {
+  "id": "etm.char_run",
+  "area": "etm",
+  "behaviour": "?ETM,CHAR (and legacy ?ETMCHAR) runs three phases over the online peers, clamps the per-board sample so no phase passes 200 messages, prints per-board Min/Max/Avg/Missed rows and a recommended timeout, restores ?DEBUG,ETM, refuses a second start, ETM off and WCBQ < 2, and phase 3 starts every peer's 10 s untracked load generator.",
+  "where": "Code/WCB/WCB.ino:1823-2124,2320-2392",
+  "status": "partial",
+  "tested_by": [
+   "etm.char_unicast",
+   "etm.char_loaded",
+   "etm.char_load_on_peers",
+   "etm.char_second_start_refused",
+   "etm.char_guard_wcbq",
+   "etm.char_per_board_clamp",
+   "etm.char_legacy",
+   "etm.off_local"
+  ],
+  "gap": "The 'Characterization aborted: no online peers' path (debug restored, a latched requester notified) and the 'Warning: >5% packet loss detected' footer are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Deafen W1 (?MAC,3 flip) until its peers are swept offline, then ?ETM,CHAR: the abort line prints, ?DEBUG,ETM comes back on; the footer needs a lossy run and is best left as a format check on the string."
+ },
+ {
+  "id": "etm.char_relay",
+  "area": "etm",
+  "behaviour": "?MGMT,ETM,CHAR,n sends one ETM_REQ; the target latches the requester, runs, holds the result until its peers' load is off the air, then sends it in two frag passes; a run it cannot start is answered at once with the reason and the latch released; a request during a run is ignored.",
+  "where": "Code/WCB/WCB.ino:4900-4919,2379-2404,5208-5219",
+  "status": "partial",
+  "tested_by": [
+   "etm.char_relay_roundtrip",
+   "etm.char_relay_refusal_reported",
+   "ncmesh.mgmt_etm_char"
+  ],
+  "gap": "The 'ETM char already running — ignoring relay request' arm (no reply, no re-latch) is not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Start a local ?ETM,CHAR on W2, then ?MGMT,ETM,CHAR,2 from W1 within a second: W1 gets no [MGMT:ETM,2] and W2's finished run sends W1 nothing."
+ },
+ {
+  "id": "rx.mac_group_filter",
+  "area": "rx",
+  "behaviour": "Every received frame whose source MAC octets 2/3 differ from this board's ?MAC octets is dropped before any handler, so another mesh group is deaf and mute whatever the password.",
+  "where": "Code/WCB/WCB.ino:5301",
+  "status": "tested",
+  "tested_by": [
+   "ident.mac_octet2_live",
+   "client_mesh.auth_mismatch_silent",
+   "wdp.peers.fingerprint_discard",
+   "ident.mac_hex_refused"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "A probe joined on a different octet 3 is never learned, its command never runs and it hears nothing; W1 with a flipped octet runs no command from W2."
+ },
+ {
+  "id": "rx.password_gate",
+  "area": "rx",
+  "behaviour": "Each handler compares the frame's 40-byte password field with its own (strncmp) before acting: ETM, plain, MGMT push, config/stats/seq/ETM requests and their reply frags, raw serial, RTERM, OTA.",
+  "where": "Code/WCB/WCB.ino:5435,5778,3594,4419,4662,4782,4796,4842,4904,4978,5018,5058,5098; Code/WCB/WCB_RemoteTerm.cpp:176",
+  "status": "partial",
+  "tested_by": [
+   "ident.epass_live",
+   "ident.epass_window_gates",
+   "client_mesh.auth_mismatch_silent",
+   "map.probe_mesh_raw_chunk_bounds"
+  ],
+  "gap": "Asserted for ETM commands, config pull, SEQ names, OTA BEGIN, RTERM and raw serial. Not asserted for a MGMT push frame (type 3/5, the fragmented-unicast path) or for the reply frags (STATS/SEQ/SEQVAL/ETM types 9/14/16/10) from a wrong-password sender.",
+  "testable": "opt-in",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "Under mesh_password: a wrong-password probe sends a 400-character unicast (type-5 fragments) to W1 and W1 must log no '[MGMT] New session'; a reply-frag arm needs a probe verb that emits a 230-byte frag."
+ },
+ {
+  "id": "rx.sender_mac_bound",
+  "area": "rx",
+  "behaviour": "An ETM packet whose structSenderID is not the last octet of its source MAC is dropped before presence, ACK, WDP or commands see it ('[ETM] Dropped id-spoof: senderWCB=n but src MAC .m' under debug).",
+  "where": "Code/WCB/WCB.ino:5462-5475",
+  "status": "tested",
+  "tested_by": [
+   "ident.sender_id_mac_bound"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Renumber W1 live to an absent id (radio still .01): W2 logs the id-spoof drops, never ACKs or runs the unicast and learns no such board."
+ },
+ {
+  "id": "rx.sender_range_guard",
+  "area": "rx",
+  "behaviour": "An ETM packet whose sender id is outside 1-20 or equals the receiver's own number is dropped.",
+  "where": "Code/WCB/WCB.ino:5452-5460",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "Needs a hand-built 252-byte frame.",
+  "testable": "blocked",
+  "bench_needs": "probe feature",
+  "risk": "L",
+  "how": "A probe MESH INJECT verb.",
+  "blocked_by": "known: WCB-WP59 wcb.rx.spoof_sender_guards"
+ },
+ {
+  "id": "rx.malformed_frame_bounds",
+  "area": "rx",
+  "behaviour": "Frames of an unknown size, a bad packet type, or raw/Kyber chunks with a bad length or port are dropped (with a debug line) and nothing reaches a port.",
+  "where": "Code/WCB/WCB.ino:5386-5391,5807-5818,5843-5846,5897-5902",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "Needs raw-frame injection.",
+  "testable": "blocked",
+  "bench_needs": "probe feature",
+  "risk": "L",
+  "how": "The same MESH INJECT verb.",
+  "blocked_by": "known: WCB-WP59 wcb.rx.malformed_frame_bounds"
+ },
+ {
+  "id": "rx.target_filter",
+  "area": "rx",
+  "behaviour": "A unicast COMMAND, config/stats/seq request, MGMT push or RTERM packet addressed to another board is ignored (no ACK, no session, no log).",
+  "where": "Code/WCB/WCB.ino:5540,5935,3595,4416,4783,4797,4843",
+  "status": "tested",
+  "tested_by": [
+   "mesh.frag_sessions",
+   "wcb.pull_wrong_target",
+   "client_mesh.timer_chain_keeps_mesh_origin"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "A FRAG session for WCB3 puts nothing on W2 S2 and W2 logs no session; a pull of WCB3 draws no 'Config request' on W2; a client unicast to W1 never reaches W2's port."
+ },
+ {
+  "id": "rx.wizard_origin_marker",
+  "area": "rx",
+  "behaviour": "A one-chunk relayed command rides an ETM unicast with a leading SOH; the target strips it on both receive paths and enqueues the command with local origin so it may re-broadcast, while board-to-board ETM text keeps mesh origin and stays on the receiver's ports.",
+  "where": "Code/WCB/WCB.ino:3531-3538,5627-5628,5759-5764,5954-5957",
+  "status": "tested",
+  "tested_by": [
+   "mesh.frag_origin_rebroadcast",
+   "etm.off_fleet_normal_path",
+   "mesh.w_legacy_digits",
+   "input.mesh_bcast_to_ports"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "A one-chunk and a two-chunk ?MGMT,FRAG to W2 each land once on W2 S3 and once (re-broadcast) on W1 S2; ;W2,<text> lands on W2 S3 only."
+ },
+ {
+  "id": "rx.timer_chain_deferred",
+  "area": "rx",
+  "behaviour": "A received ;T chain (ETM, plain, multi-chunk FRAG or fragmented client unicast) is handed to loop() through the 8-slot pending-timer queue with its origin stated; a long chain rides a heap buffer; a full queue or a failed allocation is counted and loop() prints '[TIMER] N received timer chain(s) not run: ...'.",
+  "where": "Code/WCB/WCB.ino:450-549,3682-3688,5755-5759,6002-6005",
+  "status": "partial",
+  "tested_by": [
+   "client_mesh.timer_chain_keeps_mesh_origin",
+   "client_mesh.timer_chain_queue_accounted",
+   "mesh.timer_chain",
+   "mesh.timer_chain_two_chunks",
+   "mesh.timer_chain_long",
+   "etm.off_fleet_normal_path"
+  ],
+  "gap": "'no memory for the chain' is unreachable without a heap fault knob; the rest is asserted.",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "L",
+  "how": "The no-memory arm needs a RAM fault knob beside ?DEBUG,PULLFAULT."
+ },
+ {
+  "id": "rx.whoami_reply",
+  "area": "rx",
+  "behaviour": "A received ?WHOAMI (any case) is answered to the sender with {\"type\":\"wcb_alias\",\"id\":n,\"alias\":\"..\"} as an untracked ETM frame, backslash and quote escaped, and never reaches the command parser or a port.",
+  "where": "Code/WCB/WCB.ino:5728-5750",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.whoami_roundtrip",
+   "client_mesh.whoami_alias_escape",
+   "ncmesh.alias_whoami"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "The probe sends ?WHOAMI / ?whoami to W1 and W2 and parses each JSON reply back to the exact alias; W1 prints no 'Invalid Serial Command'."
+ },
+ {
+  "id": "rx.whoami_reply_nonetm",
+  "area": "rx",
+  "behaviour": "With ETM off the ?WHOAMI reply goes as a plain 249-byte frame.",
+  "where": "Code/WCB/WCB.ino:5747",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "Unreachable: the ?WHOAMI branch is inside the ETM receive path.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Delete or document.",
+  "blocked_by": "known: WCB-WP59 wcb.rx.dead_branches (the non-ETM ?WHOAMI reply)"
+ },
+ {
+  "id": "rx.debug_mirror_lines",
+  "area": "rx",
+  "behaviour": "Under ?DEBUG,ON a received ETM command prints 'Processing ETM input from WCBn: <cmd>' and a plain one 'Sender ID: WCBn, Target ID: WCBm' + 'Processing ESP-NOW input: ..'; an inbound ?STATS,RPT prints only under ?DEBUG,MGMT.",
+  "where": "Code/WCB/WCB.ino:5686-5698,5786-5788,5998-5999",
+  "status": "tested",
+  "tested_by": [
+   "etm.rx_debug_lines",
+   "etm.nonetm_whitelist_scope"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "W2 under ?DEBUG,ON prints the line for ;W2,?PEERSLIVE but not for ;W2,?STATS,RPT until ?DEBUG,MGMT is on."
+ },
+ {
+  "id": "rx.etmload_and_etmchar_payloads",
+  "area": "rx",
+  "behaviour": "A received ETMLOAD (either path) starts this board's 10 s load generator ('ETM load test started by remote board.' .. 'complete: N frame(s) sent'); ETMCHAR_ payloads are ACKed and dropped unrun, so no load text reaches a port.",
+  "where": "Code/WCB/WCB.ino:5642-5643,5959-5965,2057-2124",
+  "status": "tested",
+  "tested_by": [
+   "etm.char_load_on_peers"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "During W1's ?ETM,CHAR, W2 prints exactly one start and one completion line ~10 s apart with >= 50 frames, and no LOAD/ETMCHAR text appears on any wired port."
+ },
+ {
+  "id": "rx.raw_serial_delivery",
+  "area": "rx",
+  "behaviour": "A WCB_TARGET_RAW_SERIAL (99) frame writes its bytes to the named port exactly (no CR, no CRC), up to 177 data bytes per chunk, via the mesh-to-port queue for soft ports; '[RAW] Wn → Sp (ESP-NOW) N bytes: ..' under ?DEBUG,RAW.",
+  "where": "Code/WCB/WCB.ino:5894-5929,3416-3459,2595-2644",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.sendraw_exact_bytes",
+   "client_mesh.sendraw_real_maestro_tap",
+   "map.probe_mesh_raw_chunk_bounds",
+   "input.softserial_tx_during_nvs_write",
+   "input.softserial_core0_contention"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "The probe's sendRaw of 6 bytes to W1 S2 and 4 bytes to W2 S3 arrive byte-exact; a 177-byte pattern arrives whole on W2 S2."
+ },
+ {
+  "id": "mgmt.frag_single_chunk_via_etm",
+  "area": "mgmt",
+  "behaviour": "A one-chunk ?MGMT,FRAG whose payload fits (186 under CHKSM, 198 without) is sent as one SOH-marked ETM unicast ('[MGMT] Single-chunk cmd → ETM unicast ..'); a longer single chunk falls to the fragment path, which refuses a payload over 179 with an ungated REJECTED line.",
+  "where": "Code/WCB/WCB.ino:3517-3558",
+  "status": "partial",
+  "tested_by": [
+   "mgmt.frag_chksm_boundary",
+   "mesh.frag_chain",
+   "mesh.mgmt_errors",
+   "mesh.frag_trailing_q"
+  ],
+  "gap": "The CHKSM-off ceiling (198) is not exercised (s18 never changes W2's checksum setting).",
+  "testable": "opt-in",
+  "bench_needs": "probe tap",
+  "risk": "L",
+  "how": "With CHKSM off on both boards, a 190- and a 198-character one-chunk FRAG go as one ETM unicast and run; 199 is REJECTED."
+ },
+ {
+  "id": "mgmt.frag_multichunk_session",
+  "area": "mgmt",
+  "behaviour": "Multi-chunk FRAGs are broadcast as 226-byte type-3 packets; the target keeps one session (busy guard 2 s, takeover when stale, 15 s timeout, chunk index/total bounds, target filter), reassembles when every chunk is in and runs the whole ^ chain through the splitter (or the timer queue); a type-5 session keeps unicast origin.",
+  "where": "Code/WCB/WCB.ino:3560-3699",
+  "status": "partial",
+  "tested_by": [
+   "mesh.frag_push_chain",
+   "mesh.frag_push_reboot",
+   "mesh.frag_sessions",
+   "mesh.frag_trailing_q",
+   "client_mesh.fragmented_unicast_limits",
+   "mesh.timer_chain_two_chunks",
+   "mesh.timer_chain_long",
+   "inv.seqget_multichunk"
+  ],
+  "gap": "The completed-session ring (the last 8 session ids: a retransmitted chunk of a finished session is discarded, '[MGMT] Duplicate session XXXX — discarding') is not asserted; a re-sent session executing twice would double-run a push.",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Push a 2-chunk chain to W2, wait for completion, then re-send chunk 0 and 1 under the same id: W2 logs the duplicate line and the markers reach W2 S2 once."
+ },
+ {
+  "id": "mgmt.forward_argument_errors",
+  "area": "mgmt",
+  "behaviour": "?MGMT parse errors (bare, unknown sub-command, ETM forms, malformed FRAG, target 0/21, total 0/17, PULL 0/21) are reported only under ?DEBUG,MGMT; STATS/ETM,CHAR to WCB 0 are dropped silently; the oversize-fragment refusal is ungated.",
+  "where": "Code/WCB/WCB.ino:3464-3515,5134-5136,5208-5210,5229-5234",
+  "status": "tested",
+  "tested_by": [
+   "mesh.mgmt_errors",
+   "inv.relay_arg_errors"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Each malformed line against its exact [MGMT] reply with debug on, and silence with it off."
+ },
+ {
+  "id": "mgmt.help_trap_exempt",
+  "area": "mgmt",
+  "behaviour": "A ?MGMT (any case), ?SEQ, ?FUNCCHAR, ?CMDCHAR, ?DELIM or ?WIFI line ending in '?' is executed, not taken for a help request, so a push chunk ending in '?' is forwarded.",
+  "where": "Code/WCB/WCB.ino:6264-6281",
+  "status": "tested",
+  "tested_by": [
+   "mesh.frag_trailing_q",
+   "mesh.frag_trailing_q_mixed_case"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "A chain split right after '?', a sequence value split at its '?' and ?Mgmt,FRAG ..;S2<c>? all reach W2 and W1 prints no help page."
+ },
+ {
+  "id": "mgmt.pull_request_relay",
+  "area": "mgmt",
+  "behaviour": "?MGMT,PULL,n[,P] validates 1-20 and sends the 43-byte request 3 times (6 with ,P: type 19 first, then type 5) so a lost broadcast costs nothing; the relay prints the reassembled [MGMT:CONFIG,n] / [MGMT:CFGPART,n] / [MGMT:CFGERR,n] line from loop().",
+  "where": "Code/WCB/WCB.ino:5229-5267,4655-4724",
+  "status": "tested",
+  "tested_by": [
+   "wcb.mgmt_pull",
+   "wcb.pull_size_limit",
+   "wcb.pull_plain_over_limit",
+   "wcb.pull_parts_many",
+   "wcb.pull_error_oom_legacy",
+   "wcb.pull_error_oom_parts",
+   "persist.label_remote",
+   "navicore.mgmt_pull"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Pull W2 under and over 2912 characters, with and without ,P: one CONFIG line, joinable CFGPART parts or CFGERR NOPARTS, each CRC-valid."
+ },
+ {
+  "id": "mgmt.pull_target_dedup_park",
+  "area": "mgmt",
+  "behaviour": "The target answers a requester once per 1.5 s (a copy inside the window is 'Duplicate config request .. ignored'), ignores a requester whose reply is in progress, parks a second requester behind the running job and serves it next, and drops a request for another board before any of that.",
+  "where": "Code/WCB/WCB.ino:4410-4454",
+  "status": "tested",
+  "tested_by": [
+   "wcb.pull_dedup_window",
+   "wcb.pull_park_second_requester",
+   "wcb.pull_wrong_target",
+   "wcb.pull_holds_restart",
+   "wcb.pull_changed_restart",
+   "wcb.pull_nonblocking"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "NaviCore",
+  "risk": "M",
+  "how": "Re-pull 1.0 s after acceptance (dropped) and 1.7 s after (served); W1 and NaviCore pull within 100 ms: one is parked and both get a CRC-valid config."
+ },
+ {
+  "id": "mgmt.pull_relay_session_keying",
+  "area": "mgmt",
+  "behaviour": "The relay keeps one pull session keyed on (sessionId, packetType, sourceWCB), drops a type-18 part that lands within 200 ms of a live type-6 session, drops a type-18 body starting with neither P nor E, reaps a stalled session after 10 s ('Config pull session XXXX timed out'), and suppresses the target's second pass.",
+  "where": "Code/WCB/WCB.ino:4642-4724,5270-5275",
+  "status": "partial",
+  "tested_by": [
+   "wcb.pull_session_reaped",
+   "wcb.pull_size_limit",
+   "wcb.pull_park_second_requester"
+  ],
+  "gap": "The 200 ms yield and the bad-body drop need raw 230-byte frags (blocked); the reap and the second-pass suppression are asserted.",
+  "testable": "blocked",
+  "bench_needs": "probe feature",
+  "risk": "M",
+  "how": "A probe verb that emits raw config frags.",
+  "blocked_by": "known: WCB-WP59 wcb.relay.pull_session_keying"
+ },
+ {
+  "id": "mgmt.out_ring_drop",
+  "area": "mgmt",
+  "behaviour": "Reassembled MGMT results are queued in a 3-slot ring for loop() to print in one write; a line that finds the ring full is dropped.",
+  "where": "Code/WCB/WCB.ino:4456-4571",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A fault knob.",
+  "blocked_by": "known: WCB-WP59 wcb.pull.send_fault_paths (the 3-slot mgmtOut ring drops)"
+ },
+ {
+  "id": "mgmt.stats_relay",
+  "area": "mgmt",
+  "behaviour": "?MGMT,STATS,n sends one STATS_REQ; the target answers its ?STATS text as type-9 frags in two passes; the relay prints '[MGMT:STATS,n]' + the block once; a result over 16 x 182 characters is replaced by '[ERROR] Result too large to relay (..)' and the target prints its own ungated line.",
+  "where": "Code/WCB/WCB.ino:5134-5145,4778-4787,4729-4775,4974-5011",
+  "status": "tested",
+  "tested_by": [
+   "stats.rpt_remote",
+   "wcb.mgmt_result_too_large",
+   "ncmesh.mgmt_stats_frag"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "After ;W2,?STATS,RPT,9,.. the relayed block carries the WCB9 row; with 20 made-up rows on W2 the relay prints the too-large error."
+ },
+ {
+  "id": "mgmt.seq_names_relay",
+  "area": "mgmt",
+  "behaviour": "?MGMT,SEQ,n sends SEQ_REQ x3; the target answers once per requester per 1.5 s with its sequence inventory; the relay prints one [MGMT:SEQ,n]<hash>,<count>,.. line; argument errors are debug-gated; absent or self targets are silent.",
+  "where": "Code/WCB/WCB.ino:5148-5169,4792-4824,5014-5051",
+  "status": "tested",
+  "tested_by": [
+   "inv.mgmt_seq_remote",
+   "inv.mgmt_seq_w2_relay",
+   "inv.dedup",
+   "inv.relay_arg_errors",
+   "inv.hash_matches_wdp"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "Two requests 300 ms apart draw one answer; the line tracks a remote save and clear and equals the target's ?SEQ,NAMES."
+ },
+ {
+  "id": "mgmt.seqval_relay",
+  "area": "mgmt",
+  "behaviour": "?MGMT,SEQGET,n,<key> (key 1-15 characters, else an ungated refusal) sends the 59-byte SEQVAL_REQ x3; the target dedups on (requester, key) for 1.5 s and answers '<key>,OK,<value>' / NOTFOUND / TOOBIG (over 2912 - key - 4); the relay prints one [MGMT:SEQVAL,n] line.",
+  "where": "Code/WCB/WCB.ino:5172-5206,4837-4897,5054-5091",
+  "status": "tested",
+  "tested_by": [
+   "inv.seqget_formats",
+   "inv.seqget_multichunk",
+   "inv.seqget_largest",
+   "inv.dedup",
+   "inv.relay_arg_errors",
+   "mesh.frag_trailing_q"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "A value with ^ and commas, a missing key and a wrong-case key answer OK/NOTFOUND/NOTFOUND; a 900-character value comes back byte-exact; the TOOBIG arm runs once a value over 2903 stores."
+ },
+ {
+  "id": "mgmt.seq_store_unreadable_unanswered",
+  "area": "mgmt",
+  "behaviour": "A SEQ or SEQVAL request the target cannot serve because the sequence store would not read is left unanswered with an ungated 'Could not read ..' line and the dedup cleared, so the requester's retry is served.",
+  "where": "Code/WCB/WCB.ino:4816-4822,4871-4876",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Needs the store to fail a read (a low heap at mount); no knob exists.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A RAM-only fault knob (?DEBUG,SEQFAULT) that makes seqStoreGet / buildSequenceNamesString fail once; then ?MGMT,SEQ,2 twice: the first draws the line and no reply, the second is answered."
+ },
+ {
+  "id": "mgmt.relay_sessions_reaped",
+  "area": "mgmt",
+  "behaviour": "Half-received SEQ and SEQVAL relay sessions are reaped 10 s after their last frag ('Sequence-names/-value session XXXX timed out' under debug); STATS and ETM sessions are never reaped but a new sessionId resets them.",
+  "where": "Code/WCB/WCB.ino:5276-5289,4986-4993,5106-5113",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "inv.seqget_largest reads the SEQVAL reap line only as a diagnostic; nothing asserts it.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Deafen W1 (?MAC,3 flip, as wcb.pull_session_reaped does with a timer chain) right after W2 starts a 5-frag SEQVAL reply; under ?DEBUG,MGMT W1 prints the timed-out line ~10 s after its last frag and the next SEQGET is answered whole."
+ },
+ {
+  "id": "mgmt.result_two_passes",
+  "area": "mgmt",
+  "behaviour": "Every relayed result (STATS, SEQ, SEQVAL, ETM) is sent as broadcast frags twice, 100 ms apart, 20 ms per frag; a relay fills gaps from the second pass and drops the rest once delivered, so the line never prints twice.",
+  "where": "Code/WCB/WCB.ino:4727-4775,4984-4985,5024-5025,5064-5065,5104-5105",
+  "status": "tested",
+  "tested_by": [
+   "inv.dedup",
+   "ncmesh.mgmt_stats_frag",
+   "inv.seqget_largest"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "W1 never prints more [MGMT:SEQVAL,2] lines than W2's ?DEBUG,MGMT says it answered."
+ },
+ {
+  "id": "mgmt.requests_deferred_to_loop",
+  "area": "mgmt",
+  "behaviour": "Config/stats/seq/ETM requests are only queued from the WiFi task and handled in loop() (drainMgmtReqs), with the password and target re-checked there; a 59-byte request shorter than its struct is dropped.",
+  "where": "Code/WCB/WCB.ino:4921-4971,5339-5355",
+  "status": "partial",
+  "tested_by": [
+   "wcb.pull_nonblocking",
+   "ident.epass_window_gates"
+  ],
+  "gap": "The short-SEQVAL_REQ drop and an unknown request type are blocked (raw frames); the deferral itself is asserted by wcb.pull_nonblocking.",
+  "testable": "blocked",
+  "bench_needs": "probe feature",
+  "risk": "L",
+  "how": "A probe verb that sends raw 43- and 59-byte requests.",
+  "blocked_by": "known: WCB-WP59 wcb.mgmt.request_filters"
+ },
+ {
+  "id": "rterm.mirror_start_stop",
+  "area": "rterm",
+  "behaviour": "?RTERM,START,n (1-20) mirrors every console line (CR dropped, flushed at LF or 160 bytes) as a 204-byte unicast to the relay, which prints '[TERM:n]<line>' from loop(); STOP flushes, clears the relay and prints 'Session stopped' on the target only; bad relay / sub-command print their usage lines.",
+  "where": "Code/WCB/WCB.ino:7138-7162; Code/WCB/WCB_RemoteTerm.cpp:61-158,195-210",
+  "status": "tested",
+  "tested_by": [
+   "mesh.rterm",
+   "mesh.rterm_long_output",
+   "mesh.rterm_stop",
+   "mesh.rterm_errors",
+   "mesh.rterm_relay_navicore",
+   "ncmesh.mgmt_rterm_relay",
+   "navicore.cli_over_mesh"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "?HELP and ?backup mirrored from W2 arrive line for line on W1 in 160-byte pieces, the mirrored chain passes its CRC, and nothing follows a STOP."
+ },
+ {
+  "id": "rterm.relay_ring_loss_reported",
+  "area": "rterm",
+  "behaviour": "A mirrored line the relay's 2560-byte ring cannot hold is counted and loop() prints '[RTERM] N line(s) from WCBn lost at this relay: its queue was full' after what did arrive.",
+  "where": "Code/WCB/WCB_RemoteTerm.cpp:185-191,211-215",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "mesh.rterm_long_output treats any loss as a failure and has not seen one; the report line itself is never asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Hold W1's loop() with a ?backup (as client_mesh.timer_chain_queue_accounted does) while W2 mirrors ?HELP to it: the ring overflows and W1 prints the lost-lines line with a count matching the missing pieces."
+ },
+ {
+  "id": "rterm.rearm_not_activity",
+  "area": "rterm",
+  "behaviour": "A ?RTERM,START that re-arms the session already running to the same relay re-announces but does not restart the 4 s quiet window of a deferred reboot.",
+  "where": "Code/WCB/WCB.ino:7147-7152,1235-1239",
+  "status": "tested",
+  "tested_by": [
+   "etm.reboot_rterm_rearm"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "W2 re-arms W1's terminal every second while W1 has ?reboot queued: W1 restarts within 10 s with two or more re-arms inside the window."
+ },
+ {
+  "id": "route.w_numeric_forms",
+  "area": "route",
+  "behaviour": ";W<n>,<cmd> routes to board n (two-digit ids with the comma); the legacy ;w<d><payload> takes one digit as the target and the rest, digits included, as payload; a bare ;W prints its usage; the local number runs the payload here.",
+  "where": "Code/WCB/WCB.ino:8098-8111,8166-8180,8215-8224",
+  "status": "partial",
+  "tested_by": [
+   "mesh.w_usage",
+   "mesh.w_legacy_digits",
+   "mesh.unicast_acked",
+   "navicore.cli_over_mesh"
+  ],
+  "gap": "The numeric self form (;W1,<cmd> typed on W1 runs locally without a send) is not asserted; only the alias self form is (mesh.alias_ambiguous_wcb).",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "On W1 send ;W1,;S0<m> under ?DEBUG,ETM: the marker echoes and no '[ETM] Sent seq' line prints."
+ },
+ {
+  "id": "route.w_alias",
+  "area": "route",
+  "behaviour": ";W<alias>,<cmd> matches this board's own alias (runs locally) or a unique neighbour alias or client device type, case-insensitively; no match prints 'No board named ..'; two matches print the ambiguous refusal and send nothing; the alias form needs a comma.",
+  "where": "Code/WCB/WCB.ino:8139-8165; Code/WCB/WCB_WDP.cpp:794-806",
+  "status": "tested",
+  "tested_by": [
+   "mesh.alias",
+   "mesh.alias_case",
+   "mesh.alias_client_devtype",
+   "mesh.alias_ambiguous_wcb",
+   "mesh.alias_ambiguous_client",
+   "mesh.w_usage",
+   "wdp.forget_floor_relearn",
+   "wdp.off_on",
+   "persist.alias_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "Route by W2's alias in three spellings; alias W1 as NaviCore's device type so W2 refuses the name as ambiguous while W1 takes it as its own."
+ },
+ {
+  "id": "route.w_unreachable",
+  "area": "route",
+  "behaviour": "A target that is not an active peer (floor, learned or temporary) or the enabled controller prints 'WCB n is not a reachable target — it isn't a configured or learned peer[ or the controller].' and sends nothing.",
+  "where": "Code/WCB/WCB.ino:8226-8241",
+  "status": "tested",
+  "tested_by": [
+   "mesh.unreachable",
+   "peers.controller_off_on",
+   "wdp.temp_probe_lifecycle",
+   "peers.wcbq_live",
+   "client_mesh.adopt_identity_route",
+   "wdp.autojoin_off_ignores_probe"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": ";W15 before the probe joins, ;W20 with the controller off and ;W3 after the floor is restored each print the line."
+ },
+ {
+  "id": "route.w_if_refused",
+  "area": "route",
+  "behaviour": "An IF token inside a ;W payload is refused with '[IF] ERROR: IF cannot be routed inside ;w ..' and nothing is sent.",
+  "where": "Code/WCB/WCB.ino:8182-8196",
+  "status": "tested",
+  "tested_by": [
+   "if.payload_rejections"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Send ;W2,IF,cond^cmd: the error line prints, the next command runs ungated."
+ },
+ {
+  "id": "route.w_chain_split",
+  "area": "route",
+  "behaviour": "A ^ chain behind ;W<n>, is split by the sender before routing: only the first token goes to the target, the rest runs locally (a remote chain must ride ?MGMT,FRAG).",
+  "where": "Code/WCB/WCB.ino:2792-2860",
+  "status": "tested",
+  "tested_by": [
+   "mesh.chain_split",
+   "mesh.timer_chain"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": ";W2,;S2a^;S1b: a on W2 S2, b on W1 S1."
+ },
+ {
+  "id": "route.w_received_routes_one_hop",
+  "area": "route",
+  "behaviour": "A ;W<n> that arrives over the mesh is routed on as a unicast (the loop-prevention gate applies to broadcasts only), so ;W2;S3<text> sent to W1 lands once on W2 S3.",
+  "where": "Code/WCB/WCB.ino:8226-8234,3137-3138",
+  "status": "tested",
+  "tested_by": [
+   "ncmesh.w_route_chains"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "NaviCore WCB_SEND to W1 of ';W2;S3<t>': exactly one copy on W2 S3."
+ },
+ {
+  "id": "route.w_json_opens_rc_window",
+  "area": "route",
+  "behaviour": "Only a ;W<controller>,{json} opens the 20 s RC telemetry relay window; a text route to the controller or any other board never does, and the controller's own telemetry never renews it.",
+  "where": "Code/WCB/WCB.ino:8198-8213,5674-5681,5982-5987",
+  "status": "tested",
+  "tested_by": [
+   "navicore.rc_relay_window"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "NaviCore",
+  "risk": "M",
+  "how": "No sys:1 lines with no window, none after ;W20,HILtext, rc_* lines within 6 s of a PING and none 22 s after it."
+ },
+ {
+  "id": "bcast.mesh_copy_decided_at_entry",
+  "area": "bcast",
+  "behaviour": "A plain broadcast typed on S0 or arriving on a port goes to the mesh exactly once, decided from the command's own origin before the local ports are written; a broadcast that arrived over the mesh is never sent back (rule 3), whatever traffic lands meanwhile.",
+  "where": "Code/WCB/WCB.ino:8487-8491,8626-8634,3137-3138,2646-2692",
+  "status": "tested",
+  "tested_by": [
+   "input.bcast_mesh_under_traffic",
+   "input.bcast_under_json_flood",
+   "client_mesh.broadcast_reaches_all_ports",
+   "input.mesh_bcast_to_ports",
+   "etm.broadcast_per_board_ack",
+   "seq.fanout_wire_probe",
+   "client_mesh.timer_chain_keeps_mesh_origin",
+   "seq.peer_body_broadcasts"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "40 lines typed under a 50 Hz JSON flood and a 20 Hz command load each reach W1's port and W2's port once with one '[ETM] Sent seq' each; a client broadcast draws no 'Sent seq' from W1."
+ },
+ {
+  "id": "bcast.s0_echo_of_mesh_broadcast",
+  "area": "bcast",
+  "behaviour": "With ?BCAST,OUT,S0,ON a board echoes a mesh-received broadcast on its USB console.",
+  "where": "Code/WCB/WCB.ino:8618-8624",
+  "status": "tested",
+  "tested_by": [
+   "input.bcast_s0_echo_remote",
+   "persist.flags_and_etm_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "W2 with S0 echo on prints W1's typed broadcast."
+ },
+ {
+  "id": "bcast.pwm_non_etm_path",
+  "area": "bcast",
+  "behaviour": ";P messages always take the 249-byte path, untracked, counted under 'PWM Passthrough' in ?STATS and never under ETM.",
+  "where": "Code/WCB/WCB.ino:3140-3144,3221-3240",
+  "status": "tested",
+  "tested_by": [
+   "pwm.p_forwarded_stats"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Two ;W2,;P31500 give PWM Attempts 2 Success 2 and no '[ETM] Sent seq'."
+ },
+ {
+  "id": "bcast.send_failure_visible",
+  "area": "bcast",
+  "behaviour": "A send esp_now refuses prints '[ETM] Send failed seq N, error: E' (ETM) or 'ESP-NOW send failed! Error code: E' (plain), and a MAC-layer failure prints '[SEND CB] MAC-layer FAILED to: <mac>' and resolves the entry at once.",
+  "where": "Code/WCB/WCB.ino:3195-3198,3235-3242,6012-6020",
+  "status": "tested",
+  "tested_by": [
+   "map.unreachable_board",
+   "ident.channel_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "A text mapping to an absent board prints the ETM send-failed line; off-channel, a unicast to W2 prints the MAC-layer failure and 'Seq N resolved' with no retry."
+ },
+ {
+  "id": "ident.wcb_number",
+  "area": "ident",
+  "behaviour": "?WCB,n (1-20; legacy ?WCB<n>) saves the board number, applies it to the running number at once and to the radio address, peers and ETM at the next boot ('Changed WCB Number to: n / Please reboot ..'); out of range is refused.",
+  "where": "Code/WCB/WCB.ino:6779-6787,7778-7785; Code/WCB/WCB_Storage.cpp:242-257",
+  "status": "tested",
+  "tested_by": [
+   "ident.wcb_number_reboot",
+   "wcb.cmd.legacy_wcb_wcbq_spellings",
+   "ident.sender_id_mac_bound"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "?WCB,3, reboot: the chain, the WDP self row and the heartbeats say 3; ?WCB,21 refused; ?WCB,1 and a reboot put it back."
+ },
+ {
+  "id": "ident.wcbq_floor",
+  "area": "ident",
+  "behaviour": "?WCBQ,n (1-20; legacy ?WCBQ<n>) saves the peer floor and reconciles registrations live ('Saved WCB quantity: n. Peer registrations reconciled live'); a raised floor registers an absent board (never seen, fire-once sends, 'Not yet seen' in ?config); the floor survives a reboot; out of range refused.",
+  "where": "Code/WCB/WCB.ino:6790-6796,7543-7548,9255-9260,9417-9434; Code/WCB/WCB_Storage.cpp:514-528",
+  "status": "tested",
+  "tested_by": [
+   "peers.wcbq_live",
+   "peers.wcbq_reboot",
+   "wcb.cmd.legacy_wcb_wcbq_spellings",
+   "etm.char_guard_wcbq",
+   "wdp.add_forget_noop_ids"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "?WCBQ,3 on a two-board bench: live peers +1, WCB3 'Not yet seen', ;W3 sent once with no retry; the baseline token removes it."
+ },
+ {
+  "id": "ident.mesh_channel",
+  "area": "ident",
+  "behaviour": "?WCBCH,n (1-11) saves the mesh channel for the next boot ('Mesh channel saved as n — reboot to apply ..'); 0 and 12 are refused; after the boot ?WIFI reports 'Radio channel : n  (mesh channel n)' and a unicast to a board on the old channel fails at the MAC layer.",
+  "where": "Code/WCB/WCB.ino:6804-6812; Code/WCB/WCB_Storage.cpp:545-557",
+  "status": "tested",
+  "tested_by": [
+   "ident.channel_reboot",
+   "wifi.status"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "?WCBCH five channels away, reboot: the radio line, a MAC-layer failure to W2 and nothing on W2 S2; the original channel and a reboot restore delivery."
+ },
+ {
+  "id": "ident.mesh_channel_nvs_clamp",
+  "area": "ident",
+  "behaviour": "A stored mesh channel outside 1-11 falls back to the default at load so a corrupt blob cannot strand the board off-channel.",
+  "where": "Code/WCB/WCB_Storage.cpp:531-543",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "No command can store such a value.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A host test of loadMeshChannelFromPreferences with a Preferences shim.",
+  "blocked_by": "known: WCB-WP59 storage.unsettable_and_legacy_loads (the channel clamp)"
+ },
+ {
+  "id": "ident.mac_octets",
+  "area": "ident",
+  "behaviour": "?MAC,2|3,<1-2 hex digits> (legacy ?M2xx/?M3xx) saves the group octet and changes the receive filter at once (the radio address and the derived peer MACs follow at boot); non-hex, empty, 3-digit or '0x' values and a bad octet number are refused with the chain unchanged.",
+  "where": "Code/WCB/WCB.ino:6727-6761,7509-7541,9856-9861; Code/WCB/WCB_Storage.cpp:452-466",
+  "status": "tested",
+  "tested_by": [
+   "ident.mac_octet2_live",
+   "ident.mac_hex_refused",
+   "ident.legacy_mac_short",
+   "wdp.peers.fingerprint_discard",
+   "etm.ack_lost_retry_fail"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "?MAC,2 flipped: W1's unicast fails after 3 retries while W2 still runs it, W2's command to W1 is ignored; ZZ / empty / 1FF / 0x refused; the boot after a flip prints the new MAC address."
+ },
+ {
+  "id": "ident.espnow_password",
+  "area": "ident",
+  "behaviour": "?EPASS,<1-39 chars> (legacy ?EPASS<pw>) writes NVS and the live password every frame carries and every receiver checks, so a mismatched board is deaf and mute at once; 40+ and empty are refused with their lines.",
+  "where": "Code/WCB/WCB.ino:6764-6776,7787-7799; Code/WCB/WCB_Storage.cpp:559-578",
+  "status": "tested",
+  "tested_by": [
+   "ident.epass_live",
+   "ident.epass_window_gates"
+  ],
+  "gap": "",
+  "testable": "opt-in",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Opt-in mesh_password: with a throwaway password W1's unicast fails and W2's command is ignored; W1's own line from its chain restores both ways."
+ },
+ {
+  "id": "ident.hw_version",
+  "area": "ident",
+  "behaviour": "?HW,n (legacy ?HW<n>) accepts only 1/21/23/24/31/32 of this chip family ('Saved HW Ver: x.y to NVS. Reboot to take effect!'), refuses other values and the other family with the stored and running version unchanged, updates the running value for the chain at once and applies the pin map at boot; a stored other-family value is ignored at load.",
+  "where": "Code/WCB/WCB.ino:7165-7169,7801-7804; Code/WCB/WCB_Storage.cpp:81-150",
+  "status": "partial",
+  "tested_by": [
+   "ident.hw_setter",
+   "ident.hw_other_chip_refused"
+  ],
+  "gap": "The load-time ignore of a stored other-family version ('[HW] Saved HW version n is for the other chip - ignored') is only reachable from older firmware.",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A host test of loadHWversion with a Preferences shim holding 32 on a classic build."
+ },
+ {
+  "id": "ident.alias",
+  "area": "ident",
+  "behaviour": "?ALIAS,<text> replaces ^ , ; ? CR LF with '_', cuts at 24 bytes on a UTF-8 boundary, saves to NVS and the chain, advertises on change; ?ALIAS / ?ALIAS,LIST query; ?ALIAS,CLEAR unsets; the alias survives a reboot and resolves on other boards.",
+  "where": "Code/WCB/WCB.ino:6862-6874; Code/WCB/WCB_Storage.cpp:262-305",
+  "status": "tested",
+  "tested_by": [
+   "alias.set_sanitize_propagate",
+   "alias.utf8_truncation",
+   "persist.alias_reboot",
+   "client_mesh.whoami_alias_escape",
+   "mesh.alias"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "?ALIAS,HIL,a;b?c sets HIL_a_b_c; 26 letters keep 24; 23 ASCII + é keeps 23; after a reboot W2 routes ;W<alias> to W1."
+ },
+ {
+  "id": "ident.boot_banner_identity",
+  "area": "ident",
+  "behaviour": "The boot banner states the board number, firmware, WCB count, derived ESP-NOW MAC 02:<o2>:<o3>:00:00:<n>, the broadcast peer FF:<o2>:<o3>:FF:FF:FF, the ETM state and 'ETM struct size: 252 / Normal struct size: 249'.",
+  "where": "Code/WCB/WCB.ino:9856-9861,9920-9930,9976-9990",
+  "status": "tested",
+  "tested_by": [
+   "boot.banner_w1",
+   "boot.banner_w2",
+   "wdp.peers.fingerprint_discard",
+   "peers.wcbq_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "After a reboot each banner line follows from the chain's ?WCB, ?WCBQ, ?MAC and ?ETM tokens."
+ },
+ {
+  "id": "ident.erase_defaults",
+  "area": "ident",
+  "behaviour": "?ERASE,NVS / ?WCB_ERASE erase every namespace and restart on the defaults: WCB 1, quantity 1, octets 00, channel 1, no controller, no alias, ETM on with its defaults, WDP and auto-join on, no learned peers; the learned-peer table is frozen until the restart.",
+  "where": "Code/WCB/WCB_Storage.cpp:1049-1140; Code/WCB/WCB.ino:672-673,9441-9442",
+  "status": "tested",
+  "tested_by": [
+   "nvs.erase_defaults_restore",
+   "nvs.wcb_erase_alias",
+   "nvs.erase_led_and_tails"
+  ],
+  "gap": "",
+  "testable": "opt-in",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "Opt-in nvs_erase: the banner and chain after the erase hold the defaults; the old chain, a boot and ?WDP,ADD put W1 back and the mesh works both ways."
+ },
+ {
+  "id": "peers.membership_floor_union",
+  "area": "peers",
+  "behaviour": "The active peer set is {1..WCBQ} ∪ learned ∪ temporary minus self; every ETM loop, ?PEERSLIVE, WDPCFG PEERS, ?WDP,STATUS peers and the ?config peer list agree; ?PEERSLIVE ignores an argument (a replayed factory chain is harmless).",
+  "where": "Code/WCB/WCB.ino:631-660,9252-9260,9291-9295,6826-6830",
+  "status": "tested",
+  "tested_by": [
+   "peers.peerslive_consistency",
+   "peers.wcbq_live",
+   "wdp.autojoin_query_set",
+   "wdp.clear_learned_relearn"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "?PEERSLIVE, ?PEERSLIVE,99, WDPCFG PEERS, ?WDP,STATUS and the ?config rows give one count."
+ },
+ {
+  "id": "peers.learned_persistence",
+  "area": "peers",
+  "behaviour": "Learned membership is a 20-bit mask in NVS learned_peers with the MAC-octet fingerprint, flushed 5 s after a change (and just before a deferred restart), restored at boot ('[PEER] restored n learned peer(s) from NVS'), discarded when the octets differ, and frozen after ?ERASE,NVS.",
+  "where": "Code/WCB/WCB.ino:662-673,9436-9503,10140-10145",
+  "status": "partial",
+  "tested_by": [
+   "wdp.autojoin_permanent_downgrade",
+   "wdp.peers.forget_learned_persists",
+   "wdp.peers.add_forget_survive_quick_reboot",
+   "wdp.peers.fingerprint_discard",
+   "wdp.clear_learned_relearn",
+   "nvs.erase_defaults_restore"
+  ],
+  "gap": "The post-erase freeze (nothing writes the table between ?ERASE,NVS and the restart) is not asserted; the erase tests re-add the learned peers afterwards, which would also pass if the freeze failed and the erase ran first.",
+  "testable": "opt-in",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Under nvs_erase: ?WDP,ADD,<id>^?ERASE,NVS; after the boot ?NVS must list no learned_peers namespace and no '[PEER] restored' line."
+ },
+ {
+  "id": "peers.wdp_add_forget_clear",
+  "area": "peers",
+  "behaviour": "?WDP,ADD,<id> learns and persists a peer (self, the controller and the floor change nothing); ?WDP,FORGET,<id> unregisters a learned or temporary peer at once, drops its row, its live count and its open ACK expectations, and persists; ?WDP,CLEAR drops every learned peer and the whole table; bad ids print usage.",
+  "where": "Code/WCB/WCB_WDP.cpp:1896-1927; Code/WCB/WCB.ino:9303-9410,9496-9503,1765-1775",
+  "status": "tested",
+  "tested_by": [
+   "wdp.add_forget_noop_ids",
+   "wdp.forget_floor_relearn",
+   "wdp.clear_learned_relearn",
+   "wdp.peers.forget_learned_persists",
+   "etm.forget_clears_pending",
+   "wdp.peers.add_forget_survive_quick_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "FORGET of a learned peer prints 'unregistered' and 'forgot', ;W<id> is refused, ?PEERSLIVE drops by one and a reboot restores the rest; a FORGET during a broadcast's retry ends the retries."
+ },
+ {
+  "id": "peers.temporary_adoption",
+  "area": "peers",
+  "behaviour": "A device advertising the TEMPORARY flag is adopted on its second advert as a live, unpersisted peer ('[PEER] WCBn registered (live, TEMPORARY).', 'temporarily joined'), downgrades a learned peer ('downgraded to temporary'), is ignored at or below the floor, and shows PEER=4 in the dump.",
+  "where": "Code/WCB/WCB_WDP.cpp:673-700; Code/WCB/WCB.ino:9341-9375",
+  "status": "tested",
+  "tested_by": [
+   "wdp.temp_probe_lifecycle",
+   "client_mesh.adopt_identity_route",
+   "wdp.autojoin_permanent_downgrade",
+   "wdp.autojoin_two_advert_vetting"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "The probe's join prints the four lines in order; a learned id re-joining temporary prints the downgrade and the next reboot no longer restores it."
+ },
+ {
+  "id": "peers.autojoin_permanent",
+  "area": "peers",
+  "behaviour": "With auto-join on, a non-temporary device heard twice is auto-joined as a persisted learned peer ('[WDP] auto-joined WCBn .. (board|client)', PEER=2, a member after a reboot); with auto-join off a device is learned but never joined; ?WDP,AUTOJOIN query/ON/OFF/usage persist and ride the chain.",
+  "where": "Code/WCB/WCB_WDP.cpp:673-700,1883-1894; Code/WCB/WCB.ino:9303-9332",
+  "status": "tested",
+  "tested_by": [
+   "wdp.autojoin_permanent_downgrade",
+   "wdp.autojoin_off_ignores_probe",
+   "wdp.autojoin_query_set",
+   "wdp.autojoin_two_advert_vetting",
+   "wdp.neighbor_stale_after_ttl",
+   "persist.flags_and_etm_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "H",
+  "how": "A permanent probe at 12 is auto-joined, reachable, ACKing and restored after a W1 reboot; with AUTOJOIN,OFF it is learned, unreachable and PEER=0."
+ },
+ {
+  "id": "peers.controller_special_peer",
+  "area": "peers",
+  "behaviour": "?CONTROLLER,ON[,id] (?SPECIAL alias) registers the controller live ('registered (live)', 'Controller peer ID set to n.'), persists both, keeps it out of the learned set, shows it as 'WCBn (special)' in ?STATS and CTRL=n in the self row; OFF frees the out-of-band slot and makes ;W<id> unreachable while its commands still run; invalid ids refused; the query prints state and usage; all of it survives a reboot.",
+  "where": "Code/WCB/WCB.ino:6888-6921,9212-9250; Code/WCB/WCB_Storage.cpp:475-512",
+  "status": "partial",
+  "tested_by": [
+   "peers.controller_off_on",
+   "peers.controller_other_id_persist",
+   "peers.controller_off_still_executes",
+   "peers.controller_off_reboot_readopted",
+   "wcb.chain_partial_tokens",
+   "etm.controller_unicast_tracked"
+  ],
+  "gap": "enableControllerPeer clearing the learned bit of an id that was auto-joined earlier (so it is not dual-tracked) is not asserted.",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "L",
+  "how": "Learn the probe permanently at 13 (PEER=2), then ?CONTROLLER,ON,13: the dump row must read PEER=0 and ?PEERSLIVE drop by one; ?CONTROLLER,ON,20 and a FORGET put it back."
+ },
+ {
+  "id": "peers.controller_auto_adopt",
+  "area": "peers",
+  "behaviour": "The first learn of a controller-type device (NaviCore, Sabé/Sabe, any case) while no controller is enabled auto-enables it at that id ('[WDP] heard controller \"..\" (WCBn) — auto-enabling controller peer'); re-hearing a known row, or any device while a controller is pinned, changes nothing; auto-join does not gate it; after a reboot the RAM table is empty so an OFF lasts until the controller is heard again.",
+  "where": "Code/WCB/WCB_WDP.cpp:426-434,640-650,1959-1963",
+  "status": "tested",
+  "tested_by": [
+   "wdp.controller_auto_enable",
+   "wdp.controller_no_readopt_no_override",
+   "peers.controller_off_reboot_readopted"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "OFF + FORGET,20 + POLL re-adopts NaviCore; with the controller at 17, relearning NaviCore leaves it; a 'Sabe' probe at 14 is adopted once the controller is OFF."
+ },
+ {
+  "id": "peers.esp_now_table_full",
+  "area": "peers",
+  "behaviour": "A peer the 20-slot ESP-NOW table cannot take is not marked active ('[PEER] Could not add WCBn (ESP-NOW peer table full? cap 20)').",
+  "where": "Code/WCB/WCB.ino:9309-9317,9348-9356",
+  "status": "blocked",
+  "tested_by": [],
+  "gap": "",
+  "testable": "blocked",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Code review only.",
+  "blocked_by": "known: WCB-WP59 wcb.etm.ack_queue_and_peer_reregister (more than 20 peers)"
+ },
+ {
+  "id": "peers.chain_tokens",
+  "area": "peers",
+  "behaviour": "?PEERSLIVE rides only the factory chain, once; a controller pinned at a non-default id survives OFF in the chain as '?CONTROLLER,ON,17^?CONTROLLER,OFF'.",
+  "where": "Code/WCB/WCB.ino:1268-1271,3737-3950",
+  "status": "tested",
+  "tested_by": [
+   "wcb.chain_partial_tokens"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Read both chains after ?CONTROLLER,ON,17 then OFF."
+ },
+ {
+  "id": "stats.print_and_reset",
+  "area": "stats",
+  "behaviour": "?STATS prints the unicast summary and success rate (ETM or MAC counters), the PWM and raw blocks when non-zero, the heap line, the given-up-frame, queue-refused and USB-overflow lines when non-zero, the per-board ETM rows with online/age, the '(special)' row and the reported rows; ?STATS,RESET (legacy ?STATSRESET) clears them all.",
+  "where": "Code/WCB/WCB.ino:2127-2264,7042-7057,7343-7346",
+  "status": "partial",
+  "tested_by": [
+   "etm.ack_lost_retry_fail",
+   "etm.pending_table_evict",
+   "etm.off_fleet_normal_path",
+   "pwm.p_forwarded_stats",
+   "stats.rpt_local",
+   "etm.off_local",
+   "stats.usb_rx_overflow_line",
+   "etm.controller_unicast_tracked",
+   "wcb.mgmt_result_too_large"
+  ],
+  "gap": "The 'ESP-NOW: N frame(s) not sent - the radio's queue stayed full', 'ETM: N command(s) refused unacknowledged', 'Raw Data (Kyber Bridging)' and 'Heap: ..' lines are not asserted.",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "L",
+  "how": "After a sendRaw burst assert the Raw block; after etm.full_queue_refused_not_lost assert the ETM refused line; the heap line is a regex check on any ?STATS; the given-up line needs a radio flood (the [MESH] report of etm.char_per_board_clamp shows when it happens)."
+ },
+ {
+  "id": "stats.rpt_store",
+  "area": "stats",
+  "behaviour": "?STATS,RPT,<from>,<sent>,<ackd>,<retries>,<failed>,<unguaranteed>,<bcast>,<recv> stores a RAM-only row (strtoul, so > 2^31 exact) silently; fewer than 8 fields or an id outside 1-20 is refused with its line; the row shows under 'Reported by Other Nodes' with its age; RESET and a reboot clear it; it prints only under ?DEBUG,MGMT and does not hold off a deferred restart.",
+  "where": "Code/WCB/WCB.ino:2266-2317,7045-7052",
+  "status": "tested",
+  "tested_by": [
+   "stats.rpt_local",
+   "stats.rpt_remote",
+   "stats.rpt_large_ram_only",
+   "etm.reboot_stats_rpt",
+   "etm.rx_debug_lines"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "A valid row prints nothing and shows in ?STATS; 3-field, 0-field, id 21/0 and a blank field each refuse; 3000000000 is stored exactly and gone after a reboot."
+ },
+ {
+  "id": "wdp.advert_payload",
+  "area": "wdp",
+  "behaviour": "This board's advert carries magic/version, alias (<=24), firmware (<=27), HW, the capability bitmap, the controller id when linked, Maestro and WLED id@baud records, remote PWM targets, the sequence-inventory hash, then one label per port (a user label or the WDP-DA device type), dropping labels that no longer fit the 200-byte payload.",
+  "where": "Code/WCB/WCB_WDP.cpp:114-139,242-327",
+  "status": "partial",
+  "tested_by": [
+   "wdp.dump_fields",
+   "wdp.dump_neighbor_fields",
+   "wdp.list_detail_content",
+   "inv.hash_matches_wdp",
+   "ncmesh.wdp_neighbour_table",
+   "pwm.passthrough_mesh",
+   "wdp.da_announce_propagates"
+  ],
+  "gap": "The budget rule (labels dropped gracefully when the payload would exceed 200 bytes) is not asserted.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Give W2 five 24-character labels, a 24-character alias and its Maestro/WLED slots so the TLVs exceed 200 bytes: W1's row must keep the identity fields and lose only the trailing labels, with no garbled field."
+ },
+ {
+  "id": "wdp.advert_cadence",
+  "area": "wdp",
+  "behaviour": "Three boot adverts from 1.6 s after wdpBegin, 1.3 s apart; a 60 s backstop phased by (number mod 16) x 500 ms; an on-change advert within ~0.5 s of a payload change plus one re-send; none while WDP or ETM is off.",
+  "where": "Code/WCB/WCB_WDP.cpp:374-413,1959-1971,55",
+  "status": "tested",
+  "tested_by": [
+   "boot.announce_advert_burst",
+   "wdp.advert_stagger_by_number",
+   "alias.set_sanitize_propagate",
+   "wdp.off_reboot",
+   "etm.off_local",
+   "client_mesh.whoami_alias_escape"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "M",
+  "how": "W2's first periodic advert after boot comes 61.0 s after '[WDP] discovery enabled'; an alias change reaches W2's table within 2 s; nothing is sent with WDP off."
+ },
+ {
+  "id": "wdp.poll_solicit",
+  "area": "wdp",
+  "behaviour": "?WDP,POLL advertises and broadcasts a SOLICIT; a receiver arms one prompt advert staggered by its number and does not decode the solicit as an advert (the sender's row is kept); POLL is refused while WDP or ETM is off.",
+  "where": "Code/WCB/WCB_WDP.cpp:351-372,513-527,1871-1879",
+  "status": "partial",
+  "tested_by": [
+   "wdp.poll_refreshes_age",
+   "wdp.off_on",
+   "etm.off_local",
+   "wdp.forget_floor_relearn",
+   "ncmesh.wdp_solicit_keeps_rows"
+  ],
+  "gap": "The 'solicit keeps the sender's row' rule is asserted on NaviCore's table only, not on a WCB's: W2's row for W1 after W1's POLL is never compared.",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Read W2's [WDP:N=1,...] row and [WDPIF] rows, send ?WDP,POLL on W1, read them again on W2: unchanged, and W1's row for W2 is AGE 0-2."
+ },
+ {
+  "id": "wdp.advert_decode_and_table",
+  "area": "wdp",
+  "behaviour": "An advert from a valid in-range sender replaces that board's row wholesale (alias/devtype, fw, hw, caps, ctrl id, flags, seqhash, maestro/wled, labels, PWM targets for this board), scrubs ',' ']' and control bytes, prints '[WDP] learned WCBn <alias>' on the first learn, marks the row stale after 180 s of silence and keeps it; ?WDP,OFF ignores adverts.",
+  "where": "Code/WCB/WCB_WDP.cpp:508-638,406-412,421-424",
+  "status": "tested",
+  "tested_by": [
+   "wdp.dump_fields",
+   "wdp.neighbor_stale_after_ttl",
+   "wdp.off_on",
+   "ncmesh.wdp_identity_fields",
+   "wdp.da_announce_propagates",
+   "client_mesh.adopt_identity_route"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "A probe's row carries its advertised type/fw/hwrev/captags; after 188 s of silence SEEN=0, 'stale' in LIST and '(stale)' in detail; with WDP off W2's AGE keeps growing through its POLL."
+ },
+ {
+  "id": "wdp.advert_bad_frame_ignored",
+  "area": "wdp",
+  "behaviour": "An advert with the wrong magic or protocol version, or from a sender outside 1-20, is ignored; a full 8-slot advert queue drops the advert (periodic re-adverts recover).",
+  "where": "Code/WCB/WCB_WDP.cpp:509-511; Code/WCB/WCB.ino:1346-1351",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Needs hand-built WDP payloads or a burst of more than 8 adverts in one loop pass.",
+  "testable": "blocked",
+  "bench_needs": "probe feature",
+  "risk": "L",
+  "how": "A probe verb that sends a WDP envelope with a chosen magic/version; the table must not change."
+ },
+ {
+  "id": "wdp.dump_list_detail_status",
+  "area": "wdp",
+  "behaviour": "?WDP,DUMP prints the SELF row first (PEER=3), one [WDP:N=..] row per neighbour with CLIENT/ALIAS/HW/HWREV/FW/CAP/CTRL/CAPTAGS/MAESTRO/AGE/SEEN/PEER, [WDPIF] labels, [WDPDA] devices, [WDPX] id@baud, [WDPSEQ] hash (omitted for a client), [WDPPWM] edges, then [WDPCFG:EN,AUTOJOIN,PEERS] and [WDP:END,count]; ?WDP / LIST is the table with the capability legend and live/stale; ?WDP,<n> / DETAIL,n the detail (WCB or device form, '(not heard)' devices); ?WDP,STATUS the one-line summary; an unknown sub-command or neighbour prints its line.",
+  "where": "Code/WCB/WCB_WDP.cpp:1530-1941",
+  "status": "tested",
+  "tested_by": [
+   "wdp.dump_fields",
+   "wdp.dump_neighbor_fields",
+   "wdp.list_detail_errors",
+   "wdp.list_detail_content",
+   "peers.peerslive_consistency",
+   "inv.client_no_hash",
+   "inv.hash_matches_wdp",
+   "client_mesh.adopt_identity_route"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "L",
+  "how": "Every field of the self, W2 and NaviCore rows against each board's own config; the LIST columns and the detail block for W2."
+ },
+ {
+  "id": "wdp.on_off_persist",
+  "area": "wdp",
+  "behaviour": "?WDP,ON/OFF confirms, persists in wdp_cfg, rides the chain (OFF only), stops adverts and advert decoding while off, keeps alias routing, and survives a reboot (WDPCFG EN=0, POLL refused).",
+  "where": "Code/WCB/WCB_WDP.cpp:1880-1881,1945-1957; Code/WCB/WCB.ino:6968-6974",
+  "status": "tested",
+  "tested_by": [
+   "wdp.off_on",
+   "wdp.off_reboot"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "OFF: no adverts for 8 s under ?DEBUG,MGMT after a reboot, POLL refused, W2's AGE grows past its POLL, ;W<alias> still delivers."
+ },
+ {
+  "id": "wdp.autojoin_two_advert_vetting",
+  "area": "wdp",
+  "behaviour": "Auto-join and temporary adoption act only on a sender's second advert, so one stray packet cannot inject a peer; FORGET resets the count.",
+  "where": "Code/WCB/WCB_WDP.cpp:674-677; Code/WCB/WCB.ino:9389",
+  "status": "tested",
+  "tested_by": [
+   "wdp.autojoin_two_advert_vetting",
+   "wdp.autojoin_off_ignores_probe"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "'temporarily joined WCB15' comes 1-4 s after 'learned WCB15' (one boot-burst advert later); a strict single-advert arm needs a probe verb."
+ },
+ {
+  "id": "client.adoption_and_rows",
+  "area": "client",
+  "behaviour": "A WCB_Client that joins is learned from its advert ('[WDP] learned WCBn <type>'), adopted temporary or permanent, marked ONLINE with its derived MAC in the came-ONLINE line, and shown as CLIENT=1, ALIAS=<device type>, HW=0, CAP=0000, CTRL=0, PEER=4|2 with no WDPIF/WDPX/WDPSEQ rows; it then becomes a ;W target.",
+  "where": "Code/WCB/WCB_WDP.cpp:567-577,637-700,1810-1847; Code/WCB/WCB.ino:5481-5495",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.adopt_identity_route",
+   "wdp.temp_probe_lifecycle",
+   "inv.client_no_hash",
+   "ncmesh.wdp_identity_fields",
+   "wdp.autojoin_permanent_downgrade"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "The probe's join prints the learn/register/join/ONLINE lines in order, its dump row matches exactly, ;W<id> delivers and is ACKed."
+ },
+ {
+  "id": "client.commands_run_before_adoption",
+  "area": "client",
+  "behaviour": "A WCB ACKs and runs an ETM command from any valid in-group sender whether or not it has adopted it; adoption gates only WCB-to-client routing and online tracking; a disabled controller's commands still run.",
+  "where": "Code/WCB/WCB.ino:5539-5567,5728",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.unicast_executes",
+   "client_mesh.rejoin_unadopted",
+   "peers.controller_off_still_executes",
+   "etm.nonetm_whitelist_scope"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "With W1's WDP off a never-adopted client's seven commands each land once on W1 S2; with the controller OFF NaviCore's TEST_ACTION unicast is received, ACKed and run."
+ },
+ {
+  "id": "client.fragmented_unicast_stays_local",
+  "area": "client",
+  "behaviour": "A client unicast over 187 characters arrives as type-5 fragments ('New session .. (client unicast)'), is reassembled and run once, and keeps unicast origin so its broadcastable tokens never fan out to other boards.",
+  "where": "Code/WCB/WCB.ino:3634,3666-3688",
+  "status": "partial",
+  "tested_by": [
+   "client_mesh.fragmented_unicast_limits",
+   "navicore.wcb_send_fragmented_unicast"
+  ],
+  "gap": "Run-once on W1 and the session lines are asserted; that the 188/400-character ;S2 unicast never reaches W2's port (the no-re-broadcast half) is not.",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "M",
+  "how": "Send a 400-character ';S3<text>' unicast to W1 while watching W2 S3: nothing arrives there and W1 prints no '[ETM] Sent seq' for it."
+ },
+ {
+  "id": "client.broadcast_once_acked_not_rebroadcast",
+  "area": "client",
+  "behaviour": "A client's ensured plain broadcast runs once on every WCB, is ACKed by each, reaches every eligible port (Maestro/device ports skipped) and is never re-broadcast; a WCB's own broadcast reaches the client exactly once.",
+  "where": "Code/WCB/WCB.ino:5539-5567,8487-8634",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.broadcast_reaches_all_ports",
+   "input.mesh_bcast_to_ports",
+   "client_mesh.wcb_broadcast_reaches_client",
+   "navicore.plain_broadcast_both_ways",
+   "navicore.wcb_send_broadcast_exec",
+   "client_mesh.timer_chain_keeps_mesh_origin"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "A client ;S4 broadcast lands once on W1 S4 and W2 S4 with one 'Sent ACK' and no 'Sent seq' on W1; a top-level ;C from W1 reaches the client once."
+ },
+ {
+  "id": "client.sendraw_bounds_and_auth",
+  "area": "client",
+  "behaviour": "A client's raw frame of up to 177 bytes is written byte-exact; a wrong-password or wrong-octet client's frames and commands are ignored and create no WCB state.",
+  "where": "Code/WCB/WCB.ino:5894-5903,5301,5778",
+  "status": "tested",
+  "tested_by": [
+   "map.probe_mesh_raw_chunk_bounds",
+   "client_mesh.auth_mismatch_silent",
+   "client_mesh.sendraw_exact_bytes"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe tap",
+  "risk": "H",
+  "how": "177 bytes arrive whole on W2 S2; a wrong-password probe's 16-byte raw frame never reaches it; W1 logs nothing about the wrong-password/octet client."
+ },
+ {
+  "id": "client.whoami_and_alias_query",
+  "area": "client",
+  "behaviour": "A client's ?WHOAMI is answered with the alias JSON (see rx.whoami_reply); a WCB with no alias advertises no ALIAS TLV and answers with an empty alias.",
+  "where": "Code/WCB/WCB.ino:5728-5750; Code/WCB/WCB_WDP.cpp:248-251",
+  "status": "tested",
+  "tested_by": [
+   "client_mesh.whoami_roundtrip",
+   "ncmesh.alias_whoami"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "NaviCore",
+  "risk": "L",
+  "how": "With W2's alias cleared NaviCore names it nothing and sends at most 4 ?WHOAMI per session; the alias comes back after the restore."
+ },
+ {
+  "id": "rcrelay.window_queue_pause",
+  "area": "rcrelay",
+  "behaviour": "Inside the 20 s window every '{' payload from the mesh is queued (64 slots) and printed from loop(); a full queue drops the line and prints '[RCBRG] relay queue FULL — dropped a JSON line (total drops=N)' with consecutive totals; any ?OTA / ?OTALOCAL pauses the relay for 8 s.",
+  "where": "Code/WCB/WCB.ino:326-448,5674-5684,5982-5987,6835-6856",
+  "status": "tested",
+  "tested_by": [
+   "navicore.rc_relay_window",
+   "navicore.rc_relay_ota_pause",
+   "client_mesh.rc_relay_drops_counted"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "probe",
+  "risk": "M",
+  "how": "A 100 Hz client JSON flood while loop() prints ?HELP/?backup/?config overflows the queue: drop totals count up by one and relayed + dropped account for what was sent; a PING right after ?OTALOCAL,STATUS gets no PONG for 6 s."
+ },
+ {
+  "id": "boot.deferred_restart_quiet_window",
+  "area": "boot",
+  "behaviour": "A ?reboot (local or over the mesh) sets rebootPending; loop() restarts once the command queue has been quiet 4 s, or at the 20 s cap with an ungated 'Restart held off N s ..' line, never while a config pull job runs; store-only ?STATS,RPT and a same-relay RTERM re-arm are not activity.",
+  "where": "Code/WCB/WCB.ino:1060-1064,1230-1256,10128-10160",
+  "status": "tested",
+  "tested_by": [
+   "etm.reboot_rterm_rearm",
+   "etm.reboot_stats_rpt",
+   "etm.reboot_defer_cap",
+   "mesh.frag_push_reboot",
+   "wcb.pull_holds_restart"
+  ],
+  "gap": "",
+  "testable": "unattended",
+  "bench_needs": "none",
+  "risk": "H",
+  "how": "A ?reboot under a ?VERSION-a-second stream restarts at the 20 s cap with the held-off line; under RTERM re-arms or ?STATS,RPT it restarts within 10 s."
+ }
+]
