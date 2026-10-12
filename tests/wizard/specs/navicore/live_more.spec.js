@@ -14,6 +14,19 @@ const chip = (page) => page.locator('#live-btn-name');
 const activeTab = (page) => page.locator('.mode-tab[class*="active-"]').getAttribute('data-mode');
 const glowing = (page, btn) => page.locator(`.btn-zone.live-active[data-btn="${btn}"]`).count();
 const fired = (page, slot) => page.locator(`#assignment-list .tier-row[data-slot="${slot}"].trig-fired`).evaluateAll((els) => els.map((e) => +e.dataset.tier).sort());
+// Whether button `btn`'s zone glows at any moment during `action` (a MutationObserver armed first, up to `ms`): over
+// Direct USB the next PWM frame's render drops the glow again within 50 ms, which a poll can miss.
+async function glowsDuring(page, btn, action, ms = 3000) {
+  const armed = page.evaluate(([b, t]) => new Promise((resolve) => {
+    const hit = () => !!document.querySelector(`.btn-zone.live-active[data-btn="${b}"]`);
+    if (hit()) return resolve(true);
+    const obs = new MutationObserver(() => { if (hit()) { obs.disconnect(); resolve(true); } });
+    obs.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+    setTimeout(() => { obs.disconnect(); resolve(hit()); }, t);
+  }), [btn, ms]);
+  await action();
+  return armed;
+}
 
 test.describe('the live view over Direct USB', () => {
   const live = { matrixVal: 992, btn: 0, mode: 1, swing: {} };
@@ -65,9 +78,9 @@ test.describe('the live view over Direct USB', () => {
     await expect(page.locator('.mode-tab[data-mode="1"]')).toHaveClass(/active-1/);
     // rc_trig on the wire: a double tap on button 10 (cumulative) lights tiers 1 and 2 and glows the zone briefly; a
     // long press on button 7 lights its long-press tier alone.
-    emu.inject('{"type":"rc_trig","mode":1,"btn":10,"tap":2}');
+    expect(await glowsDuring(page, 10, async () => emu.inject('{"type":"rc_trig","mode":1,"btn":10,"tap":2}')),
+           'the zone glowed on the trigger').toBe(true);
     await expect.poll(() => fired(page, 10)).toEqual([1, 2]);
-    await expect.poll(() => glowing(page, 10)).toBeGreaterThan(0);
     await page.clock.fastForward(300);
     await expect.poll(() => glowing(page, 10)).toBe(0);
     await page.clock.fastForward(2000);
