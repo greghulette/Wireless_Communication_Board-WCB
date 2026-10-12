@@ -2318,6 +2318,8 @@ GATED = {
                  "ncota.recovery_hard_reset", "ncboot.new_peer_fires_once")},
     "ncboot.bad_device_id": ("navicore_identity", "takes NaviCore off the mesh with a saved invalid deviceId until it "
                                                   "is restored over USB; attended only"),
+    "ncboot.identity_change_rejoin": ("navicore_identity", "takes NaviCore off the mesh with a saved invalid deviceId "
+                                                           "until it is restored over USB; attended only"),   # 2026-10-11
     "ncota.recovery_esptool": ("navicore_esptool", "resets NaviCore into ROM download mode and writes its app0 and "
                                                    "otadata with esptool; watched runs only"),
     "ncota.local_begin_abort_timeout": ("navicore_ota_erase", "every accepted BEGIN erases 4 KB of NaviCore's inactive "
@@ -8943,7 +8945,8 @@ def _run_boot_suite(tmp, ids=None, mut=(), tag="all"):
 # s46/s47 tests the model cannot host (2026-10-11): a W2 console silenced across a restart (NaviBootModel's W2 script
 # has no ETM or WDP verbs), and junk images refused by esp_ota_write's magic check and esp_ota_end's verify, which
 # the model's OTA does not validate. They run on the bench only.
-NCBOOT_BENCH_ONLY = {"ncboot.new_peer_fires_once", "ncota.local_bad_image_refused", "ncota.relay_small_to_navicore"}
+NCBOOT_BENCH_ONLY = {"ncboot.new_peer_fires_once", "ncota.local_bad_image_refused", "ncota.relay_small_to_navicore",
+                     "ncboot.identity_change_rejoin"}   # the last: W1's WDP view and relay of a new id, beyond the model
 
 
 def t_ncboot_ncota_against_model(tmp):

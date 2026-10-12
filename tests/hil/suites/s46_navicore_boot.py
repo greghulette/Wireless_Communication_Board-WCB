@@ -999,3 +999,89 @@ def new_peer_fires_once(bench):
         notes.append(f"W1 may have marked W2 offline meanwhile (over {W1_OFFLINE_S} s silent)")
     bench.note("ncboot.new_peer_fires_once: " + "; ".join(notes))
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ attended: a saved mesh identity that works
+from suites.common import FORBIDDEN_MESH_IDS  # noqa: E402
+from suites.s18_etm_config_wdp import _forget_everywhere  # noqa: E402
+from suites.s43_navicore_mesh import _row_of, _term_lines, _wcb_view  # noqa: E402
+
+IDENTITY_TEMP_ID = 15     # identity_change_rejoin's deviceId for one boot: no bench board, probe (s19 MESH_IDS) or
+                          # reserved id (common.FORBIDDEN_MESH_IDS) uses it
+REJOIN_SEEN_S = 20.0      # W1 shows a WDP row for the new id within this of the join (two ?WDP,POLLs along the way)
+
+
+@test("ncboot.identity_change_rejoin", "OPT-IN (navicore_identity, attended): a saved deviceId takes effect at the next "
+      f"boot: on deviceId {IDENTITY_TEMP_ID} NaviCore joins the mesh as that board (the banner's join line, "
+      "GET_WCB_STATUS's self), W1 gets a WDP row for it and relays a ?version to it as [TERM:<id>] lines; the real "
+      "deviceId written back over USB and a restart rejoin as before, and every WCB forgets the temporary id (NaviCore "
+      "restarts twice)", needs=["navicore", "wcb1"], links=[], opt_in="navicore_identity")
+def identity_change_rejoin(bench):
+    """The valid half of ncboot.bad_device_id: SET_CONFIG stores wcbNetwork.deviceId as sent (rc_config.h:1771) and only
+    setup() reads it into WCB_Client (NaviCore.ino:4834-4838; the running client keeps its id until a restart, as
+    nccfg.mesh_creds_live_split shows for the password), so the next boot joins as the new board: '[WCB] Joined
+    network as device ID <n>', GET_WCB_STATUS's self <n>, and W1 hears its adverts - W1's ?WDP,POLL makes every board
+    advertise at once (WCB_WDP.cpp:366-372) and a permanent advert counted twice is learned, so two polls give W1 the
+    peer a unicast needs - and a line relayed by W1 to ;W<n> runs on NaviCore's console and comes back as [TERM:<n>]
+    (ncmesh.remote_cli_order_and_drop). Attended only (D-NC14): if the restore did not take, NaviCore stays on the
+    temporary id until `python -m hil.ncflash status` shows it answering and its deviceId is written back over USB.
+    Every WCB forgets WCB<n> in the finally (s18 _forget_everywhere), so the next run finds the roster as it was."""
+    nc, w1 = _nc(bench), WCB(bench.dev("wcb1"))
+    _restartable(nc)
+    n = IDENTITY_TEMP_ID
+    if n in FORBIDDEN_MESH_IDS:
+        raise AssertionError(f"IDENTITY_TEMP_ID {n} is reserved on this bench (suites.common.FORBIDDEN_MESH_IDS)")
+    if _row_of(_wcb_view(w1), n) is not None:
+        raise Skip(f"W1 has a WDP row for WCB{n}: the id is in use")
+    known = nc.wcb_status().get("known") or []
+    if n <= len(known) and known[n - 1]:
+        raise Skip(f"NaviCore knows a WCB{n}: the id is in use")
+    problems, facts = [], {}
+    with nc_guard(bench, nc=nc) as g:
+        me = g.before["wcbNetwork"]["deviceId"]
+        failure = None
+        try:
+            g.nc.set_config({"wcbNetwork": {"deviceId": n}})
+            _, lines, _ = _restart(g.nc, "json")
+            joined = next((j.groups() for x in lines for j in [JOINED.match(x)] if j), None)
+            facts["joined"] = joined
+            if joined is None or joined[0] != str(n):
+                problems.append(f"after the restart NaviCore joined as {joined}, not device {n}")
+            self_id = g.nc.wcb_status().get("self")
+            facts["self"] = self_id
+            if self_id != n:
+                problems.append(f"GET_WCB_STATUS names self {self_id}, not {n}")
+            row, end = None, time.monotonic() + REJOIN_SEEN_S
+            for _ in range(2):
+                w1.run("?WDP,POLL", timeout=6)
+                time.sleep(1.5)
+            while row is None and time.monotonic() < end:
+                row = _row_of(_wcb_view(w1), n)
+                if row is None:
+                    time.sleep(2.0)
+            facts["w1_row"] = {k: row.get(k) for k in ("ALIAS", "PEER", "CLIENT") if k in row} if row else None
+            if row is None:
+                problems.append(f"W1 never showed a WDP row for WCB{n} within {REJOIN_SEEN_S:.0f} s of the join")
+            stats = [x.rstrip() for x in w1.run("?STATS")]
+            facts["w1_stats_online"] = any(re.match(rf"^WCB{n}( \(special\))?: .*Online", x) for x in stats)
+            wm = w1.dev.mark()
+            w1.send(f";W{n},?version")
+            try:
+                w1.dev.expect(rf"^\[TERM:{n}\]", timeout=8, since=wm)
+                time.sleep(1.0)
+                facts["term_lines"] = len(_term_lines(w1, wm, n))
+            except AssertionError:
+                problems.append(f";W{n},?version on W1 brought no [TERM:{n}] line back")
+        except Exception as e:  # noqa: BLE001 - raised by _put_back once the deviceId is back
+            failure = e
+        m2 = g.nc.dev.mark()
+        try:
+            _put_back(g.nc, g.before_text, failure)
+        finally:
+            back = next((j.groups() for x in g.nc.dev.since(m2) for j in [JOINED.match(x)] if j), None)
+            facts["rejoined"] = back
+            _forget_everywhere(bench, n)
+        if back is None or back[0] != str(me):
+            problems.append(f"after the restore NaviCore joined as {back}, not device {me}")
+    bench.note(f"deviceId {n} for one boot: {facts}")
+    assert not problems, "; ".join(problems)
