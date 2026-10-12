@@ -892,13 +892,34 @@ def fragment_reassembly_edges(bench):
     while len(sids) < 4:          # four distinct ids: two equal ones share a session, so the fourth needs no slot and no
         sids.add(_fsid())         # 'pool exhausted' line is due (run 20261004-231308 drew one twice)
     sess = [envs_for(x, pad=150, sid=sid) for x, sid in zip(tags, sorted(sids))]
+
+    def w1_row():
+        """W1's ETM row for NaviCore -> (sent, ackd, retries, failed), or None without one."""
+        for x in w1.run("?STATS"):
+            m = re.match(rf"^WCB{nid}: Sent: (\d+), ACKd: (\d+), Retries: (\d+), Failed: (\d+)", x.rstrip())
+            if m:
+                return tuple(int(v) for v in m.groups())
+        return None
+    before = w1_row()
     pm, nm, wm = l12.mark(), nc.dev.mark(), w1.dev.mark()
     send_fragments(w1, [s[0] for s in sess], target=nid)                     # three open sessions, then a fourth
-    # Hold the three open before completing them: sent 1 ms behind the fourth's first part, session 1's last part
-    # completed it (NaviCore 52 ms on) before the fourth was judged, so the pool had room and no line was due (run
-    # 20261010-060621). A fifth of FRAG_TIMEOUT_S (1 s on the bench) covers a delayed or retried relay and leaves the
-    # three well inside their timeout.
-    time.sleep(min(1.0, ncmesh.FRAG_TIMEOUT_S * 0.2))
+    # Hold the three open until W1 has delivered all four first parts - its ETM row for NaviCore ACKd four more (the
+    # library ACKs an envelope on receipt, before the pool judges it). Sent 1 ms behind the fourth's first part,
+    # session 1's last part once completed it before the fourth was judged (run 20261010-060621); a fixed hold of a
+    # fifth of FRAG_TIMEOUT_S covered that, but a first part lost on the air is retried 500 ms and then 1 s on, and a
+    # fourth that landed that late found room again (run 20261011-171424). The hold is bounded by the three sessions'
+    # idle timeout; without a row to read (a model's W1) the fixed hold stands.
+    delivered, held = None, before
+    if before is None:
+        time.sleep(min(1.0, ncmesh.FRAG_TIMEOUT_S * 0.2))
+    else:
+        end = time.monotonic() + min(2.5, ncmesh.FRAG_TIMEOUT_S * 0.5)
+        while time.monotonic() < end:
+            held = w1_row()
+            if held and held[1] - before[1] >= 4:
+                delivered = held
+                break
+            time.sleep(0.25)
     send_fragments(w1, [x for s in sess[:3] for x in s[1:]], target=nid)     # the three complete
     _wait_all(l12, pm, tags[:3], 4.0)
     send_fragments(w1, sess[3], target=nid)                                  # the fourth, whole, now there is room
@@ -912,7 +933,11 @@ def fragment_reassembly_edges(bench):
     if counts != [1, 1, 1, 1] or acks != 4:
         problems.append(f"pool: the four sessions ran {counts} times with {acks} ACK(s), expected once each")
     if full < 1:
-        problems.append("pool: no 'Fragment pool exhausted' line for the fourth session while three were open")
+        if before is not None and delivered is None:
+            notes.append(f"pool: W1's ETM row for WCB{nid} went {before} -> {held} during the hold: not all four first "
+                         f"parts were delivered in time, so the fourth was not judged against a full pool")
+        else:
+            problems.append("pool: no 'Fragment pool exhausted' line for the fourth session while three were open")
     t = marker("F8")
     e = envs_for(t)
 
