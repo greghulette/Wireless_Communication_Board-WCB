@@ -1296,15 +1296,16 @@ _UIVER_RX = r"""(\bUI_VERSION\s*=\s*['"])[^'"]+"""
 
 @test("intellex.update_routes", "POST /_api/update-webui, -firmware and -wiki run their fetcher and report it: a bad "
       "?tool= is 400 and runs nothing; ?tool= reaches the fetcher (all by default); success carries the new versions and "
-      "the fetcher's log; a failed tool update is 502 with what landed; firmware and docs report ok false with the "
-      "error and what is cached; a frozen build re-invokes itself (stub fetchers; IX re-scan host.api.update_subprocesses)")
+      "the fetcher's log; a failed update answers 200 ok false on all three, with the error, the log and what landed "
+      "or is cached; a frozen build re-invokes itself (stub fetchers; IX re-scan host.api.update_subprocesses)")
 def update_routes(bench):
     """Intellex src/host.py api_update_webui (:912-965), api_update_firmware (:636-669), api_update_wiki (:828-854). The
     stage's tools/fetch_webui.py, fetch_firmware.py and fetch_wiki.py are replaced by _FETCH_STUB, which edits or writes
     stage files as a real fetch would (the bundled Wizard's UI_VERSION, the config tool's footer-dtg, a cached image, a
     wiki page) - so nothing reaches GitHub. The frozen re-invocation (--run-fetch-*) and app.py's handling of it are
-    tests/intellex/py/host_units.py group update_frozen, run on the same stage. Pinned as it is today: a failed
-    firmware or docs update still answers 200 (ok false), only the tool update answers 502."""
+    tests/intellex/py/host_units.py group update_frozen, run on the same stage. A failed update answers 200 with ok
+    false on all three routes: the tool update answered 502 alone until Intellex made it match the other two
+    (2026-10-13; the launcher's api() reads only the body, so 200 {ok:false} is the form it handles for all three)."""
     require(bench)
     tid = "intellex.update_routes"
     sd = stage(bench, tid)
@@ -1356,10 +1357,12 @@ def update_routes(bench):
         control(fetch_webui={"rc": 1, "print": "HIL stub: the Wizard fetch failed (rate limited)",
                              "edit": {index: [_DTG_RX, r"\g<1>HILNC-2"]}})
         st, body = host.json("POST", "/_api/update-webui?tool=all", {}, timeout=120)
-        if st != 502 or body.get("ok") is not False or "the Wizard fetch failed" not in body.get("error", "") \
+        if st != 200 or body.get("ok") is not False or "the Wizard fetch failed" not in body.get("error", "") \
+                or "the Wizard fetch failed" not in body.get("log", "") \
                 or body.get("version") != "HILNC-2" or body.get("wcbVersion") != "HILWIZ-1":
-            problems.append(f"update-webui failing after the config tool landed: {st} {body}, expected 502 with the "
-                            f"fetcher's words, version HILNC-2 (what landed) and wcbVersion HILWIZ-1")
+            problems.append(f"update-webui failing after the config tool landed: {st} {body}, expected 200 ok false "
+                            f"with the fetcher's words in error and log, version HILNC-2 (what landed) and wcbVersion "
+                            f"HILWIZ-1")
         st, ver = host.json("GET", "/_api/webui-version", timeout=30)
         if (ver or {}).get("bundled") != "HILNC-2" or ((ver or {}).get("wcb") or {}).get("bundled") != "HILWIZ-1":
             problems.append(f"/_api/webui-version after the updates: bundled {(ver or {}).get('bundled')!r}, Wizard "
@@ -1379,9 +1382,9 @@ def update_routes(bench):
         st, body = host.json("POST", "/_api/update-firmware", {}, timeout=120)
         nc = ((body or {}).get("cached") or {}).get("navicore") or {}
         if st != 200 or body.get("ok") is not False or "HIL stub rate limit" not in body.get("error", "") \
-                or nc.get("count") != 1:
+                or "HIL stub rate limit" not in body.get("log", "") or nc.get("count") != 1:
             problems.append(f"update-firmware failing for WCB: {st} {body}, expected 200 ok false with the fetcher's "
-                            f"words and the NaviCore set still reported cached")
+                            f"words in error and log and the NaviCore set still reported cached")
 
         control(fetch_wiki={"rc": 0, "print": "[wcb] 1 page(s), 0 asset(s)",
                             "write": {os.path.join("src", "wiki", "wcb", "Home.md"): "# HIL stub page\n"}})
@@ -1394,8 +1397,10 @@ def update_routes(bench):
             problems.append(f"update-wiki ran the fetcher with {calls()}")
         control(fetch_wiki={"rc": 1, "print": "github.com is not reachable - the bundled docs are unchanged."})
         st, body = host.json("POST", "/_api/update-wiki", {}, timeout=120)
-        if st != 200 or body.get("ok") is not False or "not reachable" not in body.get("error", ""):
-            problems.append(f"update-wiki failing: {st} {body}")
+        if st != 200 or body.get("ok") is not False or "not reachable" not in body.get("error", "") \
+                or "not reachable" not in body.get("log", ""):
+            problems.append(f"update-wiki failing: {st} {body}, expected 200 ok false with the fetcher's words in "
+                            f"error and log")
     try:
         run_intellex_py(bench, tid, "host_units.py", args={"group": "update_frozen"}, stage_dir=sd)
     except AssertionError as e:

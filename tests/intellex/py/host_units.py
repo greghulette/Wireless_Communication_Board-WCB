@@ -229,7 +229,8 @@ def identify_route(ctx):
 
 # ------------------------------------------------------------------ group "update_frozen"
 @case("a frozen build's update routes re-invoke the app with --run-fetch-webui --tool <t>, --run-fetch-firmware and "
-      "--run-fetch-wiki --wiki all; their exit code and output make the reply", group="update_frozen")
+      "--run-fetch-wiki --wiki all; their exit code and output make the reply, HTTP 200 for a failed fetch on all "
+      "three", group="update_frozen")
 def update_frozen(ctx):
     import proc
     s = _server()
@@ -253,12 +254,17 @@ def update_frozen(ctx):
                 code, reply = s.req("POST", path, {})
                 if runs != [want]:
                     problems.append(f"POST {path} (frozen) ran {runs}, expected {want}")
+                # One form for a failed fetch on all three routes: 200 {ok: false} (Intellex made the tool update's
+                # 502 match the firmware and docs updates, 2026-10-13).
+                if code != 200:
+                    problems.append(f"POST {path} with the fetcher exiting {code_want}: HTTP {code}, expected 200")
                 if bool(reply.get("ok")) != (code_want == 0):
                     problems.append(f"POST {path} with the fetcher exiting {code_want}: ok={reply.get('ok')}")
-                text = reply.get("log", "") if code_want == 0 else reply.get("error", "")
-                if f"rc={code_want}" not in text:
-                    problems.append(f"POST {path} with the fetcher exiting {code_want}: its output is not in the "
-                                    f"reply's {'log' if code_want == 0 else 'error'} ({text[:80]!r})")
+                for key in (("log",) if code_want == 0 else ("error", "log")):
+                    text = reply.get(key, "")
+                    if f"rc={code_want}" not in text:
+                        problems.append(f"POST {path} with the fetcher exiting {code_want}: its output is not in the "
+                                        f"reply's {key} ({text[:80]!r})")
         del runs[:]
         code, reply = s.req("POST", "/_api/update-webui?tool=bogus", {})
         if code != 400 or runs:
