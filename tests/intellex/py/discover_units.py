@@ -225,5 +225,115 @@ def bounce_default_route(ctx):
     check(not problems, "; ".join(problems))
 
 
+
+# ------------------------------------------------------------------ group "scan_rows" (intellex.discover_scan_unit)
+NC_HINT_INFO = {"kind": "navicore", "version": "v0.2.0_hilscan", "relayId": None, "alias": None, "peers": []}
+
+
+@case("discover._hint: a NaviCore by its version; a relay or a WCB doorway by alias (or its noun), its number and up "
+      "to three boards it sees ('no boards seen yet' with none), a WCB alias naming WCB not repeated; something else "
+      "on port 80; routed with no TCP; no route", group="scan_rows")
+def hints(ctx):
+    import discover
+    peers = [{"alias": "Body", "fw": "6.2.1"}, {"alias": "Dome"}, {"alias": ""}, {"alias": "Legs", "fw": "6.2.0"},
+             {"alias": "Fourth", "fw": "1"}]
+    problems = []
+    for label, via, reach, info, want in (
+            ("navicore", "192.168.4.2", True, NC_HINT_INFO, "NaviCore v0.2.0_hilscan"),
+            ("relay", "192.168.4.2", True, {"kind": "relay", "alias": "Mgmt Relay", "relayId": "19", "peers": peers},
+             "Mgmt Relay (WCB #19) \u2014 sees Body 6.2.1, Dome, Legs 6.2.0"),
+            ("relay, no alias, no peers", "192.168.4.2", True, {"kind": "relay", "alias": None, "relayId": None,
+                                                                "peers": []},
+             "mgmt relay \u2014 no boards seen yet"),
+            ("wcb alias naming WCB", "192.168.4.2", True, {"kind": "wcb", "alias": "Body WCB", "relayId": "1",
+                                                           "peers": []},
+             "Body WCB (#1) \u2014 no boards seen yet"),
+            ("wcb, no alias", "192.168.4.2", True, {"kind": "wcb", "alias": None, "relayId": "2",
+                                                    "peers": [{"alias": "Dome", "fw": "6.2.1"}]},
+             "WCB (#2) \u2014 sees Dome 6.2.1"),
+            ("wcb alias without WCB", "192.168.4.2", True, {"kind": "wcb", "alias": "Vader", "relayId": "21",
+                                                            "peers": []},
+             "Vader (WCB #21) \u2014 no boards seen yet"),
+            ("something else on 80", "192.168.4.2", True, discover._unknown(),
+             "something answers on port 80, but it is not a NaviCore, a WCB or a management relay"),
+            ("routed, no TCP", "192.168.4.2", False, discover._unknown(),
+             "routed via 192.168.4.2 but no TCP \u2014 stale association or the AP is down. Toggle that adapter off/on, "
+             "or check the board's serial log for '[WS] command endpoint ready'."),
+            ("no route", None, False, discover._unknown(),
+             "no route \u2014 this machine is not joined to the droid's WiFi")):
+        got = discover._hint(via, reach, info)
+        if got != want:
+            problems.append(f"{label}: {got!r}, expected {want!r}")
+    check(not problems, "; ".join(problems))
+
+
+@case("discover.scan(): per host via, routable, reachable (TCP 80 asked only when routable, the probe only when "
+      "reachable), kind and its flags (isMesh for a relay or a WCB), version, relayId, alias, peers and the hint; the "
+      "hosts are INTELLEX_DISCOVER_HOSTS when set (empty probes nothing) and an explicit list wins", group="scan_rows")
+def scan_rows(ctx):
+    import discover
+    asked = {"route": [], "tcp": [], "probe": []}
+    route = {"nc": "192.168.4.2", "relay": "192.168.4.2", "wcb": "192.168.4.3", "dead": "192.168.4.2", "far": None}
+    probes = {
+        "nc": dict(NC_HINT_INFO),
+        "relay": {"kind": "relay", "version": None, "relayId": "19", "alias": "Mgmt Relay",
+                  "peers": [{"alias": "Body", "fw": "6.2.1"}]},
+        "wcb": {"kind": "wcb", "version": None, "relayId": "1", "alias": "Body WCB", "peers": []},
+    }
+    real = discover.local_ip_for, discover.tcp_open, discover.probe
+    discover.local_ip_for = lambda h: asked["route"].append(h) or route.get(h)
+    discover.tcp_open = lambda h, *a, **k: asked["tcp"].append(h) or h in probes
+    discover.probe = lambda h, *a, **k: asked["probe"].append(h) or dict(probes[h])
+    saved = os.environ.get("INTELLEX_DISCOVER_HOSTS")
+    problems = []
+    try:
+        rows = {r["host"]: r for r in discover.scan(["nc", "relay", "wcb", "dead", "far"])}
+        if list(rows) != ["nc", "relay", "wcb", "dead", "far"]:
+            problems.append(f"scan rows for {list(rows)}, expected the five hosts in order")
+        if asked["tcp"] != ["nc", "relay", "wcb", "dead"] or asked["probe"] != ["nc", "relay", "wcb"]:
+            problems.append(f"TCP asked of {asked['tcp']}, probe of {asked['probe']}: TCP only where a route exists, "
+                            f"the probe only where TCP answered")
+        flags = ("via", "routable", "reachable", "kind", "isNaviCore", "isRelay", "isWcb", "isMesh", "version",
+                 "relayId", "alias", "peers")
+        want = {
+            "nc": ("192.168.4.2", True, True, "navicore", True, False, False, False, "v0.2.0_hilscan", None, None, []),
+            "relay": ("192.168.4.2", True, True, "relay", False, True, False, True, None, "19", "Mgmt Relay",
+                      [{"alias": "Body", "fw": "6.2.1"}]),
+            "wcb": ("192.168.4.3", True, True, "wcb", False, False, True, True, None, "1", "Body WCB", []),
+            "dead": ("192.168.4.2", True, False, "unknown", False, False, False, False, None, None, None, []),
+            "far": (None, False, False, "unknown", False, False, False, False, None, None, None, []),
+        }
+        for h, w in want.items():
+            r = rows.get(h, {})
+            got = tuple(r.get(k) for k in flags)
+            if got != w:
+                problems.append(f"{h}: {dict(zip(flags, got))}, expected {dict(zip(flags, w))}")
+            info = probes.get(h) or discover._unknown()
+            if r.get("hint") != discover._hint(route.get(h), h in probes, info):
+                problems.append(f"{h}: hint {r.get('hint')!r} is not _hint's")
+        if rows.get("relay", {}).get("hint") != "Mgmt Relay (WCB #19) \u2014 sees Body 6.2.1":
+            problems.append(f"the relay's hint: {rows.get('relay', {}).get('hint')!r}")
+        for env, cands, expect in (("hA, hB ,", None, ["hA", "hB"]), ("", None, []), ("hA", ["hC"], ["hC"])):
+            os.environ["INTELLEX_DISCOVER_HOSTS"] = env
+            del asked["route"][:]
+            out = discover.scan(cands)
+            if asked["route"] != expect or [r["host"] for r in out] != expect:
+                problems.append(f"INTELLEX_DISCOVER_HOSTS={env!r}, scan({cands}): looked at {asked['route']}, rows "
+                                f"{[r['host'] for r in out]}, expected {expect}")
+        os.environ.pop("INTELLEX_DISCOVER_HOSTS", None)
+        del asked["route"][:]
+        discover.scan()
+        if asked["route"] != list(discover.DEFAULT_CANDIDATES):
+            problems.append(f"with INTELLEX_DISCOVER_HOSTS unset scan() looked at {asked['route']}, expected "
+                            f"DEFAULT_CANDIDATES {list(discover.DEFAULT_CANDIDATES)}")
+    finally:
+        discover.local_ip_for, discover.tcp_open, discover.probe = real
+        if saved is None:
+            os.environ.pop("INTELLEX_DISCOVER_HOSTS", None)
+        else:
+            os.environ["INTELLEX_DISCOVER_HOSTS"] = saved
+    check(not problems, "; ".join(problems))
+
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())

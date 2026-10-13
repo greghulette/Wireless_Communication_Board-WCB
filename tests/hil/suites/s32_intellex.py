@@ -760,12 +760,16 @@ def flash_update_partition_edges(bench):
 @test("intellex.bridge_superseded_attach", "An attach still inside open() when a newer attach or a detach lands closes "
       "what it opened and raises 'superseded' instead of publishing over the newer link, and the bridge's lock is free "
       "while open() blocks; through POST /_api/attach the first of two racing attaches answers 502 and the second's "
-      "target is the one attached (in-process fakes; IX re-scan host.bridge.superseded_attach)")
+      "target is the one attached, with lastError left reading the loser's 'superseded' (pinned; in-process fakes; IX "
+      "re-scan host.bridge.superseded_attach, host.api.superseded_last_error)")
 def bridge_superseded_attach(bench):
     """tests/intellex/py/bridge_units.py group superseded: Intellex src/host.py Bridge.attach/detach (:214-251), whose
     generation count is what stops a slow open() from leaking a transport nothing can close (a held COM port with its
     reader still feeding bytes). A transport whose open() waits on an Event stands in for the slow port or handshake;
-    the HTTP case runs Intellex's real build_app() in the venv process, its rebuild() handing out such transports."""
+    the HTTP case runs Intellex's real build_app() in the venv process, its rebuild() handing out such transports.
+    The re-scan's host.api.superseded_last_error is pinned there as it is today, a product call: api_attach writes the
+    loser's 'superseded by a newer attach' into lastError after the winner cleared it, so /_api/status shows an error
+    beside a healthy newer link (no page reads lastError)."""
     run_intellex_py(bench, "intellex.bridge_superseded_attach", "bridge_units.py", args={"group": "superseded"})
 
 
@@ -1918,3 +1922,144 @@ def tool_base_unit(bench):
     fetch_webui.py base_for (:71-78) and host.py _published_dtg / _wcb_published_ver (:461-519), whose urlopen is
     answered in the venv process with flash.reachable True - nothing reaches the network."""
     run_intellex_py(bench, "intellex.tool_base_unit", "host_units.py", args={"group": "tool_base"})
+
+
+@test("intellex.flash_progress_unit", "flash.write_progress weights each region by size: a 2 KB bootloader written to "
+      "100 % is about 0.1 % of a 2 MB write, not 99; a region's last line naming the next one's start stays with it; "
+      "/_api/flash-status's percent is monotonic and held at 99; its log keeps the last 400 lines (IX re-scan "
+      "host.flash.status_progress)")
+def flash_progress_unit(bench):
+    """tests/intellex/py/flash_units.py group progress: Intellex src/flash.py write_progress (:423-459) fed esptool 5's
+    progress lines ('Writing at 0x... [===] 50.0% ...'), and host.py _flash_progress / _flash_log (:985-996) - the state
+    /_api/flash-status serves."""
+    run_intellex_py(bench, "intellex.flash_progress_unit", "flash_units.py", args={"group": "progress"})
+
+
+@test("intellex.discover_scan_unit", "discover.scan() rows: via, routable, reachable (TCP asked only with a route, the "
+      "probe only with TCP), kind and its flags, version, relayId, alias, peers and the hint for a NaviCore, a relay, a "
+      "WCB doorway, a routed host with no TCP and one with no route; INTELLEX_DISCOVER_HOSTS and an explicit list; "
+      "_hint's shapes (the OS answered here; IX re-scan discover.scan_rows)")
+def discover_scan_unit(bench):
+    """tests/intellex/py/discover_units.py group scan_rows: Intellex src/discover.py scan (:456-484), _default_candidates
+    (:446-453) and _hint (:774-802), with local_ip_for, tcp_open and probe answered in the venv process - nothing is
+    probed."""
+    run_intellex_py(bench, "intellex.discover_scan_unit", "discover_units.py", args={"group": "scan_rows"})
+
+
+@test("intellex.winsize_mac_unit", "winsize._mac_visible_frame: the main screen less menu bar and Dock, top counted down "
+      "from the screen's own top and relative to that screen; None without one; fit() centres in it and falls back "
+      "when AppKit fails; on a Mac the real call is four ints inside the main screen (IX re-scan winsize.fit)")
+def winsize_mac_unit(bench):
+    """tests/intellex/py/paths_logs.py group winsize_mac: Intellex src/winsize.py _mac_visible_frame (:144-166) with
+    AppKit's NSScreen stood in for (a secondary screen at a negative global y, a left Dock), and the real call on this
+    Mac (skipped elsewhere: the fakes still run)."""
+    run_intellex_py(bench, "intellex.winsize_mac_unit", "paths_logs.py", args={"group": "winsize_mac"})
+
+
+def _version_of(sd):
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', open(os.path.join(sd, "src", "version.py"), encoding="utf-8").read(),
+                  re.M)
+    return m.group(1) if m else "?"
+
+
+@test("intellex.applog_unit", "Each run's log opens with its header - 'Intellex v<VERSION> (...)', started, python, "
+      "frozen, bundle, data and argv as the host was started - and the host's lines are in it at once; a data "
+      "directory where no logs directory can be made leaves the host serving, /_api/log naming no file; applog's "
+      "fallback and tee in the venv (IX re-scan applog.tee_prune)")
+def applog_unit(bench):
+    """Intellex src/applog.py start (:110-142) as a staged host runs it (host.py main), _Tee (:38-87). The header
+    lines are read from the staged host's own log while it runs; the second host's appdata/Intellex/logs is a FILE.
+    tests/intellex/py/paths_logs.py group applog: start() returning None with stdout untouched, the tee flushing each
+    line and surviving a sink or console that fails."""
+    import glob as _glob
+    require(bench)
+    tid = "intellex.applog_unit"
+    problems = []
+    sd = stage(bench, tid, tools="none")
+    ver = _version_of(sd)
+    with IntellexHost(bench, sd) as host:
+        logs = _glob.glob(os.path.join(sd, "appdata", "Intellex", "logs", "intellex-*.log"))
+        st, info = host.json("GET", "/_api/log")
+        if len(logs) != 1:
+            problems.append(f"the staged host left {len(logs)} intellex-*.log files, expected one")
+        else:
+            with open(logs[0], encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            head = lines[:8]
+            want = [("Intellex v" + ver, lambda x: x.startswith(f"Intellex v{ver}")),
+                    ("  started  ", lambda x: x.startswith("  started  20")),
+                    ("  python   3.", lambda x: x.startswith("  python   3.")),
+                    ("  frozen   False", lambda x: x == "  frozen   False"),
+                    ("  bundle   <stage>/src", lambda x: os.path.realpath(x[11:]) == os.path.realpath(
+                        os.path.join(sd, "src")) if x.startswith("  bundle   ") else False),
+                    ("  data     <stage>/appdata/Intellex", lambda x: os.path.realpath(x[11:]) == os.path.realpath(
+                        os.path.join(sd, "appdata", "Intellex")) if x.startswith("  data     ") else False),
+                    (f"  argv     --port {host.port} --no-auto-bounce",
+                     lambda x: x == f"  argv     --port {host.port} --no-auto-bounce"),
+                    ("(a blank line)", lambda x: x == "")]
+            for i, (what, ok) in enumerate(want):
+                if i >= len(head) or not ok(head[i]):
+                    problems.append(f"log line {i + 1} is {head[i] if i < len(head) else None!r}, expected {what!r}")
+            if not any(x.startswith(f"serving   http://127.0.0.1:{host.port}/") for x in lines):
+                problems.append("the host's 'serving' line is not in its log while it runs: the log is buffered")
+            if os.path.realpath(info.get("path", "")) != os.path.realpath(logs[0]):
+                problems.append(f"/_api/log names {info.get('path')!r}, not the log the host is writing")
+    sd2 = stage(bench, tid + "_nolog", tools="none")
+    logs_dir = os.path.join(sd2, "appdata", "Intellex", "logs")
+    with open(logs_dir, "w", encoding="utf-8") as f:
+        f.write("a file where the logs directory goes\n")
+    with IntellexHost(bench, sd2) as host:
+        st, info = host.json("GET", "/_api/log")
+        if st != 200 or info.get("path") != "" or info.get("tail") != "" or \
+                os.path.realpath(info.get("dir", "")) != os.path.realpath(logs_dir):
+            problems.append(f"with no logs directory possible /_api/log: {st} {info}, expected no path, no tail and "
+                            f"dir {logs_dir}")
+        if host.json("GET", "/_api/status")[0] != 200:
+            problems.append("with no logs directory possible the host does not answer /_api/status")
+    try:
+        run_intellex_py(bench, tid, "paths_logs.py", args={"group": "applog"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"in the venv (paths_logs.py applog): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.log_tail_cap", "GET /_api/log: the path of this run's log inside the stage, the logs directory, and "
+      "exactly its last 400 lines after 600 more are written to it; a log it cannot read gives '(could not read the "
+      "log: ...)' instead (IX re-scan host.api.log)")
+def log_tail_cap(bench):
+    """Intellex src/host.py api_log (:568-590). The 600 numbered lines are appended to the staged host's own log file;
+    the tail is compared with the file's last 400 lines read right after. The unreadable case takes the file's read
+    permission away for one request and puts it back."""
+    import stat as _stat
+    require(bench)
+    sd = stage(bench, "intellex.log_tail_cap", tools="none")
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, info = host.json("GET", "/_api/log")
+        p = info.get("path", "")
+        if os.path.realpath(info.get("dir", "")) != os.path.realpath(os.path.join(sd, "appdata", "Intellex", "logs")) \
+                or not os.path.realpath(p).startswith(os.path.realpath(info.get("dir", "")) + os.sep):
+            problems.append(f"/_api/log: path {p!r}, dir {info.get('dir')!r}, expected this run's log in the stage's "
+                            f"appdata/Intellex/logs")
+        with open(p, "a", encoding="utf-8") as f:
+            for i in range(600):
+                f.write(f"HILTAIL-{i:03d}\n")
+        st, info = host.json("GET", "/_api/log")
+        with open(p, encoding="utf-8", errors="replace") as f:
+            want = "".join(f.readlines()[-400:])
+        tail = info.get("tail", "")
+        if tail != want or tail.count("\n") != 400:
+            problems.append(f"the tail after 600 more lines: {tail.count(chr(10))} lines (first {tail[:14]!r}), "
+                            f"expected the file's last 400")
+        elif "HILTAIL-199" in tail or "HILTAIL-200" not in tail or not tail.rstrip().endswith("HILTAIL-599"):
+            problems.append("the tail is not HILTAIL-200 .. HILTAIL-599")
+        mode = os.stat(p).st_mode
+        os.chmod(p, 0)
+        try:
+            st, info = host.json("GET", "/_api/log")
+        finally:
+            os.chmod(p, _stat.S_IMODE(mode))
+        if st != 200 or not str(info.get("tail", "")).startswith("(could not read the log: "):
+            problems.append(f"an unreadable log: {st}, tail {str(info.get('tail'))[:60]!r}, expected '(could not read "
+                            f"the log: ...)'")
+    assert not problems, "; ".join(problems)

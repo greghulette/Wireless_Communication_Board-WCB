@@ -301,5 +301,174 @@ def certs_context(ctx):
     check(not problems, "; ".join(problems))
 
 
+
+# ------------------------------------------------------------------ group "winsize_mac" (intellex.winsize_mac_unit)
+class _Rect:
+    def __init__(self, x, y, w, h):
+        import types
+        self.origin = types.SimpleNamespace(x=float(x), y=float(y))
+        self.size = types.SimpleNamespace(width=float(w), height=float(h))
+
+
+class _FakeScreen:
+    def __init__(self, full, vis):
+        self._full, self._vis = full, vis
+
+    def frame(self):
+        return self._full
+
+    def visibleFrame(self):
+        return self._vis
+
+
+def _fake_appkit(main):
+    """An AppKit module whose NSScreen.mainScreen() answers `main` (a _FakeScreen, None, or an exception to raise)."""
+    import types
+    mod = types.ModuleType("AppKit")
+
+    class NSScreen:
+        @staticmethod
+        def mainScreen():
+            if isinstance(main, Exception):
+                raise main
+            return main
+    mod.NSScreen = NSScreen
+    return mod
+
+
+@case("winsize._mac_visible_frame: the main screen less the menu bar and Dock, top measured down from the screen's own "
+      "top (AppKit counts y up from the bottom) and relative to that screen, not the desktop; no main screen is None; "
+      "on this Mac the real call gives four ints inside the main screen, and fit() centres the window in it",
+      group="winsize_mac")
+def mac_visible_frame(ctx):
+    import winsize
+    problems = []
+    saved = sys.modules.get("AppKit")
+    try:
+        # A 2560x1440 screen to the right of and below the primary (global origin 1792,-300): a 25-point menu bar at
+        # its top, a 60-point Dock at its bottom. AppKit's y grows upwards, so the visible part starts 60 above the
+        # frame's bottom edge.
+        full, vis = _Rect(1792, -300, 2560, 1440), _Rect(1792, -240, 2560, 1355)
+        sys.modules["AppKit"] = _fake_appkit(_FakeScreen(full, vis))
+        got = winsize._mac_visible_frame()
+        if got != (0, 25, 2560, 1355):
+            problems.append(f"a secondary screen with a menu bar and a bottom Dock: {got}, expected (0, 25, 2560, 1355) "
+                            f"- left and top relative to that screen, top below the menu bar")
+        if not all(isinstance(v, int) for v in (got or ())):
+            problems.append(f"not ints: {got}")
+        # A Dock on the left: the visible part starts 80 points in.
+        sys.modules["AppKit"] = _fake_appkit(_FakeScreen(_Rect(0, 0, 1792, 1120), _Rect(80, 0, 1712, 1095)))
+        got = winsize._mac_visible_frame()
+        if got != (80, 25, 1712, 1095):
+            problems.append(f"a left Dock on the primary screen: {got}, expected (80, 25, 1712, 1095)")
+        if sys.platform == "darwin":
+            want = {"width": 1280, "height": 880, "x": 80 + (1712 - 1280) // 2, "y": 25 + (1095 - 880) // 2,
+                    "min_size": (900, 600)}
+            if winsize.fit(1280, 880, (900, 600)) != want:
+                problems.append(f"fit() on that screen: {winsize.fit(1280, 880, (900, 600))}, expected {want}")
+            sys.modules["AppKit"] = _fake_appkit(RuntimeError("no window server"))
+            if winsize.fit(1280, 880, (900, 600)) != {"width": 1280, "height": 880, "min_size": (900, 600)}:
+                problems.append("fit() with AppKit failing did not fall back to the requested size")
+        sys.modules["AppKit"] = _fake_appkit(None)
+        if winsize._mac_visible_frame() is not None:
+            problems.append("no main screen: not None")
+    finally:
+        if saved is None:
+            sys.modules.pop("AppKit", None)
+        else:
+            sys.modules["AppKit"] = saved
+    if sys.platform == "darwin":
+        real = winsize._mac_visible_frame()
+        from AppKit import NSScreen
+        f = NSScreen.mainScreen().frame()
+        if not (isinstance(real, tuple) and len(real) == 4 and all(isinstance(v, int) for v in real)):
+            problems.append(f"the real call: {real!r}, not four ints")
+        else:
+            left, top, w, h = real
+            if not (w > 0 and h > 0 and left >= 0 and top >= 0 and left + w <= f.size.width
+                    and top + h <= f.size.height):
+                problems.append(f"the real call: {real} does not lie inside the main screen's "
+                                f"{f.size.width:.0f}x{f.size.height:.0f}")
+        ctx.note(f"winsize_mac_unit: this Mac's main screen {f.size.width:.0f}x{f.size.height:.0f}, visible frame {real}")
+    else:
+        ctx.note("winsize_mac_unit: not a Mac - the real AppKit call is not made here")
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "applog" (half of intellex.applog_unit)
+@case("applog.start() with a logs directory that cannot be made returns None, path() stays None and stdout and stderr "
+      "are left as they were; the tee writes and flushes each line to the file, and a sink or console that fails "
+      "never breaks a print", group="applog")
+def applog_fallback(ctx):
+    import contextlib
+    import io
+    import applog
+    import paths
+    problems = []
+    d = _scratch(ctx, "applog_unwritable")
+    _touch(os.path.join(d, "logs"), "a file where the logs directory goes")
+    saved = os.environ.get("INTELLEX_DATA_DIR")
+    out0, err0 = sys.stdout, sys.stderr
+    try:
+        os.environ["INTELLEX_DATA_DIR"] = d
+        check(str(paths.user_data_dir()) == d, f"INTELLEX_DATA_DIR not honoured: {paths.user_data_dir()}")
+        got = applog.start()
+        if got is not None or applog.path() is not None:
+            problems.append(f"with no logs directory possible start() returned {got!r}, path() {applog.path()!r}")
+        if sys.stdout is not out0 or sys.stderr is not err0:
+            problems.append("start() replaced stdout/stderr although no log opened")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print("HIL-after-failed-log")
+        if buf.getvalue() != "HIL-after-failed-log\n":
+            problems.append(f"print after the failed start: {buf.getvalue()!r}")
+    finally:
+        sys.stdout, sys.stderr = out0, err0
+        if saved is None:
+            os.environ.pop("INTELLEX_DATA_DIR", None)
+        else:
+            os.environ["INTELLEX_DATA_DIR"] = saved
+
+    class Sink:
+        def __init__(self, fail=False):
+            self.fail, self.events = fail, []
+
+        def write(self, t):
+            if self.fail:
+                raise OSError("HIL: disk full")
+            self.events.append(("write", t))
+
+        def flush(self):
+            if self.fail:
+                raise OSError("HIL: disk full")
+            self.events.append(("flush",))
+    sink, console = Sink(), io.StringIO()
+    tee = applog._Tee(console, sink)
+    n = tee.write("HIL line\n")
+    if n != len("HIL line\n") or console.getvalue() != "HIL line\n" or sink.events != [("write", "HIL line\n"),
+                                                                                      ("flush",)]:
+        problems.append(f"a tee'd line: returned {n}, console {console.getvalue()!r}, sink {sink.events} - expected "
+                        f"both written and the file flushed at once")
+    bad, console2 = Sink(fail=True), io.StringIO()
+    tee2 = applog._Tee(console2, bad)
+    try:
+        n = tee2.write("HIL survives\n")
+        tee2.flush()
+        if console2.getvalue() != "HIL survives\n" or n != len("HIL survives\n"):
+            problems.append(f"with a failing log file the console got {console2.getvalue()!r}")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"a failing log file broke the print: {type(e).__name__}: {e}")
+    sink3 = Sink()
+    tee3 = applog._Tee(None, sink3)                    # pythonw / a windowed build: no console at all
+    try:
+        tee3.write("HIL no console\n")
+        tee3.flush()
+        if ("write", "HIL no console\n") not in sink3.events or tee3.isatty():
+            problems.append(f"with no console the file got {sink3.events}")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"no console broke the tee: {type(e).__name__}: {e}")
+    check(not problems, "; ".join(problems))
+
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())

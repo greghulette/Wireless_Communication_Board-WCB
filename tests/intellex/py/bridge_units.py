@@ -6,7 +6,9 @@ whose generation is stale by the time open() returns - a newer attach or a detac
 opened and raises TransportError('superseded by a newer attach') instead of publishing over the newer link, and the
 bridge's lock is never held across open(). A transport whose open() blocks on an Event stands in for a COM port or a
 WebSocket handshake that takes its time. Then the same race through POST /_api/attach on Intellex's real build_app():
-the first of two attaches answers 502, the second's target is the one attached.
+the first of two attaches answers 502, the second's target is the one attached - and, pinned as it is today (a product
+call, IX re-scan host.api.superseded_last_error), /_api/status's lastError then reads the loser's 'superseded by a newer
+attach' while the second link is attached.
 
 group "identify" (intellex.attach_identify_role): host.py _identify_attached_serial (:1152-1231) and api_attach (:1304),
 reconnect_loop (:1797). After a serial attach the host asks the port what it is through a bridge tap: the PING alone
@@ -370,8 +372,13 @@ def superseded_over_http(ctx):
     st = s.status()
     check(st.get("attached") is True and st.get("target") == "serial COMHILB" and nb.is_open and nb.closes == 0,
           f"after both answered, /_api/status: {st}")
-    ctx.note(f"bridge_superseded_attach: after the race /_api/status lastError is {st.get('lastError')!r} with B "
-             f"attached (api_attach records the loser's 'superseded' after the winner cleared it)")
+    # Pinned as it is today, a product call (IX re-scan host.api.superseded_last_error): api_attach records the
+    # loser's TransportError as lastError after the winner's attach cleared it, so /_api/status reports an error while
+    # the newer link is attached and healthy. No page reads lastError; the harness's own bench tests do.
+    check(st.get("lastError") == "superseded by a newer attach",
+          f"after the race /_api/status lastError is {st.get('lastError')!r} with B attached; today's behaviour is "
+          f"'superseded by a newer attach' (the loser writes it after the winner cleared it) - if this changed on "
+          f"purpose, update this pin")
     s.req("POST", "/_api/detach", {})
 
 

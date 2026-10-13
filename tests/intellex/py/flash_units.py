@@ -638,5 +638,80 @@ def nc_fetch_store(ctx):
     check(not problems, "; ".join(problems))
 
 
+
+# ------------------------------------------------------------------ group "progress" (intellex.flash_progress_unit)
+def _wline(addr, pct, done=0, total=1):
+    """One esptool 5 progress line (esptool logger.py's bar), as the fake esptool prints it."""
+    return f"Writing at {addr:#010x} [{'=' * int(pct // 10):<10}] {pct:5.1f}% {done}/{total} bytes..."
+
+
+@case("flash.write_progress weights each region by its size and finds it by the address its line names: a 2 KB "
+      "bootloader written to 100 % is about 0.1 % of a 2 MB write, not 99; a region's last line, naming its end where "
+      "the next begins, stays with it; a line naming no address passes its percent through; /_api/flash-status's "
+      "percent is monotonic and held at 99 until done; its log keeps the last 400 lines", group="progress")
+def flash_progress(ctx):
+    import contextlib
+    import io
+    import flash
+    import host
+    problems = []
+    boot = {"address": 0x1000, "data": b"\0" * 2048}
+    app = {"address": 0x10000, "data": b"\0" * (2 * 1024 * 1024)}
+    total = 2048 + 2 * 1024 * 1024
+    got = []
+    on_line = flash.write_progress([app, boot], got.append)          # unsorted on purpose: it sorts by address
+    for line in (_wline(0x1000, 0.0), _wline(0x1400, 50.0), _wline(0x1800, 100.0)):
+        on_line(line)
+    if got != [0, 0, int(2048 * 100.0 / total)]:
+        problems.append(f"the 2 KB bootloader at 0, 50 and 100 %: reported {got}, expected [0, 0, "
+                        f"{int(2048 * 100.0 / total)}] (its 2 KB of {total} bytes)")
+    del got[:]
+    for line in (_wline(0x10000, 0.0), _wline(0x110000, 50.0), _wline(0x210000, 100.0)):
+        on_line(line)
+    want = [int(2048 * 100.0 / total), int((2048 + 1024 * 1024) * 100.0 / total), 100]
+    if got != want:
+        problems.append(f"the 2 MB app at 0, 50 and 100 %: reported {got}, expected {want}")
+    # WCB's otadata (0xE000, 8 KB) ends at 0x10000 where the app begins: its 100 % line names 0x10000.
+    ota = {"address": 0xE000, "data": b"\0" * 0x2000}
+    got2 = []
+    on2 = flash.write_progress([ota, app], got2.append)
+    on2(_wline(0xE000, 0.0))
+    on2(_wline(0x10000, 100.0))
+    if got2 != [0, int(0x2000 * 100.0 / (0x2000 + 2 * 1024 * 1024))]:
+        problems.append(f"otadata's last line (at 0x10000, the app's start): reported {got2}, expected it kept with "
+                        f"otadata - [0, {int(0x2000 * 100.0 / (0x2000 + 2 * 1024 * 1024))}], not the app's 100")
+    got3 = []
+    on3 = flash.write_progress([boot, app], got3.append)
+    on3("Erasing flash... (37 %)")                                      # esptool 4's form, no address
+    on3("Connecting....")
+    if got3 != [37]:
+        problems.append(f"a percent with no 'Writing at' address: reported {got3}, expected [37] as it stands")
+    if flash.write_progress([boot], None)(_wline(0x1000, 50.0)) is not None:
+        problems.append("progress None: the handler returned something")
+    # Through the host's state: monotonic, and 99 at most until the job marks it done.
+    with host._flash_lock:
+        host._flash_state.update(percent=0, log=[])
+    on4 = flash.write_progress([boot, app], host._flash_progress)
+    seen = []
+    for line in (_wline(0x1000, 100.0), _wline(0x10000, 0.0), _wline(0x110000, 50.0), _wline(0x1000, 10.0),
+                 _wline(0x210000, 100.0)):
+        on4(line)
+        seen.append(host._flash_state["percent"])
+    if seen[0] > 1 or seen[2] != int((2048 + 1024 * 1024) * 100.0 / total) or seen[3] < seen[2] or seen[4] != 99:
+        problems.append(f"/_api/flash-status's percent through a bootloader at 100 %, the app at 0 and 50 %, a stray "
+                        f"bootloader 10 % line and the app at 100 %: {seen}, expected about 0, then "
+                        f"{int((2048 + 1024 * 1024) * 100.0 / total)}, never backwards, and 99 at the end")
+    with contextlib.redirect_stdout(io.StringIO()):
+        for i in range(500):
+            host._flash_log(f"HILFLASH-{i:03d}")
+    log = list(host._flash_state["log"])
+    if len(log) != 400 or log[0] != "HILFLASH-100" or log[-1] != "HILFLASH-499":
+        problems.append(f"after 500 lines the flash log holds {len(log)}, {log[:1]} .. {log[-1:]}, expected the last "
+                        f"400 (HILFLASH-100 .. HILFLASH-499)")
+    with host._flash_lock:
+        host._flash_state.update(percent=0, log=[])
+    check(not problems, "; ".join(problems))
+
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())
