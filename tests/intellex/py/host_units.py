@@ -17,13 +17,16 @@ group "update_frozen" (half of intellex.update_routes): host.py api_update_webui
 --run-fetch-wiki --wiki all (sys.frozen patched, proc.run recorded); app.py main() hands each sentinel, and
 --run-esptool, to the module it names with the rest of argv (stand-in modules).
 
-group "bounce" (intellex.reconnect_auto_bounce): host.py reconnect_loop's self-heal (:1810-1871). A ws link whose
-reattach fails BOUNCE_AFTER_FAILS (2) times in a row while the OS would route to the host off its subnet re-associates
-the adapter (discover.wifi_bounce), asking the OS for the network first and falling back to the recorded one, at most
-once per BOUNCE_COOLDOWN_S, giving up after BOUNCE_GIVE_UP (3) failed bounces with one line; a move to another network
-or a bounce that works resets the count; on-subnet routing, a serial link and auto_bounce False never bounce. The
-cooldown is shortened to 2.5 s for the run (a module global the loop reads each pass); everything else is as shipped.
-The host is 192.0.2.1 (TEST-NET-1): nothing is ever sent there, every discover question is answered here.
+group "bounce" (intellex.reconnect_auto_bounce): host.py reconnect_loop's self-heal. A ws link whose reattach fails
+BOUNCE_AFTER_FAILS (2) times in a row while the OS would route to the host off its subnet re-associates the adapter
+(discover.wifi_bounce), asking the OS for the network first and falling back to the recorded one, at most once per
+BOUNCE_COOLDOWN_S, giving up after BOUNCE_GIVE_UP (3) failed bounces with one line; a move to another network or a
+bounce that works resets the give-up; on-subnet routing, a serial link and auto_bounce False never bounce. Both counts
+(Bridge.retry_fails, Bridge.bounce_fails) belong to one attach: a new attach and a detach zero them (Bridge.session),
+so a give-up or a failure count left by one target never carries to the next. The cooldown is shortened to 2.5 s for
+the run (a module global the loop reads each pass); everything else is as shipped. The host is 192.0.2.1 (TEST-NET-1,
+the one host the harness leash lets this case's ws targets name - INTELLEX_WS_ALLOW): nothing is ever sent there,
+every discover question is answered here and every transport is a fake.
 
 group "cli" (half of intellex.host_cli): host.py main() (:2015-2074) in-process, web.run_app stood in for: --ssid rides
 into a --ws target's spec (default NaviCore), --no-auto-bounce clears host.auto_bounce, a --serial target is attached
@@ -356,8 +359,8 @@ def _wait(pred, timeout, step=0.1):
 
 @case("the reconnect loop re-associates a ws link's adapter after 2 failed reattaches while routed off the host's "
       "subnet, once per cooldown, asking the OS for the network first; it gives up after 3 failed bounces with one "
-      "line; a move or a bounce that works resets the count; on-subnet routing, a serial link and auto_bounce False "
-      "never bounce", group="bounce")
+      "line; a move or a bounce that works resets the give-up; a new attach and a detach zero both counts; on-subnet "
+      "routing, a serial link and auto_bounce False never bounce", group="bounce")
 def bounce(ctx):
     import discover
     from transport import TransportError
@@ -394,8 +397,6 @@ def bounce(ctx):
               f"written for 2 and 3")
 
         # ── off-subnet, every bounce failing: the OS names the network once, then cannot ───────────────────────
-        # First, on the loop's fresh counts: its failure count and give-up count outlive a detach and a new attach
-        # (they are reconnect_loop locals, reset only by a bounce, a move or a reattach that works).
         k = len(out.text)
         fos.os_ssid = None               # at the attach: the body's name is recorded
         n0 = len(built)
@@ -428,6 +429,10 @@ def bounce(ctx):
             problems.append("no 'routed via 10.9.8.7 instead of 192.0.2.1 - re-associating HILOS: FAILED' line")
         ctx.note(f"reconnect_auto_bounce: off-subnet bounces at {[round(b[0] - t_attach, 2) for b in a]} s after the "
                  f"attach, {len(built) - n0} reattaches built by then")
+        gave = (host.bridge.retry_fails, host.bridge.bounce_fails)
+        if gave[1] != host.BOUNCE_GIVE_UP or gave[0] < host.BOUNCE_AFTER_FAILS:
+            problems.append(f"after the give-up the bridge counts {gave} (failed reattaches, failed bounces), expected "
+                            f"at least {host.BOUNCE_AFTER_FAILS} and exactly {host.BOUNCE_GIVE_UP}")
 
         # ── on-subnet on another network: a move (resets the give-up); a failing reattach there is never bounced ─
         fos.via, fos.os_ssid = ON_NET, "HILNET2"
@@ -437,13 +442,22 @@ def bounce(ctx):
         if 'network changed "HILNET" -> "HILNET2"' not in out.since(k):
             problems.append("on the new network, no 'network changed \"HILNET\" -> \"HILNET2\"' line: the move "
                             "check did not run")
+        elif host.bridge.bounce_fails != 0:
+            problems.append(f"after the move the give-up count is {host.bridge.bounce_fails}, expected 0 (a move resets "
+                            f"it; no attach or detach came between)")
         _wait(lambda: False, 2 * cool + 1.5)
         if len(fos.bounces) != n_b:
             problems.append(f"routed on the host's subnet the loop bounced {fos.bounces[n_b:]}")
         spec = dict(host.bridge._spec or {})
         if spec.get("ssid") != "HILNET2":
             problems.append(f"after the move the spec records ssid {spec.get('ssid')!r}, expected 'HILNET2'")
+        # ── a detach zeroes the failure count: on-subnet failures were counted (never bounced), and are gone after ──
+        before = host.bridge.retry_fails
         s.req("POST", "/_api/detach", {})
+        after = (host.bridge.retry_fails, host.bridge.bounce_fails)
+        if before < host.BOUNCE_AFTER_FAILS or after != (0, 0):
+            problems.append(f"a detach after {before} failed reattaches left the counts at {after}, expected (0, 0) "
+                            f"(and at least {host.BOUNCE_AFTER_FAILS} failures counted before it)")
 
         # ── a serial link failing, off-subnet: never bounced (no adapter carries a COM port) ───────────────────
         fos.via, fos.os_ssid = OFF_NET, None
@@ -452,7 +466,30 @@ def bounce(ctx):
         _wait(lambda: len(built) >= n0 + int(2 * cool) + 2, 3 * cool + 4)
         if len(fos.bounces) != n_b:
             problems.append(f"a failing serial link was bounced: {fos.bounces[n_b:]}")
+
+        # ── a new attach zeroes the failure count: the serial link's failures do not bounce the ws attach after it ─
+        # Straight from the failing serial link to a ws target off-subnet, no detach between. Carried over, the
+        # serial link's count (never reset: it never bounces) would bounce the new link on its first failed
+        # reattach; zeroed, the first bounce waits for BOUNCE_AFTER_FAILS of the new link's own, a second apart.
+        before = host.bridge.retry_fails
+        t_new = time.monotonic() - fos.t0
+        s.req("POST", "/_api/attach", {"kind": "ws", "host": HOST, "role": "navicore", "ssid": "HILNET2"})
+        after = (host.bridge.retry_fails, host.bridge.bounce_fails)
+        if before < host.BOUNCE_AFTER_FAILS:
+            problems.append(f"the failing serial link counted {before} failed reattaches, expected at least "
+                            f"{host.BOUNCE_AFTER_FAILS}")
+        if after[0] > 1 or after[1] != 0:
+            problems.append(f"a new attach after {before} failed reattaches left the counts at {after}, expected at "
+                            f"most 1 (one loop pass during the request) and 0")
+        _wait(lambda: len(fos.bounces) > n_b, 3 * cool + 4, step=0.02)
+        if len(fos.bounces) == n_b:
+            problems.append("the ws attach after the serial link never bounced off-subnet")
+        elif fos.bounces[n_b][0] - t_new < 0.9:
+            problems.append(f"the ws attach after the serial link bounced {fos.bounces[n_b][0] - t_new:.2f} s after "
+                            f"its attach: before BOUNCE_AFTER_FAILS failed reattaches of its own, a second apart (the "
+                            f"serial link's count carried over)")
         s.req("POST", "/_api/detach", {})
+        n_b = len(fos.bounces)
 
         # ── auto_bounce False (--no-auto-bounce): a ws link failing off-subnet is never bounced ─────────────────
         host.auto_bounce = False
@@ -462,12 +499,11 @@ def bounce(ctx):
         if len(fos.bounces) != n_b:
             problems.append(f"with auto_bounce False the loop bounced {fos.bounces[n_b:]}")
 
-        # ── auto_bounce back on: the move above reset the give-up, so it bounces again, by the recorded name ────
+        # ── auto_bounce back on: the attach started its counts afresh, so it bounces, by the recorded name ──────
         host.auto_bounce = True
         _wait(lambda: len(fos.bounces) >= n_b + 1, 3 * cool + 4)
         if len(fos.bounces) < n_b + 1:
-            problems.append("after a move to another network the loop never bounced again: the give-up reached on "
-                            "the old network still held (host.py resets bounce_fails on a move)")
+            problems.append("with auto_bounce back on the loop never bounced the failing ws link")
         elif fos.bounces[n_b][1] != "HILNET2":
             problems.append(f"after the move the bounce asked for {fos.bounces[n_b][1]!r}, expected the recorded "
                             f"'HILNET2'")
@@ -487,6 +523,25 @@ def bounce(ctx):
                             f"{out.since(k).count('giving up on re-associating')} times, expected once")
         if "re-associating HILNET2: ok (HIL: power-cycled)" not in out.since(k):
             problems.append("the working bounce's line 're-associating HILNET2: ok (HIL: power-cycled)' is missing")
+
+        # ── a new attach after the give-up bounces again; a detach then zeroes the give-up count ─────────────────
+        # The give-up belongs to the attach that reached it. Kept, a droid attached next would get no bounce at all.
+        gave = host.bridge.bounce_fails
+        n_d = len(fos.bounces)
+        s.req("POST", "/_api/attach", {"kind": "ws", "host": HOST, "role": "navicore", "ssid": "HILNET2"})
+        if gave != host.BOUNCE_GIVE_UP or host.bridge.bounce_fails != 0:
+            problems.append(f"a new attach after the give-up: the give-up count went {gave} -> "
+                            f"{host.bridge.bounce_fails}, expected {host.BOUNCE_GIVE_UP} -> 0")
+        _wait(lambda: len(fos.bounces) > n_d, 3 * cool + 4, step=0.05)
+        if len(fos.bounces) == n_d:
+            problems.append("after a new attach the loop never bounced again: the give-up reached under the attach "
+                            "before still held")
+        _wait(lambda: host.bridge.bounce_fails >= 1, 2)
+        before = host.bridge.bounce_fails
+        s.req("POST", "/_api/detach", {})
+        after = (host.bridge.retry_fails, host.bridge.bounce_fails)
+        if before < 1 or after != (0, 0):
+            problems.append(f"a detach after {before} failed bounce(s) left the counts at {after}, expected (0, 0)")
     finally:
         host.BOUNCE_COOLDOWN_S, host.auto_bounce = cooldown0, auto0
         s.req("POST", "/_api/detach", {})

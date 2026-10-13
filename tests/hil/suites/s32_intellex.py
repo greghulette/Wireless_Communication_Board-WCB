@@ -781,16 +781,16 @@ def flash_update_partition_edges(bench):
 @test("intellex.bridge_superseded_attach", "An attach still inside open() when a newer attach or a detach lands closes "
       "what it opened and raises 'superseded' instead of publishing over the newer link, and the bridge's lock is free "
       "while open() blocks; through POST /_api/attach the first of two racing attaches answers 502 and the second's "
-      "target is the one attached, with lastError left reading the loser's 'superseded' (pinned; in-process fakes; IX "
-      "re-scan host.bridge.superseded_attach, host.api.superseded_last_error)")
+      "target is the one attached, and lastError stays empty beside it - the loser's 'superseded' is not recorded "
+      "(in-process fakes; IX re-scan host.bridge.superseded_attach, host.api.superseded_last_error)")
 def bridge_superseded_attach(bench):
     """tests/intellex/py/bridge_units.py group superseded: Intellex src/host.py Bridge.attach/detach (:214-251), whose
     generation count is what stops a slow open() from leaking a transport nothing can close (a held COM port with its
     reader still feeding bytes). A transport whose open() waits on an Event stands in for the slow port or handshake;
     the HTTP case runs Intellex's real build_app() in the venv process, its rebuild() handing out such transports.
-    The re-scan's host.api.superseded_last_error is pinned there as it is today, a product call: api_attach writes the
-    loser's 'superseded by a newer attach' into lastError after the winner cleared it, so /_api/status shows an error
-    beside a healthy newer link (no page reads lastError)."""
+    The re-scan's host.api.superseded_last_error: api_attach wrote the loser's 'superseded by a newer attach' into
+    lastError after the winner cleared it, so /_api/status showed an error beside a healthy newer link. Since Intellex
+    2026-10-13 a failure is recorded only while that attach's target is still the current one (Bridge.note_failure)."""
     run_intellex_py(bench, "intellex.bridge_superseded_attach", "bridge_units.py", args={"group": "superseded"})
 
 
@@ -1434,16 +1434,19 @@ def bridge_attach_detach_window(bench):
 
 @test("intellex.reconnect_auto_bounce", "The reconnect loop's self-heal: a ws link whose reattach fails twice while the "
       "OS routes to the host off its subnet re-associates the adapter, asking the OS for the network first, once per "
-      "cooldown, and gives up after 3 failed bounces with one line; a move or a working bounce resets that; on-subnet "
-      "routing, a serial link and --no-auto-bounce never bounce (in-process, discover stood in for; IX re-scan "
-      "host.reconnect.auto_bounce)")
+      "cooldown, and gives up after 3 failed bounces with one line; a move or a working bounce resets that; a new "
+      "attach and a detach zero both the failure count and the give-up count; on-subnet routing, a serial link and "
+      "--no-auto-bounce never bounce (in-process, discover stood in for; IX re-scan host.reconnect.auto_bounce)")
 def reconnect_auto_bounce(bench):
-    """tests/intellex/py/host_units.py group bounce: Intellex src/host.py reconnect_loop (:1810-1871) running in its real
-    build_app() in the venv process, every reattach failing, with discover.local_ip_for, ssid_for_host, wifi_bounce and
-    probe answered by the case - no adapter is touched and the host (192.0.2.1, TEST-NET-1) is never contacted. Every
+    """tests/intellex/py/host_units.py group bounce: Intellex src/host.py reconnect_loop running in its real build_app()
+    in the venv process, every reattach failing, with discover.local_ip_for, ssid_for_host, wifi_bounce and probe
+    answered by the case - no adapter is touched and the host (192.0.2.1, TEST-NET-1) is never contacted; it is the one
+    ws host the leash allows (INTELLEX_WS_ALLOW), so the loop's move check may ask the stood-in probe about it. Every
     staged-host test runs with --no-auto-bounce; this is the path that flag turns off. BOUNCE_COOLDOWN_S is shortened
-    to 2.5 s for the run."""
-    run_intellex_py(bench, "intellex.reconnect_auto_bounce", "host_units.py", args={"group": "bounce"}, timeout=300)
+    to 2.5 s for the run. The two counts are Bridge.retry_fails and Bridge.bounce_fails since Intellex 2026-10-13: as
+    reconnect_loop locals they outlived a detach and the next attach (a product call from the re-scan, now changed)."""
+    run_intellex_py(bench, "intellex.reconnect_auto_bounce", "host_units.py", args={"group": "bounce"}, timeout=360,
+                    ws_hosts=["192.0.2.1"])
 
 
 @test("intellex.host_cli", "host.py's command line: --serial with --ws exits 2 before serving; a --serial target that "

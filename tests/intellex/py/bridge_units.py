@@ -6,9 +6,11 @@ whose generation is stale by the time open() returns - a newer attach or a detac
 opened and raises TransportError('superseded by a newer attach') instead of publishing over the newer link, and the
 bridge's lock is never held across open(). A transport whose open() blocks on an Event stands in for a COM port or a
 WebSocket handshake that takes its time. Then the same race through POST /_api/attach on Intellex's real build_app():
-the first of two attaches answers 502, the second's target is the one attached - and, pinned as it is today (a product
-call, IX re-scan host.api.superseded_last_error), /_api/status's lastError then reads the loser's 'superseded by a newer
-attach' while the second link is attached.
+the first of two attaches answers 502, the second's target is the one attached, and /_api/status's lastError stays
+empty beside it - a failure is recorded only while that attach's target is still the current one (Bridge.note_failure;
+IX re-scan host.api.superseded_last_error, a product call changed in Intellex 2026-10-13: the loser's 'superseded by a
+newer attach' used to land after the winner had cleared it). An attach superseded by a detach records nothing either;
+an attach of the current target that fails still records its error.
 
 group "identify" (intellex.attach_identify_role): host.py _identify_attached_serial (:1152-1231) and api_attach (:1304),
 reconnect_loop (:1797). After a serial attach the host asks the port what it is through a bridge tap: the PING alone
@@ -334,7 +336,9 @@ def superseded_by_detach(ctx):
 
 
 @case("through POST /_api/attach: of two attaches, the one still opening when the second lands answers 502 "
-      "'superseded'; the second's target is attached and the first's transport is closed", group="superseded")
+      "'superseded'; the second's target is attached, the first's transport is closed, and lastError stays empty; "
+      "superseded by a detach it records nothing either, and a failing attach of the current target is recorded",
+      group="superseded")
 def superseded_over_http(ctx):
     s = _server()
     Gate = _gate_class()
@@ -372,13 +376,51 @@ def superseded_over_http(ctx):
     st = s.status()
     check(st.get("attached") is True and st.get("target") == "serial COMHILB" and nb.is_open and nb.closes == 0,
           f"after both answered, /_api/status: {st}")
-    # Pinned as it is today, a product call (IX re-scan host.api.superseded_last_error): api_attach records the
-    # loser's TransportError as lastError after the winner's attach cleared it, so /_api/status reports an error while
-    # the newer link is attached and healthy. No page reads lastError; the harness's own bench tests do.
-    check(st.get("lastError") == "superseded by a newer attach",
-          f"after the race /_api/status lastError is {st.get('lastError')!r} with B attached; today's behaviour is "
-          f"'superseded by a newer attach' (the loser writes it after the winner cleared it) - if this changed on "
-          f"purpose, update this pin")
+    # IX re-scan host.api.superseded_last_error: the loser's 'superseded by a newer attach' is not the current target's
+    # news, so it is not recorded - the winner's attach cleared lastError and it stays clear (it used to read the
+    # loser's words beside the healthy newer link).
+    check(st.get("lastError") == "",
+          f"after the race /_api/status lastError is {st.get('lastError')!r} with B attached and healthy, expected "
+          f"'' (the loser's failure is not the current target's)")
+    s.req("POST", "/_api/detach", {})
+
+    # Superseded by a detach: the attach answers 502 'superseded', and nothing is recorded - the user stopped it.
+    gates = []
+
+    def make_blocking(spec, on_data, on_lost):
+        g = Gate(spec["port"], block=True, on_data=on_data, on_lost=on_lost)
+        gates.append(g)
+        return g
+    s.make = make_blocking
+    th, first = _req_thread(s, "POST", "/_api/attach", dict(SPEC_A))
+    deadline = time.monotonic() + 5
+    while not gates and time.monotonic() < deadline:
+        time.sleep(0.02)
+    check(bool(gates) and gates[0].entered.wait(5), "the attach to be detached never reached open()")
+    s.req("POST", "/_api/detach", {})
+    for g in gates:                      # the reconnect loop may have started its own open() of the same target
+        g.go.set()
+    th.join(10)
+    st = s.status()
+    check(first.get("status") == 502 and "superseded" in str((first.get("body") or {}).get("error")),
+          f"the attach a detach superseded answered {first.get('status')} {first.get('body')}")
+    check(st.get("lastError") == "" and not st.get("wantsLink") and not st.get("attached"),
+          f"after a detach superseded an attach, /_api/status: {st} (expected nothing wanted and lastError '')")
+
+    # The current target failing is still news: its error is recorded (the reconnect loop's retries say it again).
+    Transport, TransportError = _transport_base()
+
+    class Refused(Gate):
+        def open(self):
+            self.opened += 1
+            raise TransportError(f"HIL: {self.name} refused")
+    s.make = lambda spec, on_data, on_lost: Refused(spec["port"], block=False, on_data=on_data, on_lost=on_lost)
+    code, body = s.req("POST", "/_api/attach", {"kind": "serial", "port": "COMHILC"})
+    st = s.status()
+    check(code == 502 and "HIL: COMHILC refused" in str((body or {}).get("error")),
+          f"a refused attach answered {code} {body}")
+    check("HIL: COMHILC refused" in str(st.get("lastError")),
+          f"a refused attach of the current target: /_api/status lastError {st.get('lastError')!r}, expected its error")
     s.req("POST", "/_api/detach", {})
 
 
