@@ -229,7 +229,8 @@ for _key, _title in _FAKE_RESCAN:
 # (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
 # devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js), the Connect button,
 # BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js), the shared-port hub and the
-# wrong-slot pull (specs/hub_rescan_fake.spec.js). No board and no real port, so CI runs them too.
+# wrong-slot pull (specs/hub_rescan_fake.spec.js), the flasher's choices and write (specs/flasher_rescan_fake.spec.js).
+# No board and no real port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -264,6 +265,9 @@ _FAKE_RESCAN_M = (
     ("hub_fake_share_rebuild", "Share port tears down any shared connection, a shared relay's boards and card, and the old hub, then rebuilds it; a share no tab opens is torn down with a warning, off the hub and forgotten as the shared slot (hub.share_rebuild)"),
     ("hub_fake_flash_borrow", "A flash on the shared port this tab leads borrows it open (releasePortKeepOpen, becomeDirect), flashes direct and re-shares after the reconnect; no re-share when the board did not return or another board took the slot (hub.flash_borrow)"),
     ("pull_fake_slot_migration", "A board pulled in the wrong slot moves to its number with its terminal output, the old pane gone; if that slot is connected it stays where it landed with a warning and the other slot is untouched (pull.slot_migration)"),
+    ("flasher_fake_image_choice", "The flasher's image set: an update with an unreadable layout stays app-only unless the app outgrew the legacy slot (refused); unreadable, blank or corrupted flash writes the full set; no bootloader files refuses a full flash; ascending order (flasher.image_choice)"),
+    ("flasher_fake_fetch", "getBinaryData picks files by suffix, falls back to the legacy S3 bootloader for 16 MB, warns when the 8 MB one is missing (an 8 MB full flash then refused), and with no bootloader/partition files warns loudly and returns app only (flasher.fetch)"),
+    ("flasher_fake_write_retry_reset", "A write failing once is retried; twice stops with the recovery steps when boot or partitions were written; progress is weighted per file; the board is reset by afterFlash or a DTR/RTS pulse and the port released (flasher.write_retry_reset)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
