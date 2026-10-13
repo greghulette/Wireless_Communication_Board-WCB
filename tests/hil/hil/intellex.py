@@ -253,10 +253,13 @@ class IntellexHost:
     offline: INTELLEX_OFFLINE (on by default: no GitHub, a 2 s start).
     hide: network names (SSIDs) to take out of every line the host prints before it is kept or logged: a host attached
     over WiFi records the SSID it asks Windows for (host.py api_attach, ssid_for_host) and names both networks when the
-    adapter moves ('network changed "<a>" -> "<b>"', _reidentify_if_moved). A name is never logged (hil/wlan.py)."""
+    adapter moves ('network changed "<a>" -> "<b>"', _reidentify_if_moved). A name is never logged (hil/wlan.py).
+    script: the staged file to run - host.py, or app.py (the desktop app; with --browser it opens no window). Both take
+    --port and --no-auto-bounce."""
 
-    def __init__(self, bench, stage_dir, allow_ports=(), discover_hosts=(), offline=True, env=None, args=(), hide=()):
-        self.bench, self.stage = bench, stage_dir
+    def __init__(self, bench, stage_dir, allow_ports=(), discover_hosts=(), offline=True, env=None, args=(), hide=(),
+                 script="host.py"):
+        self.bench, self.stage, self.script = bench, stage_dir, script
         self.allow_ports, self.discover_hosts, self.offline = list(allow_ports), list(discover_hosts), offline
         self.extra_env, self.args = dict(env or {}), list(args)
         self.hide = tuple(h for h in hide if h)
@@ -276,7 +279,7 @@ class IntellexHost:
         if self.offline:
             env["INTELLEX_OFFLINE"] = "1"
         env.update(self.extra_env)
-        cmd = [py, os.path.join(self.stage, "src", "host.py"), "--port", str(self.port), "--no-auto-bounce"] + self.args
+        cmd = [py, os.path.join(self.stage, "src", self.script), "--port", str(self.port), "--no-auto-bounce"] + self.args
         self.proc = subprocess.Popen(cmd, cwd=self.stage, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding="utf-8", errors="replace", **OWN_GROUP)
         self._reader = threading.Thread(target=self._drain, daemon=True)

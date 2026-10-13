@@ -197,3 +197,255 @@ test('intellex.shim_native_flash the shim runs the config tool\'s flash buttons 
   }
   expect(rec.errors, 'page errors').toEqual([]);
 });
+
+// ── IX re-scan shim.native_flash_buttons (intellex_shim.js:514-607): a host too old to have /_api/flash-status ───────
+const NATIVE_FLASH = "Update via the host's native esptool. Saved configuration (NVS) is preserved.";
+const NATIVE_WIPE = "Full wipe via the host's native esptool. ERASES saved configuration (NVS).";
+
+test('intellex.shim_stale_host_buttons a host without /_api/flash-status disables the flash buttons', async ({ page, context, rec }) => {
+  test.setTimeout(90_000);
+  const calls = await hostGuard(context, rec);
+  let stale = true;
+  await context.route(/\/_api\/flash-status(\?|$)/, (route) => {
+    if (!stale) return route.fulfill({ json: IDLE });
+    rec.fulfilled.add(route.request().url());
+    return route.fulfill({ status: 404, contentType: 'text/plain', body: '404: Not Found' });
+  });
+  const btns = () => page.evaluate(() => ['btn-fw-flash', 'btn-fw-wipe'].map((i) => {
+    const b = document.getElementById(i);
+    return b ? { disabled: b.disabled, title: b.title, wired: !!b.__intellexWired } : null;
+  }));
+  const STALE_BTN = { disabled: true, title: STALE, wired: false };
+  await page.goto('/', { waitUntil: 'load' });
+  await expect.poll(btns, { timeout: 10_000, message: 'the flash buttons on a stale host' })
+    .toEqual([STALE_BTN, STALE_BTN]);
+  // The tool rewrites these on every transport change, so the shim re-asserts every 3 s: still stale after two.
+  await page.waitForTimeout(6_500);
+  expect(await btns(), 'after two re-asserts').toEqual([STALE_BTN, STALE_BTN]);
+  expect(calls.filter((c) => c.name === 'flash'), 'a stale host was asked to flash').toEqual([]);
+  // The host answers again (restarted): the next re-assert wires them with the native titles.
+  stale = false;
+  await expect.poll(btns, { timeout: 8_000, message: 'the buttons once the host answers /_api/flash-status' })
+    .toEqual([{ disabled: false, title: NATIVE_FLASH, wired: true }, { disabled: false, title: NATIVE_WIPE, wired: true }]);
+  // Only a positive answer is kept: a later miss does not disable buttons the host has shown it can drive.
+  stale = true;
+  await page.waitForTimeout(4_000);
+  expect((await btns()).map((b) => b.disabled), 'one failed probe after a good one').toEqual([false, false]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// ── IX re-scan shim.wizard_port_sharing_off (intellex_shim.js:784-794, :1625-1641) ──────────────────────────────────
+test('intellex.shim_wizard_no_share the Wizard\'s establishConnection always gets allowShare false', async ({ page, rec, guarded }) => {
+  // Before any page script: a DOMContentLoaded listener on document, registered ahead of the shim's, puts a recorder in
+  // place of the Wizard's establishConnection, so the shim wraps the recorder; one on window (bubbling, after the
+  // shim's on document) sees whether the wrap is already there at DOMContentLoaded.
+  await page.addInitScript(() => {
+    window.__hilShare = [];
+    document.addEventListener('DOMContentLoaded', () => {
+      window.__hilOrigType = typeof window.establishConnection;
+      window.establishConnection = function (n, port, used, allowShare) {
+        window.__hilShare.push({ n, port: port && port.tag, used: used && used.tag, allowShare, args: arguments.length,
+                                 self: this === window });
+        return 'hil-result';
+      };
+    }, { once: true });
+    window.addEventListener('DOMContentLoaded', () => {
+      const f = window.establishConnection;
+      window.__hilWrappedAtDCL = !!(f && f.__intellexNoShare);
+    }, { once: true });
+  });
+  await page.goto('/wcb/Wizard/', { waitUntil: 'load' });
+  await expect.poll(() => rec.intellex.some((l) => l.includes('cross-tab port sharing disabled')), { timeout: 15_000 })
+    .toBe(true);
+  await page.waitForTimeout(1_000);              // past load+400 ms, where the shim wraps again as a backstop
+  const got = await page.evaluate(() => {
+    window.__hilShare.length = 0;
+    const f = window.establishConnection;
+    const out = [f.call(window, 3, { tag: 'P' }, { tag: 'U' }, true), f(4, { tag: 'Q' }, { tag: 'V' })];
+    return { out, seen: window.__hilShare, marked: f.__intellexNoShare === true, origType: window.__hilOrigType,
+             atDCL: window.__hilWrappedAtDCL };
+  });
+  expect(got.origType, 'the Wizard defines establishConnection by DOMContentLoaded').toBe('function');
+  expect(got.atDCL, 'establishConnection was not wrapped yet at DOMContentLoaded').toBe(true);
+  expect(got.marked, 'window.establishConnection is the shim\'s wrapper').toBe(true);
+  expect(got.out, 'the wrapper returns what the original returns').toEqual(['hil-result', 'hil-result']);
+  expect(got.seen, 'what the original was called with (once per call: wrapped once, not twice)').toEqual([
+    { n: 3, port: 'P', used: 'U', allowShare: false, args: 4, self: true },
+    { n: 4, port: 'Q', used: 'V', allowShare: false, args: 4, self: true },
+  ]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// ── IX re-scan shim.wizard_flash_replacement (intellex_shim.js:1327-1417) ────────────────────────────────────────────
+const NOT_USB = 'Flashing needs a direct USB connection. This session is over WiFi, which has no DTR/RTS lines to enter '
+              + 'the bootloader. Attach the board over USB, or use OTA.';
+
+test('intellex.shim_wizard_flash_refusals the Wizard\'s flashFirmware refuses and fails the way boardGo needs', async ({ page, context, rec }) => {
+  test.setTimeout(150_000);
+  let kind = '';                                          // '' = the host's own /_api/status (nothing attached)
+  await context.route(/\/_api\/status(\?|$)/, (route) => (kind ? route.fulfill({ json: { attached: false, target: '',
+    lastError: '', reconnecting: false, wantsLink: true, kind, role: '', relayId: null } }) : route.continue()));
+  let flashStatus = 'stale';
+  let flow = [];
+  let step = 0;
+  await context.route(/\/_api\/flash-status(\?|$)/, (route) => {
+    if (flashStatus === 'stale') {
+      rec.fulfilled.add(route.request().url());
+      return route.fulfill({ status: 404, contentType: 'text/plain', body: '404: Not Found' });
+    }
+    return route.fulfill({ json: flow.length ? flow[Math.min(step++, flow.length - 1)] : IDLE });
+  });
+  let wcbReply = { status: 200, json: { ok: true, started: true, target: 'serial COMFAKE' } };
+  const calls = await hostGuard(context, rec, {
+    'flash-wcb': (route) => { step = 0; return route.fulfill({ status: wcbReply.status, json: wcbReply.json }); },
+  });
+  const wcbCalls = () => calls.filter((c) => c.name === 'flash-wcb').map((c) => c.body);
+  await page.goto('/wcb/Wizard/', { waitUntil: 'load' });
+  await expect.poll(() => rec.intellex.some((l) => l.includes('flashFirmware() now runs on the host')),
+    { timeout: 15_000 }).toBe(true);
+  // flashFirmware as boardGo calls it, every callback recorded.
+  const run = (opts) => page.evaluate(async (o) => {
+    const ev = { log: [], status: [], progress: [] };
+    try {
+      await window.flashFirmware({ fake: true }, 'HIL-HW', Object.assign({}, o, {
+        onLog: (m) => ev.log.push(m), onStatus: (m) => ev.status.push(m), onProgress: (a, b) => ev.progress.push([a, b]),
+      }));
+      ev.result = 'resolved';
+    } catch (e) {
+      ev.result = 'rejected';
+      ev.error = e && e.message;
+    }
+    return ev;
+  }, opts);
+  const NOTHING = { log: [], status: [], progress: [] };
+
+  // ── a host older than the page (no /_api/flash-status): refused before anything is POSTed or reported ──────────
+  expect(await run({ appOnly: true }), 'a stale host').toEqual({ ...NOTHING, result: 'rejected', error: STALE });
+  // ── a WiFi link: refused with the USB message, before anything is POSTed or reported ─────────────────────────────
+  flashStatus = 'ok';
+  kind = 'ws';
+  expect(await run({ appOnly: true }), 'a WiFi link').toEqual({ ...NOTHING, result: 'rejected', error: NOT_USB });
+  expect(wcbCalls(), 'flash-wcb POSTed although refused').toEqual([]);
+
+  // ── USB: the host runs it and fails - the error is THROWN (boardGo's only failure signal), the log fed once ──────
+  kind = 'serial';
+  flow = [
+    { running: true, ok: null, error: '', version: '', percent: 40, log: ['HIL w1'] },
+    { running: true, ok: null, error: '', version: '', percent: 70, log: ['HIL w1', 'HIL w2'] },
+    { running: false, ok: false, error: 'E', version: '', percent: 70, log: ['HIL w1', 'HIL w2', 'FAILED: E'] },
+  ];
+  let ev = await run({ eraseNvs: true });
+  expect(wcbCalls(), 'Factory Reset POSTs eraseNvs').toEqual([{ appOnly: false, eraseNvs: true }]);
+  expect(ev.result + ': ' + ev.error, 'a failed host flash').toBe('rejected: E');
+  expect(ev.log, 'the flash log fed to the Wizard').toEqual(['Intellex: flashing through the host (esptool), not the browser.',
+    'Mode: Factory Reset — NVS will be erased.', 'HIL w1', 'HIL w2', 'FAILED: E']);
+  expect(ev.status, 'the status fed to the Wizard').toEqual(['Starting native flash…', 'Flashing… 40%', 'Flashing… 70%']);
+  expect(ev.progress, 'the progress fed to the Wizard (percent of 100)').toEqual([[40, 100], [70, 100], [70, 100]]);
+  flow = [{ running: false, ok: false, error: '', version: '', percent: 0, log: [] }];
+  ev = await run({ appOnly: true });
+  expect(ev.result + ': ' + ev.error, 'a failure with no words').toBe('rejected: flash failed — see the log');
+
+  // ── the host refuses the start: its words; a route it does not have (404/405): the stale-host message ───────────
+  for (const [status, json, want] of [[409, { ok: false, error: 'a flash is already running' }, 'a flash is already running'],
+                                      [500, {}, 'the host refused (HTTP 500)'],
+                                      [405, { message: 'Method Not Allowed' }, STALE], [404, { message: 'Not Found' }, STALE]]) {
+    wcbReply = { status, json };
+    ev = await run({ appOnly: true });
+    expect(ev.result + ': ' + ev.error, `flash-wcb answering ${status}`).toBe('rejected: ' + want);
+  }
+
+  // ── boardGo's Update FW with a fake board connection: the failure becomes 'Flash failed', no config is pushed ─────
+  wcbReply = { status: 200, json: { ok: true, started: true } };
+  flow = [{ running: false, ok: false, error: 'E', version: '', percent: 10, log: ['FAILED: E'] }];
+  const goUpdate = () => page.evaluate(async () => {
+    const seen = [];
+    const fake = {
+      _shared: false, _hub: null, port: { close: async () => seen.push('port.close') },
+      isConnected: () => true,
+      closeForReconnect: async () => { seen.push('closeForReconnect'); },
+      reconnect: async () => { seen.push('reconnect'); return true; },
+      send: () => seen.push('send'), sendAndCollect: async () => { seen.push('sendAndCollect'); return ''; },
+    };
+    /* global boardConnections, boardGo */
+    const keep = boardConnections[1];
+    boardConnections[1] = fake;
+    const before = document.querySelectorAll('#toast-container .toast.error').length;
+    try { await boardGo(1, { mode: 'update' }); } catch (e) { seen.push('threw: ' + (e && e.message)); }
+    const toasts = [...document.querySelectorAll('#toast-container .toast.error .toast-msg')].slice(before)
+      .map((t) => t.textContent);
+    boardConnections[1] = keep;
+    return { seen, toasts };
+  });
+  let go = await goUpdate();
+  expect(go.toasts, 'boardGo on a failed host flash').toEqual(['Flash failed: E']);
+  expect(go.seen.filter((s) => s.startsWith('send') || s.startsWith('threw')), 'boardGo pushed config (or threw) after '
+    + 'a failed flash').toEqual([]);
+  // Over WiFi. PINNED AS IT IS TODAY: boardGo closes the board's connection (closeForReconnect) BEFORE it calls
+  // flashFirmware, so the shim's refusal - whose comment says it comes "BEFORE boardGo() tears the board's connection
+  // down" - comes after the teardown; boardGo's failure path then reconnects. Nothing is POSTed.
+  kind = 'ws';
+  const n0 = wcbCalls().length;
+  go = await goUpdate();
+  expect(go.toasts, 'boardGo over WiFi').toEqual(['Flash failed: ' + NOT_USB]);
+  expect(wcbCalls().length, 'flash-wcb POSTed over WiFi').toBe(n0);
+  expect(go.seen, 'boardGo over WiFi: the teardown before the refusal, then the reconnect (pinned)')
+    .toEqual(['closeForReconnect', 'reconnect']);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// ── IX re-scan shim.close_intent (intellex_shim.js:48-54, :224-246, :1595-1605) ──────────────────────────────────────
+// The page's /_link is routed to a stand-in NaviCore here (page.routeWebSocket): it answers the tool's ?REC and PING
+// while `answering`, and the spec can drop it. /_api/status says a serial link is attached throughout. Nothing reaches a
+// port or a board.
+test('intellex.shim_close_intent a Disconnect is honoured, a teardown after a loss is not', async ({ page, context, rec }) => {
+  test.setTimeout(180_000);
+  await hostGuard(context, rec);
+  await context.route(/\/_api\/status(\?|$)/, (r) => r.fulfill({ json: { attached: true, target: 'serial COMFAKE',
+    lastError: '', reconnecting: false, wantsLink: true, kind: 'serial', role: 'navicore', relayId: null } }));
+  const link = { sockets: [], opened: 0, answering: true };
+  await page.routeWebSocket(/\/_link$/, (ws) => {
+    link.opened += 1;
+    link.sockets.push(ws);
+    ws.onMessage((msg) => {
+      const t = typeof msg === 'string' ? msg : Buffer.from(msg).toString('utf8');
+      if (!link.answering) return;
+      if (t.startsWith('?REC')) ws.send('[REC] state=idle\n');
+      else if (t.includes('"PING"')) ws.send('{"type":"PONG","version":"v0.2.0_hilclose"}\n');
+    });
+  });
+  const reconnecting = () => rec.intellex.filter((l) => l.includes('host is attached but the page is not')).length;
+  /* global isMonitoring */
+  const monitoring = () => page.evaluate(() => (typeof isMonitoring === 'undefined' ? null : isMonitoring));
+  const connectBtn = () => page.locator('#btn-connect').textContent();
+
+  await page.goto('/', { waitUntil: 'load' });
+  await expect.poll(monitoring, { timeout: 30_000, message: 'the tool did not connect through the stand-in' }).toBe(true);
+  expect(await connectBtn()).toBe('Disconnect');
+
+  // ── the user's Disconnect, with no loss before it: honoured - nothing reconnects ──────────────────────────────────
+  const opened0 = link.opened;
+  const lines0 = reconnecting();
+  await page.click('#btn-connect');
+  await expect.poll(connectBtn, { timeout: 10_000 }).toBe('Connect');
+  await page.waitForTimeout(8_000);               // four of watchLink's 2 s ticks, past its 5 s backoff
+  expect(await monitoring(), 'isMonitoring after Disconnect').toBe(false);
+  expect(reconnecting(), 'the shim reconnected after the user\'s Disconnect').toBe(lines0);
+  expect(link.opened, '/_link sockets opened after the Disconnect').toBe(opened0);
+  expect(await connectBtn()).toBe('Connect');
+
+  // ── a loss: the far end drops, the tool's one-shot reconnect finds nobody and closes the port again - within 60 s
+  //    of the loss that close is teardown, so the shim keeps trying, and gets the page back ─────────────────────────
+  await page.reload({ waitUntil: 'load' });
+  await expect.poll(monitoring, { timeout: 30_000, message: 'the reloaded tool did not connect' }).toBe(true);
+  const lines1 = reconnecting();
+  const opened1 = link.opened;
+  link.answering = false;
+  for (const ws of link.sockets) ws.close();
+  await expect.poll(reconnecting, { timeout: 60_000, message: 'the shim never tried to get the page back after a '
+    + 'loss: a close within LOSS_GRACE_MS of it was taken for the user\'s Disconnect' }).toBeGreaterThan(lines1);
+  link.answering = true;
+  await expect.poll(monitoring, { timeout: 45_000, message: 'the page did not come back' }).toBe(true);
+  expect(link.opened, '/_link sockets after the loss (the tool\'s own try, then the shim\'s)')
+    .toBeGreaterThanOrEqual(opened1 + 2);
+  expect(rec.errors, 'page errors').toEqual([]);
+});

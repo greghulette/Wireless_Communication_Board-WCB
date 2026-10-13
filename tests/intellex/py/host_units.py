@@ -29,6 +29,13 @@ group "cli" (half of intellex.host_cli): host.py main() (:2015-2074) in-process,
 into a --ws target's spec (default NaviCore), --no-auto-bounce clears host.auto_bounce, a --serial target is attached
 and asked what it is before serving, and the startup lines say '** OUT OF DATE **' when Pages has a newer config tool
 (flash.reachable and urlopen answered here).
+
+group "app" (half of intellex.app_browser_mode): app.py main() (:141-387) in-process, the window toolkit, the browser and
+the Dock icon stood in for: a server that cannot start releases the --ws target attached before it and exits 1; with no
+pywebview, or a window that cannot be made or started, the default browser gets the landing page ('/_launcher', or '/'
+with a target); in window mode the window is 'Intellex' on that page, pywebview keeps its storage under the data
+directory (private_mode off), --dev turns on its debug flag, --inspect sets WebView2's debugging port, and the
+open-window hook makes a second window on a local path.
 """
 import contextlib
 import io
@@ -598,6 +605,182 @@ def cli_startup_lines(ctx):
                             f"{[x for x in text.splitlines() if x.startswith(('ui', '   '))][:4]}, expected {want!r}")
         if rc != 0 or "serving   http://127.0.0.1:18765/" not in text:
             problems.append(f"bundled {bundled!r}: returned {rc}, no 'serving   http://127.0.0.1:18765/' line")
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "app"
+def _free_port():
+    import socket
+    with socket.socket() as sk:
+        sk.bind(("127.0.0.1", 0))
+        return sk.getsockname()[1]
+
+
+class _FakeWebview(types.ModuleType):
+    """pywebview: create_window and start recorded; either can be made to raise."""
+
+    def __init__(self, fail_create=False, fail_start=False):
+        super().__init__("webview")
+        self.windows, self.starts = [], []
+        self.fail_create, self.fail_start = fail_create, fail_start
+
+    def create_window(self, title, url, **k):
+        if self.fail_create:
+            raise RuntimeError("HIL: no window toolkit")
+        self.windows.append((title, url, k))
+
+    def start(self, func=None, **k):
+        if self.fail_start:
+            raise RuntimeError("HIL: the backend failed")
+        self.starts.append(k)
+
+
+def _app_main(argv, webview="missing", fail_serve=False, transport=None):
+    """app.main() with sys.argv = ['app.py'] + argv -> (returned, what it printed, the URLs the browser was asked for).
+    webview: 'missing' (import fails), or a _FakeWebview. The idle loop's time.sleep(1) raises KeyboardInterrupt, the
+    way Ctrl+C ends --browser; the Dock icon (appicon) is never touched; transport: what bridge.rebuild() hands out."""
+    import webbrowser
+    import app
+    import appicon
+    import winsize
+    host = _host()
+    opened = []
+    screen = (winsize._mac_visible_frame, winsize._win_work_area)
+    winsize._mac_visible_frame = winsize._win_work_area = lambda: None     # no screen asked: the requested size
+    real_sleep = time.sleep
+
+    def sleep(sec):
+        if sec == 1:
+            raise KeyboardInterrupt
+        real_sleep(sec)
+    cap = _Cap()
+    saved = (sys.argv, sys.stdout, sys.stderr, sys.modules.get("webview", "absent"), webbrowser.open, time.sleep,
+             appicon.prepare, appicon.attach, host.build_app, host.open_window_hook, host.auto_bounce,
+             os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"))
+    sys.argv, sys.stdout, sys.stderr = ["app.py"] + list(argv), cap, cap
+    sys.modules["webview"] = None if webview == "missing" else webview
+    webbrowser.open = lambda url, *a, **k: opened.append(url) or True
+    time.sleep = sleep
+    appicon.prepare = appicon.attach = lambda *a, **k: None
+    if fail_serve:
+        def broken():
+            raise RuntimeError("HIL: the server could not start")
+        host.build_app = broken
+    if transport is not None:
+        host.bridge.rebuild = lambda: transport
+    del app._serve_error[:]
+    try:
+        try:
+            rc = app.main()
+        except SystemExit as e:
+            rc = ("exit", e.code)
+        env = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+        hook = host.open_window_hook
+        _STATE["app_after"] = {"wants": host.bridge.wants_link, "attached": host.bridge.attached,
+                               "closes": getattr(transport, "closes", None)}    # before the cleanup below detaches
+    finally:
+        (sys.argv, sys.stdout, sys.stderr, wv, webbrowser.open, time.sleep, appicon.prepare, appicon.attach,
+         host.build_app, host.open_window_hook, host.auto_bounce, env0) = saved
+        if wv == "absent":
+            sys.modules.pop("webview", None)
+        else:
+            sys.modules["webview"] = wv
+        if env0 is None:
+            os.environ.pop("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", None)
+        else:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = env0
+        if transport is not None:
+            del host.bridge.rebuild
+        winsize._mac_visible_frame, winsize._win_work_area = screen
+        host.bridge.detach()
+        del app._serve_error[:]
+    return rc, cap.getvalue(), opened, env, hook
+
+
+@case("app.py: a server that cannot start releases the --ws target attached before it and exits 1, opening nothing",
+      group="app")
+def app_failed_start(ctx):
+    host = _host()
+    Gate = _gate_class()
+    g = Gate("WS", block=False, on_data=host.bridge._on_transport_data, on_lost=host.bridge._on_transport_lost)
+    port = _free_port()
+    rc, text, opened, _, _ = _app_main(["--port", str(port), "--ws", HOST, "--browser"], fail_serve=True, transport=g)
+    problems = []
+    if rc != 1:
+        problems.append(f"returned {rc}, expected 1")
+    if f"host did not start on 127.0.0.1:{port}: HIL: the server could not start" not in text:
+        problems.append(f"no 'host did not start on 127.0.0.1:{port}: <why>' line: {text[-300:]!r}")
+    after = _STATE.get("app_after") or {}
+    if g.opened != 1 or not after.get("closes") or after.get("attached"):
+        problems.append(f"the early --ws attach was opened {g.opened}, closed {after.get('closes')} time(s) by the time "
+                        f"main() returned: a failed start must release it (app.py, the detach after _wait_until_up)")
+    if after.get("wants"):
+        problems.append("the bridge still wanted the target when main() returned after the failed start")
+    if opened:
+        problems.append(f"a failed start opened the browser on {opened}")
+    check(not problems, "; ".join(problems))
+
+
+@case("app.py --browser, and pywebview missing or failing: the default browser gets the landing page - the chooser, "
+      "or the tool when a target was given", group="app")
+def app_browser_fallbacks(ctx):
+    host = _host()
+    Gate = _gate_class()
+    problems = []
+    for label, argv, webview, page, words in (
+            ("--browser", ["--browser"], _FakeWebview(), "/_launcher", "serving http://127.0.0.1:{p}/_launcher"),
+            ("--browser with --ws", ["--browser", "--ws", HOST], _FakeWebview(), "/", "serving http://127.0.0.1:{p}/"),
+            ("no pywebview", [], "missing", "/_launcher", "pywebview not installed"),
+            ("a window that cannot be made", [], _FakeWebview(fail_create=True), "/_launcher",
+             "could not create the window (RuntimeError: HIL: no window toolkit)"),
+            ("a backend that fails to start", [], _FakeWebview(fail_start=True), "/_launcher",
+             "the window backend failed (RuntimeError: HIL: the backend failed)")):
+        port = _free_port()
+        g = Gate("WS", block=False, on_data=host.bridge._on_transport_data, on_lost=host.bridge._on_transport_lost)
+        rc, text, opened, _, _ = _app_main(["--port", str(port)] + argv, webview=webview, transport=g)
+        want = f"http://127.0.0.1:{port}{page}"
+        if rc != 0 or opened != [want]:
+            problems.append(f"{label}: returned {rc}, the browser was asked for {opened}, expected [{want}]")
+        if words.format(p=port) not in text:
+            problems.append(f"{label}: no {words.format(p=port)!r} line")
+        if label.startswith("--browser") and webview.windows:
+            problems.append(f"{label}: a window was made: {webview.windows}")
+    check(not problems, "; ".join(problems))
+
+
+@case("app.py window mode: one 'Intellex' window on the chooser, pywebview's storage kept under the data directory, "
+      "--dev for its debug flag, --inspect for WebView2's debugging port, and the open-window hook for a second window",
+      group="app")
+def app_window(ctx):
+    problems = []
+    data = os.environ.get("INTELLEX_DATA_DIR", "")
+    for argv, debug, inspect in (([], False, None), (["--dev"], True, None), (["--inspect", "9444"], False, 9444)):
+        wv = _FakeWebview()
+        port = _free_port()
+        rc, text, opened, env, hook = _app_main(["--port", str(port)] + argv, webview=wv)
+        label = " ".join(argv) or "(no flags)"
+        url = f"http://127.0.0.1:{port}/_launcher"
+        if rc != 0 or opened:
+            problems.append(f"{label}: returned {rc}, opened the browser on {opened}")
+        if [(t, u, k.get("text_select")) for t, u, k in wv.windows] != [("Intellex", url, True)]:
+            problems.append(f"{label}: windows made {[(t, u) for t, u, _ in wv.windows]}, expected one 'Intellex' on {url}")
+        elif (wv.windows[0][2].get("width"), wv.windows[0][2].get("height")) != (1280, 880):
+            problems.append(f"{label}: the window was sized {wv.windows[0][2]}, expected winsize.fit's 1280x880 with no "
+                            f"screen to measure")
+        want_start = {"debug": debug, "private_mode": False, "storage_path": os.path.join(data, "webview")}
+        if wv.starts != [want_start]:
+            problems.append(f"{label}: webview.start{wv.starts}, expected {want_start}")
+        if not os.path.isdir(os.path.join(data, "webview")):
+            problems.append(f"{label}: the webview storage directory was not made under the data directory")
+        want_env = f"--remote-debugging-port={inspect}" if inspect else None
+        if env != want_env:
+            problems.append(f"{label}: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is {env!r}, expected {want_env!r}")
+        if not callable(hook):
+            problems.append(f"{label}: no open-window hook registered for the shell")
+        else:
+            hook("WCB Wizard", "/wcb/Wizard/")
+            if [(t, u) for t, u, _ in wv.windows[1:]] != [("WCB Wizard", f"http://127.0.0.1:{port}/wcb/Wizard/")]:
+                problems.append(f"{label}: the open-window hook made {[(t, u) for t, u, _ in wv.windows[1:]]}")
     check(not problems, "; ".join(problems))
 
 

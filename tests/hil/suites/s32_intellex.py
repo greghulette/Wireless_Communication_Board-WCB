@@ -1645,3 +1645,147 @@ def ui_launcher_tools_stale(bench):
     """Intellex src/launcher.html paintMaint (:343-394), checkUi (:868-901), Update tools (:1176-1191);
     tests/intellex/specs/ui_launcher.spec.js. Nothing reaches GitHub: both routes are fulfilled in the page."""
     run_intellex_test(bench, "intellex.ui_launcher_tools_stale")
+
+
+@test("intellex.shim_stale_host_buttons", "On a host too old to answer /_api/flash-status (404) the config tool's "
+      "Update Firmware and Full Wipe stay disabled with the stale-host message through the shim's 3 s re-asserts, are "
+      "wired with their native titles once the host answers, and stay so after one later miss (Playwright; IX re-scan "
+      "shim.native_flash_buttons)")
+def shim_stale_host_buttons(bench):
+    """Intellex src/intellex_shim.js hostSupportsFlash / wireNativeFlash (:514-607); tests/intellex/specs/ui_shim.spec.js.
+    /_api/flash-status is fulfilled in the page; nothing is flashed."""
+    run_intellex_test(bench, "intellex.shim_stale_host_buttons")
+
+
+@test("intellex.shim_wizard_no_share", "The Wizard's establishConnection is wrapped by DOMContentLoaded, once, and the "
+      "original always receives allowShare false as its 4th argument (the others and its result passed through) "
+      "(Playwright; IX re-scan shim.wizard_port_sharing_off)")
+def shim_wizard_no_share(bench):
+    """Intellex src/intellex_shim.js disableWcbPortSharing (:784-794) and its DOMContentLoaded hook (:1625-1641); a
+    recorder takes the place of the Wizard's establishConnection before the shim wraps it
+    (tests/intellex/specs/ui_shim.spec.js)."""
+    run_intellex_test(bench, "intellex.shim_wizard_no_share")
+
+
+@test("intellex.shim_wizard_flash_refusals", "The Wizard's flashFirmware through the shim: a stale host and a WiFi link "
+      "are refused before anything is POSTed or reported; a host failure is THROWN with its error after feeding the log, "
+      "status and progress once each; a 409 gives the host's words, a 404/405 the stale-host message; boardGo turns a "
+      "failure into 'Flash failed' and pushes nothing (Playwright, flash routes fulfilled; IX re-scan "
+      "shim.wizard_flash_replacement)")
+def shim_wizard_flash_refusals(bench):
+    """Intellex src/intellex_shim.js installWcbFlash (:1327-1417) and the Wizard's boardGo (Wizard/app.js), with a fake
+    board connection in slot 1 and /_api/flash-wcb, /_api/flash-status and /_api/status fulfilled in the page
+    (tests/intellex/specs/ui_shim.spec.js). Pinned as it is today: boardGo closes the board's connection before it
+    calls flashFirmware, so the shim's WiFi refusal - meant to come 'BEFORE boardGo() tears the board's connection
+    down' (its comment) - comes after that teardown; boardGo's failure path then reconnects."""
+    run_intellex_test(bench, "intellex.shim_wizard_flash_refusals")
+
+
+@test("intellex.shim_close_intent", "The shim tells a Disconnect from a teardown: the user's Disconnect on a healthy link "
+      "is honoured (nothing reconnects in 8 s), while a close within 60 s of a loss - the tool's own failed reconnect - "
+      "is teardown, and the shim gets the page back (Playwright, /_link routed to a stand-in NaviCore; IX re-scan "
+      "shim.close_intent)")
+def shim_close_intent(bench):
+    """Intellex src/intellex_shim.js IntellexPort.close (:224-246), LOSS_GRACE_MS (:48-54) and watchLink (:1595-1605),
+    with the NaviCore config tool's own Disconnect, handleLinkLost and tryAutoReconnect. The page's /_link is answered
+    by Playwright (page.routeWebSocket): a stand-in that answers ?REC and PING and can drop; /_api/status says a serial
+    link is attached. The row's bench half (NaviCore's port) is played by that stand-in, so no board is touched
+    (tests/intellex/specs/ui_shim.spec.js)."""
+    run_intellex_test(bench, "intellex.shim_close_intent")
+
+
+@test("intellex.app_browser_mode", "The desktop app (app.py) as a process: --browser opens the default browser on the "
+      "chooser ('/' with a --ws target) and serves only once its own /_api/status answers; a second app.py on the same "
+      "port exits 1 at once with 'already running' on stderr and opens nothing; in-process, a failed start releases its "
+      "early attach and the window, storage and browser fallbacks (IX re-scan app.window_mode)")
+def app_browser_mode(bench):
+    """Intellex src/app.py _bind (:47-71), main (:141-387). BROWSER names a stand-in that records the URL it was asked to
+    open, so no browser starts; INTELLEX_DATA_DIR keeps everything in the stage. The second app.py binds the same port
+    with no SO_REUSEADDR and must refuse before attaching anything. The --ws half runs against hil/ws.py WsEndpoint on
+    127.0.0.2:80 (skipped with a note where nothing can listen there). The window itself is attended; its pywebview
+    calls, the failed-start release and the fallbacks are tests/intellex/py/host_units.py group app."""
+    import time
+    require(bench)
+    tid = "intellex.app_browser_mode"
+    sd = stage(bench, tid, tools="none")
+    opened = os.path.join(sd, "browser_opened.txt")
+    if os.name == "nt":
+        browser = os.path.join(sd, "hil_browser.bat")
+        with open(browser, "w", encoding="utf-8") as f:
+            f.write(f'@echo %~1>> "{opened}"\r\n')
+    else:
+        browser = os.path.join(sd, "hil_browser.sh")
+        with open(browser, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\nprintf "%s\\n" "$1" >> "{opened}"\n')
+        os.chmod(browser, 0o755)
+
+    def urls():
+        try:
+            with open(opened, encoding="utf-8") as f:
+                return [x.strip() for x in f if x.strip()]
+        except OSError:
+            return []
+
+    def wait_urls(n, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and len(urls()) < n:
+            time.sleep(0.2)
+        return urls()
+    problems = []
+    env = {"BROWSER": browser, "PYTHONUNBUFFERED": "1"}     # app.py, unlike host.py, leaves a piped stdout buffered
+    with IntellexHost(bench, sd, script="app.py", args=["--browser"], env=env) as app:
+        got = wait_urls(1)
+        if got != [f"{app.url}/_launcher"]:
+            problems.append(f"--browser opened {got}, expected [{app.url}/_launcher]")
+        if not any(x.startswith(f"serving {app.url}/_launcher") for x in app.lines):
+            problems.append("no 'serving <url>' line from app.py --browser")
+        st, body = app.json("GET", "/_api/status")
+        if st != 200 or body.get("attached") is not False:
+            problems.append(f"app.py's own /_api/status: {st} {body}")
+        py = require(bench)[1]
+        e = {k: v for k, v in os.environ.items() if not k.startswith("INTELLEX_")}
+        e.update(PYTHONUTF8="1", BROWSER=browser, INTELLEX_OFFLINE="1", INTELLEX_SERIAL_ALLOW="",
+                 INTELLEX_DISCOVER_HOSTS="", INTELLEX_DATA_DIR=os.path.join(sd, "appdata", "Intellex"))
+        t0 = time.monotonic()
+        try:
+            p = subprocess.run([py, os.path.join(sd, "src", "app.py"), "--port", str(app.port), "--browser",
+                                "--no-auto-bounce"], cwd=sd, env=e, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=30)
+            took = time.monotonic() - t0
+            if p.returncode != 1 or f"Intellex is already running on 127.0.0.1:{app.port}" not in (p.stderr or ""):
+                problems.append(f"a second app.py on port {app.port}: exited {p.returncode} after {took:.1f} s, stderr "
+                                f"{(p.stderr or '').strip()[:160]!r}; expected 1 with 'already running'")
+            elif took > 10:
+                problems.append(f"the second app.py took {took:.1f} s to refuse")
+        except subprocess.TimeoutExpired:
+            problems.append(f"a second app.py on port {app.port} was still running after 30 s: it did not refuse the "
+                            f"port (and was killed)")
+        time.sleep(1.0)
+        if urls() != [f"{app.url}/_launcher"]:
+            problems.append(f"the refused second app.py opened the browser: {urls()}")
+        st, body = app.json("GET", "/_api/status")
+        if st != 200:
+            problems.append(f"the first app.py stopped answering after the second was refused: {st}")
+    try:
+        ep = WsEndpoint("127.0.0.2", 80)
+    except OSError as e:
+        ep = None
+        bench.note(f"{tid}: --ws at launch not checked: nothing can listen on 127.0.0.2:80 here ({e})")
+    if ep is not None:
+        try:
+            os.remove(opened)
+            with IntellexHost(bench, sd, script="app.py", args=["--browser", "--ws", "127.0.0.2"], env=env) as app:
+                got = wait_urls(1)
+                st, body = app.json("GET", "/_api/status")
+                if got != [f"{app.url}/"]:
+                    problems.append(f"--browser --ws 127.0.0.2 opened {got}, expected [{app.url}/] (straight to the "
+                                    f"tool)")
+                if not body.get("attached") or body.get("target") != "ws://127.0.0.2/ws":
+                    problems.append(f"--browser --ws 127.0.0.2: /_api/status {body}, expected attached at launch")
+        finally:
+            ep.close()
+    try:
+        run_intellex_py(bench, tid, "host_units.py", args={"group": "app"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"in-process (host_units.py app): {e}")
+    assert not problems, "; ".join(problems)
