@@ -230,8 +230,9 @@ for _key, _title in _FAKE_RESCAN:
 # devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js), the Connect button,
 # BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js), the shared-port hub and the
 # wrong-slot pull (specs/hub_rescan_fake.spec.js), the flasher's choices and write (specs/flasher_rescan_fake.spec.js),
-# the flash and OTA paths around it (specs/flash_ota_rescan_fake.spec.js). No board and no real port, so CI runs them
-# too.
+# the flash and OTA paths around it (specs/flash_ota_rescan_fake.spec.js), the system file and the setup wizard
+# (specs/file_wiz_rescan_fake.spec.js). No board and no real port, so CI runs them too. The parser row of the batch
+# (parser.backup_tokens) is a node test, tests/wizard/unit/legacy_vars.test.js, run by wizard.parser.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -275,6 +276,10 @@ _FAKE_RESCAN_M = (
     ("ota_fake_serial_stream", "An OTA over USB follows the board's cursor (a NAK rewinds), verifies with END, reconnects (direct) or waits on the shared port, and pulls; END failing or the cursor collapsing sends ABORT and restores a raised baud (ota.serial_stream)"),
     ("ota_fake_relay", "A wireless OTA through a relay frames BEGIN / 192-byte DATA / END by target and session following the target's cursor, re-arms the link and pulls with 12 attempts 8 s later; a non-zero status or collapsed cursor stops it with ABORT (ota.relay)"),
     ("ota_fake_edges_replay", "Once the last OTA ends, the ETM edges held during it are replayed one board at a time (pull, then terminal re-armed), skipping the OTA's target and a board with no relay; kept while another OTA runs (ota.suppressed_edges_replay)"),
+    ("file_fake_load", "Load File sets General and a 'loaded file' baseline from the file, ETM and NaviCore included, so its own boards pulled afterwards open no modal; renders its boards, derives the controller, toasts; a sectionless text loads empty, a failed parse toasts (file.load)"),
+    ("wiz_fake_navigation", "The setup wizard: Next validates then saves, a card click advances 200 ms later once and not after Back, Review reads Apply & Connect, and leaving Firmware stamps each WCB slot factory or erase and no client slot (wiz.navigation)"),
+    ("wiz_fake_save_steps", "Saving a setup-wizard step: an owner-named claimed label stored blank, a port a Maestro leaves (moved or removed) back to 9600 unless changed, ETM numbers with defaults for emptied ones, the Kyber ports, the NaviCore id (wiz.save_steps)"),
+    ("wiz_fake_apply_config", "Apply writes the wizard's state onto the page: quantity and General, NaviCore on every WCB with Maestro boards remote, the whole Maestro table everywhere, a client slot as a client, ETM off, the controller and its id (wiz.apply_config)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):

@@ -9279,6 +9279,14 @@ function syncGeneralFromConfig(config) {
   if (config.etm.enabled && appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   const chksmEl = document.getElementById('g-etm-chksm');
   if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
+  // ...and into systemConfig.general.etm and every board, as the network fields above are: left at the page's
+  // defaults there, an export wrote them into [GENERAL], and the next General edit's updateGeneralBaseline put them in
+  // the baseline - so the next pull of the same board opened the keep/use modal over ETM values it never changed.
+  _mirrorGeneral(() => {
+    onETMToggle();
+    onETMChecksumToggle();
+    onGeneralETMChange();
+  });
 
   // Controller (network-wide) — reflect the pulled board's value, then derive
   // which controller the segmented selector should show.
@@ -9570,6 +9578,10 @@ function loadSystemFileContent(content) {
       funcChar:  system.general.funcChar,
       cmdChar:   system.general.cmdChar,
       etm: system.general.etm,
+      // The file's controller too: without it syncGeneralFromConfig set General's to off, and the next General edit
+      // put that in the baseline - a NaviCore board pulled afterwards then opened the keep/use modal.
+      specialPeer:   system.general.specialPeer,
+      specialPeerId: system.general.specialPeerId,
     }));
 
     renderBoards(system.general.wcbQuantity);
@@ -11825,7 +11837,16 @@ function wizardAddMaestro() {
 }
 function wizardRemoveMaestro(mi) {
   wizardSaveStep('maestro-config');
-  wizardState.maestros.splice(mi, 1);
+  const [gone] = wizardState.maestros.splice(mi, 1);
+  // The port it held is released: back to 9600 if it still has the Maestro's baud, as wizardSaveStep does for a Maestro
+  // moved off a port (a removed one used to keep its baud there, and Apply pushed it with nothing on the port).
+  if (gone) {
+    const stillHeld = wizardState.maestros.some(m => m.boardSlot === gone.boardSlot && m.port === gone.port) ||
+      (wizardState.kyberEnabled && wizardState.kyberBoard === gone.boardSlot &&
+       (wizardState.kyberPort === gone.port || wizardState.kyberMarcduinoPort === gone.port));
+    const sp = wizardState.boards[gone.boardSlot - 1]?.serialPorts[gone.port - 1];
+    if (!stillHeld && sp && sp.baud === gone.baud) sp.baud = 9600;
+  }
   document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('maestro-config');
 }
 
@@ -11960,10 +11981,12 @@ function wizardSaveStep(key) {
     case 'etm':
       if (get('wiz-etm-enabled')) wizardState.etmEnabled = get('wiz-etm-enabled').checked;
       if (wizardState.etmEnabled) {
-        wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value ?? 500);
-        wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value      ?? 10);
-        wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value    ?? 5);
-        wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value    ?? 2);
+        // An emptied field is the default, as in General (onGeneralETMChange): parseInt('') saved NaN, and Apply
+        // copied that into every board's config, so the push sent ?ETM,TIMEOUT,NaN.
+        wizardState.etmConfig.timeoutMs        = parseInt(get('wiz-etm-timeout')?.value) || 500;
+        wizardState.etmConfig.heartbeatSec     = parseInt(get('wiz-etm-hb')?.value)      || 10;
+        wizardState.etmConfig.missedHeartbeats = parseInt(get('wiz-etm-miss')?.value)    || 5;
+        wizardState.etmConfig.bootHeartbeatSec = parseInt(get('wiz-etm-boot')?.value)    || 2;
       }
       wizardState.etmConfig.checksumEnabled = get('wiz-etm-chksm')?.checked ?? true;
       break;
