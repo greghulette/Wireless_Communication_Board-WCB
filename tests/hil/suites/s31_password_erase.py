@@ -202,10 +202,12 @@ def _defaults_problems(banner, toks, base, da_after, da_before):
     return p
 
 
-def _erase_cycle(bench, erase_cmd, extras=False):
+def _erase_cycle(bench, erase_cmd, extras=False, pre=None):
     """extras (WCB-WP57, nvs.erase_led_and_tails): first ?LED,PIN with W1's own pin and a boot that applies it
     (_led_override); the erase sent with ';S0<t>' chained behind it, which must print before the restart; and, before
-    ?HW, the erased board's LED state and ?backup (_erased_board_problems)."""
+    ?HW, the erased board's LED state and ?backup (_erased_board_problems). pre (nvs.erase_freezes_learned_peers): a
+    ?WDP,ADD,<n> chained in front of the erase, whose learned-peer save is due after it; the erased board must then
+    boot with no learned_peers namespace in ?NVS (and, as always, no [PEER] line)."""
     w = usb_wcb(bench)
     problems = []
     with config_guard(bench, 1) as before, Console(bench, 2) as c2:
@@ -228,7 +230,8 @@ def _erase_cycle(bench, erase_cmd, extras=False):
             if extras:
                 _led_override(w, problems)
                 tail = marker("t")
-            m = w.send(erase_cmd if tail is None else f"{erase_cmd}^;S0{tail}")
+            cmd = erase_cmd if tail is None else f"{erase_cmd}^;S0{tail}"
+            m = w.send(f"{pre}^{cmd}" if pre else cmd)
             erased = True
             try:
                 w.dev.expect(r"^NVS cleared — set \?HW,xx before use \(serial ports are inactive until then\)\.$",
@@ -249,6 +252,16 @@ def _erase_cycle(bench, erase_cmd, extras=False):
             w.wait_boot(m, timeout=30)
             banner = _cut(w.dev.since(m))
             problems += _defaults_problems(banner, snapshot(bench, 1), base, _da_rows(w), da_before)
+            if pre:
+                said = [x.strip() for x in w.dev.since(m)]
+                i_add = next((i for i, x in enumerate(said) if re.match(r"^\[WDP\] added WCB\d+ as a peer$", x)), None)
+                i_era = next((i for i, x in enumerate(said) if x.startswith("NVS cleared")), None)
+                if i_add is None or i_era is None or i_add > i_era:
+                    problems.append(f"{pre} did not add the peer before the erase")
+                _, spaces = _nvs(w.run("?NVS", timeout=6))
+                if "learned_peers" in spaces:
+                    problems.append(f"the erased board boots with a learned_peers namespace ({spaces['learned_peers']} "
+                                    f"entries): the peer {pre} added was saved after the erase")
             if extras:
                 problems += _erased_board_problems(w, banner)
         finally:
@@ -281,6 +294,18 @@ def _erase_cycle(bench, erase_cmd, extras=False):
 @test("nvs.erase_defaults_restore", "(attended) ?ERASE,NVS on W1 erases every namespace and restarts; W1 boots on the firmware's defaults (identity, MAC, peers, ports, ETM, WDP, WiFi off, no devices, sequences or saved serial devices); then ?HW and a boot, every line of W1's old chain, a boot and its learned peers put it back exactly, and the mesh works both ways (3 reboots)", needs=["wcb1"], links=[], opt_in="nvs_erase")
 def erase_defaults_restore(bench):
     _erase_cycle(bench, "?ERASE,NVS")
+
+
+@test("nvs.erase_freezes_learned_peers", "(attended) A learned peer added right before ?ERASE,NVS (?WDP,ADD,<n>^?ERASE,NVS, its save still 5 s off) is not written back into the erased store: W1 boots with no learned_peers namespace in ?NVS and no [PEER] line, on the firmware's defaults; then the usual restore (3 reboots)", needs=["wcb1"], links=[], opt_in="nvs_erase")
+def erase_freezes_learned_peers(bench):
+    """Coverage re-scan 2026-10-12, peers.learned_persistence. addActivePeer schedules the learned-peer save
+    LEARNED_FLUSH_DEBOUNCE_MS (5 s) later, and the restart path saves a pending one first; ?ERASE,NVS (eraseNVSFlash)
+    sets learnedPeersFrozen, which saveLearnedPeers honours until the restart, so nothing is written back into the
+    erased store. Unfrozen, the table would come back saved under the old MAC octets, and the erased board (octets 00)
+    would print '[PEER] learned-peer table saved under different MAC octets - discarding' at boot, which
+    _defaults_problems refuses with every other [PEER] line. The added id is absent_wcbs' first number."""
+    from suites.common import absent_wcbs
+    _erase_cycle(bench, "?ERASE,NVS", pre=f"?WDP,ADD,{absent_wcbs(bench)[0]}")
 
 
 @test("nvs.wcb_erase_alias", "(attended) The legacy ?WCB_ERASE is the same erase as ?ERASE,NVS: the same confirmation, the same defaults, the same restore (3 reboots)", needs=["wcb1"], links=[], opt_in="nvs_erase")

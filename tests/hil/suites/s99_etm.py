@@ -841,3 +841,105 @@ def came_online_outside_backup(bench):
     if cut:
         problems.append(f"{len(cut)} came-ONLINE line(s) not whole: {[x[:60] for x in cut][:2]}")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+@test("etm.char_no_online_peers", "?ETM,CHAR on a board that sees no peer online aborts with '[ETM] Characterization aborted: no online peers.' and turns ?DEBUG,ETM back on (W1 deafened, with HB 4 / MISS 1, until ?STATS shows no peer online; ~25 s)", needs=["wcb1"], links=[])
+def char_no_online_peers(bench):
+    """Coverage re-scan 2026-10-12, etm.char_run. startETMChar (WCB.ino) saves ?DEBUG,ETM and turns it off for the run;
+    processETMChar aborts on its first pass when no active peer is online, and that early return must undo the save
+    itself, since printETMCharResults - which normally restores it - never runs. '?MAC,3,<other>' deafens W1 at once
+    (s18's _deaf_w1) and HB 4 / MISS 1 has it mark its peers offline 5 s after their last packet. The restored debug
+    shows in W1's next '[ETM] Heartbeat sent (WCB1)', due within the 4 s heartbeat. The latched-requester arm needs
+    the target to hear a request while it hears no peer, and the >5% loss footer a lossy run: neither is made here."""
+    from suites.s18_etm_config_wdp import _deaf_w1, _etm, _restore_etm
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?ETM,ON")
+    bad = []
+    with config_guard(bench, 1) as before:
+        orig = _etm(before[1])
+        lines = []
+        try:
+            w.run("?DEBUG,ETM,ON")
+            w.run("?ETM,HB,4")
+            w.run("?ETM,MISS,1")
+            with _deaf_w1(w, before[1]):
+                deadline = time.monotonic() + 20      # a peer W1 already counts offline prints no OFFLINE line
+                while any(v.get("online") for v in w.etm_board_stats().values()):
+                    if time.monotonic() > deadline:
+                        raise AssertionError(f"setup: W1 still sees peers online 20 s after going deaf: "
+                                             f"{[n for n, v in w.etm_board_stats().items() if v.get('online')]}")
+                    time.sleep(1.0)
+                cm = w.dev.mark()
+                w.send("?ETM,CHAR")
+                try:
+                    w.dev.expect(r"^\[ETM\] Characterization aborted: no online peers\.$", timeout=5, since=cm)
+                    w.dev.expect(r"^\[ETM\] Heartbeat sent \(WCB1\)$", timeout=7, since=cm)
+                except AssertionError:
+                    pass
+                lines = [x.rstrip() for x in w.dev.since(cm)]
+        finally:
+            _restore_etm(w, orig, ("HB", "MISS"))
+            w.run("?DEBUG,ETM,OFF")
+            _peers_online(bench, w, strict=False)
+    i_off = next((i for i, x in enumerate(lines) if x.startswith("[ETM CHAR] Temporarily disabling ETM debug")), None)
+    i_abort = next((i for i, x in enumerate(lines) if x == "[ETM] Characterization aborted: no online peers."), None)
+    if i_off is None:
+        bad.append("?ETM,CHAR did not save and turn off ?DEBUG,ETM (no 'Temporarily disabling' line)")
+    if i_abort is None:
+        bad.append(f"no abort line: {[x for x in lines if 'ETM' in x][:6]}")
+    elif not any(x == "[ETM] Heartbeat sent (WCB1)" for x in lines[i_abort + 1:]):
+        bad.append("?DEBUG,ETM did not come back on after the abort: no 'Heartbeat sent' line within 7 s")
+    if any(x.startswith("Phase 2") for x in lines):
+        bad.append("the run went on to phase 2 with no peer online")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.char_relay_ignored_while_running", "A relayed ?MGMT,ETM,CHAR,2 that reaches W2 while its own local ?ETM,CHAR runs is ignored: W2 logs '[MGMT] ETM char already running — ignoring relay request', W1 gets no [MGMT:ETM,2] - no refusal and, when W2's run ends, none of its results (~60 s)", needs=["wcb1", "wcb2"], links=[])
+def char_relay_ignored_while_running(bench):
+    """Coverage re-scan 2026-10-12, etm.char_relay. handleETMReqPacket (WCB.ino) returns before latching the requester
+    while etmCharRunning: the run in progress keeps its own (no) requester, so W2's results are not sent to W1, and W1
+    is not told anything either. Without that check startETMChar's 'already running' refusal would be relayed back as a
+    [MGMT:ETM,2] block, and a latched requester would get the local run's results (etm.char_relay_roundtrip is the
+    relayed run, etm.char_relay_refusal_reported the refusal of one that cannot start). The request goes 1 s into W2's
+    run; W1 is watched until 10 s after W2 prints its recommended timeout."""
+    own = bench.usb_wcbs().get(2)
+    if not own:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own))
+    require_tokens(bench, 1, "?ETM,ON")
+    require_tokens(bench, 2, "?ETM,ON")
+    _peers_online(bench, w)
+    bad = []
+    try:
+        w2.run("?DEBUG,MGMT,ON")
+        m1, m2 = w.dev.mark(), w2.dev.mark()
+        w2.send("?ETM,CHAR")
+        w2.dev.expect(r"^Phase 1 - Individual Baseline", timeout=5, since=m2)
+        time.sleep(1.0)
+        w.send("?MGMT,ETM,CHAR,2")
+        try:
+            w2.dev.expect(r"^\[MGMT\] ETM char already running . ignoring relay request$", timeout=5, since=m2)
+        except AssertionError:
+            bad.append("W2 printed no 'ETM char already running - ignoring relay request' line")
+        try:
+            w2.dev.expect(REC_TIMEOUT.pattern, timeout=90, since=m2)
+        except AssertionError:
+            raise AssertionError("W2's own characterisation never finished") from None
+        time.sleep(10.0)
+        relayed = [x.rstrip() for x in w.dev.since(m1) if x.startswith("[MGMT:ETM,2]")]
+        if relayed:
+            bad.append(f"W1 got {len(relayed)} [MGMT:ETM,2] block(s) for a request W2 ignored: {relayed[:2]}")
+        lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+        if not _has_line(lines2, r"^\[MGMT\] ETM char request from WCB1$"):
+            bad.append("W2 never logged W1's request (lost on the air?)")
+        if _has_line(lines2, r"could not run"):
+            bad.append("W2 refused the relayed request instead of ignoring it")
+    finally:
+        w2.run("?DEBUG,MGMT,OFF")
+    assert not bad, "; ".join(bad)
+
+
+def _has_line(lines, pattern):
+    rx = re.compile(pattern)
+    return any(rx.search(x) for x in lines)

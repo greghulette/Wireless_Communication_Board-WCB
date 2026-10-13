@@ -2289,6 +2289,7 @@ GATED = {
     "nvs.full_bcast_flags_warn": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
     "ident.epass_window_gates": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_led_and_tails": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
+    "nvs.erase_freezes_learned_peers": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     **{f"ota.{n}": ("ota_erase", _ERASE) for n in (
         "local_begin_abort", "local_begin_supersede", "local_cursor_nak_incomplete", "local_truncated_verify_fail",
         "local_bad_magic", "local_overrun", "local_base64_errors", "local_idle_timeout_nak_no_refresh",

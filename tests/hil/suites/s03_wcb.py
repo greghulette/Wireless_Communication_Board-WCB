@@ -1177,3 +1177,89 @@ def pull_error_lost_line(bench):
         if r.kind not in ("legacy", "parts"):
             problems.append(f"the pull after the fault was disarmed came back as {r.kind}")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+@test("mgmt.seqval_session_reaped", "A sequence-value reply W1 is left holding part of (W1 deafened by its own timer chain inside W2's ~850-character, 5-frag reply) is reaped with '[MGMT] Sequence-value session <id> timed out' under ?DEBUG,MGMT about 10 s later, and the next ?MGMT,SEQGET of the key comes back whole", needs=["wcb1", "wcb2"], links=[])
+def seqval_session_reaped(bench):
+    """Coverage re-scan 2026-10-12, mgmt.relay_sessions_reaped. checkConfigPullTimeout (WCB.ino) reaps the relay's
+    sequence-value session CONFIG_SESSION_TIMEOUT_MS (10 s) after its last frag, as it does the config pull session
+    (wcb.pull_session_reaped, whose method this is): W1 deafens ITSELF with ;S0<m>^;T<d>^?MAC,3,<other>^;T2000^?MAC,3,
+    <orig> on the line right behind the request, the delay stepping across tries until it lands inside the reply. The
+    relay prints nothing per frag, so a try whose reply completed shows its [MGMT:SEQVAL,2] line, and one deafened
+    before the first frag shows neither line. W2 sends its frags twice (sendResultFrags); the session is kept across
+    both passes. The value is stored on W2 for the test and never recalled; W1's octet is put back by its own chain."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    key = "HILRV"
+    value = ";S0," + padded_value(846)
+    problems, notes = [], []
+    with config_guard(bench, 1, 2) as before:
+        t = token(before[1], "?MAC,3,")
+        if t is None:
+            raise Skip("W1's chain lacks ?MAC,3")
+        if any(x.upper().startswith(f"?SEQ,SAVE,{key},") for x in before[2]):
+            raise Skip(f"W2 already stores {key}")
+        orig = t[len("?MAC,3,"):]
+        other = "%02X" % (int(orig, 16) ^ 0x01)
+        deaf, reaped = False, None
+        try:
+            if not any(f"Stored: Key='{key}'" in x for x in w2.run(f"?SEQ,SAVE,{key},{value}", timeout=8)):
+                raise AssertionError(f"setup: W2 did not store the {len(value)}-character {key}")
+            w1.run("?DEBUG,MGMT,ON")
+            for attempt, delay in enumerate((40, 80, 120, 170, 230, 300, 400), 1):
+                mk, m1 = marker("d"), w1.dev.mark()
+                w1.dev.send(f"?MGMT,SEQGET,2,{key}")
+                t_req = time.monotonic()
+                w1.dev.send(f";S0{mk}^;T{delay}^?MAC,3,{other}^;T2000^?MAC,3,{orig}")
+                deaf = True
+                w1.dev.expect(rf"Updated 3rd MAC octet to 0x{orig}", timeout=delay / 1000 + 6, since=m1)
+                deaf = False
+                lines = w1.dev.since(m1)
+                if not any(f"Updated 3rd MAC octet to 0x{other}" in x for x in lines):
+                    problems.append(f"try {attempt}: W1 never deafened")
+                    break
+                if any(x.startswith(f"[MGMT:SEQVAL,2]{key},") for x in lines):
+                    notes.append(f"try {attempt}: ;T{delay} came after the whole reply")
+                    time.sleep(2.0)
+                    continue
+                try:
+                    g = w1.dev.expect(r"^\[MGMT\] Sequence-value session ([0-9A-F]{4}) timed out", timeout=14, since=m1)
+                except AssertionError:
+                    notes.append(f"try {attempt}: ;T{delay} came before the first frag (no session, nothing to reap)")
+                    time.sleep(2.0)
+                    continue
+                t_out, _ = _at(w1.dev, m1, r"^\[MGMT\] Sequence-value session [0-9A-F]{4} timed out")
+                reaped = (g.group(1), round(t_out - t_req, 1))
+                if not 9.5 <= t_out - t_req <= 13.0:
+                    problems.append(f"session {g.group(1)} was reaped {t_out - t_req:.1f} s after the request, "
+                                    f"not about 10 s after its last frag")
+                break
+            if reaped is None and not problems:
+                problems.append("no try deafened W1 inside the reply: no half-received session to reap")
+            want, got = f"[MGMT:SEQVAL,2]{key},OK,{value}", None
+            for _ in range(3):
+                time.sleep(2.0)
+                m1 = w1.dev.mark()
+                w1.send(f"?MGMT,SEQGET,2,{key}")
+                try:
+                    got = w1.dev.expect(rf"^\[MGMT:SEQVAL,2\]{key},", timeout=5, since=m1).string.rstrip()
+                    break
+                except AssertionError:
+                    continue
+            if got != want:
+                problems.append(f"the SEQGET after the reaping came back as {len(got or '')} characters, "
+                                f"not the {len(want)}-character value whole")
+        finally:
+            try:
+                if deaf:
+                    w1.run(f"?MAC,3,{orig}")
+                w1.run("?DEBUG,MGMT,OFF")
+            finally:
+                w2.run(f"?SEQ,CLEAR,{key}")
+    bench.note(f"mgmt.seqval_session_reaped: reaped (session, seconds after the request) {reaped}; " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+def padded_value(n):
+    """n characters of [0-9A-Z] after a unique marker: no ^, ? or ; to end or split a stored value."""
+    return (marker("RV") + "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 40)[:n]

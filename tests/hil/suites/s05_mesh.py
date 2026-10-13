@@ -1151,3 +1151,76 @@ def frag_completed_session_ring(bench):
             c2.send("?DEBUG,MGMT,OFF")
             time.sleep(0.3)
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+RTERM_LOST = re.compile(r"^\[RTERM\] (\d+) line\(s\) from WCB2 lost at this relay: its queue was full$")
+
+
+@test("rterm.relay_ring_loss_reported", "With W1's loop() held several seconds by a slow ;S3 line while W2 mirrors two ?HELP pages to W1, the relay's 2.5 KB ring fills: W1 prints the pieces it kept, then '[RTERM] N line(s) from WCB2 lost at this relay: its queue was full', and N accounts for every piece of W2's missing from the mirror (N less the missing pieces is at most W2's empty lines, which a kept piece prints as nothing)", needs=["wcb1", "wcb2"], links=[])
+def rterm_relay_ring_loss_reported(bench):
+    """Coverage re-scan 2026-10-12, rterm.relay_ring_loss_reported. rtermRelayHandlePacket (WCB_RemoteTerm.cpp) runs on
+    W1's WiFi task and puts each mirrored piece in a 2560-byte ring with a zero wait, counting the piece lost when it
+    does not fit; rtermRelayDrain, from loop(), prints what the ring holds and then one line with the count. A held
+    loop() is what fills it: a ;S3 line at 1200 baud, which WcbSoftSerial::write sends on loop()'s task and waits out.
+    ?HELP is typed on W2's own USB, so W2 needs nothing from W1 meanwhile, and W2's USB cut the relay's way (_pieces)
+    is what W1 should have printed; a piece W2 itself could not send shows as W2's '[MESH] ... not sent' line and is
+    allowed for. mesh.rterm_long_output is the same mirror with nothing held, where nothing may be lost."""
+    own = bench.usb_wcbs().get(2)
+    if not own:
+        raise Skip("W2 has no USB console here: there is nothing to compare the mirror with")
+    d2 = bench.dev(own)
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        base = token(before[1], "?BAUD,S3,") or "?BAUD,S3,9600"
+        try:
+            if not any("Baud rate for Serial3 updated to 1200" in x for x in w.run("?BAUD,S3,1200")):
+                raise AssertionError("setup: ?BAUD,S3,1200 did not confirm")
+            with w.remote_terminal(2, bench.usb_wcb_number()):
+                time.sleep(0.5)
+                m1, held = w.dev.mark(), "HILHELD" + nonce()
+                w.send(";S3" + padded("HOLD", 1080))       # several seconds at 1200 baud
+                w.send(f";S0,{held}")                      # echoes once the hold is over
+                time.sleep(0.3)
+                m2 = d2.mark()
+                d2.send("?HELP")                           # twice: well past the ring's 2560 bytes
+                d2.send("?HELP")
+                _settle(d2, m2)
+                # W2's end marker only after the hold: sent during it, its own piece would be lost to the full ring
+                # (run 20261013-002216).
+                _await_line(w.dev, rf"^{held}$", m1, 25, "the end of W1's hold")
+                end = "HILEND" + nonce()
+                d2.send(f";S0,{end}")
+                i2 = _await_line(d2, rf"^{end}(?![0-9A-F])", m2, 5, f"the {end} echo on W2's USB")
+                i1 = _await_line(w.dev, rf"^\[TERM:2\]{end}(?![0-9A-F])", m1, 25, f"the mirrored {end} echo on W1")
+                time.sleep(1.5)                            # the report follows everything that drain printed
+                usb = d2.since(m2)[:i2 - m2]
+                w1lines = [x for x in w.dev.since(m1) if not x.startswith(f"[TERM:2]{end}")]
+        finally:
+            w.run(base)
+    term = [x[len("[TERM:2]"):] for x in w1lines if x.startswith("[TERM:2]")]
+    lost = sum(int(m.group(1)) for x in w1lines for m in [RTERM_LOST.match(x.rstrip())] if m)
+    w2drops = sum(int(m.group(1)) for x in usb for m in [re.match(r"^\[MESH\] (\d+) ESP-NOW frame\(s\) not sent", x)] if m)
+    want = [p for x in usb if x and not IDF_LOG.match(x) for p in _pieces(x)]
+    empties = sum(1 for x in usb if not x and not IDF_LOG.match(x))   # sent as a bare LF, never printed if kept
+    missing = extra = 0
+    for op, a1, a2, b1, b2 in difflib.SequenceMatcher(a=want, b=term, autojunk=False).get_opcodes():
+        if op in ("delete", "replace"):
+            missing += a2 - a1
+        if op in ("insert", "replace"):
+            extra += b2 - b1
+    bench.note(f"rterm.relay_ring_loss_reported: {len(want)} non-empty pieces and {empties} empty lines sent, {len(term)} "
+               f"mirrored, {missing} missing, {lost} reported lost at W1, {w2drops} not sent by W2")
+    if not lost:
+        raise Skip(f"the relay's ring never overflowed: {len(want)} pieces, {missing} missing - nothing to report")
+    if extra:
+        problems.append(f"{extra} mirrored piece(s) W2 never printed")
+    # Every piece W2 sent was printed, lost at W1, never sent by W2, or an empty line kept and printed as nothing.
+    if not missing <= lost + w2drops <= missing + empties:
+        problems.append(f"{missing} non-empty pieces missing from the mirror (and {empties} empty lines sent), but W1 "
+                        f"reported {lost} lost and W2 {w2drops} not sent")
+    i_lost = next(i for i, x in enumerate(w1lines) if RTERM_LOST.match(x.rstrip()))
+    if not any(x.startswith("[TERM:2]") for x in w1lines[:i_lost]):
+        problems.append("the lost-lines report came before any of the pieces the ring kept")
+    assert not problems, "; ".join(problems)
