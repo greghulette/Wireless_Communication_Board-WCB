@@ -645,8 +645,19 @@ function addDiscoveredBoards(numbers) {
   for (const n of numbers) {
     if (n >= 1 && n <= WCB_MAX && !_meshBoards.has(n)) { _meshBoards.add(n); added = true; }
   }
-  if (added) reconcileBoardGrid();
+  if (added) { reconcileBoardGrid(); _refreshRouteHostDropdowns(); }
   return added;
+}
+
+// Rebuild every Remote host list on the page (HCR/MP3/DFPlayer, once built), keeping each one's pick: a board the mesh
+// reports later is offered at once, as a mapping destination added then offers it (_populateRouteHostDropdown).
+function _refreshRouteHostDropdowns() {
+  for (const n of Object.keys(boardConfigs)) {
+    for (const dev of ['mp3', 'hcr', 'dfp']) {
+      const sel = document.getElementById(`b${n}-${dev}-remote-wcb`);
+      if (sel?.options.length) _populateRouteHostDropdown(+n, sel, parseInt(sel.value) || 0);
+    }
+  }
 }
 
 function addBoardSection(n) {
@@ -1357,19 +1368,47 @@ function validateMacOctet(input) {
 }
 
 // The General MAC octets as a push sends them, [octet2, octet3]: two hex digits each, a single digit padded, empty
-// '00' (as the push has always defaulted). null, with a toast naming the octet, when either is not hex - the firmware
-// saves whatever ?MAC,<n>,<value> carries (?MAC,2,ZZ included), so such a push must send nothing at all.
+// '00' (as the push has always defaulted). null, with a toast naming the octet, when either is not hex - a push of
+// ?MAC,2,ZZ is refused by the firmware, so such a push must send nothing at all.
 function _pushMacOctets(n) {
-  const out = [];
+  const bad = _badMacOctet();
+  if (bad) {
+    showToast(`WCB ${n}: MAC octet ${bad.k} "${bad.v}" is not a hex value 00–FF — fix it in General first. Nothing was sent.`, 'error', 8000);
+    return null;
+  }
+  return [2, 3].map(k => (document.getElementById(`g-mac${k}`)?.value ?? '').trim().toUpperCase().padStart(2, '0'));
+}
+
+// The first General MAC octet that is not 0-2 hex digits, as { k, v }, or null. Push All asks once, before any board
+// starts (boardGoAll), so a bad octet is one message rather than one per board.
+function _badMacOctet() {
   for (const k of [2, 3]) {
     const v = (document.getElementById(`g-mac${k}`)?.value ?? '').trim().toUpperCase();
-    if (!/^[0-9A-F]{0,2}$/.test(v)) {
-      showToast(`WCB ${n}: MAC octet ${k} "${v}" is not a hex value 00–FF — fix it in General first. Nothing was sent.`, 'error', 8000);
-      return null;
-    }
-    out.push(v.padStart(2, '0'));
+    if (!/^[0-9A-F]{0,2}$/.test(v)) return { k, v };
   }
-  return out;
+  return null;
+}
+
+// What a push of board n must refuse before anything is sent, as { reason } with the toast already shown, or null.
+// boardGo and boardGoRemote ask once the page is synced into the config (config.kyber, config.sequences).
+//  - Kyber Local with no port: S1 and S2 both held by other features (updateKyberPortDropdown says "S1 and S2 both in
+//    use"), so the select reads back no port, and the ?KYBER,LOCAL emit's fallback (parser.js, `|| 2`) would claim S2
+//    over the device there.
+//  - A sequence with IF inside a ;t or ;w payload, refused as TEST and SAVE/UPDATE refuse it (validateSequenceValue):
+//    the firmware rejects it as a timer payload. Only a row the push would send - one that differs from what the
+//    board holds - is checked.
+function _pushRowProblem(n, config, baseline) {
+  if (config.kyber?.mode === 'local' && !config.kyber.port) {
+    showToast(`WCB ${n}: Kyber is set to Local, but S1 and S2 are both in use — free one of them for the Kyber, or set Kyber to None. Nothing was sent.`, 'error', 10000);
+    return { reason: 'Kyber Local has no free port (S1 and S2 both in use) — nothing was sent' };
+  }
+  const held = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const seq  = (config.sequences ?? []).find(s => held.get(s.key) !== s.value && SEQ_EMBEDDED_IF_RES.some(re => re.test(s.value)));
+  if (seq) {
+    showToast(`WCB ${n}: sequence "${seq.key}" — IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd. Nothing was sent.`, 'error', 10000);
+    return { reason: `sequence "${seq.key}" has IF inside a ;t or ;w payload — nothing was sent` };
+  }
+  return null;
 }
 
 // srcEl is the General input the user just typed into (index.html passes `this`). Only a user's edit is checked
@@ -2532,8 +2571,8 @@ function onMP3Change(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-mp3-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.mp3.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.mp3.remoteWCB || 0);
     config.mp3.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.mp3.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -2707,8 +2746,8 @@ function onDFPChange(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-dfp-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.dfp.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.dfp.remoteWCB || 0);
     config.dfp.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.dfp.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -2874,8 +2913,11 @@ function updateHCRPortDropdown(n) {
   }
 }
 
-// Populate a device-route "Host WCB" dropdown (HCR/MP3 Remote mode) with the mesh's
-// WCB numbers, selecting the current host. Reused by both devices.
+// Populate a device-route "Host WCB" dropdown (HCR/MP3/DFPlayer Remote mode) with the mesh's
+// WCB numbers, selecting the current host. Reused by every device. The boards offered are the ones
+// a mapping destination offers (appendMappingDestination): the quantity's floor, every board the
+// mesh reported or that is connected (desiredBoardNumbers - a board WDP joined above the floor
+// included), the board's own number and the current host - with this board's own taken out.
 function _populateRouteHostDropdown(n, sel, selectedHost) {
   if (!sel) return;
   const cfg  = boardConfigs[n];
@@ -2885,6 +2927,7 @@ function _populateRouteHostDropdown(n, sel, selectedHost) {
     parseInt(document.getElementById('g-wcbq')?.value) || 0,
     self,
     selectedHost || 0,
+    ...desiredBoardNumbers(),
     2
   );
   populateWCBDropdown(sel, qty, selectedHost || 0, true);
@@ -2920,8 +2963,8 @@ function onHCRChange(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-hcr-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.hcr.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.hcr.remoteWCB || 0);
     config.hcr.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.hcr.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -3155,7 +3198,8 @@ function onWLEDPortChange(n, rowId) {
   const baudSel = document.getElementById(`${rowId}-baud`);
   if (portSel && baudSel) {
     const port    = parseInt(portSel.value) || 0;
-    const maxBaud = port >= 3 ? 9600 : Infinity;   // S3-5 software-serial cap
+    // S3-5 software-serial cap, the same as appendWLEDRow's: the firmware takes up to 57600 there (115200 refused).
+    const maxBaud = port >= 3 ? 57600 : Infinity;
     const curBaud = parseInt(baudSel.value) || 115200;
     baudSel.innerHTML = WLED_BAUD_RATES.filter(b => b <= maxBaud).map(b =>
       `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`).join('');
@@ -6007,7 +6051,7 @@ class BoardConnection {
       // A mirrored board can itself be a relay answering someone else's pull: its [MGMT:CONFIG/CFGPART] lines
       // arrive here inside [TERM:n], and get the same summary as the relay's own.
       const termText = _summariseMgmtConfigLine(termMatch[2]);
-      if (!_suppressTerminalLine(termText))
+      if (!_suppressTerminalLine(termText) && !_rtermKeepAliveEcho(slot, termText))
         termLog(slot, termText, 'out');
     } else {
       const displayed = _summariseMgmtConfigLine(line);   // config text (and its passwords) never reaches the pane
@@ -6648,6 +6692,7 @@ function setRemoteConnected(n, relayN) {
     updateFwBtn.title = 'Connect via USB to update firmware — not available over wireless relay';
   }
   updateBoardStatusBadge(n, 'remote');
+  updateHCRStatusBtn(n);               // disabled through a relay, with a tooltip saying so
   ensureTerminalPane(relayN);          // relay's own pane (its [TERM] demux + [MGMT] replies)
   ensureTerminalPane(n);               // the TARGET board gets its own pane for [TERM:n] output
   updateTerminalPaneDot(n, true);
@@ -6674,6 +6719,7 @@ function clearRemoteBoardsForRelay(relayN) {
 
 function clearRemoteConnected(n) {
   const relayN = remoteRelayForBoard[n];
+  _rtermKeepAliveStop(n);              // no more re-arms for a board that is no longer managed
   // Best-effort: tell the target board to stop forwarding terminal output
   if (relayN) stopRemoteTermSession(relayN, n);
   delete remoteRelayForBoard[n];
@@ -6717,15 +6763,80 @@ async function startRemoteTermSession(relayN, targetN) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) return;
   try {
-    const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
-    const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
-    const relayFc    = _relayFuncChar(relayN);
-    const targetFc   = _liveFuncChar(targetN);
-    const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
-    await sendMgmtReliable(relayConn, rtermStartCmd, null, 3, 250);   // 3× for reliable arming — see note above
+    await sendMgmtReliable(relayConn, _rtermStartCmd(relayN, targetN), null, 3, 250);   // 3× for reliable arming — see note above
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
+    _rtermKeepAliveArm(relayN, targetN);   // the next re-arm, RTERM_KEEPALIVE_MS after this one
   } catch (_) {}
+}
+
+// ?RTERM,START,<relay> for targetN as the relay forwards it: a one-chunk MGMT FRAG with a fresh session id.
+function _rtermStartCmd(relayN, targetN) {
+  const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
+  const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
+  const relayFc    = _relayFuncChar(relayN);
+  const targetFc   = _liveFuncChar(targetN);
+  return `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
+}
+
+// ─── Remote-terminal keep-alive ───────────────────────────────────
+// The firmware ends a remote-terminal session nobody re-armed for 30 s (WCBSerial::expireIfIdle, RTERM_IDLE_MS), so a
+// page that went away without ?RTERM,STOP no longer leaves its boards mirroring every line over the mesh. While a board
+// stays managed through a relay, the page re-sends its ?RTERM,START,<relay> RTERM_KEEPALIVE_MS after the last one any
+// path sent (setRemoteConnected, a pull that landed, an ETM came-ONLINE edge, relayRouteAll, the post-OTA replay - all
+// through startRemoteTermSession, which re-schedules it): two chances inside the 30 s, and a session that did lapse is
+// started again by the next one. One copy, not the arming's three: a one-chunk FRAG reaches the target as an ETM
+// unicast, so every copy runs (and re-announces), and a board must see no more than 6 starts in any minute (the HIL
+// bound, s35_intellex_wifi.py RATE_BOUND) - 12 s apart is at most 6. Quiet: no relay-pane line, and the target's own
+// "[RTERM] Session started" echo of a keep-alive is kept out of its pane (_rtermKeepAliveEcho). While the relay is
+// mid-push or either board is in an OTA the re-arm waits, checking every second: a line on the relay's USB then could
+// pass for a command's acknowledgement, or cut into the OTA stream. It stops when the board is un-managed
+// (clearRemoteConnected) and when its relay is no longer connected.
+const RTERM_KEEPALIVE_MS      = 12000;
+const RTERM_KEEPALIVE_WAIT_MS = 1000;
+const _rtermKeepAlive = {};   // target slot -> { relay, timer, sentAt }
+
+function _rtermKeepAliveArm(relayN, targetN) {
+  const prev = _rtermKeepAlive[targetN];
+  if (prev?.timer) clearTimeout(prev.timer);
+  delete _rtermKeepAlive[targetN];
+  if (remoteRelayForBoard[targetN] !== relayN) return;   // only a board this relay manages is kept alive
+  const k = { relay: relayN, timer: null, sentAt: prev?.sentAt ?? 0 };
+  k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_MS);
+  _rtermKeepAlive[targetN] = k;
+}
+
+function _rtermKeepAliveStop(targetN) {
+  const k = _rtermKeepAlive[targetN];
+  if (k?.timer) clearTimeout(k.timer);
+  delete _rtermKeepAlive[targetN];
+}
+
+async function _rtermKeepAliveTick(targetN, k) {
+  if (_rtermKeepAlive[targetN] !== k) return;            // re-armed or stopped meanwhile
+  k.timer = null;
+  const relayN    = k.relay;
+  const relayConn = boardConnections[relayN];
+  if (remoteRelayForBoard[targetN] !== relayN || !relayConn?.isConnected()) { delete _rtermKeepAlive[targetN]; return; }
+  if (_pushingBoards.has(relayN) || _otaInProgress.has(relayN) || _otaInProgress.has(targetN)) {
+    k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_WAIT_MS);
+    return;
+  }
+  try {
+    k.sentAt = Date.now();
+    await relayConn.send(_rtermStartCmd(relayN, targetN) + '\r');
+  } catch (_) {}
+  if (_rtermKeepAlive[targetN] === k) k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_MS);
+}
+
+// True for the "[RTERM] Session started" line a keep-alive just made board `slot` print (within 5 s of the send), once
+// per send: the line is left out of the pane. Any other start's announcement (the arming, a re-arm after a reboot) shows.
+function _rtermKeepAliveEcho(slot, text) {
+  const k = _rtermKeepAlive[slot];
+  if (_termVerbose || !k?.sentAt || !/^\[RTERM\] Session started\b/.test(text)) return false;
+  const mine = Date.now() - k.sentAt < 5000;
+  k.sentAt = 0;
+  return mine;
 }
 
 // Stops the remote terminal session on board targetN.
@@ -8205,6 +8316,13 @@ async function boardGo(n, opts = {}) {
       btn.textContent = 'Push Config';
       return;
     }
+    const rowProblem = _pushRowProblem(n, config, boardBaselines[n]);
+    if (rowProblem) {
+      boardPushOutcome[n].reason = rowProblem.reason;
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
     config.variables     = uiVariables;
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     [config.macOctet2, config.macOctet3] = macOctets;
@@ -8628,6 +8746,12 @@ async function boardGoRemote(n, opts = {}) {
   const macOctets = _pushMacOctets(n);
   if (!macOctets) {
     boardPushOutcome[n].reason = 'invalid MAC octet — nothing was sent';
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
+  const rowProblem = _pushRowProblem(n, config, boardBaselines[n]);
+  if (rowProblem) {
+    boardPushOutcome[n].reason = rowProblem.reason;
     if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
     return;
   }
@@ -9463,6 +9587,13 @@ async function boardGoAll() {
     showToast('No boards connected', 'error');
     return;
   }
+  // The General MAC octets go to every board, so a bad one stops Push All before any board starts: one message, nothing
+  // pushed anywhere, General left pending. Each board's push checks again (_pushMacOctets) for a single Push.
+  const badMac = _badMacOctet();
+  if (badMac) {
+    showToast(`MAC octet ${badMac.k} "${badMac.v}" is not a hex value 00–FF — fix it in General first. Nothing was pushed to any board.`, 'error', 8000);
+    return;
+  }
 
   // Push All uses a four-stage approach so that every board that needs a
   // reboot (MAC, HW, WCB#, KYBER, PWM map) actually gets one, in the right order:
@@ -9560,6 +9691,12 @@ function readFile(file) {
 
 function loadSystemFileContent(content) {
   try {
+    // A text with no [GENERAL] or [WCB<n>] section is not a system file (parseSystemFile reads only those): refuse it
+    // before General or the boards are touched, instead of loading it as an empty system with General reset.
+    if (!content.split(/\r?\n/).some(l => /^\[(?:GENERAL|WCB\d+)\]$/i.test(l.trim()))) {
+      showToast('Not a WCB system file: it has no [GENERAL] or [WCB n] section. Nothing was loaded.', 'error', 8000);
+      return;
+    }
     const system = WCBParser.parseSystemFile(content);
     systemConfig = system;
 
@@ -10921,8 +11058,8 @@ function wizardHTMLIdentity() {
 
             <!-- WCB # -->
             <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-              <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
-              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+              <div class="wizard-ident-label">WCB # ${wizHint(`Unique ID for this board (1–${WCB_MAX}). Each board must have a different number.`)}</div>
+              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="${WCB_MAX}" value="${b.wcbNumber}"
                      class="wizard-ident-input">
             </div>
 
@@ -10975,8 +11112,8 @@ function wizardHTMLIdentity() {
           <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
 
             <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-              <div class="wizard-ident-label">ID ${wizHint('The device_id this client occupies in your network. Must be unique among all slots.')}</div>
-              <input id="wiz-b${i}-cnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+              <div class="wizard-ident-label">ID ${wizHint(`The device_id this client occupies in your network (1–${WCB_MAX}). Must be unique among all slots.`)}</div>
+              <input id="wiz-b${i}-cnum" type="number" min="1" max="${WCB_MAX}" value="${b.wcbNumber}"
                      class="wizard-ident-input">
             </div>
 
@@ -11382,19 +11519,19 @@ function wizardHTMLEtm() {
     </div>
     <div class="wizard-etm-fields" id="wiz-etm-fields" style="${detailDisplay}">
       <div class="wizard-field-row">
-        <label>Timeout (ms)</label>${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 250 ms.')}
+        <label>Timeout (ms)</label>${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 500 ms.')}
         <input id="wiz-etm-timeout" type="number" value="${etmConfig.timeoutMs}">
       </div>
       <div class="wizard-field-row">
-        <label>Heartbeat (sec)</label>${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 5 sec.')}
+        <label>Heartbeat (sec)</label>${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 10 sec.')}
         <input id="wiz-etm-hb" type="number" value="${etmConfig.heartbeatSec}">
       </div>
       <div class="wizard-field-row">
-        <label>Missed before action</label>${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 3.')}
+        <label>Missed before action</label>${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 5.')}
         <input id="wiz-etm-miss" type="number" value="${etmConfig.missedHeartbeats}">
       </div>
       <div class="wizard-field-row">
-        <label>Boot heartbeat (sec)</label>${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}
+        <label>Boot heartbeat (sec)</label>${wizHint('After a boot, a board sends its first heartbeat at a random moment between 1 second and this many seconds, so boards powered on together do not all announce at once. 1-30. Default: 2 sec.')}
         <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
       </div>
       <div class="wizard-field-row">
@@ -11566,8 +11703,7 @@ function wizardHTMLConnect() {
       <summary>💡 How to connect &amp; authorize ports</summary>
       <div class="wizard-connect-tip-body">
         Connect all WCBs via USB before proceeding — this is the preferred method.
-        Click <strong>🔍 Detect</strong> on each row, then press the reset button on that board to auto-select its port.
-        Or click <strong>Use →</strong> to pick a port directly.<br><br>
+        Click <strong>🔍 Detect</strong> on each row, then press the reset button on that board to auto-select its port.<br><br>
         <strong>First time connecting?</strong> Click <strong>+ Authorize…</strong> to grant the browser permission
         to access each board's USB port. You will need to do this once per WCB you want to configure. So if you are configuring 3 WCBs, click the Authorize button 3 times to grant permissions to the 3 serial ports.
       </div>
@@ -12037,8 +12173,9 @@ function wizardValidateStep(key) {
         };
       });
       const ids = slotInfo.map(s => s.id);
-      if (ids.some(n => n < 1 || n > 99 || isNaN(n)))
-        return 'Each slot must have an ID between 1 and 99.';
+      // 1..WCB_MAX, the firmware's MAX_WCB_COUNT (WCB.ino): ?WCB refuses a number past it.
+      if (ids.some(n => n < 1 || n > WCB_MAX || isNaN(n)))
+        return `Each slot must have an ID between 1 and ${WCB_MAX}.`;
       if (new Set(ids).size !== ids.length)
         return 'Each slot must have a unique ID (WCBs and Clients share the same address space).';
       // Use the CONFIGURED controller id, not a hardcoded 20. The wizard lets the user pick any
@@ -13195,17 +13332,20 @@ async function fetchHCRStatus() {
   }
 }
 
-// Show the HCR Status button only when HCR is configured on this board;
-// enable only when the board is reachable.
+// Show the HCR Status button only when HCR is configured on this board; enable it only while the board is on USB.
+// fetchHCRStatus asks the board's own connection, so a board managed through a relay gets the button disabled with
+// a tooltip saying why, rather than a modal that then says relay is not supported.
 function updateHCRStatusBtn(n) {
   const btn = document.getElementById(`b${n}-btn-hcr-status`);
   if (!btn) return;
   const enabled   = !!boardConfigs[n]?.hcr?.enabled;
   const connected = boardConnections[n]?.isConnected() ?? false;
-  const reachable = connected || (remoteRelayForBoard[n] !== undefined &&
-                    boardConnections[remoteRelayForBoard[n]]?.isConnected());
+  const relayed   = !connected && remoteRelayForBoard[n] !== undefined;
   btn.style.display = enabled ? '' : 'none';
-  btn.disabled      = !reachable;
+  btn.disabled      = !connected;
+  btn.title         = relayed ? 'HCR Status is not supported through a relay — connect this board over USB to see it'
+                              : 'Live HCR Vocalizer status (polls while open)';   // index.html's own title
+  btn.classList.toggle('btn-why', relayed);   // styles.css: a disabled .btn takes no hover unless it says why
 }
 
 async function fetchStatsData() {

@@ -855,8 +855,8 @@
         <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
           <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
           <!-- ONLY 9600 / 38400: the firmware rejects anything else outright and discards the whole
-               ?MP3 config line (Code/WCB/WCB_MP3.cpp:287). S3-S5 are additionally blocked above 9600
-               because they are software serial (:292). -->
+               ?MP3 config line (Code/WCB/WCB_MP3.cpp, the ?MP3 handler). Both rates are allowed on S3-S5 too:
+               software serial receives exactly through 57600 there, so the MP3 handler has no S3-S5 block. -->
           <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
             <option value="9600" selected>9,600</option>
             <option value="38400">38,400</option>
@@ -886,7 +886,7 @@
           <select id="b{N}-hcr-remote-wcb" onchange="onHCRChange({N})"></select>
         </div>
         <div class="field" id="b{N}-hcr-port-wrap" style="display:none">
-          <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 9600 baud.">i</span></label>
+          <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 57,600 baud.">i</span></label>
           <select id="b{N}-hcr-port" onchange="onHCRPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2">Serial 2</option>
@@ -896,7 +896,7 @@
           </select>
         </div>
         <div class="field" id="b{N}-hcr-baud-wrap" style="display:none">
-          <label>Baud Rate <span class="wiz-hint" data-tip="HCR serial baud. S3–S5 (software serial) are limited to 9600.">i</span></label>
+          <label>Baud Rate <span class="wiz-hint" data-tip="HCR serial baud. S3–S5 (software serial) allow up to 57,600; 115,200 needs S1 or S2.">i</span></label>
           <select id="b{N}-hcr-baud" onchange="onHCRBaudChange({N})">
             <option value="9600" selected>9,600</option>
             <option value="19200">19,200</option>
