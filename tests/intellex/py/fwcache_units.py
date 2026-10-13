@@ -73,21 +73,21 @@ def atomic_store(ctx):
         t0 = int(time.time())
         fwcache.store("wcb", "feature/hil", name, b"IMAGE" * 100)
         got = _files(fw)
-        if got.get(f"wcb/feature__hil/{name}") != b"IMAGE" * 100:
-            problems.append(f"store() did not leave the image at wcb/feature__hil/{name}: {sorted(got)}")
+        if got.get(f"wcb/feature%2Fhil/{name}") != b"IMAGE" * 100:
+            problems.append(f"store() did not leave the image at wcb/feature%2Fhil/{name}: {sorted(got)}")
         if any(k.endswith(".part") for k in got):
             problems.append(f"store() left a .part behind: {sorted(got)}")
         try:
             m = json.loads(got.get("manifest.json", b"{}"))
         except ValueError:
             m = {}
-        stamp = (m.get("wcb/feature__hil") or {}).get(name)
+        stamp = (m.get("wcb/feature%2Fhil") or {}).get(name)
         if not isinstance(stamp, int) or not t0 - 2 <= stamp <= t0 + 5:
-            problems.append(f"the manifest's wcb/feature__hil entry for the image is {stamp!r}, expected the time it "
+            problems.append(f"the manifest's wcb/feature%2Fhil entry for the image is {stamp!r}, expected the time it "
                             f"arrived ({t0}): {m}")
         fwcache.store_listing("wcb", "feature/hil", b'[{"name": "x"}]')
         got = _files(fw)
-        if got.get("wcb/feature__hil/listing.json") != b'[{"name": "x"}]' or any(k.endswith(".part") for k in got):
+        if got.get("wcb/feature%2Fhil/listing.json") != b'[{"name": "x"}]' or any(k.endswith(".part") for k in got):
             problems.append(f"store_listing() left {sorted(got)}")
 
         before = _files(fw)
@@ -145,12 +145,19 @@ def frozen_lookup(ctx):
     put(bundle, f"wcb/WIFI/{b}", b"bundled-wifi")
     put(bundle, "wcb/WIFI/listing.json", b'["bundled-wifi"]')
     put(user, "wcb/main/listing.json", b'["user-main"]')
-    put(bundle, f"wcb/feature__x/{b}", b"bundled-feature")
+    put(bundle, f"wcb/feature%2Fx/{b}", b"bundled-feature")
+    put(bundle, f"wcb/feature__x/{b}", b"bundled-feature-underscores")       # its own branch, its own directory
+    put(bundle, f"wcb/legacy__y/{b}", b"cached-under-the-old-folded-name")   # what 'legacy/y' was cached as before
     os.makedirs(os.path.join(user, "firmware", "wcb", "WIFI", b), exist_ok=True)   # a directory, not a file: unreadable
     problems = []
     with _Paths(True, bundle, user):
+        # feature/x and feature__x never share a directory (the folded '__' key gave both one); a set cached under
+        # the old folded name for a slashed branch is a miss for it - fetched again online - and belongs to the
+        # branch that really is called that.
         for branch, nm, want in (("main", a, b"user-main"), ("WIFI", b, b"bundled-wifi"), ("WIFI", a, None),
-                                 ("feature/x", b, b"bundled-feature"), ("feature/y", b, None), ("main", b, None)):
+                                 ("feature/x", b, b"bundled-feature"), ("feature__x", b, b"bundled-feature-underscores"),
+                                 ("feature/y", b, None), ("main", b, None), ("legacy/y", b, None),
+                                 ("legacy__y", b, b"cached-under-the-old-folded-name")):
             got = fwcache.load("wcb", branch, nm)
             if got != want:
                 problems.append(f"frozen load(wcb, {branch}, {nm}): {got!r}, expected {want!r}")

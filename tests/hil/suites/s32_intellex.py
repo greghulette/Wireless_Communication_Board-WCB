@@ -1607,14 +1607,17 @@ def settings_branch_fallback(bench):
 
 
 @test("intellex.fwcache_branch_slash", "The firmware cache for a branch with a slash: feature/x, cached under its "
-      "flattened name feature__x, is reported by /_api/firmware and served by the GitHub proxy offline, while "
-      "feature/y is not; a frozen build reads each set from the user directory first, per set, and writes there "
-      "(IX re-scan fwcache.key_and_lookup)")
+      "percent-encoded name feature%2Fx, is reported by /_api/firmware and served by the GitHub proxy offline, while "
+      "feature/y and the branch feature__x are not (they shared one directory while '/' folded to '__'); a frozen "
+      "build reads each set from the user directory first, per set, and writes there (IX re-scan "
+      "fwcache.key_and_lookup)")
 def fwcache_branch_slash(bench):
-    """Intellex src/fwcache.py _key (:81-89), load/load_listing (:92-105, :196-204) and _dirs (:65-78). On a staged host
-    whose settings.json names feature/x for both products, with a cache seeded for feature/x (seed_firmware flattens
-    it as fwcache._key does). The frozen two-location precedence is tests/intellex/py/fwcache_units.py group
-    frozen_lookup, on the same stage."""
+    """Intellex src/fwcache.py _key, load/load_listing and _dirs. On a staged host whose settings.json names feature/x
+    for both products, with a cache seeded for feature/x (seed_firmware encodes it as fwcache._key does). The key was
+    '/' folded to '__' until Intellex 2026-10-13, so feature/x and a branch named feature__x shared a directory (the
+    re-scan's product call); it is percent-encoded now, and a set cached under the old name is fetched again. The frozen
+    two-location precedence and the old-name miss are tests/intellex/py/fwcache_units.py group frozen_lookup, on the
+    same stage."""
     require(bench)
     tid = "intellex.fwcache_branch_slash"
     branch = "feature/x"
@@ -1622,8 +1625,8 @@ def fwcache_branch_slash(bench):
     files = _fw_files()
     for product, fs in files.items():
         d = seed_firmware(sd, product, branch, fs)
-        if os.path.basename(d) != "feature__x":
-            raise AssertionError(f"seed_firmware filed {branch} under {os.path.basename(d)}, not feature__x")
+        if os.path.basename(d) != "feature%2Fx":
+            raise AssertionError(f"seed_firmware filed {branch} under {os.path.basename(d)}, not feature%2Fx")
     problems = []
     with IntellexHost(bench, sd) as host:
         st, summary = host.json("GET", "/_api/firmware")
@@ -1645,10 +1648,14 @@ def fwcache_branch_slash(bench):
                 st, hdr, data = host.http("GET", f["download_url"], timeout=30)
                 if st != 200 or data != files[product].get(f["name"]):
                     problems.append(f"{product} {f['name']} for {branch}: {st}, {len(data)} bytes")
-            q = urllib.parse.urlencode({"owner": owner, "repo": repo, "path": path, "ref": "feature/y"})
-            st, _, _ = host.http("GET", f"/_api/gh/contents?{q}", timeout=30)
-            if st != 502:
-                problems.append(f"{product} listing for the uncached feature/y: {st}, not 502")
+            for other in ("feature/y", "feature__x"):
+                q = urllib.parse.urlencode({"owner": owner, "repo": repo, "path": path, "ref": other})
+                st, hdr, _ = host.http("GET", f"/_api/gh/contents?{q}", timeout=30)
+                if st != 502:
+                    problems.append(f"{product} listing for the uncached {other}: {st} (X-Intellex-Source "
+                                    f"{_hdr(hdr, 'x-intellex-source')!r}), not 502" +
+                                    (" - feature/x's set, served under the folded name it shares" if
+                                     other == "feature__x" else ""))
     try:
         run_intellex_py(bench, tid, "fwcache_units.py", args={"group": "frozen_lookup"}, stage_dir=sd)
     except AssertionError as e:
@@ -1853,7 +1860,8 @@ def fetch_firmware_unit(bench):
 
 @test("intellex.fetch_wiki_unit", "tools/fetch_wiki.py: both link dialects and image tags read into pages and assets, a "
       "dotted page name not taken for a file; with no page index the crawl from Home and _Sidebar, a 404 page skipped, "
-      "an image over 1 MB left online after a HEAD, an asset path out of the wiki refused; the swap recovering a "
+      "an image over 1 MB left online after a HEAD, an asset path out of the wiki refused (a leading ../ logged and "
+      "skipped, no longer stripped into a path inside the wiki); the swap recovering a "
       "half-swap and putting the old copy back; one empty wiki kept on disk while the others update; offline, nothing "
       "touched (GitHub stood in for; IX re-scan tools.fetch_wiki)")
 def fetch_wiki_unit(bench):

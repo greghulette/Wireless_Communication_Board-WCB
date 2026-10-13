@@ -562,9 +562,11 @@ def seed_wiki(stage_dir):
 
 
 def fw_key(branch):
-    """The cache directory name Intellex gives a branch (fwcache._key): '/' and '\\' flattened to '__', so 'feature/x'
-    is one directory and the summary walk sees it."""
-    return (branch or "main").replace("/", "__").replace("\\", "__")
+    """The cache directory name Intellex gives a branch (fwcache._key): percent-encoded, so 'feature/x' is one
+    directory, 'feature%2Fx', that the summary walk sees and that no other branch shares. Until Intellex 2026-10-13 '/'
+    was folded to '__', and feature/x shared feature__x's directory."""
+    import urllib.parse
+    return urllib.parse.quote(branch or "main", safe="")
 
 
 FW_REPOS = {"wcb": ("greghulette", "Wireless_Communication_Board-WCB", "Code/bin"),

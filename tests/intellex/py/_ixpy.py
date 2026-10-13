@@ -56,8 +56,10 @@ def check(cond, msg):
 
 
 def fw_key(branch):
-    """Intellex fwcache._key's directory name for a branch ('/' flattened to '__')."""
-    return (branch or "main").replace("/", "__").replace("\\", "__")
+    """Intellex fwcache._key's directory name for a branch: percent-encoded, so 'feature/x' is 'feature%2Fx' and never
+    the 'feature__x' of a branch by that name ('/' was folded to '__' before Intellex 2026-10-13)."""
+    import urllib.parse
+    return urllib.parse.quote(branch or "main", safe="")
 
 
 REPOS = {"wcb": ("greghulette", "Wireless_Communication_Board-WCB", "Code/bin"),

@@ -64,10 +64,11 @@ def _online(ctx, fn):
     return got, gh.urls, sorted(_files(fw) - before)
 
 
-@case("control: online, a real branch's listing and image are fetched and cached under firmware/wcb/<branch>",
-      group="ref")
+@case("control: online, a real branch's listing and image are fetched and cached under firmware/wcb/<branch "
+      "percent-encoded>: feature/x and feature__x each in a directory of its own", group="ref")
 def real_branches(ctx):
-    for ref, key in (("main", "main"), ("feature/x", "feature__x"), ("v6.2.1-rc.1", "v6.2.1-rc.1")):
+    for ref, key in (("main", "main"), ("feature/x", "feature%2Fx"), ("feature__x", "feature__x"),
+                     ("v6.2.1-rc.1", "v6.2.1-rc.1")):
         got, urls, added = _online(ctx, lambda g: g.contents(OWNER, REPO, PATH, ref))
         check(not isinstance(got, Exception), f"contents ref {ref!r} was refused: {got}")
         body, cached = got

@@ -9,10 +9,12 @@ and reports a failure per product without aborting the other: a NaviCore listing
 cached, a WCB listing that 404s exits 1 with NaviCore's cached; a build with no 8 MB S3 bootloader is a note, not a
 failure.
 
-group "fetch_wiki" (intellex.fetch_wiki_unit): fetch_wiki._targets (:174-197) reads both link dialects and image tags
-into pages and assets, _is_asset (:166-171) tells a file from a dotted page name; fetch_one (:200-283) crawls from Home
-and _Sidebar when the page index cannot be read, skips a 404 page, leaves an image over 1 MB online (HEAD first) and
-refuses an asset path that escapes the wiki's directory; _swap_in (:286-321) recovers a previous run's half-swap and puts
+group "fetch_wiki" (intellex.fetch_wiki_unit): fetch_wiki._targets reads both link dialects and image tags into pages
+and assets, dropping a leading './' or '/' but keeping a leading '../' (_asset_path; it was lstrip("./"), which turned
+'../x.png' into the wiki's own 'x.png'), _is_asset tells a file from a dotted page name; fetch_one crawls from Home and
+_Sidebar when the page index cannot be read, skips a 404 page, leaves an image over 1 MB online (HEAD first), refuses
+an asset path with a leading '../' out loud (a printed line and a problem, never requested) and one that escapes the
+wiki's directory further in; _swap_in (:286-321) recovers a previous run's half-swap and puts
 the old copy back when the final rename fails; main() (:338-381) swaps each wiki separately, keeps what is on disk for a
 wiki that came back empty, and refuses at once offline.
 """
@@ -178,15 +180,20 @@ def fetch_partial(ctx):
 
 # ------------------------------------------------------------------ group "fetch_wiki"
 @case("_targets reads [[Text|Target]], [[Page Name]], [text](Page.md), [text](Page#anchor) and <img src>; skips "
-      "external links and anchors; _is_asset tells a file from a dotted page name", group="fetch_wiki")
+      "external links and anchors; drops a leading ./ or / from an asset path but keeps a leading ../ for fetch_one to "
+      "refuse; _is_asset tells a file from a dotted page name", group="fetch_wiki")
 def targets(ctx):
     import fetch_wiki
     text = ("Intro [[Shown|Target-B]] and [[Page Name]], see [c](C.md) or [part](Some-Page#section).\n"
             "[ext](https://example.com/x) [top](#top) [mail](mailto:a@example.com) [v](version3.2_build)\n"
-            '<img src="Images/p.png" width=10> ![q](Images/q.jpg) <IMG SRC=\'./Images/r.gif\'>\n')
+            '<img src="Images/p.png" width=10> ![q](Images/q.jpg) <IMG SRC=\'./Images/r.gif\'>\n'
+            "![root](/Images/s.png) ![up](../Outside/u.png) ![up2](./../w.png) ![dot](.dotted.png)\n")
     pages, assets = fetch_wiki._targets(text)
     want_pages = {"Target-B", "Page-Name", "C", "Some-Page", "version3.2_build"}
-    want_assets = {"Images/p.png", "Images/q.jpg", "Images/r.gif"}
+    # A leading ../ is kept as written (it was stripped to 'Outside/u.png' and 'w.png', paths inside the wiki the page
+    # never named), and a name that merely starts with a dot keeps it (lstrip("./") made it 'dotted.png').
+    want_assets = {"Images/p.png", "Images/q.jpg", "Images/r.gif", "Images/s.png", "../Outside/u.png", "../w.png",
+                   ".dotted.png"}
     problems = []
     if pages != want_pages:
         problems.append(f"pages {sorted(pages)}, expected {sorted(want_pages)}")
@@ -303,21 +310,26 @@ def _wiki_net(net):
 
 
 @case("fetch_one with no page index crawls Home and _Sidebar in both dialects, skips a 404 page, leaves an image over "
-      "1 MB online (asked with HEAD, never fetched) and refuses an asset path that leaves the wiki", group="fetch_wiki")
+      "1 MB online (asked with HEAD, never fetched) and refuses an asset path that leaves the wiki - a leading ../ "
+      "with a line of its own, never re-read as a path inside it", group="fetch_wiki")
 def crawl(ctx):
     import shutil
     import fetch_wiki
     staged = pathlib.Path(ctx.stage, "scratch", "crawl", "wcb")
     shutil.rmtree(staged.parent, ignore_errors=True)
     staged.mkdir(parents=True)
+    # ../outside.png is served by the stand-in GitHub at the wiki's own outside.png too: stripped to that (as it was),
+    # it would be requested and written; refused, it never is.
     net = _Wiki(pages={
         "Home": "[[Getting Started]] and [Wiring](Wiring) <img src=\"Images/big.png\"> ![s](Images/small.png) "
-                "[esc](Images/../../../escape.png)",
+                "[esc](Images/../../../escape.png) ![up](../outside.png)",
         "_Sidebar": "[[Home]] [[Linked But Missing]]",
         "Getting-Started": "back to [[Home]]",
         "Wiring": "see [Getting Started](Getting-Started)",
-    }, assets={"Images/big.png": fetch_wiki.MAX_ASSET_BYTES + 1, "Images/small.png": 10, "escape.png": 10})
-    with _wiki_net(net):
+    }, assets={"Images/big.png": fetch_wiki.MAX_ASSET_BYTES + 1, "Images/small.png": 10, "escape.png": 10,
+               "outside.png": 10})
+    printed = io.StringIO()
+    with _wiki_net(net), contextlib.redirect_stdout(printed):
         pages, assets, problems_seen = fetch_wiki.fetch_one("wcb", staged)
     on_disk = sorted(str(p.relative_to(staged)).replace(os.sep, "/") for p in staged.rglob("*") if p.is_file())
     problems = []
@@ -327,9 +339,15 @@ def crawl(ctx):
     if on_disk != want:
         problems.append(f"staged {on_disk}, expected {want}")
     for words in ("page index unreadable - crawled links instead", "refused (path escapes the wiki directory)",
-                  "1 image(s) over 1024 KB left online"):
+                  "1 image(s) over 1024 KB left online", "../outside.png: refused (a leading ../ leaves the wiki)"):
         if not any(words in p for p in problems_seen):
             problems.append(f"no {words!r} among the problems reported: {problems_seen}")
+    if "[wcb] refused asset ../outside.png: a leading ../ leaves the wiki" not in printed.getvalue():
+        problems.append(f"the ../ refusal was not logged as it happened: printed {printed.getvalue()[-300:]!r}")
+    if any("outside.png" in u for u in net.got + net.heads):
+        problems.append("the leading-../ asset was requested (as the wiki's own outside.png)")
+    if any("outside" in p for p in on_disk) or os.path.exists(staged.parent / "outside.png"):
+        problems.append("the leading-../ asset was written")
     if any(u.endswith("Images/big.png") for u in net.got):
         problems.append("the image over 1 MB was downloaded, not only asked about with HEAD")
     if any("escape.png" in u for u in net.got + net.heads):

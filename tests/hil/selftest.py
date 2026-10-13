@@ -4372,8 +4372,8 @@ def t_intellex_py_judge(tmp):
 def t_intellex_stream_helpers(tmp):
     """hil/intellex.py's stream and seeding helpers: window() takes the bytes strictly between a start line and the next
     end line, whatever came before; line_spans() finds every whole line holding a repeated needle (NaviCore's PONG);
-    boot_markers_in(); fw_key() flattens a branch as Intellex's fwcache._key does; seed_firmware() writes a set and a
-    GitHub-shaped listing where a non-frozen host caches; seed_wiki() copies the crafted wiki."""
+    boot_markers_in(); fw_key() percent-encodes a branch as Intellex's fwcache._key does; seed_firmware() writes a set
+    and a GitHub-shaped listing where a non-frozen host caches; seed_wiki() copies the crafted wiki."""
     from hil import intellex as IX
     data = b"old\r\nnoise X-SYNC tail\r\nline 1\r\nline 2\r\nX-END\r\nafter\n"
     assert IX.window(data, b"X-SYNC", b"X-END") == b"line 1\r\nline 2\r\n"
@@ -4387,9 +4387,10 @@ def t_intellex_stream_helpers(tmp):
     assert IX.boot_markers_in(b"x rst:0x1 (POWERON_RESET)\nBooting up the Wireless Communication Board\n",
                               IX.WCB_BOOT_MARKERS) == ["rst:0x", "Booting up the Wireless Communication Board"]
     assert IX.boot_markers_in(b'{"type":"PONG"}\n', IX.NAVICORE_BOOT_MARKERS) == []
-    assert (IX.fw_key("feature/x"), IX.fw_key(""), IX.fw_key("a\\b")) == ("feature__x", "main", "a__b")
+    assert (IX.fw_key("feature/x"), IX.fw_key("feature__x"), IX.fw_key(""), IX.fw_key("a\\b")) == \
+        ("feature%2Fx", "feature__x", "main", "a%5Cb")
     d = IX.seed_firmware(tmp.root, "wcb", "feature/x", {"WCB_1_ESP32.bin": b"\x01\x02"})
-    assert d == os.path.join(tmp.root, "src", "firmware", "wcb", "feature__x"), d
+    assert d == os.path.join(tmp.root, "src", "firmware", "wcb", "feature%2Fx"), d
     with open(os.path.join(d, "WCB_1_ESP32.bin"), "rb") as f:
         assert f.read() == b"\x01\x02"
     with open(os.path.join(d, "listing.json"), encoding="utf-8") as f:
