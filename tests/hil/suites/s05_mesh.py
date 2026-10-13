@@ -794,7 +794,9 @@ def rterm_idle_expiry(bench):
             took = time.monotonic() - t0
             if not 28.0 <= took <= 34.0:
                 problems.append(f"the idle session stopped {took:.1f} s after its start, not ~30")
-            if not any("not re-armed for 30 s" in x for x in d2.since(m2)):
+            try:                                  # printed right after the stop line
+                d2.expect(r"not re-armed for 30 s", timeout=3, since=m2)
+            except Exception:
                 problems.append("no 'not re-armed for 30 s' line on W2")
         except Exception:
             problems.append("an idle session was still running 40 s after its start")
