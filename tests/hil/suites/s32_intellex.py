@@ -19,10 +19,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 
-from hil.intellex import (FW_REPOS, IntellexHost, require, run_intellex_py, run_intellex_test, run_venv,
-                          seed_firmware, seed_wiki, stage)
+from hil.intellex import (FW_REPOS, STAGE_DIR, IntellexHost, intellex_dir, require, run_intellex_py,
+                          run_intellex_test, run_venv, seed_firmware, seed_wiki, stage)
 from hil.runner import Skip, test
 from hil.ws import WsClient, WsEndpoint
 
@@ -2430,3 +2431,424 @@ def shim_still_trying_banner(bench):
     """Intellex src/intellex_shim.js watchLink and banner (:1563-1618, QUIET_S 20 s), in the NaviCore config tool; once
     attached, /_link is a Playwright stand-in answering ?REC and PING (tests/intellex/specs/ui_shim.spec.js)."""
     run_intellex_test(bench, "intellex.shim_still_trying_banner")
+
+
+# ------------------------------------------------------------------ the tools' Pages half, and the launchers
+@test("intellex.webui_version_online", "GET /_api/webui-version online, GitHub Pages stood in for on 127.0.0.1: a "
+      "bundle older than its published copy is stale with checked true and no reason, an equal one is not stale, each "
+      "tool asks its configured branch's copy (settings.tool_base: <site>/config_tool, <site>/dev/<branch>/Wizard), "
+      "and a failure says why - certs.ADVICE for a certificate the venv cannot verify, the HTTP error for a 404 - "
+      "without hiding the other tool's answer (in-process; IX re-scan host.api.webui_version)")
+def webui_version_online(bench):
+    """Intellex src/host.py api_webui_version, _published_dtg and _wcb_published_ver on its real build_app() in the venv
+    (tests/intellex/py/webui_units.py group webui_version). urlopen answers https://greghulette.github.io/<path> from
+    a local HTTP stand-in (and, for the certificate case, an HTTPS one with a self-signed certificate the venv's own
+    verification refuses); flash.reachable answers True; anything else is refused, so nothing reaches the network.
+    intellex.offline_con_floor and intellex.routes_api cover the offline half."""
+    require(bench)
+    run_intellex_py(bench, "intellex.webui_version_online", "webui_units.py", args={"group": "webui_version"})
+
+
+@test("intellex.fetch_webui_unit", "tools/fetch_webui.py against a local stand-in for GitHub Pages: _safe_relname; "
+      "the cmdlib manifest walk; each tool's update one atomic swap, byte-identical to what was served, the old bundle "
+      "kept whole as <dir>.prev; up to date, --check and --force; one missing file changes nothing and leaves no "
+      "staging directory; the branch's /dev/<branch>/ copy, else main's with a note; --tool all as two independent "
+      "swaps (in-process; IX re-scan tools.fetch_webui)")
+def fetch_webui_unit(bench):
+    """Intellex tools/fetch_webui.py (_safe_relname, cmdlib_names, _swap_in, fetch_wcb, _fetch_navicore, resolve_base,
+    main) in the venv (tests/intellex/py/webui_units.py group fetch_webui), its main() run per argv against a
+    127.0.0.1 server laid out like gh-pages (--base for the row's own case, and urlopen answering greghulette.github.io
+    from it for the branch cases); fetch_webui.reachable answers True. The bundles are the stage's src/webui and
+    src/webui_wcb, the staging directories go to a scratch directory in the stage. intellex.offline_con_floor covers
+    the offline refusal."""
+    require(bench)
+    run_intellex_py(bench, "intellex.fetch_webui_unit", "webui_units.py", args={"group": "fetch_webui"})
+
+
+# A stand-in Python for the launcher scripts. Each name a launcher looks for on PATH (python3.11, python3, ...) and the
+# venv's python3 it makes is a two-line sh wrapper running this file under the harness's own interpreter as the version
+# it stands for. It records every call, answers -V, runs a -c snippet with sys.version_info set to that version (so the
+# launcher's own version tests decide), makes a venv of wrappers for -m venv, and never installs, fetches or starts
+# anything: -m pip, tools/fetch_webui.py and src/app.py are only recorded (the fetch writes src/webui/index.html when
+# told to succeed). hil_launch_ctl.json beside the log says how each step goes.
+_FAKE_PY = r'''import json, os, shlex, sys
+
+
+def wrapper(path, ver, name, log, ctl, flags=()):
+    argv = [sys.executable, "-I", os.path.abspath(__file__), "--as", ver, "--name", name, "--log", log, "--ctl", ctl]
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\nexec " + " ".join(shlex.quote(x) for x in argv + list(flags) + ["--"]) + ' "$@"\n')
+    os.chmod(path, 0o755)
+
+
+def main():
+    a = sys.argv[1:]
+    cut = a.index("--")
+    opts, args = a[:cut], a[cut + 1:]
+    ver, name, log, ctl_path = (opts[opts.index(k) + 1] for k in ("--as", "--name", "--log", "--ctl"))
+    try:
+        with open(ctl_path) as f:
+            ctl = json.load(f)
+    except (OSError, ValueError):
+        ctl = {}
+    rec = {"exe": name, "as": ver, "argv": args, "cwd": os.getcwd()}
+    if "-r" in args:
+        rec["requirements_found"] = os.path.isfile(args[args.index("-r") + 1])
+    with open(log, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    if "--broken" in opts:
+        return 1
+    if args[:1] in (["-V"], ["--version"]):
+        print("Python " + ver)
+        return 0
+    if args[:1] == ["-c"]:
+        class VersionInfo(tuple):
+            major = property(lambda s: s[0])
+            minor = property(lambda s: s[1])
+            micro = property(lambda s: s[2])
+        sys.version_info = VersionInfo(tuple(int(x) for x in ver.split(".")) + ("final", 0))
+        exec(compile(args[1], "<-c>", "exec"), {"__name__": "__main__"})
+        return 0
+    if args[:2] == ["-m", "venv"]:
+        how = ctl.get("venv", "ok")
+        if how == "fail":
+            print("Error: the HIL stand-in venv failed")
+            return 1
+        if how == "ok":
+            d = os.path.join(args[2], "bin")
+            os.makedirs(d, exist_ok=True)
+            for exe in ("python3", "python"):
+                wrapper(os.path.join(d, exe), ver, ".venv/bin/" + exe, log, ctl_path, ["--venv"])
+            with open(os.path.join(args[2], "pyvenv.cfg"), "w") as f:
+                f.write("version = " + ver + "\n")
+        return 0                                    # "silent": exits 0 having made nothing
+    if args[:2] == ["-m", "pip"]:
+        return int(ctl.get("pip_rc", 0))
+    script = (args[0] if args else "").replace("\\", "/")
+    if script == "tools/fetch_webui.py":
+        if ctl.get("fetch") == "ok":
+            os.makedirs(os.path.join("src", "webui"), exist_ok=True)
+            with open(os.path.join("src", "webui", "index.html"), "w") as f:
+                f.write("<!-- HIL stand-in bundle -->\n")
+            print("HIL stand-in fetch_webui: fetched")
+            return 0
+        print("HIL stand-in fetch_webui: github.io is not reachable")
+        return 1
+    if script == "src/app.py":
+        print("HIL stand-in app.py: started")
+        return int(ctl.get("app_rc", 0))
+    print("HIL stand-in python: a call it does not know")
+    return 97
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+# What each macOS launcher prints at its decisions (None: it has no such line).
+_LAUNCHER_WORDS = {
+    "Intellex.command": {"first": "First run: setting up. This takes a minute.",
+                         "no_python": "No usable python3 was found (3.9 or newer is required).",
+                         "no_venv": "Could not create a virtual environment in .venv",
+                         "gave_up": "Intellex could not start (exit 1)."},
+    "scripts/run-macos.command": {"first": "First run: creating the virtual environment...",
+                                  "no_python": "No usable python3 found (3.9+).",
+                                  "no_venv": None, "gave_up": None},
+}
+_LAUNCH_FILES = ("Intellex.command", "Intellex.bat", "README.md", "requirements.txt", "scripts/run-macos.command",
+                 "scripts/run-windows.bat", "src/app.py", "tools/fetch_webui.py")
+_APP_ARGS = ["--browser", "--port", "18999", "HIL two words"]
+_C = "<-c>"
+_VENV_PY = ".venv/bin/python3"
+
+
+def _launch_tree(idir, dst, webui=None, venv=None, fake=None, log=None, ctl=None):
+    """A scratch copy of what the launchers touch in Intellex at `idir` (modes kept, so a .command runs by its path):
+    the launchers, README, requirements.txt, src/app.py and tools/fetch_webui.py - the stand-in never runs the last
+    two, so the rest of src/ is not consulted. No .venv and no src/webui unless asked: webui 'empty' makes src/webui/
+    with a subdirectory and no index.html, 'bundled' adds the index.html; venv '<x.y.z>' makes a stand-in venv of that
+    version."""
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    for rel in _LAUNCH_FILES:
+        p = os.path.join(dst, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        shutil.copy2(os.path.join(idir, *rel.split("/")), p)
+    if webui:
+        os.makedirs(os.path.join(dst, "src", "webui", "cmdlib"))
+        if webui == "bundled":
+            with open(os.path.join(dst, "src", "webui", "index.html"), "w", encoding="utf-8") as f:
+                f.write("<!-- HIL bundle -->\n")
+    if venv:
+        d = os.path.join(dst, ".venv", "bin")
+        os.makedirs(d)
+        for exe in ("python3", "python"):
+            _fake_exe(os.path.join(d, exe), fake, venv, ".venv/bin/" + exe, log, ctl, ["--venv"])
+    return dst
+
+
+def _fake_exe(path, fake, ver, name, log, ctl, flags=()):
+    """A sh wrapper at `path` running the stand-in as Python `ver` (the same form _FAKE_PY's wrapper() writes)."""
+    import shlex
+    argv = [sys.executable, "-I", fake, "--as", ver, "--name", name, "--log", log, "--ctl", ctl] + list(flags) + ["--"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexec " + " ".join(shlex.quote(x) for x in argv) + ' "$@"\n')
+    os.chmod(path, 0o755)
+
+
+def _run_launcher(work, tree, launcher, pythons, ctl, fake):
+    """Run tree/<launcher> by its path from `work` (not its own directory), stdin not a terminal, PATH holding only the
+    stand-in interpreters in `pythons` ({name: version, or 'broken'}) and dirname -> (exit code, output, calls), each
+    call (exe, argv with any -c snippet as '<-c>', cwd, the record)."""
+    bindir = os.path.join(work, "bin")
+    if os.path.isdir(bindir):
+        shutil.rmtree(bindir)
+    os.makedirs(bindir)
+    log = os.path.join(work, "calls.jsonl")
+    ctl_path = os.path.join(work, "hil_launch_ctl.json")
+    with open(ctl_path, "w", encoding="utf-8") as f:
+        json.dump(ctl, f)
+    if os.path.exists(log):
+        os.remove(log)
+    for name, ver in pythons.items():
+        _fake_exe(os.path.join(bindir, name), fake, "0.0.0" if ver == "broken" else ver, name, log, ctl_path,
+                  ["--broken"] if ver == "broken" else [])
+    os.symlink(shutil.which("dirname") or "/usr/bin/dirname", os.path.join(bindir, "dirname"))
+    env = {"PATH": bindir, "HOME": work, "TMPDIR": work, "LC_ALL": "C", "INTELLEX_OFFLINE": "1",
+           "INTELLEX_DATA_DIR": os.path.join(work, "appdata")}
+    try:
+        p = subprocess.run([os.path.join(tree, *launcher.split("/"))] + _APP_ARGS, cwd=work, env=env,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=120)
+        rc, out = p.returncode, (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        rc, out = None, "(still running after 120 s - killed)"
+    calls = []
+    if os.path.exists(log):
+        with open(log, encoding="utf-8") as f:
+            for line in f:
+                r = json.loads(line)
+                argv = list(r["argv"])
+                if argv[:1] == ["-c"]:
+                    argv[1:2] = [_C]
+                calls.append((r["exe"], tuple(argv), r["cwd"], r))
+    return rc, out, calls
+
+
+def _launch_problems(idir, root, note=lambda s: None):
+    """Every launcher check against Intellex at `idir`, in scratch directories under `root` -> [problem]. On Windows
+    only the static .bat checks run (note() says so)."""
+    problems = []
+    fake = os.path.join(root, "hil_fake_python.py")
+    os.makedirs(root, exist_ok=True)
+    with open(fake, "w", encoding="utf-8") as f:
+        f.write(_FAKE_PY)
+    problems += _bat_problems(idir, fake, root)
+    readme = open(os.path.join(idir, "README.md"), encoding="utf-8").read()
+    if "xattr -d com.apple.quarantine Intellex.command" not in readme:
+        problems.append("README.md no longer explains a quarantined Intellex.command (xattr -d com.apple.quarantine)")
+    try:
+        modes = subprocess.run(["git", "-C", idir, "ls-files", "-s", "--", "*.command"], capture_output=True,
+                               text=True, timeout=30).stdout.split("\n")
+        bad = [m.split()[-1] for m in modes if m.strip() and not m.startswith("100755")]
+        if bad:
+            problems.append(f"committed without the exec bit (git index mode not 100755): {bad}")
+    except (OSError, subprocess.SubprocessError) as e:
+        note(f"the .command files' git modes not checked: {e}")
+    if os.name == "nt" or not os.path.exists("/bin/bash"):
+        note("the .command launchers are not run here (no /bin/bash); the .bat checks are static")
+        return problems
+    for launcher, words in _LAUNCHER_WORDS.items():
+        problems += [f"{launcher}: {p}" for p in _command_problems(idir, root, launcher, words, fake)]
+    return problems
+
+
+def _command_problems(idir, root, launcher, words, fake):
+    """One macOS launcher through first run, every run, the 3.11 note, the fetch-on-empty path and its refusals."""
+    problems = []
+    base = os.path.join(root, launcher.replace("/", "_").replace(".", "_"))
+    app = (_VENV_PY, ("src/app.py",) + tuple(_APP_ARGS))
+    pip = [(_VENV_PY, ("-m", "pip", "install", "--quiet", "--upgrade", "pip")),
+           (_VENV_PY, ("-m", "pip", "install", "--quiet", "-r", "requirements.txt"))]
+
+    def run(tag, pythons, ctl, **tree_kw):
+        work = os.path.join(base, tag)
+        tree = os.path.join(work, "Intellex")
+        if tree_kw.get("reuse"):
+            tree_kw.pop("reuse")
+        else:
+            os.makedirs(work, exist_ok=True)
+            _launch_tree(idir, tree, fake=fake, log=os.path.join(work, "calls.jsonl"),
+                         ctl=os.path.join(work, "hil_launch_ctl.json"), **tree_kw)
+        rc, out, calls = _run_launcher(work, tree, launcher, pythons, ctl, fake)
+        return tree, rc, out, calls
+
+    def expect(label, tree, rc, out, calls, want_rc, want_calls, has=(), lacks=()):
+        got = [(c[0], c[1]) for c in calls]
+        if rc != want_rc:
+            problems.append(f"{label}: exited {rc}, expected {want_rc}; it printed {out.strip()[-300:]!r}")
+        if got != want_calls:
+            problems.append(f"{label}: the calls were {got}, expected {want_calls}")
+        wrong_cwd = sorted({c[2] for c in calls if os.path.realpath(c[2]) != os.path.realpath(tree)})
+        if wrong_cwd:
+            problems.append(f"{label}: a call ran in {wrong_cwd}, not the launcher's own tree")
+        for s in has:
+            if s and s not in out:
+                problems.append(f"{label}: {s!r} not printed (it printed {out.strip()[-300:]!r})")
+        for s in lacks:
+            if s and s in out:
+                problems.append(f"{label}: {s!r} printed")
+        reqs = [c[3].get("requirements_found") for c in calls if "-r" in c[1]]
+        if reqs and reqs != [True]:
+            problems.append(f"{label}: pip -r requirements.txt ran where there is no requirements.txt")
+
+    note_310 = ("Note: this venv is Python 3.10. Intellex is developed on 3.14 and only", "3.11+ is exercised")
+    fetching = "Fetching the config tool -- it is not in the repo, see README."
+    soft = "Could not fetch it. Intellex will start and explain."
+    started = "HIL stand-in app.py: started"
+
+    # First run: the newest python3 that answers (python3.12 is broken, python3 older), a venv, its dependencies, no
+    # note at 3.11, the config tool fetched because src/webui is absent, then app.py with every argument.
+    py = {"python3.12": "broken", "python3.11": "3.11.9", "python3": "3.9.6"}
+    tree, rc, out, calls = run("first", py, {"fetch": "ok"})
+    bindir = os.path.join(base, "first", "bin")
+    expect("first run", tree, rc, out, calls, 0,
+           [("python3.12", ("-c", _C)), ("python3.11", ("-c", _C)), ("python3.11", ("-V",)),
+            ("python3.11", ("-m", "venv", ".venv"))] + pip
+           + [(_VENV_PY, ("-c", _C)), (_VENV_PY, ("tools/fetch_webui.py",)), app],
+           has=(words["first"], f"Using {os.path.join(bindir, 'python3.11')} (Python 3.11.9)", fetching, started),
+           lacks=("Note: this venv is Python", soft))
+    if not os.path.isfile(os.path.join(tree, "src", "webui", "index.html")):
+        problems.append("first run: no src/webui/index.html after the fetch")
+
+    # Every later run: no setup and no fetch, only the version note's check and app.py.
+    tree, rc, out, calls = run("first", py, {"fetch": "ok"}, reuse=True)
+    expect("second run", tree, rc, out, calls, 0, [(_VENV_PY, ("-c", _C)), app], has=(started,),
+           lacks=(words["first"], fetching, "Note: this venv is Python"))
+
+    # A venv older than 3.11: the note, at setup and again on a later run; the app still starts.
+    py10 = {"python3.10": "3.10.14", "python3": "3.9.6"}
+    tree, rc, out, calls = run("py310", py10, {"fetch": "ok"})
+    expect("first run on 3.10", tree, rc, out, calls, 0,
+           [("python3.10", ("-c", _C)), ("python3.10", ("-V",)), ("python3.10", ("-m", "venv", ".venv"))] + pip
+           + [(_VENV_PY, ("-c", _C)), (_VENV_PY, ("tools/fetch_webui.py",)), app], has=note_310 + (started,))
+    tree, rc, out, calls = run("py310", py10, {"fetch": "ok"}, reuse=True)
+    expect("a later run on 3.10", tree, rc, out, calls, 0, [(_VENV_PY, ("-c", _C)), app], has=note_310 + (started,),
+           lacks=(words["first"],))
+
+    # src/webui present but without index.html, and the fetch failing: never fatal.
+    tree, rc, out, calls = run("emptyui", {"python3.11": "3.11.9"}, {"fetch": "fail"}, webui="empty", venv="3.11.9")
+    expect("an empty src/webui with the fetch failing", tree, rc, out, calls, 0,
+           [(_VENV_PY, ("-c", _C)), (_VENV_PY, ("tools/fetch_webui.py",)), app], has=(fetching, soft, started),
+           lacks=(words["first"],))
+
+    # No usable python3: nothing made, nothing started.
+    tree, rc, out, calls = run("nopython", {"python3": "3.8.18"}, {})
+    expect("only a Python 3.8", tree, rc, out, calls, 1, [("python3", ("-c", _C))],
+           has=(words["first"], words["no_python"], words["gave_up"]), lacks=(started,))
+    if os.path.exists(os.path.join(tree, ".venv")):
+        problems.append("only a Python 3.8: a .venv was made")
+
+    # venv creation failing, or exiting 0 without making an interpreter; pip failing. The app never starts.
+    make = [("python3.11", ("-c", _C)), ("python3.11", ("-V",)), ("python3.11", ("-m", "venv", ".venv"))]
+    tree, rc, out, calls = run("venvfail", {"python3.11": "3.11.9"}, {"venv": "fail"})
+    expect("python -m venv failing", tree, rc, out, calls, 1, make, has=(words["gave_up"],), lacks=(started,))
+    tree, rc, out, calls = run("venvsilent", {"python3.11": "3.11.9"}, {"venv": "silent"})
+    if words["no_venv"]:
+        expect("a venv with no interpreter in it", tree, rc, out, calls, 1, make,
+               has=(words["no_venv"], words["gave_up"]), lacks=(started,))
+    elif rc in (0, None) or any(c[1][:1] == ("src/app.py",) for c in calls):
+        problems.append(f"a venv with no interpreter in it: exited {rc} with calls {[(c[0], c[1]) for c in calls]}; "
+                        f"expected a failure before app.py")
+    tree, rc, out, calls = run("pipfail", {"python3.11": "3.11.9"}, {"pip_rc": 1})
+    expect("pip failing", tree, rc, out, calls, 1, make + pip[:1], has=(words["gave_up"],), lacks=(started,))
+    return problems
+
+
+# The Windows launchers' decisions, in order, as their commands read with REM lines dropped and spaces collapsed:
+# (what, the command's pattern). Each is looked for after the previous one's line.
+_BAT_STEPS = (
+    ("the venv's interpreter is .venv\\Scripts\\python.exe", r'^set PY=\.venv\\Scripts\\python\.exe$'),
+    ("first run is decided by that interpreter being absent", r'^if not exist "%PY%" \($'),
+    ("the py launcher is looked for", r'^where py >nul 2>&1$'),
+    ("the venv is made with py -3 (the newest 3.x), else python",
+     r'^if %ERRORLEVEL%==0 \( py -3 -m venv \.venv \) else \( python -m venv \.venv \)$'),
+    ("a venv with no interpreter is checked for", r'^if not exist "%PY%" \($'),
+    ("... and refused", r'^exit /b 1$'),
+    ("pip is upgraded in the venv", r'^"%PY%" -m pip install --quiet --upgrade pip$'),
+    ("requirements.txt is installed in the venv", r'^"%PY%" -m pip install --quiet -r requirements\.txt$'),
+    ("a failed install is checked for", r'^if errorlevel 1 \($'),
+    ("... and refused", r'^exit /b 1$'),
+    ("the venv's version is asked on every run", r'^"%PY%" -c "(?P<code>[^"]+)" >nul 2>&1$'),
+    ("... and a failing answer", r'^if errorlevel 1 \($'),
+    ("... notes it is older than 3.11", r'^echo Note: this venv is older than Python 3\.11\. '),
+    ("the config tool is fetched when src\\webui\\index.html is absent", r'^if not exist "src\\webui\\index\.html" \($'),
+    ("... with tools\\fetch_webui.py and no arguments", r'^"%PY%" tools\\fetch_webui\.py$'),
+    ("... a failed fetch only noted", r'^if errorlevel 1 echo Could not fetch it\. Intellex will start and explain\.$'),
+    ("app.py is started with every argument", r'src\\app\.py %\*$'),
+)
+
+
+def _bat_problems(idir, fake, root):
+    """Intellex.bat and scripts/run-windows.bat, read: the decisions _BAT_STEPS lists, in that order; no exit inside
+    the fetch block (a failed fetch is never fatal); and the version check's own -c snippet run by the stand-in Python
+    at 3.10.14 and 3.11.0, which must fail and pass - the note shows below 3.11 exactly, as in the .command launchers."""
+    problems = []
+    for rel in ("Intellex.bat", "scripts/run-windows.bat"):
+        with open(os.path.join(idir, *rel.split("/")), encoding="utf-8", errors="replace") as f:
+            cmds = [(i, " ".join(line.split())) for i, line in enumerate(f.read().splitlines(), 1)]
+        cmds = [(i, c) for i, c in cmds if c and not re.match(r"(?i)^(rem\b|::)", c)]
+        at, code, fetch_at = 0, None, None
+        for what, rx in _BAT_STEPS:
+            hit = next(((k, m) for k, (i, c) in enumerate(cmds) if k >= at for m in [re.search(rx, c, re.I)] if m),
+                       None)
+            if hit is None:
+                problems.append(f"{rel}: no command after line {cmds[at - 1][0] if at else 0} where {what} "
+                                f"(/{rx}/)")
+                continue
+            k, m = hit
+            at = k + 1
+            if "code" in m.groupdict():
+                code = m.group("code")
+            if what.startswith("the config tool is fetched"):
+                fetch_at = k
+        if fetch_at is not None:
+            for i, c in cmds[fetch_at + 1:]:
+                if c == ")":
+                    break
+                if re.search(r"(?i)(^|[\s(])(exit|goto)\b", c):
+                    problems.append(f"{rel}:{i}: '{c}' inside the fetch block - a failed fetch must not stop the app")
+        if code is not None:
+            for ver, want in (("3.10.14", 1), ("3.11.0", 0)):
+                p = subprocess.run([sys.executable, "-I", fake, "--as", ver, "--name", "python.exe", "--log",
+                                    os.path.join(root, "bat_calls.jsonl"), "--ctl", os.path.join(root, "none.json"),
+                                    "--", "-c", code], capture_output=True, text=True, timeout=30)
+                if p.returncode != want:
+                    problems.append(f"{rel}: its version check {code!r} exits {p.returncode} on Python {ver}, expected "
+                                    f"{want} (the note shows below 3.11 exactly)")
+    return problems
+
+
+@test("intellex.launch_scripts", "Intellex.command and scripts/run-macos.command on a scratch copy with stand-in "
+      "Pythons: first run makes the venv from the newest python3 that answers and installs requirements.txt in it, "
+      "notes a venv older than 3.11 on every run, fetches the config tool when src/webui has no index.html (a failed "
+      "fetch never fatal), and execs app.py with every argument; no usable python3, a failed venv or pip stops before "
+      "the app. Intellex.bat and run-windows.bat read for the same decisions in order, their 3.11 check run "
+      "(IX re-scan launch.scripts)")
+def launch_scripts(bench):
+    """Intellex Intellex.command (:25-120), scripts/run-macos.command (:11-80), Intellex.bat (:17-79),
+    scripts/run-windows.bat (:14-68). Each .command runs by its path, from another directory, on a fresh scratch copy
+    per case (_launch_tree), with PATH holding only stand-in interpreters (_FAKE_PY) and dirname: nothing is installed
+    from PyPI, nothing is fetched, app.py never runs, and Greg's .venv and data directory are not touched. The calls
+    each stand-in records are the launcher's decisions: which interpreter, when the venv is made, pip, the version
+    check, the fetch and its arguments, app.py's arguments. A .bat cannot run here: _bat_problems reads both for the
+    same decisions in the same order (_BAT_STEPS) and runs their version check's own snippet; `py -3` choosing the
+    newest Python is the py launcher's documented behaviour, not checked. The README's quarantine note and the
+    .command files' exec bit in git are checked too."""
+    require(bench)
+    idir = intellex_dir(bench)
+    root = os.path.join(bench.out_dir or tempfile.mkdtemp(prefix="intellex-"), STAGE_DIR, "launch_scripts")
+    if os.path.isdir(root):
+        shutil.rmtree(root)
+    problems = _launch_problems(idir, root, note=lambda s: bench.note(f"intellex.launch_scripts: {s}"))
+    assert not problems, "; ".join(problems)

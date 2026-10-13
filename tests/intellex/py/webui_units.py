@@ -1,0 +1,802 @@
+"""Intellex's two browser-tool checks that need GitHub Pages - the launcher's version check and the tool update - under
+its venv, against a local stand-in for Pages. Nothing reaches the network:
+
+- _Pages is a threaded HTTP server on 127.0.0.1:<free> laid out like gh-pages (/NaviCore/config_tool/, /NaviCore/Images/,
+  /Wireless_Communication_Board-WCB/Wizard/, .../Images/ and .../dev/<branch>/...), answering only the files a case gives
+  it (anything else is a 404) and recording every path asked for.
+- _github_is(pages) points the code at it the way host_units.py tool_base does: urllib.request.urlopen answers
+  https://greghulette.github.io/<path> with a real request to <stand-in>/<path>, keeping the code's own timeout and TLS
+  context; a 127.0.0.1 URL (fetch_webui --base, this script's requests to the in-process host) goes through as it is;
+  every other URL is refused and fails the case. flash.reachable and fetch_webui.reachable answer True for the block.
+  INTELLEX_OFFLINE stays set (run_intellex_py), so anything left unpatched fails offline rather than going out.
+- The certificate case serves HTTPS with a self-signed certificate made here (cryptography, which esptool brings into
+  Intellex's venv), so the venv's real TLS verification fails as it does on a stock macOS Python.
+
+group "webui_version" (intellex.webui_version_online, IX re-scan host.api.webui_version): Intellex src/host.py
+api_webui_version, _published_dtg and _wcb_published_ver on its real build_app() in this process (bridge_units._Server).
+A bundle older than the published copy is stale with checked true and no reason; an equal one is not stale; each tool
+asks its configured branch's copy (settings.tool_base: <site>/config_tool or <site>/dev/<branch>/<leaf>), never main's
+for a branch; a failure says why - certs.ADVICE for a certificate the venv cannot verify, the HTTP error otherwise -
+without hiding the other tool's answer.
+
+group "fetch_webui" (intellex.fetch_webui_unit, IX re-scan tools.fetch_webui): Intellex tools/fetch_webui.py in this
+process, its main() with each argv. _safe_relname (a pure unit); cmdlib_names' walk of each vendor manifest; each tool's
+update as one atomic swap (a staging directory in tempfile's directory, then a rename that keeps the old bundle as
+<dir>.prev), byte-identical to what was served; up to date, --check and --force; one missing file changes nothing and
+leaves no staging directory; the branch's /dev/<branch>/ copy when it is published, else main's with a note; --tool all
+as two independent swaps.
+"""
+import contextlib
+import datetime
+import http.server
+import io
+import ipaddress
+import json
+import os
+import shutil
+import ssl
+import sys
+import tempfile
+import threading
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _ixpy  # noqa: E402
+from _ixpy import SkipCase, case, check  # noqa: E402
+
+PAGES = "https://greghulette.github.io"
+NC = "/NaviCore"
+WCB = "/Wireless_Communication_Board-WCB"
+
+
+# ------------------------------------------------------------------ the stand-in for Pages
+class _Pages:
+    """gh-pages on 127.0.0.1:<free>: files {server path: bytes}, a 404 for anything else, every path asked recorded.
+    tls: HTTPS with a self-signed certificate (certdir holds it)."""
+
+    def __init__(self, files=None, tls=False, certdir=None):
+        self.files, self.asked, self.github = dict(files or {}), [], []
+        self.lock = threading.Lock()
+        srv = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                with srv.lock:
+                    srv.asked.append(path)
+                    body = srv.files.get(path)
+                if body is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "9")
+                    self.end_headers()
+                    self.wfile.write(b"Not Found")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        scheme = "http"
+        if tls:
+            cert, key = _self_signed(certdir)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
+            scheme = "https"
+        self.url = f"{scheme}://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def serve(self, files):
+        with self.lock:
+            self.files = dict(files)
+
+    def mark(self):
+        with self.lock:
+            return len(self.asked)
+
+    def since(self, k):
+        with self.lock:
+            return list(self.asked[k:])
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _self_signed(d):
+    """A self-signed certificate for greghulette.github.io and 127.0.0.1, made now -> (cert path, key path). Not issued
+    by any CA the venv trusts, so a client that verifies refuses it - the failure a stock macOS Python has with every
+    certificate."""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        raise SkipCase("the venv has no cryptography package to make a self-signed certificate with") from None
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "HIL stand-in for greghulette.github.io")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("greghulette.github.io"),
+                                                        x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                           critical=False)
+            .sign(key, hashes.SHA256()))
+    os.makedirs(d, exist_ok=True)
+    cp, kp = os.path.join(d, "hil-pages-cert.pem"), os.path.join(d, "hil-pages-key.pem")
+    with open(cp, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(kp, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                  serialization.NoEncryption()))
+    return cp, kp
+
+
+@contextlib.contextmanager
+def _github_is(pages):
+    """https://greghulette.github.io/<path> answered by `pages` (a real request to it, the caller's timeout and TLS
+    context kept; each such URL recorded in pages.github); a 127.0.0.1 URL as it is; anything else refused and
+    recorded in the yielded list. flash.reachable and fetch_webui.reachable answer True."""
+    import flash
+    import fetch_webui
+    real = urllib.request.urlopen
+    refused = []
+
+    def urlopen(url, *a, **k):
+        u = url if isinstance(url, str) else url.full_url
+        if u.startswith(PAGES + "/"):
+            with pages.lock:
+                pages.github.append(u)
+            return real(pages.url + u[len(PAGES):], *a, **k)
+        if u.startswith(("http://127.0.0.1:", "https://127.0.0.1:")):
+            return real(url, *a, **k)
+        refused.append(u)
+        raise urllib.error.URLError(f"HIL: no stand-in for {u} - this test never reaches the network")
+    saved = (flash.reachable, fetch_webui.reachable)
+    urllib.request.urlopen = urlopen
+    flash.reachable = fetch_webui.reachable = lambda *a, **k: True
+    try:
+        yield refused
+    finally:
+        urllib.request.urlopen = real
+        flash.reachable, fetch_webui.reachable = saved
+
+
+# ------------------------------------------------------------------ what a published tool looks like
+def _blob(tag, name):
+    """Bytes a text-mode write, a re-encode or a newline translation would change: CRLF, a lone CR and LF, a NUL, a BOM
+    mid-file and every byte value, after a line naming the file and its build."""
+    return (f"/* HIL {tag} {name} */\r\n".encode() + b"crlf\r\nlf\nlone cr\rnul\x00 bom\xef\xbb\xbf end\r\n"
+            + bytes(range(256)) + b"\r\n")
+
+
+EXTRA_IMG = "hil-extra.png"     # a ../Images name the Wizard uses that WCB_IMAGES does not list
+
+
+def _wizard_site(prefix, ver, tag, drop=()):
+    """A published Wizard at <prefix>/Wizard with its <prefix>/Images sibling -> {server path: bytes}. app.js carries
+    UI_VERSION; index.html names EXTRA_IMG. drop: server paths to leave out (a 404)."""
+    import fetch_webui as fw
+    files = {}
+    for name in list(fw.WCB_FILES) + list(fw.WCB_VENDOR):
+        body = _blob(tag, name)
+        if name == "app.js":
+            body = f"const UI_VERSION = '{ver}';\r\n".encode() + body
+        elif name == "index.html":
+            body = f'<img src="../Images/{EXTRA_IMG}" alt="">\r\n'.encode() + body
+        files[f"{prefix}/Wizard/{name}"] = body
+    for name in list(fw.WCB_IMAGES) + [EXTRA_IMG]:
+        files[f"{prefix}/Images/{name}"] = _blob(tag, name)
+    return {p: b for p, b in files.items() if p not in drop}
+
+
+def _wizard_disk(site, prefix):
+    """What src/webui_wcb must hold after `site` was fetched: Wizard/... and Images/..., the same bytes."""
+    return {p[len(prefix) + 1:]: b for p, b in site.items() if p.startswith(prefix + "/")}
+
+
+def _manifest(entries):
+    """A vendor catalog in the real shape (droidnet-command-library/catalog/v1), its boards' "file" entries as given."""
+    return json.dumps({"$schema": "droidnet-command-library/catalog/v1", "schemaVersion": "v1",
+                       "boards": [{"id": f"b{i}", "file": e, "name": f"HIL board {i}"} for i, e in enumerate(entries)]},
+                      indent=1).encode()
+
+
+def _config_site(prefix, dtg, tag, boards=("a", "b", "c", "d"), drop=()):
+    """A published config tool at <prefix>/config_tool with its <prefix>/Images sibling -> {server path: bytes}.
+
+    droidnet's manifest names its boards bare ('boards/a.json'), './'-led, vendor-prefixed ('droidnet/boards/c.json'),
+    twice (c again bare), nested under another key, and once with a '..' segment that _safe_relname must refuse; a
+    non-.json string is not a file. LICENSE is published for droidnet only, NOTICE.md for navicore only."""
+    import fetch_webui as fw
+    ct = f"{prefix}/config_tool"
+    files = {f"{ct}/index.html": f'<footer>build <span id="footer-dtg">{dtg}</span></footer>\r\n'.encode()
+             + _blob(tag, "index.html")}
+    for name in fw.ROOT_FILES[1:]:
+        files[f"{ct}/{name}"] = _blob(tag, name)
+    for name in fw.IMAGES:
+        files[f"{prefix}/Images/{name}"] = _blob(tag, name)
+    entries = []
+    for i, b in enumerate(boards):
+        entries.append(("./" if i == 1 else "droidnet/" if i == 2 else "") + f"boards/{b}.json")
+        files[f"{ct}/cmdlib/droidnet/boards/{b}.json"] = _blob(tag, f"droidnet/boards/{b}.json")
+    if len(boards) > 2:
+        entries.append(f"boards/{boards[2]}.json")                       # the vendor-prefixed one again, bare
+    entries.append("boards/../../../../hil-escape.json")
+    man = json.loads(_manifest(entries))
+    man["extra"] = {"notes": "readme.txt", "count": 3, "more": [[f"boards/{boards[0]}.json"]]}
+    files[f"{ct}/cmdlib/droidnet/manifest.json"] = json.dumps(man, indent=1).encode() + b"\r\n"
+    files[f"{ct}/cmdlib/droidnet/LICENSE"] = _blob(tag, "droidnet/LICENSE")
+    files[f"{ct}/cmdlib/navicore/manifest.json"] = _manifest(["navicore.json"])
+    files[f"{ct}/cmdlib/navicore/navicore.json"] = _blob(tag, "navicore/navicore.json")
+    files[f"{ct}/cmdlib/navicore/NOTICE.md"] = _blob(tag, "navicore/NOTICE.md")
+    return {p: b for p, b in files.items() if p not in drop}
+
+
+def _config_disk(site, prefix):
+    """What src/webui must hold after `site` was fetched: config_tool's files at its root, Images/ beside them."""
+    ct = f"{prefix}/config_tool/"
+    out = {}
+    for p, b in site.items():
+        if p.startswith(ct):
+            out[p[len(ct):]] = b
+        elif p.startswith(f"{prefix}/Images/"):
+            out[p[len(prefix) + 1:]] = b
+    return out
+
+
+# ------------------------------------------------------------------ disk helpers
+def _tree(root):
+    """{relative posix path: bytes} of every file under root ({} when it does not exist)."""
+    out = {}
+    for d, _, fs in os.walk(root):
+        for f in fs:
+            p = os.path.join(d, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root).replace(os.sep, "/")] = fh.read()
+    return out
+
+
+def _put(root, files):
+    for rel, data in files.items():
+        p = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+
+
+def _diff(got, want):
+    """Why two trees differ, briefly: missing, extra and changed paths."""
+    missing = sorted(set(want) - set(got))
+    extra = sorted(set(got) - set(want))
+    changed = sorted(k for k in set(got) & set(want) if got[k] != want[k])
+    parts = []
+    for label, names in (("missing", missing), ("extra", extra), ("bytes differ", changed)):
+        if names:
+            parts.append(f"{label} {names[:4]}{' +%d' % (len(names) - 4) if len(names) > 4 else ''}")
+    return "; ".join(parts) or "identical"
+
+
+def _run(argv):
+    """fetch_webui.main() with argv -> (exit code, everything it printed)."""
+    import fetch_webui
+    out = io.StringIO()
+    saved = sys.argv
+    sys.argv = ["fetch_webui.py"] + list(argv)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                rc = fetch_webui.main()
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else 1
+    finally:
+        sys.argv = saved
+    return rc, out.getvalue()
+
+
+@contextlib.contextmanager
+def _scratch_tmp(ctx, name):
+    """tempfile's directory pointed into the stage for the block -> its path, so a staging directory fetch_webui leaves
+    behind is seen (and Greg's real temp directory is not written)."""
+    d = os.path.join(ctx.stage, "scratch", name)
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    saved = tempfile.tempdir
+    tempfile.tempdir = d
+    try:
+        yield d
+    finally:
+        tempfile.tempdir = saved
+
+
+def _fresh_bundles():
+    """Remove the stage's src/webui, src/webui_wcb and their .prev copies."""
+    import fetch_webui as fw
+    for d in (fw.WEBUI, fw.WEBUI_WCB):
+        for p in (str(d), str(d.with_suffix(".prev"))):
+            shutil.rmtree(p, ignore_errors=True)
+
+
+def _branches(nc, wcb):
+    import settings
+    for product, b in (("navicore", nc), ("wcb", wcb)):
+        err = settings.set_branch(product, b)
+        check(err is None, f"could not set the stage's {product} branch to {b}: {err}")
+
+
+# ------------------------------------------------------------------ group "webui_version"
+def _bundle(ctx, dtg, ui):
+    """The stage's bundled tools, as far as the version check reads them: the config tool's footer-dtg and the
+    Wizard's UI_VERSION (None removes that file)."""
+    nc = os.path.join(ctx.src, "webui", "index.html")
+    wz = os.path.join(ctx.src, "webui_wcb", "Wizard", "app.js")
+    for p, text in ((nc, None if dtg is None else f'<span id="footer-dtg">{dtg}</span>\n'),
+                    (wz, None if ui is None else f"const UI_VERSION = '{ui}';\n")):
+        if text is None:
+            if os.path.exists(p):
+                os.remove(p)
+            continue
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+def _ver_site(nc_path, dtg, wz_path, ui):
+    files = {}
+    if nc_path:
+        files[nc_path] = f'<html><footer><span id="footer-dtg">{dtg}</span></footer></html>\n'.encode()
+    if wz_path:
+        files[wz_path] = f"// the Wizard\nconst UI_VERSION = '{ui}';\n".encode() + b"x" * 1000
+    return files
+
+
+@case("online, each tool's configured branch compared with its published copy: an older bundle is stale, checked "
+      "true, no reason; an equal one is not stale; a branch asks <site>/dev/<branch>/<leaf>, main asks <site>/<leaf>, "
+      "and never main's copy for a branch", group="webui_version")
+def webui_version_online(ctx):
+    from bridge_units import _server
+    s = _server()
+    nc_main, nc_dev = f"{NC}/config_tool/index.html", f"{NC}/dev/hil-ncb/config_tool/index.html"
+    wz_main, wz_dev = f"{WCB}/Wizard/app.js", f"{WCB}/dev/hil-wzb/Wizard/app.js"
+    pages = _Pages()
+    problems = []
+    try:
+        with _github_is(pages) as refused:
+            # 1. NaviCore on main, the Wizard on a branch; both bundles older than what is published. Main's Wizard is
+            # published too, with another stamp: comparing against it would show here.
+            _bundle(ctx, "HIL-NC-OLD", "HIL-WZ-OLD")
+            _branches("main", "hil-wzb")
+            pages.serve({**_ver_site(nc_main, "HIL-NC-NEW", wz_dev, "HIL-WZ-NEW"),
+                         **_ver_site(None, None, wz_main, "HIL-WZ-MAIN")})
+            k = len(pages.github)
+            code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-NEW", "stale": True, "checked": True, "reason": "",
+                    "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-NEW", "stale": True, "checked": True,
+                            "reason": ""}}
+            if code != 200 or body != want:
+                problems.append(f"bundles older than Pages (navicore main, wcb hil-wzb): {code} {body}, expected {want}")
+            asked = sorted(pages.github[k:])
+            if asked != sorted([PAGES + nc_main, PAGES + wz_dev]):
+                problems.append(f"the check asked {asked}, expected main's config_tool/index.html and "
+                                f"dev/hil-wzb/Wizard/app.js (settings.tool_base)")
+
+            # 2. NaviCore on a branch too; both published copies equal to the bundles: checked, not stale.
+            _branches("hil-ncb", "hil-wzb")
+            pages.serve({**_ver_site(nc_dev, "HIL-NC-OLD", wz_dev, "HIL-WZ-OLD"),
+                         **_ver_site(nc_main, "HIL-NC-MAIN", wz_main, "HIL-WZ-MAIN")})
+            k = len(pages.github)
+            code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-OLD", "stale": False, "checked": True, "reason": "",
+                    "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-OLD", "stale": False, "checked": True,
+                            "reason": ""}}
+            if code != 200 or body != want:
+                problems.append(f"bundles equal to their branch's Pages copy: {code} {body}, expected {want}")
+            asked = sorted(pages.github[k:])
+            if asked != sorted([PAGES + nc_dev, PAGES + wz_dev]):
+                problems.append(f"with both on branches the check asked {asked}, expected the two dev/<branch>/ copies")
+
+            # 3. Back on main: the main copies, older bundles stale again.
+            _branches("main", "main")
+            k = len(pages.github)
+            code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            if (body or {}).get("published") != "HIL-NC-MAIN" or ((body or {}).get("wcb") or {}).get("published") != \
+                    "HIL-WZ-MAIN" or body.get("stale") is not True or body["wcb"].get("stale") is not True:
+                problems.append(f"both on main: {body}, expected main's published copies and stale")
+            if sorted(pages.github[k:]) != sorted([PAGES + nc_main, PAGES + wz_main]):
+                problems.append(f"both on main the check asked {sorted(pages.github[k:])}")
+            if refused:
+                problems.append(f"the version check asked the real network for {refused}")
+    finally:
+        pages.close()
+        _branches("main", "main")
+    check(not problems, "; ".join(problems))
+
+
+@case("a failure says why: a certificate the venv cannot verify is certs.ADVICE for both tools, not the offline note; "
+      "a 404 is the HTTP error; either tool failing leaves the other's answer checked", group="webui_version")
+def webui_version_reasons(ctx):
+    import certs
+    import host
+    from bridge_units import _server
+    s = _server()
+    problems = []
+    _bundle(ctx, "HIL-NC-OLD", "HIL-WZ-OLD")
+    _branches("main", "main")
+    nc_main, wz_main = f"{NC}/config_tool/index.html", f"{WCB}/Wizard/app.js"
+
+    # HTTPS with a certificate no CA the venv trusts has issued: the venv's own verification refuses it.
+    tls = _Pages(_ver_site(nc_main, "HIL-NC-NEW", wz_main, "HIL-WZ-NEW"), tls=True,
+                 certdir=os.path.join(ctx.stage, "scratch", "tls"))
+    try:
+        with _github_is(tls) as refused:
+            code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            for label, part in (("navicore", body or {}), ("wcb", (body or {}).get("wcb") or {})):
+                if part.get("reason") != certs.ADVICE or part.get("checked") is not False or part.get("published") \
+                        or part.get("stale") is not False:
+                    problems.append(f"{label} behind a certificate the venv cannot verify: checked "
+                                    f"{part.get('checked')!r}, published {part.get('published')!r}, reason "
+                                    f"{str(part.get('reason'))[:90]!r}; expected certs.ADVICE")
+                if part.get("reason") == host.OFFLINE_NOTE:
+                    problems.append(f"{label}: a certificate failure reported as offline")
+            if (body or {}).get("bundled") != "HIL-NC-OLD" or ((body or {}).get("wcb") or {}).get("bundled") != \
+                    "HIL-WZ-OLD":
+                problems.append(f"the bundled stamps went missing beside a failed check: {body}")
+            if sorted(tls.github) != sorted([PAGES + nc_main, PAGES + wz_main]):
+                problems.append(f"the TLS stand-in was asked for {tls.github}")
+            if refused:
+                problems.append(f"the version check asked the real network for {refused}")
+    finally:
+        tls.close()
+
+    # Plain HTTP: one tool's copy missing (404) while the other answers, then the other way round.
+    pages = _Pages()
+    try:
+        with _github_is(pages) as refused:
+            for gone, ok in (("navicore", "wcb"), ("wcb", "navicore")):
+                site = _ver_site(nc_main, "HIL-NC-NEW", wz_main, "HIL-WZ-NEW")
+                site.pop(nc_main if gone == "navicore" else wz_main)
+                pages.serve(site)
+                code, body = s.req("GET", "/_api/webui-version", timeout=60)
+                parts = {"navicore": body or {}, "wcb": (body or {}).get("wcb") or {}}
+                g, o = parts[gone], parts[ok]
+                reason = str(g.get("reason"))
+                if g.get("checked") is not False or not reason.startswith("HTTPError") or "404" not in reason:
+                    problems.append(f"{gone}'s copy 404: checked {g.get('checked')!r}, reason {reason[:80]!r}; "
+                                    f"expected 'HTTPError: HTTP Error 404: ...'")
+                want_pub = "HIL-NC-NEW" if ok == "navicore" else "HIL-WZ-NEW"
+                if o.get("checked") is not True or o.get("published") != want_pub or o.get("stale") is not True or \
+                        o.get("reason") != "":
+                    problems.append(f"{gone}'s copy 404: {ok} answered {o}, expected checked, published {want_pub}, "
+                                    f"stale - one tool failing must not hide the other's answer")
+            if refused:
+                problems.append(f"the version check asked the real network for {refused}")
+    finally:
+        pages.close()
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "fetch_webui"
+@case("_safe_relname refuses an empty name, an absolute or drive path, a UNC path and any '', '.' or '..' segment "
+      "(either slash); accepts a plain relative path, dots inside a name included", group="fetch_webui")
+def safe_relname(ctx):
+    import fetch_webui
+    problems = []
+    for name in ("", "/etc/x.json", "\\x.json", "C:/x.json", "C:x.json", "c:\\x.json", "\\\\server\\share\\x.json",
+                 "//server/share/x.json", "vendor/../../x.json", "boards/../../../evil.json", "../x.json", "..",
+                 "a/./b.json", "./a.json", "a//b.json", "a/b/", "a\\..\\b.json", "boards/.."):
+        if fetch_webui._safe_relname(name) is not False:
+            problems.append(f"{name!r} accepted")
+    for name in ("droidnet/boards/a.json", "boards/a.json", "a.json", "a..b.json", "boards/v1.2/x.json",
+                 "navicore/NOTICE.md", ".hidden.json", "boards\\a.json"):
+        if fetch_webui._safe_relname(name) is not True:
+            problems.append(f"{name!r} refused")
+    check(not problems, "; ".join(problems))
+
+
+@case("cmdlib_names walks each vendor manifest: every .json string at any depth, normalised to the vendor directory "
+      "('./x', bare and '<vendor>/x' alike), once each; a '..' entry refused out loud and never requested; LICENSE "
+      "and NOTICE.md only where published; a vendor whose manifest 404s is skipped; whatever a manifest says, no name "
+      "leaves its vendor directory", group="fetch_webui")
+def manifest_walk(ctx):
+    import fetch_webui
+    pages = _Pages(_config_site(NC, "HIL-NC-1", "walk"))
+    base = f"{pages.url}{NC}/config_tool"
+    problems = []
+    try:
+        with _github_is(pages) as refused:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                names = fetch_webui.cmdlib_names(base)
+            want = ["droidnet/manifest.json", "droidnet/boards/a.json", "droidnet/boards/b.json",
+                    "droidnet/boards/c.json", "droidnet/boards/d.json", "droidnet/LICENSE",
+                    "navicore/manifest.json", "navicore/navicore.json", "navicore/NOTICE.md"]
+            if sorted(names) != sorted(want) or len(names) != len(set(names)):
+                problems.append(f"cmdlib_names {names}, expected each of {want} once")
+            if names[:1] != ["droidnet/manifest.json"] or names.index("navicore/manifest.json") < \
+                    names.index("droidnet/LICENSE"):
+                problems.append(f"not vendor by vendor, manifest first: {names}")
+            if "skipping unsafe manifest entry: 'boards/../../../../hil-escape.json'" not in out.getvalue():
+                problems.append(f"the '..' entry was not refused out loud: printed {out.getvalue()[-200:]!r}")
+            if any("escape" in p for p in pages.asked):
+                problems.append(f"the '..' entry was requested: {[p for p in pages.asked if 'escape' in p]}")
+
+            # navicore's manifest gone; droidnet's names leading '../', '/' and drive paths. Whatever each becomes,
+            # it stays inside cmdlib/droidnet/.
+            site = _config_site(NC, "HIL-NC-1", "walk2")
+            site.pop(f"{NC}/config_tool/cmdlib/navicore/manifest.json")
+            site[f"{NC}/config_tool/cmdlib/droidnet/manifest.json"] = _manifest(
+                ["boards/a.json", "../navicore/navicore.json", "../../../../hil-up.json", "/hil-abs.json",
+                 "C:/hil-drive.json", "\\\\srv\\share\\hil-unc.json", "boards\\..\\..\\hil-back.json"])
+            pages.serve(site)
+            with contextlib.redirect_stdout(io.StringIO()):
+                names = fetch_webui.cmdlib_names(base)
+            if any(n.startswith("navicore/") for n in names):
+                problems.append(f"navicore's manifest 404'd but navicore names were listed: {names}")
+            for n in names:
+                parts = n.replace("\\", "/").split("/")
+                if parts[0] != "droidnet" or any(p in ("", ".", "..") for p in parts) or ":" in n:
+                    problems.append(f"a manifest entry became {n!r}, outside cmdlib/droidnet/")
+            if refused:
+                problems.append(f"asked the real network for {refused}")
+    finally:
+        pages.close()
+    check(not problems, "; ".join(problems))
+
+
+@case("the config tool (--tool navicore --base <stand-in>): a first fetch lands byte-identical with no .prev claimed; a "
+      "newer one replaces it whole, the old kept as webui.prev; up to date and --check fetch nothing more and change "
+      "nothing; --force replaces .prev; a missing cmdlib file or no readable manifest changes nothing and leaves no "
+      "staging directory", group="fetch_webui")
+def navicore_swap(ctx):
+    import fetch_webui as fw
+    webui, prev = str(fw.WEBUI), str(fw.WEBUI.with_suffix(".prev"))
+    _fresh_bundles()
+    pages = _Pages()
+    base = f"{pages.url}{NC}/config_tool"
+    problems = []
+
+    def go(site, *extra):
+        pages.serve(site)
+        k = pages.mark()
+        rc, out = _run(["--tool", "navicore", "--base", base] + list(extra))
+        return rc, out, pages.since(k)
+    try:
+        with _github_is(pages) as refused, _scratch_tmp(ctx, "tmp-nc") as tmp:
+            v1 = _config_site(NC, "HIL-NC-1", "v1")
+            rc, out, asked = go(v1)
+            if rc != 0 or "updated to HIL-NC-1" not in out:
+                problems.append(f"first fetch: exited {rc}, {out[-200:]!r}")
+            if _tree(webui) != _config_disk(v1, NC):
+                problems.append(f"first fetch: src/webui vs what was served: {_diff(_tree(webui), _config_disk(v1, NC))}")
+            if os.path.exists(prev) or "previous kept" in out:
+                problems.append("first fetch: a .prev was made or claimed with nothing before it")
+
+            v2 = _config_site(NC, "HIL-NC-2", "v2", boards=("a", "b", "e"))      # a board gone, one new
+            rc, out, asked = go(v2)
+            if rc != 0 or "updated to HIL-NC-2" not in out or f"previous kept at {prev}" not in out:
+                problems.append(f"second fetch: exited {rc}, {out[-200:]!r}")
+            if _tree(webui) != _config_disk(v2, NC):
+                problems.append(f"second fetch: src/webui vs what was served: {_diff(_tree(webui), _config_disk(v2, NC))}"
+                                f" (an update must replace the bundle whole, not lay files over it)")
+            if _tree(prev) != _config_disk(v1, NC):
+                problems.append(f"second fetch: webui.prev vs the first bundle: {_diff(_tree(prev), _config_disk(v1, NC))}")
+
+            rc, out, asked = go(v2)
+            if rc != 0 or "up to date" not in out or asked != [f"{NC}/config_tool/index.html"]:
+                problems.append(f"up to date: exited {rc}, asked {asked}, {out[-120:]!r}")
+            v3 = _config_site(NC, "HIL-NC-3", "v3")
+            rc, out, asked = go(v3, "--check")
+            if rc != 0 or "update available" not in out or asked != [f"{NC}/config_tool/index.html"]:
+                problems.append(f"--check: exited {rc}, asked {asked}, {out[-120:]!r}")
+            if _tree(webui) != _config_disk(v2, NC) or _tree(prev) != _config_disk(v1, NC):
+                problems.append("up to date or --check changed a bundle")
+
+            rc, out, asked = go(v2, "--force")
+            if rc != 0 or "updated to HIL-NC-2" not in out or len(asked) < 10:
+                problems.append(f"--force on an up-to-date bundle: exited {rc}, {len(asked)} request(s), {out[-120:]!r}")
+            if _tree(prev) != _config_disk(v2, NC) or _tree(webui) != _config_disk(v2, NC):
+                problems.append(f"--force: webui.prev is not the bundle it replaced: {_diff(_tree(prev), _config_disk(v2, NC))}")
+            if any(n.endswith(".prev") for n in os.listdir(prev)):
+                problems.append(f"--force nested an old .prev inside the new one: {os.listdir(prev)}")
+
+            before = (_tree(webui), _tree(prev))
+            for label, site, words in (
+                    ("a missing cmdlib board", _config_site(NC, "HIL-NC-4", "v4",
+                                                            drop=(f"{NC}/config_tool/cmdlib/droidnet/boards/c.json",)),
+                     "nothing was changed"),
+                    ("a missing serial-hub.js", _config_site(NC, "HIL-NC-4", "v4",
+                                                             drop=(f"{NC}/config_tool/serial-hub.js",)),
+                     "nothing was changed"),
+                    ("no readable cmdlib manifest", _config_site(NC, "HIL-NC-4", "v4", drop=(
+                        f"{NC}/config_tool/cmdlib/droidnet/manifest.json",
+                        f"{NC}/config_tool/cmdlib/navicore/manifest.json")), "refusing a partial update")):
+                rc, out, asked = go(site)
+                if rc != 1 or words not in out:
+                    problems.append(f"{label}: exited {rc}, {out[-160:]!r}; expected 1 and {words!r}")
+                if (_tree(webui), _tree(prev)) != before:
+                    problems.append(f"{label}: the bundle changed: {_diff(_tree(webui), before[0])}; .prev "
+                                    f"{_diff(_tree(prev), before[1])}")
+                if os.listdir(tmp):
+                    problems.append(f"{label}: a staging directory was left behind: {os.listdir(tmp)}")
+                    shutil.rmtree(tmp)
+                    os.makedirs(tmp)
+            if refused:
+                problems.append(f"asked the real network for {refused}")
+    finally:
+        pages.close()
+    check(not problems, "; ".join(problems))
+
+
+@case("the Wizard (--tool wcb --base <stand-in>): every Wizard, vendor and image file byte-identical, the ../Images "
+      "name WCB_IMAGES lacks fetched with a line, a missing image a line and not a failure, the old bundle (its own "
+      "extra file included) kept whole as webui_wcb.prev; up to date fetches app.js alone; a missing vendor file "
+      "changes nothing", group="fetch_webui")
+def wizard_swap(ctx):
+    import fetch_webui as fw
+    wz, prev = str(fw.WEBUI_WCB), str(fw.WEBUI_WCB.with_suffix(".prev"))
+    _fresh_bundles()
+    old = {"Wizard/app.js": b"const UI_VERSION = 'HIL-WZ-OLD';\r\n", "Wizard/hil-old-only.js": b"old\r\n",
+           "Images/hil-old.png": b"\x89PNG old"}
+    _put(wz, old)
+    pages = _Pages()
+    base = f"{pages.url}{WCB}/Wizard"
+    problems = []
+    try:
+        with _github_is(pages) as refused, _scratch_tmp(ctx, "tmp-wz") as tmp:
+            gone_img = f"{WCB}/Images/{fw.WCB_IMAGES[-1]}"
+            w1 = _wizard_site(WCB, "HIL-WZ-1", "w1", drop=(gone_img,))
+            pages.serve(w1)
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 0 or "[wcb] updated to HIL-WZ-1" not in out or f"[wcb] previous kept at {prev}" not in out:
+                problems.append(f"Wizard fetch: exited {rc}, {out[-200:]!r}")
+            if _tree(wz) != _wizard_disk(w1, WCB):
+                problems.append(f"src/webui_wcb vs what was served: {_diff(_tree(wz), _wizard_disk(w1, WCB))}")
+            if _tree(prev) != old:
+                problems.append(f"webui_wcb.prev vs the old bundle: {_diff(_tree(prev), old)}")
+            if f"Images/{EXTRA_IMG}: the Wizard uses it and WCB_IMAGES does not list it" not in out:
+                problems.append("no line for the ../Images file the Wizard names and WCB_IMAGES lacks")
+            if f"could not fetch Images/{fw.WCB_IMAGES[-1]}" not in out:
+                problems.append("no line for the image that 404'd")
+
+            k = pages.mark()
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 0 or "[wcb] up to date" not in out or pages.since(k) != [f"{WCB}/Wizard/app.js"]:
+                problems.append(f"up to date: exited {rc}, asked {pages.since(k)}, {out[-120:]!r}")
+
+            before = (_tree(wz), _tree(prev))
+            pages.serve(_wizard_site(WCB, "HIL-WZ-2", "w2", drop=(f"{WCB}/Wizard/{fw.WCB_VENDOR[-1]}",)))
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 1 or "[wcb] nothing was changed" not in out:
+                problems.append(f"a missing vendor file: exited {rc}, {out[-160:]!r}")
+            if (_tree(wz), _tree(prev)) != before:
+                problems.append(f"a missing vendor file changed the bundle: {_diff(_tree(wz), before[0])}")
+            if os.listdir(tmp):
+                problems.append(f"a staging directory was left behind: {os.listdir(tmp)}")
+            if refused:
+                problems.append(f"asked the real network for {refused}")
+    finally:
+        pages.close()
+    check(not problems, "; ".join(problems))
+
+
+@case("with no --base each tool comes from its configured branch: /dev/<branch>/ when published (probed once, then "
+      "fetched from there), main's with 'branch <b> publishes no tool - using main's' when not; main probes nothing",
+      group="fetch_webui")
+def branch_fallback(ctx):
+    import fetch_webui as fw
+    _fresh_bundles()
+    sites = {**_wizard_site(WCB, "HIL-WZ-MAIN", "wmain"), **_wizard_site(f"{WCB}/dev/hil-wzb", "HIL-WZ-BR", "wbr"),
+             **_config_site(NC, "HIL-NC-MAIN", "cmain"), **_config_site(f"{NC}/dev/hil-ncb", "HIL-NC-BR", "cbr")}
+    pages = _Pages(sites)
+    problems = []
+    try:
+        with _github_is(pages) as refused:
+            for tool, branch, prefix, note in (
+                    ("wcb", "hil-wzb", f"{WCB}/dev/hil-wzb", "[wcb] branch hil-wzb"),
+                    ("wcb", "hil-nopub", WCB, "[wcb] branch hil-nopub publishes no tool - using main's"),
+                    ("wcb", "main", WCB, None),
+                    ("navicore", "hil-ncb", f"{NC}/dev/hil-ncb", "[navicore] branch hil-ncb"),
+                    ("navicore", "hil-nopub", NC, "[navicore] branch hil-nopub publishes no tool - using main's"),
+                    ("navicore", "main", NC, None)):
+                _branches(branch if tool == "navicore" else "main", branch if tool == "wcb" else "main")
+                k = len(pages.github)
+                rc, out = _run(["--tool", tool, "--force"])
+                asked = [u[len(PAGES):] for u in pages.github[k:]]
+                label = f"{tool} on {branch}"
+                if rc != 0 or (note and note not in out) or (not note and "branch" in out.split("bundled")[0]):
+                    problems.append(f"{label}: exited {rc}, printed {out[:160]!r}; expected {note or 'no branch note'!r}")
+                site_root = WCB if tool == "wcb" else NC
+                dev = f"{site_root}/dev/{branch}/{'Wizard' if tool == 'wcb' else 'config_tool'}/index.html"
+                probes = [p for p in asked if "/dev/" in p and p.endswith("/index.html")]
+                if branch == "main" and any("/dev/" in p for p in asked):
+                    problems.append(f"{label}: asked a /dev/ path: {[p for p in asked if '/dev/' in p][:3]}")
+                if branch != "main" and probes[:1] != [dev]:
+                    problems.append(f"{label}: the first /dev/ request was {probes[:1]}, expected the probe {dev}")
+                if branch == "hil-nopub" and (asked.count(dev) != 1 or any("/dev/" in p for p in asked if p != dev)):
+                    problems.append(f"{label}: the unpublished branch was probed {asked.count(dev)} time(s) or "
+                                    f"fetched from: {[p for p in asked if '/dev/' in p]}")
+                # Everything else from the copy in use: the branch's for a published branch, main's (no /dev/ at
+                # all) otherwise - the unpublished branch's one probe aside.
+                other = [p for p in asked if p != dev and not (p.startswith(prefix + "/") and
+                                                               (prefix != site_root or "/dev/" not in p))]
+                if other:
+                    problems.append(f"{label}: fetched outside {prefix}: {other[:3]}")
+                if tool == "wcb":
+                    got, want = _tree(str(fw.WEBUI_WCB)), _wizard_disk({p: b for p, b in sites.items()
+                                                                       if p.startswith(prefix + "/Wizard/")
+                                                                       or p.startswith(prefix + "/Images/")}, prefix)
+                else:
+                    got, want = _tree(str(fw.WEBUI)), _config_disk({p: b for p, b in sites.items()
+                                                                   if p.startswith(prefix + "/config_tool/")
+                                                                   or p.startswith(prefix + "/Images/")}, prefix)
+                if got != want:
+                    problems.append(f"{label}: the bundle is not {prefix}'s: {_diff(got, want)}")
+            if refused:
+                problems.append(f"asked the real network for {refused}")
+    finally:
+        pages.close()
+        _branches("main", "main")
+    check(not problems, "; ".join(problems))
+
+
+@case("--tool all runs two independent swaps: the Wizard failing leaves the config tool's new bundle in place and its "
+      "own old one; the config tool failing leaves the Wizard's new one; each exits 1; --base with all exits 2 and "
+      "fetches nothing", group="fetch_webui")
+def all_independent(ctx):
+    import fetch_webui as fw
+    _fresh_bundles()
+    webui, wz = str(fw.WEBUI), str(fw.WEBUI_WCB)
+    old_nc = {"index.html": b'<span id="footer-dtg">HIL-NC-OLD</span>', "cmdlib/droidnet/manifest.json": b"{}"}
+    old_wz = {"Wizard/app.js": b"const UI_VERSION = 'HIL-WZ-OLD';"}
+    _put(webui, old_nc)
+    _put(wz, old_wz)
+    _branches("main", "main")
+    pages = _Pages()
+    problems = []
+    try:
+        with _github_is(pages) as refused, _scratch_tmp(ctx, "tmp-all") as tmp:
+            nc1 = _config_site(NC, "HIL-NC-1", "all1")
+            wz_broken = _wizard_site(WCB, "HIL-WZ-1", "all1", drop=(f"{WCB}/Wizard/parser.js",))
+            pages.serve({**nc1, **wz_broken})
+            rc, out = _run(["--tool", "all"])
+            if rc != 1 or "updated to HIL-NC-1" not in out or "[wcb] nothing was changed" not in out:
+                problems.append(f"Wizard failing: exited {rc}, {out[-200:]!r}; expected 1, the config tool updated")
+            if _tree(webui) != _config_disk(nc1, NC):
+                problems.append(f"Wizard failing: the config tool did not keep its update: {_diff(_tree(webui), _config_disk(nc1, NC))}")
+            if _tree(wz) != old_wz:
+                problems.append(f"Wizard failing: its old bundle changed: {_diff(_tree(wz), old_wz)}")
+
+            nc_broken = _config_site(NC, "HIL-NC-2", "all2", drop=(f"{NC}/config_tool/cmdlib/navicore/navicore.json",))
+            wz1 = _wizard_site(WCB, "HIL-WZ-1", "all2")
+            pages.serve({**nc_broken, **wz1})
+            rc, out = _run(["--tool", "all"])
+            if rc != 1 or "[wcb] updated to HIL-WZ-1" not in out or "nothing was changed" not in out.split("[wcb]")[0]:
+                problems.append(f"config tool failing: exited {rc}, {out[-200:]!r}; expected 1, the Wizard updated")
+            if _tree(webui) != _config_disk(nc1, NC):
+                problems.append(f"config tool failing: its bundle changed: {_diff(_tree(webui), _config_disk(nc1, NC))}")
+            if _tree(wz) != _wizard_disk(wz1, WCB):
+                problems.append(f"config tool failing: the Wizard did not update: {_diff(_tree(wz), _wizard_disk(wz1, WCB))}")
+            if os.listdir(tmp):
+                problems.append(f"a staging directory was left behind: {os.listdir(tmp)}")
+
+            k = pages.mark()
+            rc, out = _run(["--tool", "all", "--base", f"{pages.url}{WCB}/Wizard"])
+            if rc != 2 or pages.since(k):
+                problems.append(f"--tool all --base: exited {rc}, asked {pages.since(k)}; expected 2 and nothing")
+            if refused:
+                problems.append(f"asked the real network for {refused}")
+    finally:
+        pages.close()
+    check(not problems, "; ".join(problems))
+
+
+if __name__ == "__main__":
+    sys.exit(_ixpy.main())
