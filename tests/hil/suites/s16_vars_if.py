@@ -81,6 +81,36 @@ def v_set_get_list(bench):
         _clear(w, "hilv")
 
 
+@test("var.lowercase_verbs", "The command letter's lower case works like the upper: ;v,<a>,5 sets a volatile variable, ;vp,<b>,6 and ;Vp,<c>,7 persistent ones, each read back by ?VAR,GET and listed by ?VAR,LIST with [volatile] / [persistent]; the persistent two reach the chain as ?VAR,SET and all three are cleared after", needs=["wcb1"], links=[])
+def lowercase_verbs(bench):
+    """Coverage re-scan 2026-10-12, var.set_forms. processCommandCharcter (WCB.ino) dispatches 'v' and 'V' to
+    processSetVariable (WCB_Variables.cpp), which takes 'P' or 'p' before the comma for persistence (;VP); var.v_verbs
+    and var.v_set_get_list only ever send the upper-case forms. config_guard checks the ?VAR,SET tokens are gone."""
+    w = usb_wcb(bench)
+    a, b, c = (f"hil{x}{nonce().lower()}" for x in "abc")
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            for cmd in (f";v,{a},5", f";vp,{b},6", f";Vp,{c},7"):
+                w.run(cmd)
+            for name, value in ((a, 5), (b, 6), (c, 7)):
+                if _get(w, name) != f"[VAR] {name} = {value}":
+                    problems.append(f"{name}: ?VAR,GET said {_get(w, name)!r}, not {value}")
+            lst = _var_list(w)
+            for want in (f"  {a} = 5  [volatile]", f"  {b} = 6  [persistent]", f"  {c} = 7  [persistent]"):
+                if want not in lst:
+                    problems.append(f"?VAR,LIST lacks {want.strip()!r}")
+            toks = snapshot(bench, 1)
+            for name, value in ((b, 6), (c, 7)):
+                if f"?VAR,SET,{name},{value}" not in toks:
+                    problems.append(f"the chain lacks ?VAR,SET,{name},{value}")
+            if any(t.startswith(f"?VAR,SET,{a},") for t in toks):
+                problems.append(f"the volatile {a} reached the chain")
+        finally:
+            _clear(w, a, b, c)
+    assert not problems, "; ".join(problems)
+
+
 @test("var.v_verbs", ";V true/false/TOGGLE/INC/DEC (any case) and integer-literal parsing", needs=["wcb1"], links=[])
 def v_verbs(bench):
     w = usb_wcb(bench)

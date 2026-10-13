@@ -1414,6 +1414,11 @@ def mgmt_seq_w2_relay(bench):
 STORE_RX = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes")
 STORE_FULL = "the sequence store is full - see ?NVS"
 NVS_BOOT = "Stored sequences are kept in the settings store this boot"
+# seqStoreReport's line on a fallback boot (WCB_SeqStore.cpp), with seqStoreBegin's reason for ?DEBUG,SEQNVS
+NVS_FALLBACK_LINE = ("Sequences: kept in the settings store this boot (?DEBUG,SEQNVS asked for it (a test knob); the next "
+                     "boot uses the sequence store again)")
+REPORT_RX = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of 32768 bytes \(partition spiffs: (\d+) of (\d+) "
+                       r"bytes used\)$")
 
 
 def _store(w):
@@ -1637,6 +1642,77 @@ def move_does_not_fit(bench):
             _clear_seq(w, key)
         if _store(w)[:2] != (n0, b0):
             problems.append(f"after the clears the store reads {_store(w)[:2]}, not {(n0, b0)}")
+    assert not problems, "; ".join(problems)
+
+
+@test("seq.store_report_line", "?NVS's last line on W1 is the whole sequence-store report: 'Sequences: N in the sequence store, x of 32768 bytes (partition spiffs: u of t bytes used)' with N the ?SEQ,NAMES count, x the size the chain's sequences make, u within t, and no READ ERROR or damaged-lines suffix (read-only)", needs=["wcb1"], links=[])
+def store_report_line(bench):
+    """Coverage re-scan 2026-10-12, seq.store_report. seqStoreReport (WCB_SeqStore.cpp) prints the record count, the
+    file size, and esp_littlefs_info's used / total for the 'spiffs' partition, then ' - READ ERROR' when the walk
+    failed and ' - damaged lines skipped' when it skipped any. STORE_RX (seq.store_accounting) matches only the head;
+    the fallback line is checked in seq.move_does_not_fit. The file is one '<key>,<value>\\n' line per sequence, as in
+    boot.banner_w1."""
+    w = usb_wcb(bench)
+    _store_or_skip(w)
+    line = next((x.rstrip() for x in w.run("?NVS", timeout=6) if x.startswith("Sequences:")), "")
+    m = REPORT_RX.match(line)
+    assert m, f"the store line is {line!r}"
+    count, size, used, total = (int(v) for v in m.groups())
+    _, n, _ = _names(w)
+    seqs = [t for t in snapshot(bench, 1) if t.upper().startswith("?SEQ,SAVE,")]
+    want = sum(len(t) - len("?SEQ,SAVE,") + 1 for t in seqs)
+    bench.note(f"store line: {count} sequence(s), {size} bytes, partition {used} of {total} bytes used")
+    assert count == n == len(seqs), f"the line counts {count}, ?SEQ,NAMES {n}, the chain {len(seqs)}"
+    assert size == want, f"the line says {size} bytes; the chain's sequences make {want}"
+    assert 0 < used <= total, f"partition usage {used} of {total}"
+
+
+@test("seq.value_over_3999_refused", "On W3 (an ESP32-S3, with the heap to copy the line) a 4000-character ?SEQ,SAVE value is refused with 'Failed to store sequence ... (it is 4000 characters - the limit is 3999). Not stored.', leaving ?SEQ,NAMES as it was and ?SEQ,GET NOTFOUND; a 3999-character one is stored and reads back whole, and is cleared", needs=["wcb3"], links=[])
+def value_over_3999_refused(bench):
+    """Coverage re-scan 2026-10-12, seq.value_max_3999. seqStorePut (WCB_SeqStore.cpp) answers SEQ_E_TOOBIG for a value
+    over SEQ_VALUE_MAX, which saveStoredCommandsToPreferences (WCB_Storage.cpp) reports with the length and the limit. On
+    W1 in AP mode the 4 KB line meets the out-of-memory copy first (inv.seqget_largest); W3 has its own USB console and
+    far more heap, so the refusal itself is what answers. The line goes out paced (send_paced). Skipped when W3 prints
+    the out-of-memory line instead."""
+    if 3 not in bench.usb_wcbs():
+        raise Skip("W3 has no USB console here")
+    w3 = WCB(bench.dev(bench.usb_wcbs()[3]))
+    _store_or_skip(w3)
+    key = "HILBIG"
+    me = 3
+    problems = []
+
+    def save(value):
+        m = w3.dev.mark()
+        w3.dev.send_paced(f"?SEQ,SAVE,{key},{value}")
+        w3.dev.send(f";S0,HILEND{nonce()}")
+        time.sleep(2.0)
+        return [x.rstrip() for x in w3.dev.since(m)]
+
+    with config_guard(bench, 3):
+        _clear_seq(w3, key)
+        _, n0, names0 = _names(w3)
+        try:
+            head = f";S0{marker('b')}^***"
+            out = save(head + "x" * (4000 - len(head)))
+            if _has(out, "Out of memory"):
+                raise Skip("W3 ran out of heap copying the 4000-character line")
+            want = f"Failed to store sequence '{key}' (it is 4000 characters - the limit is 3999). Not stored."
+            if want not in out:
+                problems.append(f"the 4000-character save printed {[x for x in out if key in x or 'store' in x][:2]}")
+            _, n1, names1 = _names(w3)
+            if (n1, names1) != (n0, names0):
+                problems.append(f"after the refusal ?SEQ,NAMES lists {n1}, not {n0}")
+            if _seqval(w3, key) != f"[MGMT:SEQVAL,{me}]{key},NOTFOUND,":
+                problems.append(f"after the refusal ?SEQ,GET says {(_seqval(w3, key) or '')[:60]!r}")
+            value = head + "y" * (3999 - len(head))
+            out = save(value)
+            if not _has(out, f"Stored: Key='{key}'"):
+                problems.append(f"the 3999-character save printed {[x[:80] for x in out if key in x][:2]}")
+            elif _seqval(w3, key) != f"[MGMT:SEQVAL,{me}]{key},OK,{value}":
+                problems.append("the 3999-character value did not read back whole")
+        finally:
+            _clear_seq(w3, key)
     assert not problems, "; ".join(problems)
 
 

@@ -146,7 +146,8 @@
     "navicore_wire",
     "navicore_webserial",
     "intellex_flash_factory",
-    "intellex_wifi_join"
+    "intellex_wifi_join",
+    "camera"
   ],
   "navicore_repo": "C:/Users/ghulette/.claude-worktrees/NaviCore/hil-week",
   "fixtures": {

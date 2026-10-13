@@ -569,6 +569,86 @@ def reset_legacy(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("led.pin_moves_camera", "(should) OPT-IN (camera): the bench camera sees W3's status LED follow ?LED,PIN: lit (idle blue) on its own GPIO48; ?LED,PIN,38 blanks the GPIO48 pixel it leaves, which stays dark through the reboot after, which prints 'LED pin override from NVS: GPIO38'; ?LED,PIN,48 lights it again and the reboot after keeps it lit ('LED pin override from NVS: GPIO48'); GPIO48 is put back and seen lit in a finally (2 W3 reboots)", needs=["wcb3"], links=[], opt_in="camera")
+def led_pin_moves_camera(bench):
+    """Coverage re-scan 2026-10-12, led.set_pin_persist / led.pin, the half that needs eyes. The ?LED handler (WCB.ino)
+    saves the pin (saveStatusLEDPin, led_config), sets STATUS_LED_PIN and re-runs initStatusLEDWithRetry on the new pin,
+    then turnOffLED shows the idle colour there; the next boot reads the override back (WCB_Storage.cpp, 'LED pin override
+    from NVS'). W3 (HW 3.2) carries its RGB pixel on GPIO48, while the HW 3.x pin map's default 38 has nothing on it
+    (bench.json wcb3 note). hil/benchcam.py counts the blue-LED pixels in W3's LED window of the bench camera's frame,
+    eight frames a look: 'lit' is a median of at least half the first look's, 'dark' every frame under 15% of it; each
+    look's last frame, the window drawn, is saved in the run folder as led_w3_<step>.jpg.
+
+    Probable firmware defect (run 20261013-001100): the move re-initialises the NeoPixel on the new pin but never
+    blanks the old one. initStatusLEDWithRetry deletes the old Adafruit_NeoPixel, whose destructor only returns its pin
+    to input, and a WS2812 keeps its last colour for as long as it is powered, so the GPIO48 pixel went on showing idle
+    blue after ?LED,PIN,38 and through the reboot on 38 (about 970-1010 blue pixels a frame, the same as lit) - a status
+    LED that no longer reports anything, until power is cut. The fix: clear the pixel and show() it before the pin
+    changes. Moving back to 48 and both reboots' 'LED pin override from NVS' lines already behave."""
+    import os
+    import statistics
+    import tempfile
+    from hil import benchcam
+    from hil.wcb import WCB
+    if 3 not in bench.usb_wcbs():
+        raise Skip("W3 has no USB console here")
+    if not benchcam.available():
+        raise Skip("the bench camera's venv (~/.venvs/benchcam) is not installed on this host")
+    w3 = WCB(bench.dev(bench.usb_wcbs()[3]))
+    window = benchcam.w3_led_window(bench.cfg)
+    out_dir = bench.out_dir or tempfile.gettempdir()
+    problems, looks = [], {}
+
+    def look(step):
+        counts = benchcam.blue_light(os.path.join(out_dir, f"led_w3_{step}.jpg"), window)
+        looks[step] = counts
+        return counts
+
+    with config_guard(bench, 3) as before:
+        if token(before[3], "?LED,PIN,") != "?LED,PIN,48":
+            raise Skip(f"W3's chain does not hold ?LED,PIN,48 ({token(before[3], '?LED,PIN,')})")
+        ref = statistics.median(look("0_gpio48"))
+        if ref < 150:
+            raise Skip(f"the camera sees no lit LED in W3's window ({looks['0_gpio48']} blue pixels): check the camera "
+                       f"and benchcam.W3_LED_WINDOW against led_w3_0_gpio48.jpg in the run folder")
+
+        def expect(step, lit, when):
+            c = look(step)
+            ok = statistics.median(c) >= 0.5 * ref if lit else max(c) <= 0.15 * ref
+            if not ok:
+                problems.append(f"{when}: W3's LED should be {'lit' if lit else 'dark'}, blue pixels {c} "
+                                f"(lit reference {ref:.0f}; see led_w3_{step}.jpg)")
+
+        def boot_says(bm, pin, when):
+            if not any(x.rstrip() == f"LED pin override from NVS: GPIO{pin}" for x in w3.dev.since(bm)):
+                problems.append(f"{when}: no 'LED pin override from NVS: GPIO{pin}' boot line")
+
+        moved = False
+        try:
+            out = w3.run("?LED,PIN,38", timeout=8)
+            moved = True
+            if not _has(out, "LED pin changed to GPIO38. Reinitializing LED..."):
+                raise AssertionError(f"?LED,PIN,38 on W3 printed {out[:3]}")
+            expect("1_gpio38", False, "after ?LED,PIN,38")
+            bm = w3.reboot()
+            boot_says(bm, 38, "the reboot on GPIO38")
+            expect("2_gpio38_rebooted", False, "after the reboot on GPIO38")
+            out = w3.run("?LED,PIN,48", timeout=8)
+            if not _has(out, "LED pin changed to GPIO48. Reinitializing LED..."):
+                problems.append(f"?LED,PIN,48 on W3 printed {out[:3]}")
+            expect("3_gpio48", True, "after ?LED,PIN,48")
+            bm = w3.reboot()
+            boot_says(bm, 48, "the reboot on GPIO48")
+            expect("4_gpio48_rebooted", True, "after the reboot on GPIO48")
+            moved = False
+        finally:
+            if moved:
+                w3.run("?LED,PIN,48", timeout=8)
+                expect("9_restored", True, "after GPIO48 was put back")
+    bench.note(f"W3 LED blue pixels per look: {looks}")
+    assert not problems, "; ".join(problems)
+
+
 @test("bcast.reset_survives_reboot", "?BCAST,RESET with S0 echo on and S3 shut both ways prints the Created lines and 'Done. Broadcast output re-enabled and input blocking cleared on S1-S5 (device ports included), S0 echo off.'; at once and again after a W1 reboot the chain holds every port ON/ON and S0 OFF, a typed broadcast reaches S3 and is not echoed on USB, and a line typed into S3 is broadcast, not blocked; the baseline flags are replayed (1 reboot)", needs=["wcb1"])
 def bcast_reset_survives_reboot(bench):
     """Coverage re-scan 2026-10-12, bcastcmd.reset. resetBroadcastSettingsNamespace (WCB_Storage.cpp) clears bdcst_set,

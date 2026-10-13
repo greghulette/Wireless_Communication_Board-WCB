@@ -758,6 +758,16 @@ def _banner_problems(banner, toks, version, live):
     # sequence, and the file holds one '<key>,<value>\n' line each, so its size follows from the chain's ?SEQ,SAVE tokens
     seqs = [t for t in toks if t.upper().startswith("?SEQ,SAVE,")]
     size = sum(len(t) - len("?SEQ,SAVE,") + 1 for t in seqs)
+    # printBootloaderInfo and the status-LED init (WCB.ino; coverage re-scan 2026-10-12, boot.bootloader_info and
+    # boot.neopixel_init): a classic ESP32 runs the stock bootloader; HW 2.x/3.x initialise the NeoPixel (the retry
+    # loop's success line follows), HW 1.0 drives a plain LED pin and prints neither
+    if hw in (1, 21, 23, 24) and not any(x.startswith("Bootloader: stock (IDF ") for x in banner):
+        p.append(f"no 'Bootloader: stock (IDF ...' line on a classic board: {[x for x in banner if x.startswith('Bootloader')]}")
+    neo = ["Initializing NeoPixel LED...", "✅ NeoPixel initialized successfully"]
+    if hw in (21, 23, 24, 31, 32):
+        p += _in_order(banner, neo, "NeoPixel init")
+    elif hw == 1 and any(x in neo for x in banner):
+        p.append("HW 1.0 has no NeoPixel, yet the banner initialised one")
     seq_line = next((x for x in banner if x.startswith("[SEQ] ") and " stored sequence(s) in the sequence store (" in x),
                     None)
     if seq_line is None:
@@ -839,7 +849,54 @@ def _cut(lines):
     return lines[s:e + 1]
 
 
-@test("boot.banner_w1", "After a reboot, W1's boot banner matches its config chain line by line: identity block, port rows with baud, flags and labels, MAC and peers, controller, WiFi, general settings, loaded devices and routes, Kyber mode, the Maestro table in slot order, learned peers against ?PEERSLIVE, the sequence store's count and size line (1 reboot)", needs=["wcb1"], links=[])
+@test("config.print_sections", "?config with S5's input blocked lists '    Serial5 input blocked' (with S5's label) under 'Broadcast Blocking:'; it shows 'Controller Peer:          ENABLED (ID n)' and a 'WCBn (controller)' peer row exactly when the chain enables the controller; and while W2 is up its peer row reads 'WCB2: 02:<oct2>:<oct3>:00:00:02  Online (last seen Ns ago)' (read-only but for the S5 flag)", needs=["wcb1"], links=[])
+def config_print_sections(bench):
+    """Coverage re-scan 2026-10-12, config.print. printConfigInfo (WCB.ino) prints the RAM tables: the Broadcast Blocking
+    block lists each port whose input is blocked with its label in brackets (or 'None'), the Peers block a row per
+    member with Online (last seen) while ETM sees it, the controller row and the Command Settings' Controller Peer line
+    only while specialPeerEnabled. ?config prints the mesh password: every line naming a password is dropped before
+    anything is checked or quoted. The Mirror lines are dead code (known: WCB-WP59)."""
+    from suites.s99_etm import _peers_online
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        lab = token(before[1], "?LABEL,S5,")
+        flag = token(before[1], "?BCAST,IN,S5,") or "?BCAST,IN,S5,ON"
+        o2 = (token(before[1], "?MAC,2,") or "?MAC,2,??")[len("?MAC,2,"):].upper()
+        o3 = (token(before[1], "?MAC,3,") or "?MAC,3,??")[len("?MAC,3,"):].upper()
+        _peers_online(bench, w, strict=False)
+        try:
+            w.run("?BCAST,IN,S5,OFF")
+            cfg = [x.rstrip() for x in w.run("?config", timeout=8) if "password" not in x.lower()]
+        finally:
+            w.run(flag)
+    if "  Broadcast Blocking:" not in cfg or "  Serial Monitoring:" not in cfg:
+        problems.append("?config has no Broadcast Blocking / Serial Monitoring blocks")
+    else:
+        block = cfg[cfg.index("  Broadcast Blocking:") + 1:cfg.index("  Serial Monitoring:")]
+        want = "    Serial5 input blocked" + (f" ({lab.split(',', 2)[2]})" if lab else "")
+        if want not in block:
+            problems.append(f"Broadcast Blocking lists {block}, not {want.strip()!r}")
+    c = token(before[1], "?CONTROLLER,ON,")
+    on = c is not None and "?CONTROLLER,OFF" not in before[1]
+    ctl = [x for x in cfg if x.startswith("Controller Peer:")]
+    rows = [x for x in cfg if re.match(r"^  WCB\d+ \(controller\): ", x)]
+    if on:
+        cid = int(c.split(",")[2])
+        if ctl != [f"Controller Peer:          ENABLED (ID {cid})"]:
+            problems.append(f"the chain enables controller {cid}; ?config says {ctl}")
+        if not any(x.startswith(f"  WCB{cid} (controller): 02:{o2}:{o3}:00:00:{cid:02X}  ") for x in rows):
+            problems.append(f"no peer row for controller WCB{cid}: {rows}")
+    elif ctl or rows:
+        problems.append(f"no controller in the chain, yet ?config shows {ctl + rows}")
+    if "?ETM,ON" in before[1]:
+        rx = rf"^  WCB2: 02:{o2}:{o3}:00:00:02  Online \(last seen \d+s ago\)$"
+        if not any(re.match(rx, x) for x in cfg):
+            problems.append(f"W2's peer row is {[x for x in cfg if x.startswith('  WCB2:')]}")
+    assert not problems, "; ".join(problems)
+
+
+@test("boot.banner_w1", "After a reboot, W1's boot banner matches its config chain line by line: identity block, port rows with baud, flags and labels, MAC and peers, controller, WiFi, general settings, loaded devices and routes, Kyber mode, the Maestro table in slot order, learned peers against ?PEERSLIVE, the sequence store's count and size line, the stock bootloader line and, on HW 2.x/3.x, the NeoPixel init lines (1 reboot)", needs=["wcb1"], links=[])
 def banner_w1(bench):
     w = usb_wcb(bench)
     toks = snapshot(bench, 1)

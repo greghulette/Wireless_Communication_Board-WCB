@@ -21,6 +21,14 @@ OPT_INS = {
         "why": "about 100 whole-blob NVS writes",
         "estimate_s": 20,
     },
+    "camera": {
+        "title": "Bench camera checks",
+        "what": "Reads the bench webcam (Microsoft LifeCam, ~/.venvs/benchcam) to see a board's LED: W3's status LED is "
+                "moved off its GPIO48 pixel and back, with two W3 reboots. Needs the camera aimed as when the window in "
+                "hil/benchcam.py was measured, and camera access for the app the harness runs under.",
+        "why": "reads the bench camera; moves W3's status LED off GPIO48 and back with two W3 reboots",
+        "estimate_s": 90,
+    },
     "seq_wipe": {
         "title": "Wipe all sequences",
         "what": "Clears every W1 sequence with ?SEQ,CLEAR,ALL and ?CCLEAR, then replays them; a failed replay loses them.",

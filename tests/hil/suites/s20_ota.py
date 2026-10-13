@@ -458,6 +458,38 @@ def usb_rx_overflow_line(bench):
                                  f"reader held: the overflow was not counted, or the ring held it all")
 
 
+@test("ota.relay_crc_drop_blames_overflow", "A relay DATA line dropped for its CRC names a USB RX overflow as the cause only when one just happened: with none, '[OTA] relay DATA @0 DROPPED: crc 0BC0B3E6 != DEADBEEF (b64 4 chars)' ends there; queued behind 700 ?VERSION while 6 s of CRs overflow the ring, the same line ends ' — serial RX HAS OVERFLOWED, this is the cause' (no OTA session; ~15 s)", needs=["wcb1"], links=[])
+def relay_crc_drop_blames_overflow(bench):
+    """Coverage re-scan 2026-10-12, ota.relay_parse. processOtaRelayCommand (WCB_OTA.cpp) appends the blame when
+    serialRxOverflows is non-zero and the last overflow (serialRxOverflowLastMs, set by onReceiveError, WCB.ino) is
+    under 2 s old. stats.usb_rx_overflow_line's flood makes the overflow; here the DATA line is the chain's last token,
+    so it runs right after the 700th ?VERSION, while the CRs - longer than the reader is held, so the ring overflows
+    until it resumes - put the last overflow about a second earlier. Target 2 and session 4242: a dropped line sends
+    nothing."""
+    w = usb_wcb(bench)
+    plain = "[OTA] relay DATA @0 DROPPED: crc 0BC0B3E6 != DEADBEEF (b64 4 chars)"
+    blame = plain + " — serial RX HAS OVERFLOWED, this is the cause"
+    out = [x.rstrip() for x in w.run("?OTA,DATA,2,4242,0:DEADBEEF,AAAA")]
+    assert plain in out, f"with no recent overflow the drop line is {[x for x in out if 'DROPPED' in x]}"
+    before = _rx_overflows(w)
+    m = w.dev.mark()
+    w.dev.send("^".join(["?VERSION"] * 700) + "^?OTA,DATA,2,4242,0:DEADBEEF,AAAA")
+    for _ in range(12):                                   # 6 s of CRs; a write is bounded by its 2 s write_timeout
+        w.dev.send("\r" * 5750, eol="")
+    try:
+        w.dev.expect(r"DROPPED: crc 0BC0B3E6 != DEADBEEF", timeout=40, since=m)
+    except AssertionError:
+        raise AssertionError("the queued DATA line printed no DROPPED line") from None
+    time.sleep(1.0)
+    after = _rx_overflows(w)
+    got = next(x.rstrip() for x in w.dev.since(m) if "DROPPED: crc 0BC0B3E6" in x)
+    versions = sum(x.count("Software Version:") for x in w.dev.since(m))
+    bench.note(f"RX overflows {before} -> {after}; {versions} of 700 ?VERSION ran; drop line {got!r}")
+    if after <= before:
+        raise Skip("the flood did not overflow the RX ring, so there was nothing to blame")
+    assert got == blame, f"right after an overflow the drop line is {got!r}"
+
+
 # ============================================================ OPT-IN ota_erase: small local sessions on W1
 ABORTED = "[OTA] aborted: local abort command (current app intact)"
 
