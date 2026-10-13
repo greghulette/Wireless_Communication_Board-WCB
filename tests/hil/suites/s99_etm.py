@@ -943,3 +943,110 @@ def char_relay_ignored_while_running(bench):
 def _has_line(lines, pattern):
     rx = re.compile(pattern)
     return any(rx.search(x) for x in lines)
+
+
+# ============================================================ #112 stress: mirrored console under ?backup load
+STALL_LINE = "[MESH] ESP-NOW transmit stalled"
+STRESS_S = 600
+
+
+def _radio_sample(w):
+    """(free, largest block, min free since boot, frames not sent) from W1's ?STATS: byte heap and wcbEspNowDropped."""
+    out = [x.rstrip() for x in w.run("?STATS", timeout=15)]
+    heap = next((re.match(r"^Heap: (\d+) free, largest block (\d+), min free since boot (\d+)", x) for x in out
+                 if x.startswith("Heap: ")), None)
+    drop = next((re.match(r"^ESP-NOW: (\d+) frame\(s\) not sent", x) for x in out if x.startswith("ESP-NOW: ")), None)
+    if heap is None:
+        raise AssertionError("W1's ?STATS printed no Heap line")
+    return (int(heap.group(1)), int(heap.group(2)), int(heap.group(3)), int(drop.group(1)) if drop else 0)
+
+
+@test("etm.rterm_backup_stress", "OPT-IN (etm_stress): tracker #112's load for 10 minutes - W1 mirrors its console to NaviCore (?RTERM,START,20, re-armed every 10 s) while it prints a ?backup every 5 s and sends W2 a unicast every 3 s: W1 never reports '[MESH] ESP-NOW transmit stalled', a unicast still reaches W2 at the end, and W1's free heap does not drain (its last sample at most 4 KB under its first, never under 10 KB); the heap trend, the radio's not-sent count and the unicasts delivered go to the run notes", needs=["wcb1", "wcb2", "navicore"], links=["W2S2"], opt_in="etm_stress")
+def rterm_backup_stress(bench):
+    """Tracker #112: on 2026-10-12 W1's ESP-NOW transmit wedged about 3 minutes after boot while it mirrored every
+    console line to NaviCore over remote-terminal sessions and printed big ?backup outputs, and stayed wedged for two
+    hours (8 frames in flight, thousands of 'radio's queue stayed full', the byte heap down to 5.5 KB) until a reboot.
+    This reproduces that load for a bounded time. Each mirrored line is an ESP-NOW unicast to the relay
+    (WCBSerial::_flushLine -> wcbEspNowSend, WCB_RemoteTerm.cpp), so a ?backup puts its whole output on the air; the
+    session expires 30 s after its last re-arm (RTERM_IDLE_MS), hence the re-arm every 10 s. wcbEspNowReportDrops
+    (WCB_EspNow.cpp) prints the stall line from loop() when nothing completes for ESPNOW_STALL_REPORT_MS while frames
+    are given up. The test stops early on a stall, stops the mirror, samples W1, and reboots W1 so the bench goes on;
+    the firmware is left as it is (no self-recovery): the result is the finding."""
+    w = usb_wcb(bench)
+    w2s2 = link(bench, 2, "S2")
+    samples, uni, problems = [], [], []
+    stalled, rebooted = None, False
+    with config_guard(bench, 1, 2):
+        s0 = _radio_sample(w)
+        samples.append((0, s0))
+        m0, um = w.dev.mark(), w2s2.mark()
+        t0 = time.monotonic()
+        next_arm = next_backup = next_uni = 0.0
+        next_sample = 60.0
+        try:
+            while True:
+                el = time.monotonic() - t0
+                if el >= STRESS_S:
+                    break
+                if el >= next_arm:
+                    w.send("?RTERM,START,20")
+                    next_arm = el + 10
+                if el >= next_backup:
+                    w.send("?backup")
+                    next_backup = el + 5
+                if el >= next_uni:
+                    t = marker("s")
+                    w.send(f";W2,;S2{t}")
+                    uni.append(t)
+                    next_uni = el + 3
+                if el >= next_sample:
+                    samples.append((round(el), _radio_sample(w)))
+                    next_sample = el + 60
+                stall = next((x.rstrip() for x in w.dev.since(m0) if STALL_LINE in x), None)
+                if stall:
+                    stalled = (round(el), stall)
+                    break
+                time.sleep(0.25)
+        finally:
+            w.send("?RTERM,STOP")
+            time.sleep(2.0)
+        lines = [x.rstrip() for x in w.dev.since(m0)]
+        stall = stalled or next(((None, x) for x in lines if STALL_LINE in x), None)
+        end = _radio_sample(w)
+        samples.append((round(time.monotonic() - t0), end))
+        got = w2s2.received(um)
+        delivered = sum(1 for t in uni if t.encode() in got)
+        last_ok = False
+        for _ in range(3):                                # delivery still works once the load is off
+            t = marker("e")
+            mk = w2s2.mark()
+            w.send(f";W2,;S2{t}")
+            try:
+                w2s2.expect(t.encode(), timeout=5, since=mk)
+                last_ok = True
+                break
+            except AssertionError:
+                time.sleep(2.0)
+        not_sent = sum(int(g.group(1)) for g in (re.match(r"^\[MESH\] (\d+) ESP-NOW frame\(s\) not sent", x)
+                                                  for x in lines) if g)
+        what = f"STALLED at {stall[0]} s: {stall[1][:160]}" if stall else "no stall"
+        trend = [(s, h[0], h[1], h[2], h[3]) for s, h in samples]
+        bench.note(f"etm.rterm_backup_stress: {what} in {samples[-1][0]} s; heap (s, free, largest, min since boot, "
+                   f"not-sent total) {trend}; '[MESH] ... not sent' lines summed {not_sent}; "
+                   f"unicasts to W2 delivered {delivered}/{len(uni)}; delivery after the load "
+                   f"{'OK' if last_ok else 'FAILED'}")
+        if stall:
+            problems.append(f"W1 reported its ESP-NOW transmit stalled ({stall[1][:160]})")
+        if not last_ok:
+            problems.append("after the load a unicast from W1 no longer reached W2 S2")
+        frees = [h[0] for _, h in samples]
+        if min(frees) < 10240:
+            problems.append(f"W1's free heap fell to {min(frees)} bytes")
+        if frees[-1] < frees[0] - 4096:
+            problems.append(f"W1's free heap drained from {frees[0]} to {frees[-1]} bytes")
+        if stall or not last_ok:
+            w.reboot()                                    # a wedged transmit stays wedged until a reboot (#112)
+            rebooted = True
+    if rebooted:
+        bench.note("etm.rterm_backup_stress: W1 was rebooted after the run to clear its transmit")
+    assert not problems, "; ".join(problems)

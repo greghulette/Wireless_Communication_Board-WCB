@@ -2268,6 +2268,11 @@ GATED = {
     "var.cap_persistent_full": ("nvs_wear", "about 100 whole-blob NVS writes"),
     "seq.clear_all_empty_hash": ("seq_wipe", "wipes W1's sequences and replays them"),
     "led.pin_moves_camera": ("camera", "reads the bench camera; moves W3's status LED off GPIO48 and back with two W3 reboots"),
+    **{t: ("fault_nvs", "writes a state no command can make into W2's saved settings and puts it back")
+       for t in ("seq.damaged_lines_skipped", "boot.baud_zero_repaired", "ident.hw_other_chip_ignored_at_boot")},
+    "wifi.join_fault_arms": ("wifi_modes", "joins W1 to W2's access point and reboots W1 twice"),
+    "etm.rterm_backup_stress": ("etm_stress", "mirrors W1's console to NaviCore under repeated ?backup output for 10 "
+                                              "minutes"),
     "wifi.off_and_back": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
     "wifi.join_w2_ap": ("wifi_modes", "changes W1's WiFi mode and reboots it four times"),
     "wifi.ap_derived_ssid_boot": ("wifi_modes", "changes W1's access point name and reboots it twice"),

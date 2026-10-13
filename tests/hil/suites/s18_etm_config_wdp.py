@@ -1617,6 +1617,90 @@ def autojoin_off_ignores_probe(bench):
     assert not bad, "; ".join(bad)
 
 
+CLIENT_MB = "7@57600.8@0.6"      # MESH MAESTRO 7:57600,8:0,6:12345 as ?WDP,DUMP's [WDPX:...MB=] shows it
+
+
+def _wdpx_mb(w, n):
+    return next((_field(x, "MB") for x in _dump(w) if x.startswith(f"[WDPX:N={n},")), None)
+
+
+def _wait_mb(w, n, want, timeout=12.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        got = _wdpx_mb(w, n)
+        if got == want or time.monotonic() > deadline:
+            return got
+        time.sleep(1.5)
+
+
+@test("wdp.client_maestros_not_configured", "Maestros a WCB_Client advertises (wcb_probe MESH MAESTRO: 7 at 57600, 8 at 0, 6 at a rate off the WDP table) configure no proxy on W1 or W2: joined as a permanent client the probe is auto-joined (PEER=2) and W1's ?WDP,DUMP shows MB=7@57600.8@0.6, yet nothing is auto-added - only a non-client peer or the pinned controller may; rejoined as a TEMPORARY client it is downgraded and the same advert adds nothing either; both chains keep their ?MAESTRO lines and no peer is left behind (~70 s)", needs=["wcb1", "wcb2", "probe2"], links=[])
+def client_maestros_not_configured(bench):
+    """Coverage re-scan 2026-10-12, wdp.autoconfig_gating (a non-controller client advertising devices; a temporary
+    client with a MAESTRO_CFG TLV) and maestro.wdp_auto_add_gating (the temporary exclusion). wdpOnAdvertReceived
+    (WCB_WDP.cpp) runs the device auto-config only with auto-join on, for a peer that is not temporary AND is either
+    the pinned controller or a non-client active peer. A permanent client passes the temporary gate, so only the client
+    gate keeps its 57600 Maestro out. A temporary client is held by the temporary gate first and the client gate
+    behind it, so that half shows the pair, not the temporary gate alone. The baud-0 / off-table skip after those gates
+    is out of a client's reach: it needs a non-client advert (a WCB's own), which no probe verb makes. The advert's
+    content is checked from ?WDP,DUMP's MB field, so a missing advert cannot pass for a refused one. Cleanup: the
+    temporary advert downgrades the learned peer on every WCB and on NaviCore's client (WCB_Client drops a permanent
+    peer that turns temporary), and ?WDP,FORGET removes the rest."""
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    n = 16
+    _require_id_free(w, n)
+    if any(re.match(r"^\?MAESTRO,M[678]:W16S", t, re.I) for t in bench.config_tokens(1, refresh=True)):
+        raise Skip("W1 already has a Maestro proxy on WCB16")
+    params = mesh_params(bench)
+    probe = bench.probe("probe2")
+    problems, joined = [], False
+    with config_guard(bench, 1, 2):
+        m1, m2 = w.dev.mark(), w2.dev.mark()
+        try:
+            for l in bench.links.all() + bench.links.nc_all():
+                if l.probe_name == "probe2":
+                    bench.links.release(l)
+            for temporary in (False, True):
+                if joined:
+                    probe.mesh_leave()
+                    joined = False
+                jm = w.dev.mark()
+                probe.mesh_join(n, params["oct2"], params["oct3"], params["password"], params["quantity"],
+                                channel=params["channel"], checksum=params["checksum"], temporary=temporary)
+                joined = True
+                probe.mesh_maestro([(7, 57600), (8, 0), (6, 12345)])
+                what = "TEMPORARY" if temporary else "permanent"
+                want = (rf"^\[WDP\] downgraded to temporary WCB{n} HILProbe \(temporary\)" if temporary
+                        else rf"^\[WDP\] auto-joined WCB{n} HILProbe \(client\)")
+                try:
+                    w.dev.expect(want, timeout=20, since=jm)
+                except AssertionError:
+                    problems.append(f"W1 did not {'downgrade' if temporary else 'auto-join'} the {what} client")
+                got = _wait_mb(w, n, CLIENT_MB)
+                if got != CLIENT_MB:
+                    problems.append(f"as a {what} client W1's ?WDP,DUMP shows MB={got}, not {CLIENT_MB}: the advert "
+                                    f"did not carry the Maestros")
+                peer = _field(_row(_dump(w), n), "PEER")
+                if peer != ("4" if temporary else "2"):
+                    problems.append(f"as a {what} client W1's row says PEER={peer}")
+                time.sleep(3.0)                          # another advert, so a late auto-add would show
+        finally:
+            try:
+                if joined:
+                    probe.mesh_leave()
+            finally:
+                bench.links.forget_probe("probe2")
+                w.run(f"?WDP,FORGET,{n}")
+                for r in remote_wcbs(bench):
+                    w.send(f";W{r},?WDP,FORGET,{n}")
+                time.sleep(1.0)
+        added = [x.rstrip() for x in w.dev.since(m1) + w2.dev.since(m2) if "auto-added remote Maestro" in x]
+        if added:
+            problems.append(f"a client's advert auto-added Maestros: {added}")
+        if _row(_dump(w), n):
+            problems.append(f"W1 still lists WCB{n} after the probe left and was forgotten")
+    assert not problems, "; ".join(problems)
+
+
 @test("etm.rx_crc_gate_probe", "W1's receive CRC gate: a missing or wrong |CRC suffix is rejected and a correct one runs; W1's own suffix format (~40 s)", needs=["wcb1", "probe2"])
 def rx_crc_gate_probe(bench):
     """The probe joins with checksums off, so it sends and receives the suffix verbatim (WCB_Client.cpp:2303-2309).

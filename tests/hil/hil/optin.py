@@ -242,6 +242,23 @@ OPT_INS = {
         "why": "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)",
         "estimate_s": 90,
     },
+    "fault_nvs": {
+        "title": "Fault knobs that write saved settings",
+        "what": "Uses the ?DEBUG,FAULT knobs that write a state no command can make straight into a board's saved "
+                "settings, and puts each back: a baud of 0 for one W2 port (two W2 reboots), the other chip's hardware "
+                "version on W2 (one W2 boot with no pin map, then ?HW and a reboot) and damaged lines in W2's sequence "
+                "store (dropped by the rewrite that ends the test).",
+        "why": "writes a state no command can make into W2's saved settings and puts it back",
+        "estimate_s": 60,
+    },
+    "etm_stress": {
+        "title": "Remote-terminal mirror stress (#112, 10 min)",
+        "what": "Tracker #112's load for 10 minutes: W1 mirrors its console to NaviCore (?RTERM,START,20, re-armed "
+                "every 10 s) while it prints a ?backup every 5 s and sends W2 a unicast every 3 s. W1's console and "
+                "the mesh are busy meanwhile; W1 is rebooted at the end if its ESP-NOW transmit wedged.",
+        "why": "mirrors W1's console to NaviCore under repeated ?backup output for 10 minutes",
+        "estimate_s": 660,
+    },
     "etm_seq_wrap": {
         "title": "ETM sequence wrap (~7 min flood)",
         "what": "Drives W1's 16-bit ETM sequence counter past 65,535 with about 65,000 untracked JSON broadcasts typed "

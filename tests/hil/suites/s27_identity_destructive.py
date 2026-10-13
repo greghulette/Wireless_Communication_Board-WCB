@@ -25,8 +25,9 @@ import re
 import time
 
 from hil.runner import Skip, test
-from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, prime, require_tokens, snapshot,
-                           token, usb_wcb)
+from hil.wcb import WCB
+from suites.common import (Console, Watch, absent_wcbs, config_guard, fault, link, marker, prime, require_tokens,
+                           snapshot, token, usb_wcb)
 from suites.s14_pwm import _no_pwm, _pwm_reboot
 from suites.s22_maestro_kyber import _kyber_list, _require_kyber_broadcast_remote, _restore_remote, _wdp_off
 from suites.s99_etm import _peers_online
@@ -407,6 +408,69 @@ def hw_other_chip_refused(bench):
         finally:
             if took:
                 w.run(f"?HW,{orig}")
+    assert not problems, "; ".join(problems)
+
+
+PIN_LINE = re.compile(r"^  Serial(\d)\b.*Pins: Tx:(\d+) Rx:(\d+)")
+HW_NAMES = {"1": "1.0", "21": "2.1", "23": "2.3", "24": "2.4", "31": "3.1", "32": "3.2"}
+
+
+def _boot_pins(lines):
+    """{port: (tx, rx)} from a boot banner's port lines (printBaudRates)."""
+    out = {}
+    for x in lines:
+        m = PIN_LINE.match(x.rstrip())
+        if m:
+            out[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
+    return out
+
+
+@test("ident.hw_other_chip_ignored_at_boot", "A hardware version saved for the other chip family (?DEBUG,FAULT,HWOTHER on W2 writes 3.2, as older firmware's ?HW allowed) is ignored at the next boot: '[HW] Saved HW version 32 is for the other chip - ignored. Set the right one with ?HW,<n>.', 'SET YOUR HARDWARE VERSION BEFORE PROCEEDING!!', every port on GPIO5 and the chain at ?HW,0; W2's own ?HW and a reboot bring back its version line and exactly its pin map (3 W2 reboots)", needs=["wcb2"], links=[], opt_in="fault_nvs")
+def hw_other_chip_ignored_at_boot(bench):
+    """Coverage re-scan 2026-10-12, hw.load_boot (the other-chip arm) and ident.hw_version (a stored other-family value
+    ignored at load). loadHWversion (WCB_Storage.cpp) drops a saved version hwVersionFitsChip refuses, so a classic
+    board with an S3 version boots with no pin map (updatePinMap's version 0: every port on GPIO5, the LED on 19)
+    instead of mapping ports onto flash pins; saveHWversion refuses the other family, so only the HWOTHER knob
+    (WCB_Fault.h) can store it. W2 is a classic V2.4 board; GPIO5 is wired to nothing on the bench. The first reboot
+    records W2's own banner, the last proves the same pins came back."""
+    w2 = WCB(bench.dev("wcb2"))
+    problems = []
+    with config_guard(bench, 2) as before:
+        own = token(before[2], "?HW,")
+        own = own.split(",")[1] if own else None
+        if own not in ("1", "21", "23", "24"):
+            raise Skip(f"W2's chain says ?HW,{own}: the test needs a classic board with its version set")
+        m = w2.reboot()
+        pins0 = _boot_pins(w2.dev.since(m))
+        if len(pins0) != 5:
+            raise AssertionError(f"W2's own boot banner gave pins for {sorted(pins0)}, not all five ports")
+        written = False
+        try:
+            fault(w2, "HWOTHER")
+            written = True
+            m = w2.reboot()
+            boot = [x.rstrip() for x in w2.dev.since(m)]
+            if "[HW] Saved HW version 32 is for the other chip - ignored. Set the right one with ?HW,<n>." not in boot:
+                problems.append("the boot did not say it ignored the saved version 32")
+            if "SET YOUR HARDWARE VERSION BEFORE PROCEEDING!!" not in boot:
+                problems.append("the boot banner did not ask for a hardware version")
+            pins = _boot_pins(boot)
+            if set(pins.values()) != {(5, 5)} or len(pins) != 5:
+                problems.append(f"with the version ignored the ports are on {pins}, not all on GPIO5")
+            hw = token(snapshot(bench, 2), "?HW,")
+            if hw != "?HW,0":
+                problems.append(f"with the version ignored the chain says {hw}, not ?HW,0")
+        finally:
+            if written:
+                out = [x.rstrip() for x in w2.run(f"?HW,{own}")]
+                if f"Saved HW Ver: {HW_NAMES[own]} to NVS.  Reboot to take effect!" not in out:
+                    problems.append(f"?HW,{own} printed {out[:2]}")
+                m = w2.reboot()
+                boot = [x.rstrip() for x in w2.dev.since(m)]
+                if f"HW Version: {HW_NAMES[own]}" not in boot:
+                    problems.append(f"after ?HW,{own} the banner has no 'HW Version: {HW_NAMES[own]}' line")
+                if _boot_pins(boot) != pins0:
+                    problems.append(f"after ?HW,{own} the ports are on {_boot_pins(boot)}, not {pins0} as before")
     assert not problems, "; ".join(problems)
 
 

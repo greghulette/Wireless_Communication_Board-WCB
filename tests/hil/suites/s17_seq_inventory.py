@@ -20,7 +20,7 @@ import time
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
 from hil.wcb import PULL_SPACING_S, WCB, PullCollector, PullRefused, chain_crc, pull_config
-from suites.common import Console, config_guard, link, marker, nonce, snapshot, token, usb_wcb
+from suites.common import Console, config_guard, fault, fault_off, link, marker, nonce, snapshot, token, usb_wcb
 from suites.s03_wcb import backup_chain_problems
 
 NAMES_RX = re.compile(r"^\[MGMT:SEQ,(\d+)\]([0-9A-F]{8}),(\d+)((?:,[^,]+)*)$")
@@ -1438,6 +1438,77 @@ def _store_or_skip(w):
     return s
 
 
+@test("inv.seq_store_unreadable_retry_served", "A sequence request W2 cannot serve because its store will not read (?DEBUG,FAULT,SEQREAD) is left unanswered with an ungated line - '[MGMT] Could not read the sequence store for WCB1's request - not answered' for ?MGMT,SEQ,2 and \"[MGMT] Could not read sequence '<key>' for WCB1 (...) - not answered\" for ?MGMT,SEQGET - and the dedup is cleared, so the next copy of W1's 3-copy burst is answered: W1 still gets the names and the value, exactly; W2's own ?SEQ,NAMES and ?SEQ,GET say they could not read it", needs=["wcb1", "wcb2"], links=[])
+def seq_store_unreadable_retry_served(bench):
+    """Coverage re-scan 2026-10-12, mgmt.seq_store_unreadable_unanswered. handleSeqReqPacket / handleSeqValReqPacket
+    (WCB.ino) answer nothing when buildSequenceNamesString / seqStoreGet cannot read the store (it will not mount on a
+    low heap): a WCB_Client reads any reply as an inventory, so no answer beats a wrong one, and lastSeqReqFrom /
+    lastSeqValFrom = 0 lets the requester's retry through. The requester sends each request 3 times 15 ms apart
+    (handleMgmtSeqRequest), so the second copy is that retry. No bench heap fails the read, so the SEQREAD knob
+    (WCB_Fault.h) fails the next seqStoreKeyList / seqStoreGet once. The local spellings (processLocalCommand's ?SEQ
+    branch) are checked the same way. A throwaway sequence is stored on W2 for the value request and cleared."""
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    key, value = "HILSR" + nonce()[:4], ";S0," + marker("v")
+    problems = []
+    with config_guard(bench, 2) as before:
+        if any(x.upper().startswith(f"?SEQ,SAVE,{key},") for x in before[2]):
+            raise Skip(f"W2 already stores {key}")
+        try:
+            if not _has(w2.run(f"?SEQ,SAVE,{key},{value}"), f"Stored: Key='{key}'"):
+                raise AssertionError(f"setup: W2 did not store {key}")
+            want = next(x.rstrip() for x in w2.run("?SEQ,NAMES") if x.startswith("[MGMT:SEQ,"))
+            want = "[MGMT:SEQ,2]" + want.split("]", 1)[1]
+            # the names, over the mesh
+            fault(w2, "SEQREAD")
+            m, m2 = w.dev.mark(), w2.dev.mark()
+            w.send("?MGMT,SEQ,2")
+            try:
+                got = w.dev.expect(r"^\[MGMT:SEQ,2\]", timeout=8, since=m).string.rstrip()
+                if got != want:
+                    problems.append(f"W1 got the names as {got[:80]!r}, not W2's own {want[:80]!r}")
+            except AssertionError:
+                problems.append("W1 got no names: the retry behind the unanswered copy was not served")
+            time.sleep(1.0)
+            said = [x.rstrip() for x in w2.dev.since(m2) if "Could not read" in x]
+            if said != ["[MGMT] Could not read the sequence store for WCB1's request - not answered"]:
+                problems.append(f"for ?MGMT,SEQ W2 said {said}, not the one 'not answered' line")
+            # one value, over the mesh
+            fault(w2, "SEQREAD")
+            m, m2 = w.dev.mark(), w2.dev.mark()
+            w.send(f"?MGMT,SEQGET,2,{key}")
+            try:
+                got = w.dev.expect(rf"^\[MGMT:SEQVAL,2\]{key},", timeout=8, since=m).string.rstrip()
+                if got != f"[MGMT:SEQVAL,2]{key},OK,{value}":
+                    problems.append(f"W1 got {key} as {got!r}, not OK with its value")
+            except AssertionError:
+                problems.append(f"W1 got no reply for {key}: the retry behind the unanswered copy was not served")
+            time.sleep(1.0)
+            said = [x.rstrip() for x in w2.dev.since(m2) if "Could not read" in x]
+            rx = rf"^\[MGMT\] Could not read sequence '{key}' for WCB1 \(.+\) - not answered$"
+            if len(said) != 1 or not re.match(rx, said[0]):
+                problems.append(f"for ?MGMT,SEQGET W2 said {said}, not the one 'not answered' line")
+            # the local spellings
+            fault(w2, "SEQREAD")
+            out = [x.rstrip() for x in w2.run("?SEQ,NAMES")]
+            if "Could not read the sequence store right now - try again." not in out or _has(out, "[MGMT:SEQ,"):
+                problems.append(f"W2's ?SEQ,NAMES with the store unreadable printed {out[:3]}")
+            fault(w2, "SEQREAD")
+            out = [x.rstrip() for x in w2.run(f"?SEQ,GET,{key}")]
+            unread = any(re.match(rf"^Could not read sequence '{key}' \(.+\)\.$", x) for x in out)
+            if not unread or _has(out, "[MGMT:SEQVAL,"):
+                problems.append(f"W2's ?SEQ,GET with the store unreadable printed {out[:3]}")
+            # the knob is spent: the next request is answered at once, with no line
+            m2 = w2.dev.mark()
+            if _seqval(w2, key) != f"[MGMT:SEQVAL,2]{key},OK,{value}":
+                problems.append(f"after the knob W2's ?SEQ,GET,{key} did not read the value back")
+            if any("Could not read" in x for x in w2.dev.since(m2)):
+                problems.append("W2 still could not read its store after the knob was spent")
+        finally:
+            fault_off(w2)
+            w2.run(f"?SEQ,CLEAR,{key}")
+    assert not problems, "; ".join(problems)
+
+
 @test("seq.store_accounting", "?NVS reports the sequence store: its count matches ?SEQ,NAMES; a save grows it by exactly key + value + 2 bytes (one '<key>,<value>' line), an edit in place by the difference and keeps the name's place, a re-save of the same value changes nothing, and a clear gives it all back; none of it touches NVS's stored_cmds; the store holds 32768 bytes", needs=["wcb1"], links=[])
 def store_accounting(bench):
     """WCB_SeqStore.h: the sequences are the lines of one file, '<key>,<value>' in save order, on the 128 KB 'spiffs'
@@ -1766,4 +1837,123 @@ def store_moves_from_nvs(bench):
                 _clear_seq(w, "HILMA", "HILMB")
                 w.reboot()
             _clear_seq(w, "HILMA", "HILMB")
+    assert not problems, "; ".join(problems)
+
+
+@test("seq.nvs_clear_list_rewrite_fails", "On the NVS fallback layout (a ?DEBUG,SEQNVS boot) a clear whose key-list rewrite fails (?DEBUG,FAULT,SEQLIST) removes the value and says so - \"Removed the value of '<k>', but NVS could not update the sequence list: it is still listed, empty. ...\" - ?SEQ,NAMES still lists it and ?SEQ,GET answers NOTFOUND; a second clear takes it off the list ('No stored value found ... removed from list if present'), and after the boot back to the store it is nowhere (2 reboots)", needs=["wcb1"], links=[])
+def seq_nvs_clear_list_rewrite_fails(bench):
+    """Coverage re-scan 2026-10-12, seq.nvs_fallback_layout (the SEQ_E_LIST outcome). nvsRemove (WCB_SeqStore.cpp)
+    removes the value first - on a full NVS that frees the room the rewrite needs - and returns SEQ_E_LIST when the
+    key_list rewrite still fails; eraseStoredCommandByName (WCB_Storage.cpp) prints the 'still listed, empty' line.
+    seq.nvs_full_consistency's full store frees enough with the value that the rewrite succeeds ('Deleted'), so the
+    SEQLIST knob (WCB_Fault.h) fails that rewrite once. The second clear finds no value but a listed name: it rewrites
+    the list and answers NOTFOUND. Method as seq.store_moves_from_nvs."""
+    w = usb_wcb(bench)
+    _store_or_skip(w)
+    key, val = "HILSL", f";S1{marker('l')}"
+    problems = []
+    on_nvs = False
+    with config_guard(bench, 1):
+        _clear_seq(w, key)
+        try:
+            if not _has(w.run("?DEBUG,SEQNVS"), "The next boot keeps stored sequences in NVS"):
+                raise AssertionError("?DEBUG,SEQNVS was not accepted")
+            m = w.reboot()
+            on_nvs = True
+            if not any(NVS_BOOT in x for x in w.dev.since(m)):
+                raise AssertionError("the ?DEBUG,SEQNVS boot did not say it keeps sequences in NVS")
+            if not _has(w.run(f"?SEQ,SAVE,{key},{val}"), f"Stored: Key='{key}'"):
+                raise AssertionError(f"setup: {key} was not stored on the NVS layout")
+            _, _, names0 = _names(w)
+            if key not in names0:
+                raise AssertionError(f"setup: ?SEQ,NAMES does not list {key} on the NVS layout")
+            fault(w, "SEQLIST")
+            out = [x.rstrip() for x in w.run(f"?SEQ,CLEAR,{key}")]
+            want = (f"Removed the value of '{key}', but NVS could not update the sequence list: it is still listed, "
+                    f"empty. See ?NVS, free space, then clear it again.")
+            if want not in out:
+                problems.append(f"the clear whose list rewrite failed printed {out[:3]}")
+            _, _, names = _names(w)
+            if key not in names:
+                problems.append(f"after the failed list rewrite ?SEQ,NAMES no longer lists {key}")
+            got = _seqval(w, key)
+            if got != f"[MGMT:SEQVAL,1]{key},NOTFOUND,":
+                problems.append(f"after the failed list rewrite ?SEQ,GET,{key} answered {got!r}, not NOTFOUND")
+            out = [x.rstrip() for x in w.run(f"?SEQ,CLEAR,{key}")]
+            if f"No stored value found for key: '{key}', but removed from list if present." not in out:
+                problems.append(f"the second clear printed {out[:3]}")
+            _, _, names = _names(w)
+            if names != [n for n in names0 if n != key]:
+                problems.append(f"after the second clear ?SEQ,NAMES is {names}, not {[n for n in names0 if n != key]}")
+        finally:
+            if on_nvs:
+                _clear_seq(w, key)
+                m = w.reboot()
+                moved = [x.rstrip() for x in w.dev.since(m) if x.startswith("[SEQ] Moved")]
+                bench.note(f"seq.nvs_clear_list_rewrite_fails: the boot back to the store said "
+                           f"{moved or 'nothing about a move'}")
+            _clear_seq(w, key)
+        _, _, names = _names(w)
+        if key in names:
+            problems.append(f"back on the store ?SEQ,NAMES lists {key}")
+    assert not problems, "; ".join(problems)
+
+
+def _store_line(w):
+    """?NVS's 'Sequences: ...' line, whole, or None."""
+    return next((x.rstrip() for x in w.run("?NVS", timeout=6) if STORE_RX.match(x.rstrip())), None)
+
+
+@test("seq.damaged_lines_skipped", "Damaged lines in W2's sequence store (?DEBUG,FAULT,SEQDAMAGE: no comma, an empty key, a key over 15 characters) are skipped and counted by every walk: ?NVS ends its Sequences line ' - damaged lines skipped' with the count unchanged and ?SEQ,NAMES unchanged; after a last line with no newline a save starts a new line first, so the new key is listed and reads back exactly; the clear that rewrites the file drops them all - ?NVS clean, count and bytes as before", needs=["wcb2"], links=[], opt_in="fault_nvs")
+def seq_damaged_lines_skipped(bench):
+    """Coverage re-scan 2026-10-12, seq.walk_damaged_lines. SeqReader::nextKey (WCB_SeqStore.cpp) skips and counts a
+    line with no comma, an empty key or one over SEQ_KEY_MAX_LEN, and a last line with no comma; walkFile keeps the
+    count for seqStoreReport (?NVS) and whether the file ended in a newline for filePut, whose fileAppend then writes a
+    newline first. fileRewrite copies only good records. No command can write a damaged line (LittleFS commits a file at
+    close, and a failed write leaves it as it was), so the SEQDAMAGE knob (WCB_Fault.h) appends one raw. Done on W2,
+    whose store the other tests rarely use; the rewrite in finally puts the file back however the test ends."""
+    w2 = WCB(bench.dev("wcb2"))
+    key, val = "HILDL" + nonce()[:4], ";S0," + marker("d")
+    problems = []
+    with config_guard(bench, 2):
+        rep0 = _store_line(w2)
+        if rep0 is None:
+            raise Skip("W2 keeps its sequences in NVS: no 'Sequences: ... in the sequence store' line in ?NVS")
+        if rep0.endswith("damaged lines skipped"):
+            raise Skip("W2's sequence store already holds damaged lines")
+        count0, bytes0 = (int(v) for v in STORE_RX.match(rep0).groups()[:2])
+        _, _, names0 = _parse_names(next(x for x in w2.run("?SEQ,NAMES") if x.startswith("[MGMT:SEQ,")))
+        try:
+            for kind in ("NOCOMMA", "EMPTYKEY", "LONGKEY"):
+                fault(w2, f"SEQDAMAGE,{kind}")
+            rep = _store_line(w2) or ""
+            m = STORE_RX.match(rep)
+            if not rep.endswith(" - damaged lines skipped") or not m or int(m.group(1)) != count0:
+                problems.append(f"with three damaged lines ?NVS said {rep!r} (count before {count0})")
+            _, _, names = _parse_names(next(x for x in w2.run("?SEQ,NAMES") if x.startswith("[MGMT:SEQ,")))
+            if names != names0:
+                problems.append(f"the damaged lines changed ?SEQ,NAMES: {names} (was {names0})")
+            fault(w2, "SEQDAMAGE,NONL")
+            if not _has(w2.run(f"?SEQ,SAVE,{key},{val}"), f"Stored: Key='{key}'"):
+                problems.append(f"{key} was not stored after a last line with no newline")
+            _, _, names = _parse_names(next(x for x in w2.run("?SEQ,NAMES") if x.startswith("[MGMT:SEQ,")))
+            if names != names0 + [key]:
+                problems.append(f"after the save ?SEQ,NAMES ends {names[-3:]}, not {(names0 + [key])[-3:]}: the append "
+                                f"did not start a new line")
+            got = next((x.rstrip() for x in w2.run(f"?SEQ,GET,{key}") if x.startswith("[MGMT:SEQVAL,")), None)
+            if got != f"[MGMT:SEQVAL,2]{key},OK,{val}":
+                problems.append(f"{key} reads back as {got!r}")
+            out = [x.rstrip() for x in w2.run(f"?SEQ,CLEAR,{key}")]
+            if f"Deleted stored command key: '{key}'" not in out:
+                problems.append(f"the clear printed {out[:3]}")
+            rep = _store_line(w2) or ""
+            m = STORE_RX.match(rep)
+            if not m or (int(m.group(1)), int(m.group(2))) != (count0, bytes0) or "damaged" in rep:
+                problems.append(f"after the rewrite ?NVS said {rep!r}, not {count0} sequences in {bytes0} bytes with "
+                                f"no damaged lines, as before")
+        finally:
+            fault_off(w2)
+            if (_store_line(w2) or "").endswith("damaged lines skipped"):   # a rewrite drops them: save and clear
+                w2.run(f"?SEQ,SAVE,{key},{val}")
+                w2.run(f"?SEQ,CLEAR,{key}")
     assert not problems, "; ".join(problems)

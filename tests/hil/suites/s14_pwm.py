@@ -14,8 +14,8 @@ import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, probe_in_mesh, quiet_lines,
-                           require_tokens, snapshot, token, usb_wcb)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, fault, fault_off, link, marker, probe_in_mesh,
+                           quiet_lines, require_tokens, snapshot, token, usb_wcb)
 
 
 def _has(lines, text):
@@ -1964,6 +1964,63 @@ def remote_config_right_after_boot(bench):
                     pass
                 if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
                     _clear_remote_out(w, "S3")
+            w.run("?DEBUG,ETM,OFF")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("pwm.remote_send_refused_espnow_down", "When ESP-NOW reads as not running (?DEBUG,FAULT,ESPNOWDOWN) ?MAP,PWM,S3,W2S3 says '⚠️  ESP-NOW is not running — remote PWM configuration was NOT sent' and sends W2 no ?MAP,PWM,OUT (none in W1's ETM debug before its PWM reboot); the mapping is cleared after (W1 x2, W2 x1 reboots)", needs=["wcb1", "wcb2"], links=["W1S3"])
+def remote_send_refused_espnow_down(bench):
+    """Coverage re-scan 2026-10-12, pwm.remote_send_gate (the refusal branch). canSendESPNow (WCB_PWM.cpp) gates every
+    remote PWM configuration send on espNowInitialized, which setup() sets right after esp_now_init(), so a running
+    board never takes the refusal. The ESPNOWDOWN knob (WCB_Fault.h) makes the next call read it as not running. A
+    fresh mapping has no old remote outputs, so the knob is spent by the remote-output send itself. W1's WDP advert
+    names W2 S3 after the reboot (PWMTARGET), so W2 may still configure the output on its own; that path is
+    pwm.wdp_autoconfig_and_selfheal's, and the clean-up below is pwm.remote_config_right_after_boot's."""
+    s3 = link(bench, 1, "S3")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1, 2)
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON")
+    _require_free_ports(bench, 2, "S3")
+    problems = []
+    with config_guard(bench, 1, 2):
+        mapped = False
+        try:
+            s3.pwm_out(0)                                   # the new input must not float (module rules)
+            w.run("?DEBUG,ETM,ON")
+            fault(w, "ESPNOWDOWN")
+            m = w.send("?MAP,PWM,S3,W2S3")
+            mapped = True
+            try:
+                w.dev.expect(r"ESP-NOW is not running — remote PWM configuration was NOT sent", timeout=5, since=m)
+            except AssertionError:
+                problems.append("W1 did not say the remote PWM configuration was NOT sent")
+            _pwm_reboot(w, m)
+            before_boot = []
+            for x in w.dev.since(m):
+                if x.startswith("Rebooting now"):
+                    break
+                before_boot.append(x)
+            sent = [x.rstrip() for x in before_boot if re.match(r"^\[ETM\] Sent seq \d+: \?MAP,PWM,OUT,S3", x)]
+            if sent:
+                problems.append(f"W1 still sent W2 the output configuration: {sent}")
+        finally:
+            s3.pwm_out(0)
+            if mapped:
+                w.run("?WDP,POLL")                        # W1 counts W2 offline until W2's next packet (F22)
+                time.sleep(1.0)
+                m = w.send("?MAP,PWM,CLEAR,S3")
+                try:
+                    _w2_reboot_wait(w, m)
+                except AssertionError:
+                    pass
+                try:
+                    w.wait_boot(m, timeout=30)
+                except AssertionError:
+                    pass
+                if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
+                    _clear_remote_out(w, "S3")
+            fault_off(w)
             w.run("?DEBUG,ETM,OFF")
             s3.pwm_stop()
     assert not problems, "; ".join(problems)

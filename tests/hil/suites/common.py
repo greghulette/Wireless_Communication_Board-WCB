@@ -135,6 +135,29 @@ def remote_wcbs(bench):
     return [w for w in bench.wcb_numbers() if w != bench.usb_wcb_number()]
 
 
+# ------------------------------------------------------------------ fault knobs
+FAULT_OK = ("armed:", ": saved ", ": appended a damaged line")
+
+
+def fault(w, name):
+    """Arm one ?DEBUG,FAULT,<name> test knob on WCB driver w (Code/WCB/WCB_Fault.h, debugFaultCommand) and return its
+    '[FAULT] ...' line; fail unless the board confirms. The RAM knobs fire once and lapse after 60 s; ?DEBUG,FAULT,OFF
+    (fault_off) and a reboot clear them. BAUD0, HWOTHER and SEQDAMAGE write saved state: the test puts it back."""
+    out = [x.rstrip() for x in w.run(f"?DEBUG,FAULT,{name}")]
+    ack = next((x for x in out if x.startswith("[FAULT] ")), None)
+    if ack is None or not any(k in ack for k in FAULT_OK):
+        raise AssertionError(f"?DEBUG,FAULT,{name} was not taken: {out[:4]} (firmware before WCB c04286c has no knobs)")
+    return ack
+
+
+def fault_off(w):
+    """?DEBUG,FAULT,OFF: disarm every RAM knob (and PULLFAULT). Best effort - for a test's finally."""
+    try:
+        w.run("?DEBUG,FAULT,OFF")
+    except AssertionError:
+        pass
+
+
 # ------------------------------------------------------------------ wires
 def link(bench, wcb, port):
     """The wire on W<wcb> <port> (a hil.links.Link), or Skip if none is connected."""

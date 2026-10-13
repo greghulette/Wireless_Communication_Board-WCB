@@ -16,7 +16,7 @@ import time
 
 from hil.nvs import parse as nvs_parse
 from hil.runner import Skip, test
-from suites.common import Console, config_guard, link, marker, nonce, snapshot, usb_wcb
+from suites.common import Console, config_guard, fault, fault_off, link, marker, nonce, snapshot, usb_wcb
 
 
 def _has(lines, text):
@@ -239,6 +239,45 @@ def _crun(console, cmd, wait=0.8):
 
 def _cget(console, name):
     return next((x for x in _crun(console, f"?VAR,GET,{name}") if x.startswith("[VAR]")), None)
+
+
+@test("var.nvs_open_failure", "When NVS will not open for a persistent save (?DEBUG,FAULT,VARNVS) ?VAR,SET prints '[VAR] ERROR: could not open NVS (wcb_vars) to save' and no '[persistent]' line, and RAM goes back to what the next boot loads: an edited variable keeps its old value, a new one is not created, a refused ?VAR,CLEAR keeps the variable; with the knob spent the same commands work", needs=["wcb1"], links=[])
+def nvs_open_failure(bench):
+    """Coverage re-scan 2026-10-12, var.nvs_write_failure (the could-not-open line). saveVarsToNVS
+    (WCB_Variables.cpp) returns false when varPrefs.begin("wcb_vars") fails; setVariableImpl then removes a created
+    variable or restores an edited one, and clearVariable puts the cleared one back, so RAM never claims what NVS does
+    not hold. The full-store arm (NVS write failed) is seq.nvs_full_consistency's. NVS always opens on the bench, so the
+    VARNVS knob (WCB_Fault.h) fails the next open, once. The variables are throwaway and cleared."""
+    w = usb_wcb(bench)
+    a, b = "HILVN" + nonce()[:4], "HILVM" + nonce()[:4]
+    open_err = "[VAR] ERROR: could not open NVS (wcb_vars) to save"
+    problems = []
+    with config_guard(bench, 1):
+        try:
+            if not _has(w.run(f"?VAR,SET,{a},5"), f"[VAR] {a} = 5  [persistent]"):
+                raise AssertionError(f"setup: ?VAR,SET,{a},5 was not acknowledged")
+            for what, cmd in (("an edit", f"?VAR,SET,{a},9"), ("a new variable", f"?VAR,SET,{b},7"),
+                              ("a clear", f"?VAR,CLEAR,{a}")):
+                fault(w, "VARNVS")
+                out = [x.rstrip() for x in w.run(cmd)]
+                if open_err not in out:
+                    problems.append(f"{what} with NVS unopenable printed {out[:3]}, not the could-not-open line")
+                if _has(out, "[persistent]") or _has(out, "[VAR] Cleared"):
+                    problems.append(f"{what} with NVS unopenable still acknowledged: {out[:3]}")
+            got_a = [x.rstrip() for x in w.run(f"?VAR,GET,{a}")]
+            if f"[VAR] {a} = 5" not in got_a:
+                problems.append(f"after the refused edit and clear {a} reads {got_a[:2]}, not its old 5")
+            got_b = [x.rstrip() for x in w.run(f"?VAR,GET,{b}")]
+            if f"[VAR] '{b}' is not set (reads as 0)" not in got_b:
+                problems.append(f"the refused new variable {b} exists: {got_b[:2]}")
+            out = [x.rstrip() for x in w.run(f"?VAR,SET,{a},9")]
+            if f"[VAR] {a} = 9  [persistent]" not in out or _has(out, "ERROR"):
+                problems.append(f"with the knob spent ?VAR,SET,{a},9 printed {out[:3]}")
+        finally:
+            fault_off(w)
+            w.run(f"?VAR,CLEAR,{a}")
+            w.run(f"?VAR,CLEAR,{b}")
+    assert not problems, "; ".join(problems)
 
 
 @test("var.backup_emit_position", "?backup emits persistent vars as ?VAR,SET before ?ETM in the configured chain and in the factory chain; never volatile ones", needs=["wcb1"], links=[])

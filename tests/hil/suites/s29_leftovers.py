@@ -10,7 +10,9 @@ import re
 import time
 
 from hil.runner import Skip, test
-from suites.common import Console, config_guard, marker, require_tokens, snapshot, token, usb_wcb, wire
+from hil.wcb import WCB
+from suites.common import (Console, config_guard, fault, fault_off, marker, require_tokens, snapshot, token, usb_wcb,
+                           wire)
 from suites.s22_maestro_kyber import _wdp_off
 
 
@@ -609,6 +611,54 @@ def mesh_timer_chain_long(bench):
     bench.note(f"long chain ({len(chain)} characters) on W2: gap {gap} ms")
     assert (a + "P" * 200).encode() in got, "the long first write did not arrive whole"
     assert 500 <= gap <= 1000, f"gap {gap} ms, expected ~600 (the delay, with the 200-byte write inside it)"
+
+
+@test("mesh.timer_chain_no_memory", "A received ;T chain too long for a timer-queue slot whose heap copy fails (?DEBUG,FAULT,TIMERMEM on W2) is not run and W2 says so: '[TIMER] 1 received timer chain(s) not run: no memory for the chain', and none of it reaches W2 S2; the same chain sent again, the knob spent, runs whole with its delay", needs=["wcb1", "wcb2"], links=["W2S2"])
+def mesh_timer_chain_no_memory(bench):
+    """Coverage re-scan 2026-10-12, timer.queue_refusals_reported and rx.timer_chain_deferred (the 'no memory' arm).
+    enqueuePendingTimerChain (WCB.ino) copies a chain of TIMER_CHAIN_MAX_LEN characters or more into a heap buffer for
+    the 8-slot pendingTimerChainQueue; a failed malloc counts timerChainsNoMemory on the WiFi task and returns, and
+    drainPendingTimerChains prints the count from loop(). No bench heap fails that copy, so the TIMERMEM knob
+    (WCB_Fault.h) fails exactly that malloc, once. The chain is mesh.timer_chain_long's two-chunk FRAG."""
+    probe, ch = wire(bench, 2, "S2")
+    w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
+    a1, b1, a2, b2 = (marker(x) for x in ("a", "b", "c", "d"))
+    problems = []
+
+    def send(a, b):
+        chain = f";S2{a}{'P' * 200}^;T600^;S2{b}"
+        assert len(chain) > 219
+        cut, sid = len(chain) // 2, marker()[3:7]
+        w.send(f"?MGMT,FRAG,2,{sid},0,2,{chain[:cut]}")
+        time.sleep(0.2)
+        w.send(f"?MGMT,FRAG,2,{sid},1,2,{chain[cut:]}")
+
+    try:
+        fault(w2, "TIMERMEM")
+        m, wm = probe.dev.mark(), w2.dev.mark()
+        send(a1, b1)
+        try:
+            w2.dev.expect(r"^\[TIMER\] 1 received timer chain\(s\) not run: no memory for the chain", timeout=6,
+                          since=wm)
+        except AssertionError:
+            said = [x[:100] for x in w2.dev.since(wm) if re.search(r"\[TIMER\]|\[MGMT\]|FRAG", x)]
+            problems.append(f"W2 printed no 'not run: no memory for the chain' line (it said {said[:4]})")
+        time.sleep(1.5)
+        got = probe.received(ch, m)
+        if a1.encode() in got or b1.encode() in got:
+            problems.append("part of the chain whose copy failed still reached W2 S2")
+        m = probe.dev.mark()
+        send(a2, b2)
+        try:
+            probe.expect_bytes(ch, b2.encode(), timeout=6, since=m)
+            gap = probe.time_of(ch, b2.encode(), m) - probe.time_of(ch, a2.encode(), m)
+            if not 500 <= gap <= 1000:
+                problems.append(f"the chain sent after the knob was spent ran with a {gap} ms gap, not ~600")
+        except AssertionError:
+            problems.append("the same chain sent again (the knob spent) did not run")
+    finally:
+        fault_off(w2)
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ ?MGMT and ?RTERM error replies

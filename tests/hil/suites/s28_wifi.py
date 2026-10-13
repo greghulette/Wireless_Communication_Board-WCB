@@ -37,7 +37,8 @@ from hil.wlan import default_routes as _default_routes
 from hil.wlan import pc_on_ap as _pc_on_ap
 from hil.wlan import realtek_enabled as _realtek_enabled
 from hil.ws import WsClient
-from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
+from suites.common import (Console, Watch, config_guard, fault, fault_off, link, marker, nonce, snapshot, token,
+                           usb_wcb)
 from suites.s03_wcb import _w2_online
 from suites.s45_navicore_wifi import navicore_home as _navicore_home
 from suites.s18_etm_config_wdp import HOLD_BAUD, _hold_line
@@ -596,6 +597,137 @@ def join_absent_ssid_keeps_mesh(bench):
             if changed:
                 _restore_ap(w, tok, ssid, problems)
     bench.note(f"wifi.join_absent_ssid_keeps_mesh: {facts}")
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.join_fault_arms", "W1 joined to W2's access point takes the JOIN state machine's two fault arms: an association that gets no address for 20 s (?DEBUG,FAULT,JOINNOIP) is dropped with 'associated with ... but no address after 20 s — starting over' and the join comes back by itself ('joined ... after N attempt(s)'); an AP read off the mesh channel (?DEBUG,FAULT,JOINCHAN) is hung up on - 'joined ... but its AP is on channel x, not y — that is OFF-MESH. Disconnecting.' - and the join settles: Association not connected, the radio still on the mesh channel, no 'still looking' for 15 s, and a unicast to W2 still delivered; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="joins W1 to W2's access point and reboots W1 twice")
+def join_fault_arms(bench):
+    """Coverage re-scan 2026-10-12, wifi.join_state_machine (the off-mesh guard and the no-address arm). wcbWifiService
+    (WCB_WiFi.cpp) reads the associated AP's own channel (esp_wifi_sta_get_ap_info) and, off the mesh channel,
+    disconnects - WiFi.disconnect(), never (true), which would stop WiFi and ESP-NOW with it - and settles for good
+    (joinSettled): retrying would thrash, and an operator has to fix one end. An association with no address for
+    JOIN_ADDR_MS (20 s) is dropped and the join starts over. W2's AP is on the mesh channel and hands out addresses,
+    so the JOINCHAN knob (WCB_Fault.h) makes the next check read the AP one channel off, and JOINNOIP hides the address
+    until its arm has fired (a joined board drops its association first, wcbWifiFaultRejoin). The SSID and the
+    passphrase are compared, never printed."""
+    w2s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1, 2) as before:
+        tok1, mode1, ssid1, _ = _wifi_token(before[1])
+        tok2, mode2, ssid2, pw2 = _wifi_token(before[2])
+        if mode1 != "AP" or mode2 != "AP":
+            raise Skip("W1 and W2 must both host an access point (W2's is joined, W1's is put back)")
+        if not pw2:
+            raise Skip("W2's ?WIFI,AP line carries no password")
+        ch = _mesh_channel(before[1])
+        if _mesh_channel(before[2]) != ch:
+            raise Skip("W1 and W2 are on different mesh channels")
+        q = re.escape(ssid2)
+        joined_rx = rf'^\[WIFI\] joined "{q}" on channel {ch} after \d+ attempt\(s\) — ws://\S+/ws$'
+        changed = False
+        try:
+            if not _has(w.run(f"?WIFI,JOIN,{ssid2},{pw2}"), f'WiFi mode set to JOIN — joining "{ssid2}"'):
+                problems.append("?WIFI,JOIN did not confirm")
+            changed = True
+            bm = w.reboot()
+            try:
+                w.dev.expect(joined_rx, timeout=45, since=bm)
+            except AssertionError:
+                raise AssertionError("W1 did not join W2's access point within 45 s of booting") from None
+            # the no-address arm
+            fm = w.dev.mark()
+            fault(w, "JOINNOIP")
+            try:
+                w.dev.expect(rf'^\[WIFI\] associated with "{q}" but no address after 20 s — starting over$', timeout=45,
+                             since=fm)
+                am = w.dev.mark()
+                try:
+                    w.dev.expect(joined_rx, timeout=30, since=am)
+                except AssertionError:
+                    problems.append("after 'starting over' W1 did not join W2's access point again within 30 s")
+            except AssertionError:
+                problems.append("no 'associated ... but no address after 20 s — starting over' line within 45 s")
+            # the off-mesh guard
+            om = w.dev.mark()
+            fault(w, "JOINCHAN")
+            try:
+                g = w.dev.expect(rf'^\[WIFI\] joined "{q}" but its AP is on channel (\d+), not {ch} — that is '
+                                 rf'OFF-MESH\. Disconnecting\.$', timeout=10, since=om)
+                if g.group(1) == ch:
+                    problems.append("the OFF-MESH line names the mesh channel as the AP's")
+            except AssertionError:
+                problems.append("no OFF-MESH line after JOINCHAN")
+            time.sleep(15)
+            later = [x.rstrip() for x in w.dev.since(om)]
+            if _has(later, "[WIFI] still looking for"):
+                problems.append("the join kept retrying after the OFF-MESH hang-up")
+            if any(re.match(joined_rx, x) for x in later):
+                problems.append("W1 joined again after the OFF-MESH hang-up")
+            st = _status(w)
+            if st.get("Association", "").startswith("connected ("):
+                problems.append(f"after the OFF-MESH hang-up Association is {st.get('Association')!r}")
+            radio = st.get("Radio channel", "")
+            if not radio.startswith(f"{ch}  (mesh channel {ch})") or "MISMATCH" in radio:
+                problems.append(f"after the OFF-MESH hang-up the radio line is {radio!r}")
+            _unicast_ok(w, w2s2, problems, "after the OFF-MESH hang-up")
+        finally:
+            fault_off(w)
+            if changed:
+                _restore_ap(w, tok1, ssid1, problems)
+        if _status(w).get("Mode") != "AP":
+            problems.append("W1 is not back in AP mode")
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.channel_drift_warned", "With W1's access point up, the drift check names a radio off the mesh channel: ?DEBUG,FAULT,CHANDRIFT moves the radio one channel off for a single check, which prints '[WIFI] WARNING: radio is on channel x but the mesh is on y — this board cannot reach the mesh.', and back ('radio back on channel y'); ?WIFI's radio line is then on the mesh channel and a unicast to W2 is delivered", needs=["wcb1"], links=["W2S2"])
+def channel_drift_warned(bench):
+    """Coverage re-scan 2026-10-12, wifi.channel_drift_check. wcbWifiService (WCB_WiFi.cpp) compares the radio's
+    channel with the mesh channel every CHAN_CHECK_MS (30 s) while an interface is up, and warns, since a drifted
+    radio drops every ESP-NOW frame with no other symptom. Nothing on the bench moves it, so the CHANDRIFT knob
+    (WCB_Fault.h) really moves the radio (esp_wifi_set_channel) for one check that runs at once, and moves it back
+    right after: W1 is off the mesh channel for one loop pass. The check is reached only outside a pending JOIN, so
+    this runs on W1's own access point, with no station on it (esp_wifi_set_channel may not move a SoftAP that has
+    one). Nothing is saved."""
+    w2s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        _, mode1, _, _ = _wifi_token(before[1])
+        if mode1 != "AP":
+            raise Skip("W1 does not host an access point")
+        ch = _mesh_channel(before[1])
+        st = _status(w)
+        if st.get("Interface") != "up":
+            raise Skip(f"W1's access point is not up (Interface {st.get('Interface')!r})")
+        if not re.match(r"^0\b", st.get("Clients", "0")):
+            raise Skip(f"a station is on W1's access point (Clients {st.get('Clients')!r})")
+        try:
+            m = w.dev.mark()
+            fault(w, "CHANDRIFT")
+            try:
+                g = w.dev.expect(r"^\[FAULT\] CHANDRIFT: radio moved to channel (\d+) for one drift check$", timeout=5,
+                                 since=m)
+                off = g.group(1)
+                try:
+                    w.dev.expect(rf"^\[WIFI\] WARNING: radio is on channel {off} but the mesh is on {ch} — this board "
+                                 rf"cannot reach the mesh\.$", timeout=3, since=m)
+                except AssertionError:
+                    problems.append(f"no drift WARNING naming channel {off} and the mesh's {ch}")
+                try:
+                    w.dev.expect(rf"^\[FAULT\] CHANDRIFT: radio back on channel {ch}$", timeout=3, since=m)
+                except AssertionError:
+                    problems.append(f"the radio did not report being back on channel {ch}")
+            except AssertionError:
+                said = [x.rstrip() for x in w.dev.since(m) if "CHANDRIFT" in x]
+                problems.append(f"the knob did not move the radio: {said}")
+            time.sleep(1.0)
+            radio = _status(w).get("Radio channel", "")
+            if not radio.startswith(f"{ch}  (mesh channel {ch})") or "MISMATCH" in radio:
+                problems.append(f"after the drift check the radio line is {radio!r}")
+            _unicast_ok(w, w2s2, problems, "after the drift check")
+        finally:
+            fault_off(w)
     assert not problems, "; ".join(problems)
 
 

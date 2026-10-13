@@ -22,8 +22,8 @@ import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, nonce, require_tokens, snapshot,
-                           token, usb_wcb)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, fault, link, marker, nonce, require_tokens,
+                           snapshot, token, usb_wcb)
 from suites.s15_hcr_mp3_dfp import (_clear_all_w2, _device_tokens, _dfp, _in_order, _inject, _lf, _no_recall_keys,
                                      _relabel, _require_free, _run, _steps, _unlearn)
 from suites.s18_etm_config_wdp import _prefix_chars, _restore_prefixes, _sent
@@ -84,6 +84,76 @@ def devices_restore_w2(bench):
             _relabel(c2, before[2], "S3", "S4", "S5")
             _unlearn(bench, "MP3", learner=1)
             _unlearn(bench, "DFP", learner=1)
+    assert not problems, "; ".join(problems)
+
+
+BAUD_LINE = re.compile(r"^  Serial(\d) Baud: (\d+), Broadcast Input: \w+, Broadcast Output: \w+  "
+                       r"Pins: Tx:(\d+) Rx:(\d+)")
+
+
+def _boot_seconds(dev, since):
+    """Seconds from 'Rebooting now' to the end of setup() ('Raw Serial Forwarding Task Created'), from the host's line
+    times, or None."""
+    t0 = t1 = None
+    for t, text in list(dev.lines[since:]):
+        if t0 is None and text.startswith("Rebooting now"):
+            t0 = t
+        elif t0 is not None and text.startswith("Raw Serial Forwarding Task Created"):
+            t1 = t
+            break
+    return None if t0 is None or t1 is None else t1 - t0
+
+
+@test("boot.baud_zero_repaired", "A baud of 0 saved for a W2 port (?DEBUG,FAULT,BAUD0, as firmware 483b4d8..f5d758f could save) is repaired at the next boot: 'Serial5 had an invalid baud of 0 in NVS — falling back to 9600.', the banner shows Serial5 at 9600 and the boot takes no longer than W2's normal one (+2 s); ?BAUD puts W2's own rate back and the boot after prints no repair (2 W2 reboots)", needs=["wcb2"], links=[], opt_in="fault_nvs")
+def baud_zero_repaired(bench):
+    """Coverage re-scan 2026-10-12, boot.baud_zero_repair. setup() (WCB.ino) repairs a loaded baud of 0 to 9600 in RAM
+    before any begin(): HardwareSerial takes 0 as auto-detect and blocks for seconds, long enough for the boot guard to
+    reset the board into the same state again. ?BAUD refuses 0 (updateBaudRate's whitelist), so the BAUD0 knob
+    (WCB_Fault.h) writes it straight to NVS. S5 is used - a soft port, so a broken repair could not hang a hardware UART
+    in auto-detect on the bench; the repair loop is the same for all five. The repair is RAM-only: NVS keeps the 0 until
+    ?BAUD saves the port's own rate again, and the second boot proves it did."""
+    w2 = WCB(bench.dev("wcb2"))
+    problems = []
+    with config_guard(bench, 2) as before:
+        tok = token(before[2], "?BAUD,S5,")
+        if tok is None:
+            raise Skip("W2's chain lacks ?BAUD,S5")
+        orig = int(tok.split(",")[2])
+        if any(t.upper().startswith(("?MAP,PWM,OUT,S5", "?MAP,PWM,S5")) for t in before[2]):
+            raise Skip("W2 S5 is a PWM port")
+        written, secs = False, None
+        try:
+            ack = fault(w2, "BAUD0,S5")
+            written = True
+            if f"it runs at {orig} until the next boot" not in ack:
+                problems.append(f"the knob's line does not give S5's running rate {orig}: {ack!r}")
+            m = w2.reboot()
+            boot = [x.rstrip() for x in w2.dev.since(m)]
+            if "Serial5 had an invalid baud of 0 in NVS — falling back to 9600." not in boot:
+                problems.append("the boot printed no repair line for Serial5")
+            s5 = [BAUD_LINE.match(x) for x in boot]
+            s5 = [x for x in s5 if x and x.group(1) == "5"]
+            if not s5 or s5[0].group(2) != "9600":
+                problems.append(f"the boot banner shows Serial5 at {s5[0].group(2) if s5 else '(no line)'}, not 9600")
+            secs = _boot_seconds(w2.dev, m)
+            if token(snapshot(bench, 2), "?BAUD,S5,") != "?BAUD,S5,9600":
+                problems.append("after the repaired boot W2's chain does not hold ?BAUD,S5,9600")
+        finally:
+            if written:
+                out = [x.rstrip() for x in w2.run(f"?BAUD,S5,{orig}")]
+                if f"Baud rate for Serial5 updated to {orig}" not in out:
+                    problems.append(f"?BAUD,S5,{orig} printed {out[:2]}")
+                m = w2.reboot()
+                if any("invalid baud of 0" in x for x in w2.dev.since(m)):
+                    problems.append("the boot after ?BAUD put S5's rate back still repaired a 0: NVS kept it")
+                normal = _boot_seconds(w2.dev, m)
+                r1 = lambda v: v if v is None else round(v, 1)    # noqa: E731
+                bench.note(f"boot.baud_zero_repaired: W2's boot with S5 at 0 took {r1(secs)} s, its normal boot "
+                           f"{r1(normal)} s "
+                           f"('Rebooting now' to the end of setup())")
+                if secs is None or normal is None or secs > normal + 2.0:
+                    problems.append(f"the boot with S5 at 0 took {secs} s, its normal boot {normal} s: the repair "
+                                    f"did not keep it as quick")
     assert not problems, "; ".join(problems)
 
 
