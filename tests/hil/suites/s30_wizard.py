@@ -346,6 +346,11 @@ _FAKE_RESCAN_L = (
     ("rc_fake_discovery", "rc_hb/rc_trig/rc_mode lines make and update an RC card that goes 12 s after the last beat; a mesh-only RC shows telemetry off and goes after 40 s (rc.discovery)"),
     ("rc_fake_tool_url", "The RC Open link uses the saved config-tool URL; 'edit Config Tool URL' saves one, the default or empty removes it (rc.tool_url)"),
     ("hub_fake_rc_open_tool", "Open in Config Tool hands ?share=1 when leading, shares a direct board first unless another tab leads, else opens the plain URL with a hint (hub.rc_open_tool)"),
+    ("wiz_fake_open_steps", "Opening the setup wizard makes a fresh password and MAC octets and the step list its answers need; closing stops watchers and detect jobs (wiz.open_steps)"),
+    ("wiz_fake_validate_steps", "The wizard refuses no control system, a short password, a bad MAC octet, an id outside 1-99 and two Maestros on one port (wiz.validate_steps)"),
+    ("wiz_fake_step_html", "Every wizard step renders its controls from a two-board Kyber state: locked ports, S1/S2, Maestro ports, ETM, review, firmware, connect rows (wiz.step_html)"),
+    ("wiz_fake_watch_timeout", "The connect watcher gives up after 90 s with 'Timed out' and the Reconnect button (wiz.watch_push_verify)"),
+    ("wiz_fake_status_mirror", "Push and flash progress is mirrored into the wizard's connect row while it is on screen (wiz.status_mirror)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
