@@ -1395,3 +1395,115 @@ def bridge_attach_detach_window(bench):
     park the attaching thread at exactly that point; once one locked section does both, there is no such point and the
     detach lands after the attach. Fixed on Intellex main."""
     run_intellex_py(bench, "intellex.bridge_attach_detach_window", "bridge_units.py", args={"group": "window"})
+
+
+@test("intellex.reconnect_auto_bounce", "The reconnect loop's self-heal: a ws link whose reattach fails twice while the "
+      "OS routes to the host off its subnet re-associates the adapter, asking the OS for the network first, once per "
+      "cooldown, and gives up after 3 failed bounces with one line; a move or a working bounce resets that; on-subnet "
+      "routing, a serial link and --no-auto-bounce never bounce (in-process, discover stood in for; IX re-scan "
+      "host.reconnect.auto_bounce)")
+def reconnect_auto_bounce(bench):
+    """tests/intellex/py/host_units.py group bounce: Intellex src/host.py reconnect_loop (:1810-1871) running in its real
+    build_app() in the venv process, every reattach failing, with discover.local_ip_for, ssid_for_host, wifi_bounce and
+    probe answered by the case - no adapter is touched and the host (192.0.2.1, TEST-NET-1) is never contacted. Every
+    staged-host test runs with --no-auto-bounce; this is the path that flag turns off. BOUNCE_COOLDOWN_S is shortened
+    to 2.5 s for the run."""
+    run_intellex_py(bench, "intellex.reconnect_auto_bounce", "host_units.py", args={"group": "bounce"}, timeout=300)
+
+
+@test("intellex.host_cli", "host.py's command line: --serial with --ws exits 2 before serving; a --serial target that "
+      "cannot open is recorded first and retried ('will keep retrying'); a --ws target is attached before the first "
+      "/_api/status answers; --ssid reaches the spec, --no-auto-bounce clears the self-heal, and the startup lines say "
+      "OUT OF DATE when Pages is newer (a stand-in endpoint on 127.0.0.2:80; IX re-scan host.main.cli)")
+def host_cli(bench):
+    """Intellex src/host.py main() (:2015-2074). As processes, on a staged host: the exit 2, a --serial port outside
+    INTELLEX_SERIAL_ALLOW (refused before it is opened - no port is touched) kept as the target and retried by the
+    reconnect loop, and --ws 127.0.0.2 against hil/ws.py WsEndpoint (skipped with a note where nothing can listen on
+    127.0.0.2:80). In-process (tests/intellex/py/host_units.py group cli): --ssid and its NaviCore default in the
+    spec, --no-auto-bounce, a --serial target identified before serving, and the startup lines, Pages stood in for.
+    The row's W1 half (a real port at startup) is left to that fake: these tests stay off the boards."""
+    import time
+    require(bench)
+    tid = "intellex.host_cli"
+    sd = stage(bench, tid, tools="none")
+    problems = []
+    rc, out = run_venv(bench, [os.path.join(sd, "src", "host.py"), "--port", "1", "--serial", "COMHILCLI", "--ws",
+                               "127.0.0.2"], cwd=sd, timeout=60,
+                       env={"INTELLEX_OFFLINE": "1", "INTELLEX_SERIAL_ALLOW": "", "INTELLEX_DISCOVER_HOSTS": "",
+                            "INTELLEX_DATA_DIR": os.path.join(sd, "appdata", "Intellex")})
+    if rc != 2 or "mutually exclusive" not in out or "serving" in out:
+        problems.append(f"--serial with --ws: exited {rc}, expected 2 with 'mutually exclusive' and nothing served")
+
+    with IntellexHost(bench, sd, args=["--serial", "COMHILCLI"]) as host:
+        st, body = host.json("GET", "/_api/status")
+        if not (body.get("wantsLink") and not body.get("attached") and body.get("kind") == "serial"):
+            problems.append(f"--serial COMHILCLI (refused): the first /_api/status {body}, expected the target kept, "
+                            f"unattached")
+        text = "\n".join(host.lines)
+        if "attach failed" not in text or "will keep retrying every second" not in text:
+            problems.append("--serial COMHILCLI (refused): no 'attach failed' / 'will keep retrying' lines at startup")
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline and not str(body.get("lastError", "")).startswith("reconnect failed"):
+            time.sleep(0.25)
+            st, body = host.json("GET", "/_api/status")
+        if not str(body.get("lastError", "")).startswith("reconnect failed"):
+            problems.append(f"--serial COMHILCLI: the reconnect loop never retried it (lastError "
+                            f"{body.get('lastError')!r})")
+
+    try:
+        ep = WsEndpoint("127.0.0.2", 80)
+    except OSError as e:
+        ep = None
+        bench.note(f"{tid}: --ws at startup not checked: nothing can listen on 127.0.0.2:80 here ({e})")
+    if ep is not None:
+        try:
+            with IntellexHost(bench, sd, args=["--ws", "127.0.0.2", "--ssid", "HILCLI"]) as host:
+                st, body = host.json("GET", "/_api/status")
+                lines = list(host.lines)
+                if not (body.get("attached") and body.get("kind") == "ws" and body.get("target") == "ws://127.0.0.2/ws"):
+                    problems.append(f"--ws 127.0.0.2: the first /_api/status {body}, expected attached to "
+                                    f"ws://127.0.0.2/ws before serving")
+                at = next((i for i, x in enumerate(lines) if x.startswith("attached  ws://127.0.0.2/ws")), None)
+                serving = next((i for i, x in enumerate(lines) if x.startswith("serving")), None)
+                if at is None or serving is None or at > serving:
+                    problems.append(f"--ws 127.0.0.2: the 'attached' line (line {at}) does not come before 'serving' "
+                                    f"(line {serving})")
+        finally:
+            ep.close()
+    try:
+        run_intellex_py(bench, tid, "host_units.py", args={"group": "cli"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"in-process (host_units.py cli): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.wifi_bounce_macos_unit", "Intellex's macOS bounce, every command answered by a script: the routing "
+      "table names the carrying interface (never the default route, and only one holding an address on the droid's "
+      "/24), a built-in Wi-Fi port is power-cycled off then on, an adapter macOS does not count as Wi-Fi is declined "
+      "with nothing touched, and the SSID scan matches by name (IX re-scan discover.wifi_bounce_macos)")
+def wifi_bounce_macos_unit(bench):
+    """tests/intellex/py/discover_units.py group bounce_macos: Intellex src/discover.py _wifi_bounce_macos (:641-771) with
+    proc.run patched - no route, ifconfig or networksetup runs, no adapter is touched. intellex.wifi_bounce_scoped
+    is the attended bench half (Windows)."""
+    run_intellex_py(bench, "intellex.wifi_bounce_macos_unit", "discover_units.py", args={"group": "bounce_macos"})
+
+
+@test("intellex.reachable_unit", "flash.reachable: every address DNS returns gets its own attempt (a dead IPv6 does not "
+      "spend the budget), the budget outlasts a slow lookup and bounds a hung one, answers are kept per host for 20 s, "
+      "and INTELLEX_OFFLINE answers False at once (socket stood in for; IX re-scan flash.nc.reachable)")
+def reachable_unit(bench):
+    """tests/intellex/py/flash_units.py group reachable: Intellex src/flash.py reachable (:50-156) with socket.getaddrinfo
+    and socket.socket replaced in the venv process - nothing is resolved or connected (TEST-NET and documentation
+    addresses only)."""
+    run_intellex_py(bench, "intellex.reachable_unit", "flash_units.py", args={"group": "reachable"})
+
+
+@test("intellex.nc_fetch_store_unit", "NaviCore's fetch_images online keeps what it downloads: the listing as GitHub sent "
+      "it and each image under firmware/navicore/<branch> ('/' flattened) with the manifest, never another product's "
+      "image or an empty one, and gives the same set back offline (GitHub stood in for; IX re-scan "
+      "flash.nc.fetch_images)")
+def nc_fetch_store_unit(bench):
+    """tests/intellex/py/flash_units.py group nc_fetch_store: Intellex src/flash.py list_firmware/fetch_images
+    (:266-371) with flash.reachable and flash._get answered in the venv process; the cache is the stage's src/firmware.
+    intellex.flash_rules_unit covers the offline pairing rules."""
+    run_intellex_py(bench, "intellex.nc_fetch_store_unit", "flash_units.py", args={"group": "nc_fetch_store"})

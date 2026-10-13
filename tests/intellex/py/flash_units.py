@@ -19,10 +19,21 @@ group "partition_edges" (intellex.flash_update_partition_edges): the rest of Upd
 the app fits the legacy layout's 0x140000 slot, and is refused ('Use Flash FW instead') one byte past it; a build with
 no _part.bin skips the check without reading the board; a differing table that needs a bootloader the build does not
 have is refused. Every refusal writes nothing and restarts the board out of its ROM loader (boot_app).
+
+group "reachable" (intellex.reachable_unit): flash.reachable (Intellex src/flash.py:50-156) with socket.getaddrinfo and
+socket.socket stood in for, so nothing is resolved or connected: each address DNS returns gets its own connect attempt
+bounded by `timeout` (a dead IPv6 address does not spend the budget), the whole answer by `budget` (which outlasts a slow
+DNS answer), answers are kept per host for REACH_TTL_S (20 s), and INTELLEX_OFFLINE answers False at once.
+
+group "nc_fetch_store" (intellex.nc_fetch_store_unit): flash.fetch_images online (:266-371), flash.reachable and
+flash._get stood in for GitHub: the listing is stored as GitHub sent it and each image as it is downloaded, under
+src/firmware/navicore/<branch> (a '/' in the branch flattened), with the manifest; an empty image is refused and never
+stored; offline the same set comes back from the cache.
 """
 import os
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ixpy  # noqa: E402
@@ -385,6 +396,246 @@ def escalation_without_bootloader(ctx):
     check(e.reads and e.reads[0] == (0x8000, 0x200), f"the table was not read before the refusal: {e.reads}")
     check(e.writes == [], f"a refused escalation still wrote {[[hex(a) for a in w] for w in e.writes]}")
     check(_restarted(e), f"the refusal left the board in its ROM loader: esptool runs {e.runs} (boot_app)")
+
+
+# ------------------------------------------------------------------ group "reachable"
+class _Net:
+    """socket.getaddrinfo and socket.socket for flash.reachable: per host a list of (family, addr, behaviour) where
+    behaviour is 'accept', 'refuse' or 'hang' (waits out the socket's timeout), or an OSError to raise from getaddrinfo;
+    dns_delay holds getaddrinfo back. Every lookup and connect is recorded."""
+
+    def __init__(self, hosts, dns_delay=0.0):
+        import socket
+        self.hosts, self.dns_delay, self.lookups, self.connects = hosts, dns_delay, [], []
+        net = self
+
+        class Sock:
+            def __init__(self, family, socktype, proto=0):
+                self.timeout = None
+
+            def settimeout(self, t):
+                self.timeout = t
+
+            def connect(self, addr):
+                how = net.how.get(addr[0], "refuse")
+                net.connects.append((addr[0], round(time.monotonic() - net.t0, 2)))
+                if how == "hang":
+                    time.sleep(self.timeout or 0)
+                    raise socket.timeout("timed out")
+                if how == "refuse":
+                    raise ConnectionRefusedError(61, "Connection refused")
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                self.close()
+        self.Sock = Sock
+        self.how = {}
+        self.t0 = time.monotonic()
+
+    def getaddrinfo(self, host, port, *a, **k):
+        import socket
+        self.lookups.append(host)
+        time.sleep(self.dns_delay)
+        rows = self.hosts.get(host)
+        if isinstance(rows, BaseException):
+            raise rows
+        out = []
+        for family, addr, how in rows or []:
+            self.how[addr] = how
+            fam = socket.AF_INET6 if family == 6 else socket.AF_INET
+            out.append((fam, socket.SOCK_STREAM, 6, "", (addr, port) if family == 4 else (addr, port, 0, 0)))
+        return out
+
+
+class _Patched:
+    def __init__(self, net):
+        self.net = net
+
+    def __enter__(self):
+        import socket
+        self.saved = (socket.getaddrinfo, socket.socket, os.environ.pop("INTELLEX_OFFLINE", None))
+        socket.getaddrinfo, socket.socket = self.net.getaddrinfo, self.net.Sock
+        self.net.t0 = time.monotonic()
+        return self.net
+
+    def __exit__(self, *exc):
+        import socket
+        socket.getaddrinfo, socket.socket, off = self.saved
+        if off is not None:
+            os.environ["INTELLEX_OFFLINE"] = off
+
+
+@case("flash.reachable: each address gets its own attempt (a dead IPv6 first does not spend the budget), the budget "
+      "outlasts a slow DNS answer and bounds a hung one, answers are kept per host for 20 s, INTELLEX_OFFLINE answers "
+      "False at once", group="reachable")
+def reachable_rules(ctx):
+    import socket
+    import flash
+    problems = []
+    flash._reach.clear()
+    check(flash.REACH_TTL_S == 20.0, f"REACH_TTL_S is {flash.REACH_TTL_S}; this case is written for 20 s")
+    v6dead = {"hil-a.example": [(6, "2001:db8::1", "hang"), (4, "192.0.2.10", "accept")]}
+    with _Patched(_Net(v6dead)) as net:
+        t0 = time.monotonic()
+        ok = flash.reachable("hil-a.example", timeout=0.6, budget=3.0)
+        took = time.monotonic() - t0
+    if ok is not True or [c[0] for c in net.connects] != ["2001:db8::1", "192.0.2.10"]:
+        problems.append(f"a dead IPv6 address then a live IPv4 one: {ok}, tried {net.connects}")
+    if took > 1.5:
+        problems.append(f"the live address answered {took:.1f} s in: the dead one spent more than its 0.6 s timeout")
+
+    with _Patched(_Net({"hil-slowdns.example": [(4, "192.0.2.11", "accept")]}, dns_delay=1.2)) as net:
+        ok = flash.reachable("hil-slowdns.example", timeout=0.5, budget=3.0)
+    if ok is not True:
+        problems.append(f"a DNS answer slower than one connect's timeout (1.2 s > 0.5 s) but inside the budget: {ok}, "
+                        f"reason {flash.unreachable_reason('hil-slowdns.example')!r} - the budget must cover the lookup")
+
+    # The lookup outlives the budget; when it finally answers, it fails - the probe thread that reachable() stopped
+    # waiting for must not go on to a connect after the stand-ins are put back (that would be a real one).
+    with _Patched(_Net({"hil-hung.example": socket.gaierror(8, "HIL: answered too late")}, dns_delay=2.5)) as net:
+        t0 = time.monotonic()
+        ok = flash.reachable("hil-hung.example", timeout=0.5, budget=0.8)
+        took = time.monotonic() - t0
+    why = flash.unreachable_reason("hil-hung.example")
+    if ok is not False or took > 1.5 or "no answer within" not in why:
+        problems.append(f"DNS hanging past the 0.8 s budget: {ok} after {took:.1f} s, reason {why!r}")
+
+    with _Patched(_Net({"hil-refused.example": [(6, "2001:db8::2", "refuse"), (4, "192.0.2.13", "refuse")]})) as net:
+        ok = flash.reachable("hil-refused.example", timeout=0.5, budget=2.0)
+    why = flash.unreachable_reason("hil-refused.example")
+    if ok is not False or "no address accepted a connection" not in why or "2001:db8::2" not in why \
+            or "192.0.2.13" not in why:
+        problems.append(f"every address refusing: {ok}, reason {why!r}")
+
+    with _Patched(_Net({"hil-nodns.example": socket.gaierror(8, "nodename nor servname provided")})) as net:
+        ok = flash.reachable("hil-nodns.example", timeout=0.5, budget=2.0)
+    if ok is not False or not flash.unreachable_reason("hil-nodns.example").startswith("DNS lookup failed"):
+        problems.append(f"a DNS failure: {ok}, reason {flash.unreachable_reason('hil-nodns.example')!r}")
+
+    # Per host, and kept 20 s: hil-a.example is still up although hil-nodns.example is down, without asking again.
+    with _Patched(_Net({"hil-a.example": [(4, "192.0.2.10", "refuse")]})) as net:
+        ok = flash.reachable("hil-a.example", timeout=0.5, budget=2.0)
+        if ok is not True or net.lookups:
+            problems.append(f"a second ask inside 20 s: {ok}, looked up {net.lookups} - the answer is not kept per "
+                            f"host for REACH_TTL_S")
+        if flash.unreachable_reason("hil-a.example") != "":
+            problems.append(f"hil-a.example's reason is {flash.unreachable_reason('hil-a.example')!r} after another "
+                            f"host failed: the answers are not kept apart")
+        when, up, why = flash._reach["hil-a.example"]
+        flash._reach["hil-a.example"] = (when - 20.5, up, why)          # 20.5 s ago
+        ok = flash.reachable("hil-a.example", timeout=0.5, budget=2.0)
+        if ok is not False or net.lookups != ["hil-a.example"]:
+            problems.append(f"an answer 20.5 s old: {ok}, looked up {net.lookups} - expected a fresh probe")
+
+    with _Patched(_Net({"hil-off.example": [(4, "192.0.2.14", "accept")]})) as net:
+        os.environ["INTELLEX_OFFLINE"] = "1"
+        try:
+            t0 = time.monotonic()
+            ok = flash.reachable("hil-off.example")
+            took = time.monotonic() - t0
+        finally:
+            os.environ.pop("INTELLEX_OFFLINE", None)
+    if ok is not False or net.lookups or took > 0.2 or \
+            flash.unreachable_reason("hil-off.example") != "INTELLEX_OFFLINE is set":
+        problems.append(f"INTELLEX_OFFLINE: {ok} after {took:.2f} s, looked up {net.lookups}, reason "
+                        f"{flash.unreachable_reason('hil-off.example')!r}")
+    flash._reach.clear()
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "nc_fetch_store"
+@case("NaviCore's fetch_images online stores the listing as GitHub sent it and each image it downloads under "
+      "firmware/navicore/<branch> with the manifest; an empty image is refused and not stored; offline the stored set "
+      "comes back", group="nc_fetch_store")
+def nc_fetch_store(ctx):
+    import json
+    import flash
+    app, part, boot = f"NaviCore_{NC_TAG}_ESP32S3.bin", f"NaviCore_{NC_TAG}_ESP32S3_part.bin", flash.BOOTLOADER_NAME
+    other = "RC-Controller_1.0.0_ESP32S3.bin"
+    data = {app: blob("app-online", 256), part: blob("part-online", 96), boot: blob("boot-online", 128),
+            other: blob("rc-online", 64)}
+    problems = []
+    for branch, key in (("hil-store", "hil-store"), ("feature/hil-store", "feature__hil-store")):
+        base = f"https://raw.githubusercontent.com/{flash.GITHUB_OWNER}/{flash.GITHUB_REPO}/{branch}/firmware/"
+        listing = json.dumps([{"name": n, "type": "file", "size": len(b), "download_url": base + n}
+                              for n, b in data.items()]).encode()
+        asked = []
+
+        def get(url, _log=None, **_k):
+            asked.append(url)
+            if "api.github.com" in url:
+                return listing
+            return data[url.rsplit("/", 1)[1]]
+        r0, g0 = flash.reachable, flash._get
+        flash.reachable, flash._get = (lambda *a, **k: True), get
+        log = []
+        try:
+            got = flash.fetch_images(branch, log.append)
+        finally:
+            flash.reachable, flash._get = r0, g0
+        d = os.path.join(ctx.src, "firmware", "navicore", key)
+        if [(e["address"], e["name"], e["data"]) for e in got] != [(0x0, boot, data[boot]), (0x8000, part, data[part]),
+                                                                   (0x10000, app, data[app])]:
+            problems.append(f"{branch}: fetch_images returned {[(hex(e['address']), e['name']) for e in got]}")
+        try:
+            stored_listing = open(os.path.join(d, "listing.json"), "rb").read()
+        except OSError:
+            stored_listing = None
+        if stored_listing != listing:
+            problems.append(f"{branch}: the listing was not stored as GitHub sent it under firmware/navicore/{key}")
+        for n in (app, part, boot):
+            try:
+                ok = open(os.path.join(d, n), "rb").read() == data[n]
+            except OSError:
+                ok = False
+            if not ok:
+                problems.append(f"{branch}: {n} was not stored under firmware/navicore/{key}")
+        if os.path.exists(os.path.join(d, other)) or any(other in u for u in asked):
+            problems.append(f"{branch}: another product's image was downloaded or stored")
+        if any(f.endswith(".part") for f in os.listdir(d)):
+            problems.append(f"{branch}: a .part file was left behind: {sorted(os.listdir(d))}")
+        try:
+            m = json.load(open(os.path.join(ctx.src, "firmware", "manifest.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            m = {}
+        if sorted((m.get(f"navicore/{key}") or {})) != sorted([app, part, boot]):
+            problems.append(f"{branch}: the manifest's navicore/{key} names {sorted(m.get(f'navicore/{key}') or {})}")
+        if branch != "main" and not any("WARNING firmware source branch" in x for x in log):
+            problems.append(f"{branch}: no non-main branch warning in the flash log")
+        # Offline: the same set, from the cache.
+        r0 = flash.reachable
+        flash.reachable = lambda *a, **k: False
+        try:
+            again = [(e["name"], e["data"]) for e in flash.fetch_images(branch)]
+        except flash.FlashError as e:
+            again = f"refused: {e}"
+        finally:
+            flash.reachable = r0
+        if again != [(e["name"], e["data"]) for e in got]:
+            problems.append(f"{branch}: offline the cached set is not what was downloaded "
+                            f"({again if isinstance(again, str) else [n for n, _ in again]})")
+
+    # GitHub hands back an empty image: refused, and nothing stored under its name.
+    branch = "hil-empty"
+    base = f"https://raw.githubusercontent.com/{flash.GITHUB_OWNER}/{flash.GITHUB_REPO}/{branch}/firmware/"
+    listing = json.dumps([{"name": app, "type": "file", "size": 0, "download_url": base + app}]).encode()
+    r0, g0 = flash.reachable, flash._get
+    flash.reachable = lambda *a, **k: True
+    flash._get = lambda url, _log=None, **_k: listing if "api.github.com" in url else b""
+    try:
+        raises(lambda: flash.fetch_images(branch), "is empty")
+    except AssertionError as e:
+        problems.append(f"an empty image from GitHub: {e}")
+    finally:
+        flash.reachable, flash._get = r0, g0
+    if os.path.exists(os.path.join(ctx.src, "firmware", "navicore", branch, app)):
+        problems.append("an empty image was stored under its build's name")
+    check(not problems, "; ".join(problems))
 
 
 if __name__ == "__main__":

@@ -94,5 +94,136 @@ def busy_and_leash(ctx):
           f"a port outside INTELLEX_SERIAL_ALLOW: opened {opened}, answered {got}")
 
 
+# ------------------------------------------------------------------ group "bounce_macos"
+# discover._wifi_bounce_macos (Intellex src/discover.py:641-771) with proc.run answering every command from a script:
+# nothing runs, no adapter is touched. Each case is a Mac: what `route -n get`, `ifconfig`, `networksetup
+# -listallhardwareports`, `-getairportnetwork`, `-getairportpower` and `-setairportpower` would say.
+ROUTE_DEFAULT = "   route to: 192.168.4.1\ndestination: default\n       mask: default\n    gateway: 10.0.0.1\n  interface: en0\n"
+
+
+def _route(iface):
+    return f"   route to: 192.168.4.1\ndestination: 192.168.4.0\n       mask: 255.255.255.0\n  interface: {iface}\n"
+
+
+def _ifconfig(iface, ip):
+    return f"{iface}: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n\tinet {ip} netmask 0xffffff00 broadcast x\n"
+
+
+HW_PORTS = ("\nHardware Port: Wi-Fi\nDevice: en0\nEthernet Address: aa\n\nHardware Port: 802.11ac NIC\nDevice: en6\n"
+            "Ethernet Address: bb\n\nHardware Port: Thunderbolt Bridge\nDevice: bridge0\n")
+
+
+class _Mac:
+    """proc.run for the bounce: {argv tuple: (returncode, stdout, stderr)}; every call recorded in order."""
+
+    def __init__(self, answers, raise_for=None):
+        self.answers, self.calls, self.raise_for = answers, [], raise_for
+
+    def run(self, args, **_k):
+        import subprocess
+        self.calls.append(tuple(args))
+        if self.raise_for and self.raise_for(tuple(args)):
+            raise FileNotFoundError(args[0])
+        rc, out, err = self.answers.get(tuple(args), (1, "", f"HIL: no script for {' '.join(args)}"))
+        return subprocess.CompletedProcess(args, rc, stdout=out, stderr=err)
+
+    def touched(self):
+        """Every networksetup call that changes something."""
+        return [c for c in self.calls if c[0] == "networksetup" and any(
+            x in c for x in ("-setairportpower", "-setnetworkserviceenabled", "-setairportnetwork"))]
+
+
+def _bounce(mac, ssid="NaviCore", ip="192.168.4.1"):
+    import discover
+    import proc
+    real = proc.run
+    proc.run = mac.run
+    try:
+        return discover._wifi_bounce_macos(ssid, ip)
+    finally:
+        proc.run = real
+
+
+@case("the routing table names the carrying interface: a built-in Wi-Fi port is power-cycled off then on; one macOS "
+      "does not count as Wi-Fi is declined with nothing touched; a failing power-on is reported", group="bounce_macos")
+def bounce_by_route(ctx):
+    problems = []
+    route = ("route", "-n", "get", "192.168.4.1")
+    base = {route: (0, _route("en1"), ""), ("ifconfig", "en1"): (0, _ifconfig("en1", "192.168.4.2"), "")}
+    mac = _Mac({**base, **{("networksetup", "-getairportpower", "en1"): (0, "Wi-Fi Power (en1): On", ""),
+                             ("networksetup", "-setairportpower", "en1", "off"): (0, "", ""),
+                             ("networksetup", "-setairportpower", "en1", "on"): (0, "", "")}})
+    ok, msg = _bounce(mac)
+    if (ok, msg) != (True, "en1 (carrying 192.168.4.1): power-cycled, reconnecting"):
+        problems.append(f"a Wi-Fi port carrying the droid: {(ok, msg)}")
+    if mac.touched() != [("networksetup", "-setairportpower", "en1", "off"),
+                         ("networksetup", "-setairportpower", "en1", "on")]:
+        problems.append(f"a Wi-Fi port carrying the droid: changed {mac.touched()}, expected en1 off then on")
+    if ("networksetup", "-listallhardwareports") in mac.calls:
+        problems.append("the SSID scan ran although the routing table had answered")
+
+    mac = _Mac({**base, **{route: (0, _route("en6"), ""), ("ifconfig", "en6"): (0, _ifconfig("en6", "192.168.4.3"), ""),
+                             ("networksetup", "-getairportpower", "en6"): (
+                                 10, "", "en6 is not a Wi-Fi interface.\n** Error: Error obtaining wireless information.")}})
+    ok, msg = _bounce(mac)
+    if ok or not msg.startswith("en6 (carrying 192.168.4.1) is an adapter macOS does not count as Wi-Fi"):
+        problems.append(f"the Realtek on en6: {(ok, msg[:90])}, expected declined")
+    if mac.touched():
+        problems.append(f"the Realtek on en6 was touched: {mac.touched()} (cycling its service froze a Mac, 2026-10-07)")
+
+    mac = _Mac({**base, **{("networksetup", "-getairportpower", "en1"): (0, "Wi-Fi Power (en1): On", ""),
+                             ("networksetup", "-setairportpower", "en1", "off"): (0, "", ""),
+                             ("networksetup", "-setairportpower", "en1", "on"): (4, "", "HIL: could not power on en1\n")}})
+    ok, msg = _bounce(mac)
+    if (ok, msg) != (False, "HIL: could not power on en1"):
+        problems.append(f"a power-on that fails: {(ok, msg)}, expected (False, its stderr)")
+    check(not problems, "; ".join(problems))
+
+
+@case("the default route is never the droid's: with only a default route, or a route whose interface holds no address "
+      "on the droid's /24, the routing check declines and the SSID scan decides - by name, never by substring",
+      group="bounce_macos")
+def bounce_default_route(ctx):
+    problems = []
+    route = ("route", "-n", "get", "192.168.4.1")
+    hw = ("networksetup", "-listallhardwareports")
+    net0 = ("networksetup", "-getairportnetwork", "en0")
+    for label, answers, ssid_reply in (
+            ("only a default route", {route: (0, ROUTE_DEFAULT, "")}, "Current Wi-Fi Network: HomeNet\n"),
+            ("a default route through an adapter that even holds a droid-subnet address",
+             {route: (0, ROUTE_DEFAULT, ""), ("ifconfig", "en0"): (0, _ifconfig("en0", "192.168.4.5"), "")},
+             "Current Wi-Fi Network: HomeNet\n"),
+            ("a host route on an adapter off the droid's /24",
+             {route: (0, _route("en0"), ""), ("ifconfig", "en0"): (0, _ifconfig("en0", "10.0.0.5"), "")},
+             "Current Wi-Fi Network: HomeNet\n"),
+            ("a house network merely containing the name", {route: (0, ROUTE_DEFAULT, "")},
+             "Current Wi-Fi Network: NaviCore_Guest\n"),
+            ("macOS hiding the SSID", {route: (0, ROUTE_DEFAULT, "")},
+             "You are not associated with an AirPort network.\n")):
+        mac = _Mac({**answers, **{hw: (0, HW_PORTS, ""), net0: (0, ssid_reply, "")}})
+        ok, msg = _bounce(mac)
+        if ok or not msg.startswith('nothing is carrying 192.168.4.1, and no Wi-Fi interface reports being on "NaviCore"'):
+            problems.append(f"{label}: {(ok, msg[:80])}, expected the 'nothing is carrying' refusal")
+        if mac.touched():
+            problems.append(f"{label}: changed {mac.touched()} - the user's own network")
+        if hw not in mac.calls:
+            problems.append(f"{label}: the SSID scan never ran")
+        if ("networksetup", "-getairportnetwork", "en6") in mac.calls:
+            problems.append(f"{label}: the scan asked en6 ('802.11ac NIC' is not a Wi-Fi hardware port)")
+
+    # The scan finds the droid by its default-named network ('NaviCore-20' is 'NaviCore'): that port is cycled.
+    mac = _Mac({route: (0, ROUTE_DEFAULT, ""), hw: (0, HW_PORTS, ""), net0: (0, "Current Wi-Fi Network: NaviCore-20\n", ""),
+                ("networksetup", "-getairportpower", "en0"): (0, "Wi-Fi Power (en0): On", ""),
+                ("networksetup", "-setairportpower", "en0", "off"): (0, "", ""),
+                ("networksetup", "-setairportpower", "en0", "on"): (0, "", "")})
+    ok, msg = _bounce(mac)
+    if (ok, msg) != (True, 'en0 (associated with "NaviCore"): power-cycled, reconnecting'):
+        problems.append(f"the SSID scan finding NaviCore-20 on en0: {(ok, msg)}")
+    mac = _Mac({}, raise_for=lambda a: a[0] == "route")
+    if _bounce(mac) != (False, "networksetup not found"):
+        problems.append("a Mac with no route/networksetup binaries did not say 'networksetup not found'")
+    check(not problems, "; ".join(problems))
+
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())
