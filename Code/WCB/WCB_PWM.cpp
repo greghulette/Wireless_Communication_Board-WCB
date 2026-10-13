@@ -395,9 +395,10 @@ void addPWMMapping(const String &config, bool autoReboot) {
         // the pin never drove anything, and ?backup emitted a self-addressed token.
         if (wcbNum == WCB_Number) wcbNum = 0;
         if (serialPort >= 1 && serialPort <= 5 && wcbNum >= 0 && wcbNum <= MAX_WCB_COUNT) {
-            // Validate local output ports aren't in use by Kyber
+            // Validate local output ports aren't held by a Kyber mode or a device. canUsePWMOnPort has just printed
+            // which; this line named the Kyber whatever the owner was (coverage re-scan 2026-10-12, pwm.out_port_device_refused).
             if (wcbNum == 0 && !canUsePWMOnPort(serialPort)) {
-                Serial.printf("⚠️  Skipping output Serial%d - reserved for Kyber\n", serialPort);
+                Serial.printf("⚠️  Skipping output Serial%d - the port is taken (see above)\n", serialPort);
             } else if (wcbNum == 0 && serialMapOwnsPort(serialPort, true)) {   // configure time only (re-scan #15)
                 Serial.printf("⚠️  Skipping output Serial%d - a serial mapping reads it\n", serialPort);
             } else {
