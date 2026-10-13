@@ -326,6 +326,12 @@ _FAKE_RESCAN_L = (
     ("term_fake_panes", "A pane's chip says USB or via WCB n, its input is disabled while unreachable, and a board moving slot takes its output along (term.panes)"),
     ("term_fake_send_history", "Terminal lines go into the board's own history, a repeat once; the arrows walk it (term.send_history)"),
     ("term_fake_log_routing", "A line goes to its board's pane when the board is connected, relayed or opened by hand; a merely discovered board's lands in the first pane (term.log_routing)"),
+    ("pull_fake_wcbq_renders_floor", "A pulled WCB quantity above 1 renders that many sections; 1 changes nothing (pull.wcbq_renders_floor)"),
+    ("pull_fake_success_state", "A pull's button, config, baseline, badge, toast and version request; an overlapping pull is dropped; only a manual pull says not connected (pull.success_state)"),
+    ("pull_fake_remote_delegation", "Pull on a relayed board goes through the relay; a slot recorded as its own relay is refused; Retry pulls again (pull.remote_delegation)"),
+    ("push_fake_progress_and_history", "A push shows 'Pushing... k/n', hides the bar after, gives the button back, releases the mesh hold and clears the controller history (push.progress_and_history)"),
+    ("rpush_fake_guards", "A relayed push is refused with its reason when the relay is down, the board has no config, or no relay is set (rpush.guards)"),
+    ("pushall_fake_exclusions", "Push All with nothing connected says 'No boards connected' and sends nothing (pushall.exclusions)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
