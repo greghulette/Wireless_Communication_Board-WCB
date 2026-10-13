@@ -226,7 +226,8 @@ for _key, _title in _FAKE_RESCAN:
 
 # The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
 # section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
-# (specs/cards_rescan_fake.spec.js). No board and no real port, so CI runs them too.
+# (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js). No board
+# and no real port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -237,6 +238,11 @@ _FAKE_RESCAN_M = (
     ("identity_fake_hw_version", "A board pulled with HW 0 pushes no ?HW line, nor does picking Select; the LED pin group shows for 3.1/3.2 only, and only a user's pick marks the board unsaved (identity.hw_version)"),
     ("serial_fake_baud_options", "The serial table offers S3-S5 up to 57600 plus the configured baud marked (!): a board pulled with S4 at 115200 shows it, and pushed untouched sends nothing (serial.table_baud_options)"),
     ("wifi_fake_ui", "The WiFi radios show the AP or Join fields with a note naming the mesh channel, Off hides them; mode and credentials go into the config, the board is marked unsaved, and the push sends one ?WIFI line (wifi.ui)"),
+    ("kyber_fake_mode_radio", "The Kyber radio: Local claims S2 as Kyber Maestro, shows its fields, marks the board unsaved and pushes the port rows then ?KYBER,LOCAL,S2; None clears the automatic label; Remote pushes ?MAESTRO,REMOTE (kyber.mode_radio)"),
+    ("kyber_fake_port_dropdown", "The Kyber port picker offers S1/S2 only, hides a port another feature holds, keeps the current one, shows a legacy S3-S5 port disabled, and says when both are taken - which still pushes ?KYBER,LOCAL,S2 (kyber.port_dropdown)"),
+    ("kyber_fake_baud", "A Kyber baud change is written into the Kyber port's serial baud, so the push carries ?BAUD,S<port> and no Kyber line (kyber.baud)"),
+    ("navicore_fake_remote_radio", "Under NaviCore only its card shows; the Remote radio sets the board's Kyber mode to remote, the status names the id, the push sends ?MAESTRO,REMOTE; None takes it back (navicore.remote_radio)"),
+    ("navicore_fake_reconcile_maestros", "A board that gains a Maestro under NaviCore goes remote, and one that loses its last Maestro leaves remote (navicore.reconcile_maestros)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
