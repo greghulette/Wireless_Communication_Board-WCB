@@ -106,10 +106,15 @@ void parseCommandGroups(const String &input, int sourceID, int originEspnow, int
                   "previous sequence dropped (nested timer sequences aren't supported).\n",
                   (unsigned)(commandGroups.size() - currentGroupIndex));
   }
+  // Timer mode stays OFF while the groups are built, and goes on only once the vector is whole (end of this
+  // function). It used to go on here: processCommandGroups on the loop task then read commandGroups while this task
+  // was still pushing into it, could catch a group mid-copy with no commands, took it for an empty group and
+  // stopped the chain before its first group ran ('Timer sequence manually stopped' with no ?STOP sent; HIL
+  // serial.timer_cap_negative, full run 20261013-021405).
+  commandTimerModeEnabled = false;
   commandGroups.clear();
   commandGroupsGeneration++;   // invalidate any in-flight processCommandGroups() pass
   currentGroupIndex = 0;
-  commandTimerModeEnabled = true;
   waitingForNextGroup = false;
   // Capture the origin now; it's re-applied as each group fires (see processCommandGroups).
   commandGroupsEspnowOrigin = (originEspnow >= 0) ? (originEspnow != 0) : lastReceivedViaESPNOW;
@@ -219,6 +224,8 @@ void parseCommandGroups(const String &input, int sourceID, int originEspnow, int
     commandGroups.push_back(currentGroup);
   }
   lastGroupTime = millis();
+  __sync_synchronize();            // the whole vector is written before the loop task can see timer mode on
+  commandTimerModeEnabled = true;
 }
 
 void processCommandGroups() {
