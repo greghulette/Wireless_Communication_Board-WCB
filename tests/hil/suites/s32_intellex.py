@@ -1826,3 +1826,95 @@ def fetch_wiki_unit(bench):
     _swap_in and main() (:132-381), with page_index, _get and _size_of answered in the venv process and the wikis in a
     scratch directory inside the stage."""
     run_intellex_py(bench, "intellex.fetch_wiki_unit", "fetch_units.py", args={"group": "fetch_wiki"})
+
+
+# ------------------------------------------------------------------ the 2026-10-12 re-scan's low-risk rows
+@test("intellex.wifi_bounce_route", "POST /_api/wifi-bounce runs discover.wifi_bounce in a thread with the body's ssid, "
+      "'NaviCore' with no body, a body that is not JSON or one without ssid, and answers {ok, message} as the bounce "
+      "returned them; a slow bounce leaves /_api/status answering (in-process, the bounce stood in for; IX re-scan "
+      "host.api.wifi_bounce_route)")
+def wifi_bounce_route(bench):
+    """tests/intellex/py/host_units.py group wifi_bounce_route: Intellex src/host.py api_wifi_bounce (:425-434) on its
+    real build_app() in the venv process, discover.wifi_bounce replaced before the app starts (and the macOS bounce made
+    to raise), so no adapter is touched. No page calls this route; intellex.origin_guard leaves it out on purpose."""
+    run_intellex_py(bench, "intellex.wifi_bounce_route", "host_units.py", args={"group": "wifi_bounce_route"})
+
+
+@test("intellex.signals_route", "POST /_api/signals: 409 with nothing attached, 200 and nothing done on a WebSocket "
+      "link (a stand-in endpoint on 127.0.0.2:80), 409 again after the detach; on a serial link DTR and RTS reach "
+      "set_signals as given (None when absent), and a driver error is 502 (IX re-scan host.api.signals)")
+def signals_route(bench):
+    """Intellex src/host.py api_signals (:1348-1372): no transport is 409; a WebSocketTransport inherits Transport's
+    set_signals, a no-op (transport.py:68-77, ws_transport.py:136), so a page's setSignals over WiFi answers ok. On a
+    staged host against hil/ws.py WsEndpoint; the serial half in-process (tests/intellex/py/host_units.py group
+    signals), a fake transport recording what set_signals was handed."""
+    require(bench)
+    tid = "intellex.signals_route"
+    problems = []
+    sd = stage(bench, tid, tools="none")
+    try:
+        ep = WsEndpoint("127.0.0.2", 80)
+    except OSError as e:
+        ep = None
+        bench.note(f"{tid}: the WebSocket half not checked: nothing can listen on 127.0.0.2:80 here ({e})")
+    try:
+        with IntellexHost(bench, sd) as host:
+            body = {"dataTerminalReady": False, "requestToSend": False}
+            st, reply = host.json("POST", "/_api/signals", body)
+            if st != 409 or reply != {"ok": False, "error": "nothing attached"}:
+                problems.append(f"signals on a fresh host: {st} {reply}, expected 409 'nothing attached'")
+            if ep is not None:
+                host.attach({"kind": "ws", "host": "127.0.0.2", "role": "navicore"}, timeout=20)
+                for b in (body, {"dataTerminalReady": True, "requestToSend": True}):
+                    st, reply = host.json("POST", "/_api/signals", b)
+                    if st != 200 or reply != {"ok": True}:
+                        problems.append(f"signals {b} on a ws link: {st} {reply}, expected 200 {{ok: true}}")
+                st, s = host.json("GET", "/_api/status")
+                if not s.get("attached") or ep.upgraded != 1:
+                    problems.append(f"after the signals the ws link: attached {s.get('attached')}, {ep.upgraded} "
+                                    f"upgrade(s) at the endpoint - expected the one link untouched")
+                host.detach()
+                st, reply = host.json("POST", "/_api/signals", body)
+                if st != 409:
+                    problems.append(f"signals after the detach: {st} {reply}, expected 409")
+    finally:
+        if ep is not None:
+            ep.close()
+    try:
+        run_intellex_py(bench, tid, "host_units.py", args={"group": "signals"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"in-process (host_units.py signals): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.reconnect_retry_reason", "While a reattach keeps failing the reconnect loop keeps lastError at "
+      "'reconnect failed: <why>' and prints that line once per new reason, again when the reason changes back; a "
+      "reattach that works prints 'reconnected', clears lastError and forgets the reason (in-process fakes; IX "
+      "re-scan host.reconnect.retry_loop)")
+def reconnect_retry_reason(bench):
+    """tests/intellex/py/host_units.py group retry_loop: Intellex src/host.py reconnect_loop's except TransportError
+    (:1789-1805, failed_why) on its real build_app() in the venv process, a fake serial transport whose open() fails
+    with the reason the case sets. intellex.bridge_failed_attach_w1 reads the same on W1's real, held port."""
+    run_intellex_py(bench, "intellex.reconnect_retry_reason", "host_units.py", args={"group": "retry_loop"},
+                    timeout=300)
+
+
+@test("intellex.version_unit", "version.info(): git's short SHA from a checkout, '+dirty' with an uncommitted change, "
+      "built 'from source'; a build stamp wins over git even on a dirty tree; with neither, no commit; describe() and "
+      "GET /_api/version agree (a scratch git repo; IX re-scan host.api.version)")
+def version_unit(bench):
+    """tests/intellex/py/host_units.py group version: Intellex src/version.py info, _from_stamp, _from_git and describe
+    (:34-77) and host.py api_version (:559-565). version.__file__ is pointed into a scratch git repo inside the stage
+    (and, for 'no git', a directory git is kept from searching above with GIT_CEILING_DIRECTORIES); the stamp is a
+    build_stamp module put in sys.modules, as a frozen build imports its generated one."""
+    run_intellex_py(bench, "intellex.version_unit", "host_units.py", args={"group": "version"})
+
+
+@test("intellex.tool_base_unit", "settings.tool_base: main (or no branch) is the site's own /Wizard or /config_tool, "
+      "any other branch /dev/<branch>/<leaf>, the configured branch when none is given; fetch_webui.base_for and the "
+      "launcher's version check ask the same URLs (GitHub stood in for; IX re-scan settings.tool_base)")
+def tool_base_unit(bench):
+    """tests/intellex/py/host_units.py group tool_base: Intellex src/settings.py tool_base (:126-140), tools/
+    fetch_webui.py base_for (:71-78) and host.py _published_dtg / _wcb_published_ver (:461-519), whose urlopen is
+    answered in the venv process with flash.reachable True - nothing reaches the network."""
+    run_intellex_py(bench, "intellex.tool_base_unit", "host_units.py", args={"group": "tool_base"})

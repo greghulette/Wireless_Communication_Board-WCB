@@ -50,7 +50,7 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ixpy  # noqa: E402
 from _ixpy import case, check  # noqa: E402
-from bridge_units import _STATE, _board_class, _gate_class, _host, _script, _server  # noqa: E402
+from bridge_units import _STATE, _board_class, _gate_class, _host, _req_thread, _script, _server  # noqa: E402
 
 ABSENT = "<no ssid key>"
 
@@ -782,6 +782,343 @@ def app_window(ctx):
             if [(t, u) for t, u, _ in wv.windows[1:]] != [("WCB Wizard", f"http://127.0.0.1:{port}/wcb/Wizard/")]:
                 problems.append(f"{label}: the open-window hook made {[(t, u) for t, u, _ in wv.windows[1:]]}")
     check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "wifi_bounce_route"
+@case("POST /_api/wifi-bounce runs discover.wifi_bounce off the event loop with the body's ssid - 'NaviCore' with no "
+      "body, a body that is not JSON or one without ssid - and answers {ok, message} as it returned them",
+      group="wifi_bounce_route")
+def wifi_bounce_route(ctx):
+    import asyncio
+    import discover
+    host = _host()
+    check(host.discover is discover, "host.py's discover is not the module patched here")
+    calls = []
+    ctl = {"sleep": 0.0, "result": (True, "HIL bounced")}
+
+    def fake(ssid="NaviCore"):
+        try:
+            asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            on_loop = False
+        calls.append({"ssid": ssid, "on_loop": on_loop})
+        time.sleep(ctl["sleep"])
+        return ctl["result"]
+
+    def refuse(*_a, **_k):
+        raise AssertionError("the real macOS bounce was reached")
+    real = discover.wifi_bounce, discover._wifi_bounce_macos
+    discover.wifi_bounce, discover._wifi_bounce_macos = fake, refuse      # before the app exists: nothing real runs
+    problems = []
+    try:
+        s = _server()
+        for label, body, want in (("no body", None, "NaviCore"), ("{}", {}, "NaviCore"),
+                                  ("{ssid: 'HILNET'}", {"ssid": "HILNET"}, "HILNET"),
+                                  ("{other: 1}", {"other": 1}, "NaviCore"), ("a body that is not JSON", b"not json",
+                                                                             "NaviCore")):
+            n = len(calls)
+            code, _, raw = s.http("POST", "/_api/wifi-bounce", body)
+            try:
+                reply = json.loads(raw or b"null")
+            except ValueError:
+                reply = raw[:80]
+            got = calls[n:]
+            if code != 200 or reply != {"ok": True, "message": "HIL bounced"}:
+                problems.append(f"{label}: {code} {reply}, expected 200 {{ok: true, message: 'HIL bounced'}}")
+            if [c["ssid"] for c in got] != [want]:
+                problems.append(f"{label}: wifi_bounce was called with {[c['ssid'] for c in got]}, expected [{want!r}]")
+            elif got[0]["on_loop"]:
+                problems.append(f"{label}: wifi_bounce ran on the event loop, not in a thread")
+        ctl["result"] = (False, "HIL: no adapter is on that network")
+        code, reply = s.req("POST", "/_api/wifi-bounce", {"ssid": "HILNET"})
+        if code != 200 or reply != {"ok": False, "message": "HIL: no adapter is on that network"}:
+            problems.append(f"a bounce that failed: {code} {reply}, expected 200 with ok false and its message")
+        # Off the loop, measured: a slow bounce leaves /_api/status answering.
+        ctl["sleep"], ctl["result"] = 2.0, (True, "HIL slow")
+        n = len(calls)
+        th, slow = _req_thread(s, "POST", "/_api/wifi-bounce", {"ssid": "HILSLOW"})
+        deadline = time.monotonic() + 5
+        while len(calls) == n and time.monotonic() < deadline:
+            time.sleep(0.02)
+        t0 = time.monotonic()
+        s.status()
+        took = time.monotonic() - t0
+        th.join(10)
+        if took > 0.5:
+            problems.append(f"/_api/status took {took:.2f} s while a 2 s bounce ran: the bounce holds the event loop")
+        if slow.get("status") != 200 or (slow.get("body") or {}).get("message") != "HIL slow":
+            problems.append(f"the slow bounce answered {slow}")
+    finally:
+        discover.wifi_bounce, discover._wifi_bounce_macos = real
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "signals"
+@case("POST /_api/signals: 409 'nothing attached' with no transport; on a serial link it hands dataTerminalReady and "
+      "requestToSend to set_signals as dtr and rts (None when absent or the body is not JSON) and answers ok; a driver "
+      "error is 502 with its words; 409 again after a detach", group="signals")
+def signals_route(ctx):
+    from transport import TransportError
+    s = _server()
+    Board = _board_class()
+    rec, ctl = [], {"fail": None}
+
+    class Lines(Board):
+        def set_signals(self, *, dtr=None, rts=None):
+            rec.append((dtr, rts))
+            if ctl["fail"]:
+                raise TransportError(ctl["fail"])
+    s.make = lambda spec, on_data, on_lost: Lines("sig", _script("navicore"), on_data, on_lost)
+    problems = []
+    try:
+        s.req("POST", "/_api/detach", {})
+        code, reply = s.req("POST", "/_api/signals", {"dataTerminalReady": False, "requestToSend": False})
+        if code != 409 or reply != {"ok": False, "error": "nothing attached"}:
+            problems.append(f"signals with nothing attached: {code} {reply}, expected 409 'nothing attached'")
+        code, reply = s.req("POST", "/_api/attach", {"kind": "serial", "port": "COMHILSIG"})
+        check(code == 200, f"the fake port did not attach: {code} {reply}")
+        for label, body, want in (("both false", {"dataTerminalReady": False, "requestToSend": False}, (False, False)),
+                                  ("DTR only", {"dataTerminalReady": True}, (True, None)),
+                                  ("RTS only", {"requestToSend": True}, (None, True)),
+                                  ("not JSON", b"not json", (None, None))):
+            n = len(rec)
+            code, _, raw = s.http("POST", "/_api/signals", body)
+            if code != 200 or json.loads(raw or b"null") != {"ok": True} or rec[n:] != [want]:
+                problems.append(f"{label}: {code} {raw[:60]!r}, set_signals got {rec[n:]}, expected 200 ok and "
+                                f"[{want}]")
+        ctl["fail"] = "HIL: the driver refused DTR"
+        code, reply = s.req("POST", "/_api/signals", {"dataTerminalReady": False})
+        if code != 502 or reply != {"ok": False, "error": "HIL: the driver refused DTR"}:
+            problems.append(f"a driver error: {code} {reply}, expected 502 with its words")
+        ctl["fail"] = None
+        s.req("POST", "/_api/detach", {})
+        code, reply = s.req("POST", "/_api/signals", {})
+        if code != 409:
+            problems.append(f"signals after a detach: {code} {reply}, expected 409")
+    finally:
+        s.req("POST", "/_api/detach", {})
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "retry_loop"
+@case("while a reattach fails the reconnect loop keeps lastError at 'reconnect failed: <why>' and prints that line "
+      "once per new reason (a reason that returns after another is new again); a reattach that works prints "
+      "'reconnected', clears lastError and forgets the reason", group="retry_loop")
+def retry_loop(ctx):
+    from transport import TransportError
+    s = _server()
+    out = _STATE["out"]
+    Board = _board_class()
+    ctl = {"why": "HIL reason A"}
+    made = []
+
+    class Flaky(Board):
+        def open(self):
+            if ctl["why"]:
+                raise TransportError(ctl["why"])
+            self._open = True
+
+    def make(spec, on_data, on_lost):
+        b = Flaky("flaky", _script("navicore"), on_data, on_lost)
+        made.append(b)
+        return b
+    s.make = make
+    A, B = "reconnect failed: HIL reason A", "reconnect failed: HIL reason B"
+    problems = []
+
+    def retries(n, timeout=10):
+        m = len(made)
+        _wait(lambda: len(made) >= m + n, timeout)
+        return len(made) - m
+    try:
+        k = len(out.text)
+        code, reply = s.req("POST", "/_api/attach", {"kind": "serial", "port": "COMHILRETRY"})
+        check(code == 502 and reply.get("error") == "HIL reason A", f"the first attach answered {code} {reply}")
+        got = retries(4)
+        st = s.status()
+        lines = out.since(k)
+        if got < 4:
+            problems.append(f"only {got} reattaches in 10 s: the loop retries every second")
+        if lines.count(A) != 1:
+            problems.append(f"'{A}' printed {lines.count(A)} times over {got} failed reattaches, expected once")
+        if st.get("lastError") != A or st.get("attached") or not st.get("reconnecting"):
+            problems.append(f"while it fails, /_api/status {st}: lastError should read {A!r}")
+        ctl["why"] = "HIL reason B"
+        retries(3)
+        lines, st = out.since(k), s.status()
+        if lines.count(B) != 1 or lines.count(A) != 1:
+            problems.append(f"after the reason changed: '{A}' x{lines.count(A)}, '{B}' x{lines.count(B)}, expected "
+                            f"once each")
+        if st.get("lastError") != B:
+            problems.append(f"after the reason changed lastError is {st.get('lastError')!r}, expected {B!r}")
+        ctl["why"] = "HIL reason A"
+        retries(3)
+        if out.since(k).count(A) != 2:
+            problems.append(f"reason A back after B: '{A}' printed {out.since(k).count(A)} times in all, expected 2 - "
+                            f"a reason is new whenever it differs from the last one")
+        ctl["why"] = None
+        _wait(lambda: s.status().get("attached"), 10)
+        st, lines = s.status(), out.since(k)
+        if not st.get("attached") or "reconnected  serial COMHILRETRY" not in lines:
+            problems.append(f"once the port opens: attached {st.get('attached')}, a 'reconnected  serial "
+                            f"COMHILRETRY' line: {'reconnected  serial COMHILRETRY' in lines}")
+        if st.get("lastError") != "":
+            problems.append(f"a reattach that worked left lastError {st.get('lastError')!r}")
+        # The reason is forgotten once a reattach works: the same failure after a drop is printed again.
+        k2 = len(out.text)
+        ctl["why"] = "HIL reason A"
+        made[-1].lose("HIL: the port went away")
+        retries(3)
+        st, lines = s.status(), out.since(k2)
+        if lines.count(A) != 1:
+            problems.append(f"after a reattach that worked and a drop, '{A}' printed {lines.count(A)} times, expected "
+                            f"once (the loop forgets the reason when it reconnects)")
+        if st.get("lastError") != A:
+            problems.append(f"after the drop lastError is {st.get('lastError')!r}, expected {A!r} (the drop's own "
+                            f"'HIL: the port went away' replaced by the failed reattach)")
+    finally:
+        ctl["why"] = None
+        s.req("POST", "/_api/detach", {})
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "version"
+def _git(cwd, *args):
+    p = subprocess.run(["git", "-c", "user.name=hil", "-c", "user.email=hil@example.invalid", "-c",
+                        "commit.gpgsign=false"] + list(args), cwd=cwd, capture_output=True, text=True, timeout=30)
+    check(p.returncode == 0, f"git {' '.join(args)} failed: {(p.stderr or p.stdout).strip()[:200]}")
+    return p.stdout.strip()
+
+
+@case("version.info(): from a checkout, git's short SHA, '+dirty' on a tree with an uncommitted change, built 'from "
+      "source'; a build stamp wins over git, dirty or not; with neither, no commit; describe() and GET /_api/version "
+      "say the same", group="version")
+def version_info(ctx):
+    import version
+    scratch = os.path.join(ctx.stage, "scratch", "version")
+    repo = os.path.join(scratch, "repo")
+    src = os.path.join(repo, "src")
+    os.makedirs(src, exist_ok=True)
+    with open(os.path.join(src, "hil.txt"), "w", encoding="utf-8") as f:
+        f.write("committed\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "hil")
+    sha = _git(repo, "rev-parse", "--short", "HEAD")
+    saved_file, saved_stamp = version.__file__, sys.modules.pop("build_stamp", None)
+    saved_ceiling = os.environ.get("GIT_CEILING_DIRECTORIES")
+    V = version.VERSION
+    problems = []
+    try:
+        version.__file__ = os.path.join(src, "version.py")         # _from_git asks git about src/'s parent
+        got = version.info()
+        if got != {"version": V, "commit": sha, "built": "from source"}:
+            problems.append(f"a clean checkout: {got}, expected commit {sha!r}, built 'from source'")
+        with open(os.path.join(repo, "untracked.txt"), "w", encoding="utf-8") as f:
+            f.write("uncommitted\n")
+        got = version.info()
+        if got.get("commit") != sha + "+dirty":
+            problems.append(f"a tree with an uncommitted file: commit {got.get('commit')!r}, expected {sha + '+dirty'!r}")
+        stamp = types.ModuleType("build_stamp")
+        stamp.COMMIT, stamp.BUILT = "hilstamp1", "2026-10-12 23:59"
+        sys.modules["build_stamp"] = stamp
+        got = version.info()
+        if got != {"version": V, "commit": "hilstamp1", "built": "2026-10-12 23:59"}:
+            problems.append(f"a build stamp on a dirty tree: {got}, expected the stamp's commit and time")
+        if version.describe() != f"v{V} (hilstamp1, 2026-10-12 23:59)":
+            problems.append(f"describe() with a stamp: {version.describe()!r}")
+        code, body = _server().req("GET", "/_api/version")
+        if code != 200 or body != got:
+            problems.append(f"GET /_api/version: {code} {body}, expected info() {got}")
+        del sys.modules["build_stamp"]
+        nogit = os.path.join(scratch, "nogit", "src")
+        os.makedirs(nogit, exist_ok=True)
+        os.environ["GIT_CEILING_DIRECTORIES"] = scratch               # git must not find the repo around the stage
+        version.__file__ = os.path.join(nogit, "version.py")
+        got = version.info()
+        if got != {"version": V, "commit": "", "built": ""}:
+            problems.append(f"no stamp and no git checkout: {got}, expected no commit and no build time")
+        if version.describe() != f"v{V}":
+            problems.append(f"describe() with neither: {version.describe()!r}, expected 'v{V}'")
+    finally:
+        version.__file__ = saved_file
+        sys.modules.pop("build_stamp", None)
+        if saved_stamp is not None:
+            sys.modules["build_stamp"] = saved_stamp
+        if saved_ceiling is None:
+            os.environ.pop("GIT_CEILING_DIRECTORIES", None)
+        else:
+            os.environ["GIT_CEILING_DIRECTORIES"] = saved_ceiling
+    check(not problems, "; ".join(problems))
+
+
+# ------------------------------------------------------------------ group "tool_base"
+WCB_PAGES = "https://greghulette.github.io/Wireless_Communication_Board-WCB"
+NC_PAGES = "https://greghulette.github.io/NaviCore"
+
+
+@case("settings.tool_base: main (or no branch) is the site's own tool, any other branch /dev/<branch>/<leaf>, and "
+      "with no branch given the configured one; fetch_webui.base_for and the launcher's version check ask those same "
+      "URLs", group="tool_base")
+def tool_base(ctx):
+    import flash
+    import settings
+    import urllib.request
+    problems = []
+    for args, want in ((("wcb", "WIFI"), f"{WCB_PAGES}/dev/WIFI/Wizard"),
+                       (("navicore", "main"), f"{NC_PAGES}/config_tool"),
+                       (("wcb", "main"), f"{WCB_PAGES}/Wizard"),
+                       (("navicore", "feature/x"), f"{NC_PAGES}/dev/feature/x/config_tool"),
+                       (("wcb", ""), f"{WCB_PAGES}/Wizard")):
+        got = settings.tool_base(*args)
+        if got != want:
+            problems.append(f"tool_base{args}: {got!r}, expected {want!r}")
+    asked = []
+
+    class _Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *_a):
+            return b""
+
+    def urlopen(url, *a, **k):
+        u = url if isinstance(url, str) else url.full_url
+        if not u.startswith("https://"):
+            return real[1](url, *a, **k)            # this script's own requests to the in-process app
+        asked.append(u)
+        return _Reply()
+    real = flash.reachable, urllib.request.urlopen
+    try:
+        check(settings.set_branch("wcb", "WIFI") is None and settings.set_branch("navicore", "main") is None,
+              "could not set the branches")
+        if settings.tool_base("wcb") != f"{WCB_PAGES}/dev/WIFI/Wizard" or settings.tool_base("navicore") != \
+                f"{NC_PAGES}/config_tool":
+            problems.append(f"with no branch given (wcb on WIFI): {settings.tool_base('wcb')!r}, "
+                            f"{settings.tool_base('navicore')!r}")
+        import fetch_webui
+        for site, leaf, br in ((fetch_webui.WCB_SITE, "Wizard", "WIFI"), (fetch_webui.NAVICORE_SITE, "config_tool",
+                                                                         "main")):
+            prod = "wcb" if leaf == "Wizard" else "navicore"
+            if fetch_webui.base_for(site, leaf, br) != settings.tool_base(prod, br):
+                problems.append(f"fetch_webui.base_for({leaf}, {br}) {fetch_webui.base_for(site, leaf, br)!r} differs "
+                                f"from tool_base's {settings.tool_base(prod, br)!r}")
+        flash.reachable = lambda *a, **k: True
+        urllib.request.urlopen = urlopen
+        code, body = _server().req("GET", "/_api/webui-version")
+        want = sorted([f"{NC_PAGES}/config_tool/index.html", f"{WCB_PAGES}/dev/WIFI/Wizard/app.js"])
+        if code != 200 or sorted(asked) != want:
+            problems.append(f"the version check asked {sorted(asked)}, expected {want}")
+    finally:
+        flash.reachable, urllib.request.urlopen = real
+        settings.set_branch("wcb", "main")
+        settings.set_branch("navicore", "main")
+    check(not problems, "; ".join(problems))
+
 
 
 if __name__ == "__main__":
