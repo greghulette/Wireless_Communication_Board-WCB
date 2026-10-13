@@ -147,3 +147,91 @@ def remote_readback(bench):
         w.send(f";M2,setTarget,0,{p0}")
         time.sleep(1.0)
         w.run("?VAR,CLEAR,m2pos0")
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+def _quiet_s1_after(w, s1, ch, cmd, settle=0.8):
+    """Send `cmd` on W1 -> (W1's console lines up to the end marker run() appends, bytes W1 S1 got meanwhile)."""
+    m = s1.dev.mark()
+    lines = [x.rstrip() for x in w.run(cmd)]
+    time.sleep(settle)
+    return lines, s1.received(ch, m)
+
+
+@test("maestro.sub_comma_form_edges", "The comma subroutine form with no device (;M,5) is a bad verb: '[MAESTRO] bad verb' under ?DEBUG,ON, nothing on W1 S1 and nothing to the mesh; with a two-digit device (;M12,5) it takes the verb path: no slot for 12, so nothing on S1 and one fallback broadcast of the comma text ';M12,5', which W2's Maestro never gets", needs=NEEDS + ["wcb2"])
+def sub_comma_form_edges(bench):
+    """Coverage re-scan 2026-10-12, maestro.sub_comma_form. processMaestroCommand (WCB.ino) sends ;M<dev>,<n> down the
+    subroutine path only for a one-digit device and a plain integer; an empty device field or a device of 10 or more
+    falls through to sendMaestroServoVerb (WCB_Maestro.cpp), where WcbMaestro::build refuses ',5' (no device number) and
+    builds AA 0C 27 05 for '12,5'. Device 12 has no slot anywhere (ids are 1-8), so the frame goes nowhere locally and
+    the verb text is forwarded as an unconfigured fallback - broadcast, since 12 is above WCBQ - in the comma form
+    maestroVerbForwardText keeps for a device above 9. ;M1,5 on W1's own Maestro 1 is the control that the wire carries
+    frames. Subroutine 5 of device 12 addresses no Maestro on the bench."""
+    probe, ch = wire(bench, 1, "S1")
+    tap, tch = wire(bench, 2, "S1")
+    w = usb_wcb(bench)
+    bad = []
+    try:
+        for kind in ("", "MAESTRO,", "ETM,"):
+            w.run(f"?DEBUG,{kind}ON")
+        lines, got = _quiet_s1_after(w, probe, ch, ";M1,5")
+        if got != bytes.fromhex("AA012705"):
+            raise AssertionError(f"control: ;M1,5 should write AA 01 27 05 on W1 S1, got {got.hex(' ') or 'nothing'}")
+        lines, got = _quiet_s1_after(w, probe, ch, ";M,5")
+        if "[MAESTRO] bad verb, ignored: ,5" not in lines:
+            bad.append(f";M,5 printed no bad-verb line: {[x for x in lines if 'MAESTRO' in x or 'Maestro' in x]}")
+        if got:
+            bad.append(f";M,5 put {got.hex(' ')} on W1 S1")
+        sends = [x for x in lines if x.startswith("[ETM] Sent seq") and ";M" in x]
+        if sends:
+            bad.append(f";M,5 went to the mesh: {sends}")
+        tm = tap.dev.mark()
+        lines, got = _quiet_s1_after(w, probe, ch, ";M12,5", settle=1.5)
+        if got:
+            bad.append(f";M12,5 put {got.hex(' ')} on W1 S1 with no slot for 12")
+        sends = [x for x in lines if x.startswith("[ETM] Sent seq") and ";M" in x]
+        if len(sends) != 1 or not sends[0].endswith(": ;M12,5"):
+            bad.append(f";M12,5 should go to the mesh once as ';M12,5', got {sends}")
+        if "→ Maestro 12 verb '12,5': Fallback broadcast" not in lines:
+            bad.append(f";M12,5 printed no 'Fallback broadcast' line: {[x for x in lines if 'Maestro' in x]}")
+        if _has_bad_verb(lines):
+            bad.append(";M12,5 was refused as a bad verb")
+        if tap.received(tch, tm):
+            bad.append(f"W2's Maestro port got {tap.received(tch, tm).hex(' ')} from ;M12,5")
+    finally:
+        for kind in ("", "MAESTRO,", "ETM,"):
+            w.run(f"?DEBUG,{kind}OFF")
+    assert not bad, "; ".join(bad)
+
+
+def _has_bad_verb(lines):
+    return any(x.startswith("[MAESTRO] bad verb") for x in lines)
+
+
+@test("maestro.bare_or_letter_ignored", "A bare ;M and a ;M followed by a letter (;Mx) are ignored: no routing or bad-verb line, no 'Invalid Serial Command', nothing to the mesh and nothing on W1 S1", needs=NEEDS)
+def bare_or_letter_ignored(bench):
+    """Coverage re-scan 2026-10-12, maestro.bare_or_letter_ignored. processMaestroCommand (WCB.ino) returns at once for a
+    ;M with no comma whose next character is not a digit ('bare/typo ;M -> ignore'). Without that return ;Mx would reach
+    the subroutine path as device 0 - the broadcast id - and fire subroutine 0 on every Maestro. Every debug flag that
+    could show a route is on; ;M11 is the control that W1 S1 carries frames."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    bad = []
+    try:
+        for kind in ("", "MAESTRO,", "ETM,"):
+            w.run(f"?DEBUG,{kind}ON")
+        lines, got = _quiet_s1_after(w, probe, ch, ";M11")
+        if got != bytes.fromhex("AA012701"):
+            raise AssertionError(f"control: ;M11 should write AA 01 27 01 on W1 S1, got {got.hex(' ') or 'nothing'}")
+        for cmd in (";M", ";Mx", ";MX5"):
+            lines, got = _quiet_s1_after(w, probe, ch, cmd)
+            said = [x for x in lines if x.startswith(("→ Maestro", "[MAESTRO]", "Invalid", "Unknown command"))
+                    or (x.startswith("[ETM] Sent seq") and ";M" in x)]
+            if said:
+                bad.append(f"{cmd} printed {said}")
+            if got:
+                bad.append(f"{cmd} put {got.hex(' ')} on W1 S1")
+    finally:
+        for kind in ("", "MAESTRO,", "ETM,"):
+            w.run(f"?DEBUG,{kind}OFF")
+    assert not bad, "; ".join(bad)

@@ -3789,3 +3789,84 @@ def remote_soft_port_maestro(bench):
                     w2.run(t)
                 _settle_maestro2(w)
     assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan 2026-10-12: low-risk rows (wcb-devices)
+@test("kyber.local_slot_add_targets", "On W1 as Kyber_Local on S2 in targeted mode, a new local Maestro slot adds its Kyber target ('✓ Kyber target added'), adds nothing when an explicit target for it is already there or when an existing slot is re-issued, and says 'Kyber target table is full (9)' when all 9 targets are taken (live, WDP off; 1 reboot)", needs=["wcb1"], links=[])
+def local_slot_add_targets(bench):
+    """Coverage re-scan 2026-10-12, maestro.cfg_adds_kyber_target. configureMaestro (WCB_Maestro.cpp) calls
+    addLocalKyberTarget only for a slot it has just claimed (newSlot), and that returns without a word when the target
+    (id, this board, port) is already enabled, or warns and adds nothing when all MAX_KYBER_TARGETS entries are taken.
+    ?KYBER,LOCAL,S2 sets Kyber_Local and targeting live (kyberTracksLocalSlots reads the globals), so no reboot is needed
+    until the restore. The 'already there' target is an explicit ?KYBER,LOCAL target made while every slot was taken
+    (storeKyberSettings adds it with no slot), the slot freed afterwards from the M7 placeholders to absent boards W11+
+    (remote proxies are never advertised; WDP is off). The full table is nine explicit copies of W1's M2:W2S1 target,
+    which all share its one proxy slot. Nothing is written to a Maestro."""
+    w = usb_wcb(bench)
+    _require_remote_pair(bench)
+    _require_kyber_broadcast_remote(w)
+    bad = []
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        _require_replayable(lines)
+        if any(re.match(r"^\?MAESTRO,M[567]:", t, re.I) for t in lines):
+            raise Skip("W1 already uses Maestro id 5, 6 or 7")
+        proxy2 = _slot(lines, 2, 2)
+        if not proxy2:
+            raise Skip("W1 has no Maestro 2 proxy to W2")
+        for p in ("S2", "S3", "S4"):
+            busy = _port_busy(before[1], p)
+            if busy:
+                raise Skip(f"W1 {p} is in use: {busy}")
+        if 9 - len(lines) < 2:
+            raise Skip("W1 needs two free Maestro slots")
+        ports = (_port_tokens(before[1], "S2") + _port_tokens(before[1], "S3") + _port_tokens(before[1], "S4")
+                 + [t for t in before[1] if re.match(r"^\?LABEL,S[234],", t, re.I)])
+        hosts = list(range(11, 11 + 9 - len(lines)))
+        added = "Kyber target added"
+
+        def targets():
+            return [x for x in _kyber_list(w) if re.match(r"^  Maestro \d → WCB\d+ S\d$", x)]
+
+        with _wdp_off(w, before[1]):
+            try:
+                for h in hosts:
+                    if not _has(w.run(f"?MAESTRO,M7:W{h}S1:9600"), f"✓ Maestro 7: Remote on WCB{h} (unicast, slot"):
+                        raise AssertionError(f"setup: placeholder M7:W{h} was not added")
+                out = [x.rstrip() for x in w.run("?KYBER,LOCAL,S2,M5:W1S3:9600", timeout=8)]
+                problems = _in_order(out, ["Kyber is LOCAL on Serial2", "Kyber target 1: Maestro 5 → WCB1 S3 (9600 baud)",
+                                           "Kyber local with targeted forwarding configured"], "?KYBER,LOCAL,S2,M5:W1S3")
+                if problems or _has(out, "Maestro 5: Local S3"):
+                    raise AssertionError(f"setup: the M5 target should be added with no slot: {problems or out}")
+                for h in hosts[-2:]:
+                    w.run(f"?MAESTRO,CLEAR,M7:W{h}S1")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S3:9600")]
+                if not _has(out, "✓ Maestro 5: Local S3 at 9600 baud (slot"):
+                    raise AssertionError(f"setup: ?MAESTRO,M5:W1S3:9600 printed {out}")
+                if _has(out, added):
+                    bad.append(f"a new slot whose target is already there added it again: {[x for x in out if added in x]}")
+                if targets().count("  Maestro 5 → WCB1 S3") != 1:
+                    bad.append(f"after the slot for an existing target the targets are {targets()}")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S3:9600")]
+                if _has(out, added):
+                    bad.append(f"re-issuing an existing slot added a target: {[x for x in out if added in x]}")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M6:W1S4:9600")]
+                if "✓ Kyber target added: Maestro 6 → WCB1 S4" not in out:
+                    bad.append(f"control: a new local slot with a free target entry printed {out}")
+                if targets() != ["  Maestro 5 → WCB1 S3", "  Maestro 6 → WCB1 S4"]:
+                    bad.append(f"targets after M6: {targets()}")
+                b2 = proxy2[1]
+                out = [x.rstrip() for x in w.run("?KYBER,LOCAL,S2," + ",".join([f"M2:W2S1:{b2}"] * 9), timeout=8)]
+                if not _has(out, f"Kyber target 9: Maestro 2 → WCB2 S1 ({b2} baud)"):
+                    raise AssertionError(f"setup: nine explicit targets were not all taken: "
+                                         f"{[x for x in out if x.startswith('Kyber target')]}")
+                w.run("?MAESTRO,CLEAR,M6:W1S4")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M6:W1S4:9600")]
+                want = "⚠️  Kyber target table is full (9) - Maestro 6 on S4 gets no Kyber data"
+                if want not in out:
+                    bad.append(f"a new local slot with all 9 targets taken printed {out}, not {want!r}")
+                if _has(out, added) or len(targets()) != 9 or "  Maestro 6 → WCB1 S4" in targets():
+                    bad.append(f"with the table full the targets became {targets()}")
+            finally:
+                bad += _restore_remote_table(w, lines, ports)
+    assert not bad, "; ".join(bad)

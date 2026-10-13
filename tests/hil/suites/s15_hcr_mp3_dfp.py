@@ -2589,3 +2589,58 @@ def mp3_playfs_callbacks(bench):
             s5.send(b"x")              # a key still pending is RAM in the codec: cancel it
             time.sleep(0.3)
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+@test("hcr.clear_resets_poll", "?HCR,CLEAR puts the poll interval back to 10 s: an HCR on W1 S4 with polling off ('Poll:  0s (off)', ?HCR,POLL,0 in the chain, S4 silent) re-added after a CLEAR lists 'Poll:  10s', saves ?HCR,POLL,10 and polls S4 again (WDP off)", needs=["wcb1"], links=["W1S4"])
+def hcr_clear_resets_poll(bench):
+    """Coverage re-scan 2026-10-12, hcr.cfg_clear. clearHCRConfig (WCB_HCR.cpp) zeroes the config and sets pollSec back
+    to 10 before saving, and the PORT branch keeps whatever pollSec holds, so without the reset a port re-added after a
+    CLEAR would stay silent. conflict.dfp_port_unguarded works around it with an explicit ?HCR,POLL,10. The re-added
+    port polls at once (hcrSetupPort's first tick), so the probe on W1 S4 sees the poll frame within a few seconds. W1's
+    WDP is off, so no board learns a route to the throwaway HCR (module rules); the release is W1's baseline route,
+    which clears the local HCR again and resets S4 to 9600 with broadcasts on, the baseline this needs."""
+    s4 = link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _require_free(bench, 1, "S4")
+    problems = []
+    with config_guard(bench, 1) as before:
+        if [t for t in before[1] if t.upper().startswith("?HCR,") and not re.match(r"^\?HCR,REMOTE,W\d+$", t, re.I)]:
+            raise Skip("W1 already hosts an HCR")
+        release = token(before[1], "?HCR,REMOTE,") or "?HCR,CLEAR"
+        with _wdp_off(w, before[1]):
+            try:
+                if not _has(w.run("?HCR,POLL,OFF"), "[HCR] Poll interval = 0s (off)"):
+                    raise AssertionError("setup: ?HCR,POLL,OFF did not confirm")
+                if not _has(w.run("?HCR,PORT,S4:9600"), "[HCR] Configured on S4 at 9600 baud"):
+                    raise AssertionError("setup: ?HCR,PORT,S4:9600 did not confirm")
+                s4.listen(9600)
+                watch = Watch(s4)
+                lst = [x.rstrip() for x in w.run("?HCR,LIST")]
+                if "  Poll:  0s (off)" not in lst:
+                    problems.append(f"with polling off ?HCR,LIST printed {lst}")
+                if "?HCR,POLL,0" not in snapshot(bench, 1):
+                    problems.append("with polling off the chain lacks ?HCR,POLL,0")
+                time.sleep(3.0)
+                if watch.got(s4):
+                    problems.append(f"control: with polling off S4 still got {watch.got(s4)!r}")
+                out = [x.rstrip() for x in w.run("?HCR,CLEAR")]
+                if "[HCR] Local configuration cleared" not in out:
+                    problems.append(f"?HCR,CLEAR printed {out}")
+                watch = Watch(s4)
+                if not _has(w.run("?HCR,PORT,S4:9600"), "[HCR] Configured on S4 at 9600 baud"):
+                    raise AssertionError("the re-add ?HCR,PORT,S4:9600 did not confirm")
+                lst = [x.rstrip() for x in w.run("?HCR,LIST")]
+                if "  Poll:  10s" not in lst:
+                    problems.append(f"after CLEAR and a re-add ?HCR,LIST printed {[x for x in lst if 'Poll' in x]}, "
+                                    f"not 'Poll:  10s'")
+                if "?HCR,POLL,10" not in snapshot(bench, 1):
+                    problems.append("after CLEAR and a re-add the chain lacks ?HCR,POLL,10")
+                try:
+                    watch.expect(s4, POLL, timeout=5)
+                except AssertionError:
+                    problems.append(f"the re-added HCR did not poll S4 within 5 s: {watch.got(s4)!r}")
+            finally:
+                w.run(release)
+                w.run(token(before[1], "?LABEL,S4,") or "?LABEL,CLEAR,S4")
+    assert not problems, "; ".join(problems)
