@@ -339,6 +339,13 @@ _FAKE_RESCAN_L = (
     ("flash_fake_erase_no_reconnect", "An erase whose board never comes back says so, pushes and probes nothing, and gives the Push button back (flash.erase_path)"),
     ("flasher_fake_windows_baud", "The flasher loads at 460800 (ROM 115200), at 115200 on Windows (flasher.windows_baud)"),
     ("ota_fake_entry_guards", "The OTA button takes the relay path for a relayed board and USB otherwise; each refuses an unreachable board (ota.entry_guards)"),
+    ("stats_fake_modal", "The ETM test shows only the last summary block; a relayed capture that times out shows what came; Refresh and errors (stats.modal)"),
+    ("wdp_fake_render", "The mesh table's self row, capability names, Controller kind, peers count and toolbar, and the empty-mesh note (wdp.render)"),
+    ("wdp_fake_refresh_no_board", "The mesh Refresh with no board says to connect one; a failed dump shows its error (wdp.refresh_no_board)"),
+    ("wdp_fake_client_cards", "A client's card shows status and age, kind, controller, firmware and capability chips; an rc client feeds the RC panel (wdp.client_cards)"),
+    ("rc_fake_discovery", "rc_hb/rc_trig/rc_mode lines make and update an RC card that goes 12 s after the last beat; a mesh-only RC shows telemetry off and goes after 40 s (rc.discovery)"),
+    ("rc_fake_tool_url", "The RC Open link uses the saved config-tool URL; 'edit Config Tool URL' saves one, the default or empty removes it (rc.tool_url)"),
+    ("hub_fake_rc_open_tool", "Open in Config Tool hands ?share=1 when leading, shares a direct board first unless another tab leads, else opens the plain URL with a hint (hub.rc_open_tool)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
