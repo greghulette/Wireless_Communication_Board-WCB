@@ -162,13 +162,15 @@
   "area": "host.api",
   "behaviour": "After a serial attach the host asks the port what it is through a tap (PING alone first; ?RELAY,WIFI and ?WDP,DUMP only when no direct PONG), records role navicore|relay|wcb and relayId before answering, leaves the role empty when unidentified, and asks again on each reattach.",
   "where": "host.py:1152-1231, 1304, 1797, 2040",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.nc_via_usb_doorway",
    "intellex.wifi_ap_hop_reidentify",
-   "intellex.attach_identify_role"
+   "intellex.attach_identify_role",
+   "intellex.attach_role_w1",
+   "intellex.identify_navicore_port"
   ],
-  "gap": "Closed with a scripted fake COM port on the real in-process app (2026-10-12, run 20261012-191812); the bench half (role wcb on W1, navicore on NaviCore over real USB) is open.",
+  "gap": "closed 2026-10-12/13 by intellex.attach_role_w1, intellex.identify_navicore_port, intellex.attach_identify_role",
   "testable": "unattended",
   "bench_needs": "Intellex host + W1 + NaviCore",
   "risk": "L",
@@ -197,13 +199,14 @@
   "area": "host.api",
   "behaviour": "POST /_api/identify {port} answers 400 without a port, {attached:true} without probing when the host itself holds that port, else opens it briefly and returns version/busy.",
   "where": "host.py:1309-1333",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.identify_direct_pong",
    "intellex.ui_launcher",
-   "intellex.identify_route"
+   "intellex.identify_route",
+   "intellex.identify_navicore_port"
   ],
-  "gap": "closed 2026-10-12 by intellex.identify_route (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
+  "gap": "closed 2026-10-12/13 by intellex.identify_navicore_port, intellex.identify_route",
   "testable": "unattended",
   "bench_needs": "Intellex host + NaviCore",
   "risk": "L",
@@ -214,13 +217,14 @@
   "area": "host.api",
   "behaviour": "POST /_api/signals drives DTR/RTS on the attached serial transport (409 when nothing is attached, 502 on a driver error, a no-op on a WebSocket link).",
   "where": "host.py:1343-1366",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.nc_setsignals",
    "intellex.nc_autoconnect",
-   "intellex.wizard_reboot_w1_boots_app"
+   "intellex.wizard_reboot_w1_boots_app",
+   "intellex.signals_route"
   ],
-  "gap": "The 409 with nothing attached and the no-op on a ws link are unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.signals_route",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -231,13 +235,14 @@
   "area": "host.api",
   "behaviour": "GET /_api/ports lists serial ports (path, description, vid, pid, serial_number), filtered by INTELLEX_SERIAL_ALLOW, enumerated off the event loop.",
   "where": "host.py:401-405; transport.py:100-120",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.stage_selftest",
    "intellex.routes_api",
-   "intellex.smoke_repo_test_hooks"
+   "intellex.smoke_repo_test_hooks",
+   "intellex.ports_real_rows"
   ],
-  "gap": "Only the leashed (empty) list is read through the route; the real row shape (vid as an int for a 303A/1A86 port) is asserted only against a fake pyserial.",
+  "gap": "closed 2026-10-12/13 by intellex.ports_real_rows",
   "testable": "unattended",
   "bench_needs": "Intellex host + W1",
   "risk": "L",
@@ -265,9 +270,11 @@
   "area": "host.api",
   "behaviour": "POST /_api/wifi-bounce {ssid?} runs discover.wifi_bounce (default ssid NaviCore) off the loop and returns {ok,message}.",
   "where": "host.py:420-429",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No UI calls this route and no test posts it: the default ssid, the body ssid and the {ok,message} shape are unasserted (origin_guard deliberately leaves it out; the bounce function is tested attended via wifi_units).",
+  "status": "tested",
+  "tested_by": [
+   "intellex.wifi_bounce_route"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.wifi_bounce_route",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -294,11 +301,12 @@
   "area": "host.api",
   "behaviour": "GET /_api/version returns version, commit and built: the build stamp when present, else git's short SHA with +dirty on a dirty tree.",
   "where": "host.py:554-560; version.py:34-67",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.version_unit"
   ],
-  "gap": "Only the keys are asserted; the stamp-before-git precedence and the +dirty mark are not.",
+  "gap": "closed 2026-10-12/13 by intellex.version_unit",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -309,13 +317,14 @@
   "area": "host.api",
   "behaviour": "GET /_api/log returns this run's log path (inside the data dir), the logs directory and the last 400 lines.",
   "where": "host.py:563-585",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.routes_api",
    "intellex.stage_selftest",
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.log_tail_cap"
   ],
-  "gap": "The 400-line cap and the read-error fallback text are unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.log_tail_cap",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -343,13 +352,14 @@
   "area": "host.api",
   "behaviour": "GET /_api/branch-list serves the cached GitHub branch lists, refetching when ?refresh=1, when outside the 6 h TTL or once per run; gh-pages is dropped; the current branch and main are always present; cached/error/missing say what happened.",
   "where": "host.py:593-610; branchlist.py:95-159",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.offline_con_floor",
    "intellex.routes_api",
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.branch_list_cached"
   ],
-  "gap": "Only the offline case with an empty cache is asserted (main present, an error note). Unasserted: a seeded branches_cache.json being served offline (cached:true with its names), 'missing' when the set branch is not in the cached list, gh-pages dropped, the refetch-once-per-run rule and ?refresh=1 (network).",
+  "gap": "closed 2026-10-12/13 by intellex.branch_list_cached",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -360,12 +370,13 @@
   "area": "host.api",
   "behaviour": "GET /_api/firmware summarises the cache for the configured branch per product: count, newest app image, branch.",
   "where": "host.py:631-633; fwcache.py:143-168",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.offline_gh_proxy",
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.firmware_summary_newest"
   ],
-  "gap": "count and branch are asserted; 'newest' (the app image, not a boot/part companion) is not.",
+  "gap": "closed 2026-10-12/13 by intellex.firmware_summary_newest",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -440,12 +451,13 @@
   "area": "host.api",
   "behaviour": "GET /_api/wiki lists each wiki with title, pages (furniture excluded), count and have.",
   "where": "host.py:823-825; wikidocs.py:57-70",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.routes_api",
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.wiki_inventory"
   ],
-  "gap": "Keys only; that _Sidebar/_Footer/_Header are excluded from pages and count is unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.wiki_inventory",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -585,14 +597,15 @@
   "area": "host.reconnect",
   "behaviour": "Every second, when the link is wanted and down, the loop rebuilds and reattaches it in a thread, logging 'reconnected' / 'reconnect failed: <why>' once per new reason and keeping lastError current.",
   "where": "host.py:1670-1809",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.bridge_failed_attach_w1",
    "intellex.wifi_link_loss",
    "intellex.flash_w2_update",
-   "intellex.smoke_repo_reconnect_identity"
+   "intellex.smoke_repo_reconnect_identity",
+   "intellex.reconnect_retry_reason"
   ],
-  "gap": "The retry and the eventual reattach are asserted; lastError reading 'reconnect failed: <why>' and the once-per-reason log rule are not.",
+  "gap": "closed 2026-10-12/13 by intellex.bridge_failed_attach_w1, intellex.reconnect_retry_reason",
   "testable": "unattended",
   "bench_needs": "Intellex host + W1",
   "risk": "L",
@@ -697,12 +710,13 @@
   "area": "host.main",
   "behaviour": "host.py --port/--serial/--ws/--ssid/--no-auto-bounce: --serial and --ws are mutually exclusive; a startup target is recorded before the first attach so a droid down at launch is retried; the startup lines report the log path, the URL and whether the bundled tool is out of date.",
   "where": "host.py:2015-2074",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.stage_selftest",
-   "intellex.host_cli"
+   "intellex.host_cli",
+   "intellex.host_cli_serial_w1"
   ],
-  "gap": "closed 2026-10-12 by intellex.host_cli (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
+  "gap": "closed 2026-10-12/13 by intellex.host_cli_serial_w1, intellex.host_cli",
   "testable": "unattended",
   "bench_needs": "Intellex host + W1",
   "risk": "L",
@@ -749,13 +763,14 @@
   "area": "host.flash",
   "behaviour": "/_api/flash-status reports running/ok/error/version/percent/log; percent is monotonic, capped at 99 until done then 100, weighted across regions by size from esptool 5's progress lines; the log keeps the last 400 lines.",
   "where": "host.py:975-991, 1125-1129; flash.py:414-459",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.flash_pipeline_fake",
    "intellex.flash_esptool5_output",
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.flash_progress_unit"
   ],
-  "gap": "Monotonic, 100 at the end and movement under esptool 5 are asserted; the per-region size weighting (the bar not sitting at 99 % after the bootloader) and the 400-line cap are not.",
+  "gap": "closed 2026-10-12/13 by intellex.flash_progress_unit",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -918,12 +933,13 @@
   "area": "discover",
   "behaviour": "scan() returns per host: via (the source address the OS would use), routable, reachable (TCP 80), kind flags, version, relayId, alias, peers and a hint sentence; the candidate list is INTELLEX_DISCOVER_HOSTS when set (empty probes nothing) and an explicit list wins.",
   "where": "discover.py:446-484, 774-802",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.wifi_discover",
-   "intellex.smoke_repo_test_hooks"
+   "intellex.smoke_repo_test_hooks",
+   "intellex.discover_scan_unit"
   ],
-  "gap": "The navicore row and the leash are asserted; the doorway rows ('<alias> (WCB #n) - sees ...' / 'no boards seen yet'), the 'routed via ... but no TCP' hint and 'no route' hint are only exercised through launcher fixtures, never from scan() itself.",
+  "gap": "closed 2026-10-12/13 by intellex.discover_scan_unit",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1289,9 +1305,12 @@
   "area": "settings",
   "behaviour": "tool_base(product, branch) is the published tool URL: the site root for main, /dev/<branch>/<leaf> otherwise; shared by the version check and fetch_webui.",
   "where": "settings.py:111-128",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test asserts the URL shape (the dotdot test only proves the branch is refused).",
+  "status": "tested",
+  "tested_by": [
+   "intellex.settings_branch_dotdot",
+   "intellex.tool_base_unit"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.settings_branch_dotdot, intellex.tool_base_unit",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1352,11 +1371,12 @@
   "area": "wiki",
   "behaviour": "With no wiki on disk /wiki/ shows 'No offline docs yet' with the launcher instructions; with others present a missing product says 'Not downloaded'.",
   "where": "host.py:730-742, 779-780",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.wiki_missing_text"
   ],
-  "gap": "routes_api GETs /wiki/ on a stage with no wiki and asserts only 200 + CSP; the explanation text and the per-product variant are unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.wiki_missing_text",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1367,9 +1387,11 @@
   "area": "wiki",
   "behaviour": "A page whose name looks like it has an extension (version3.2_build) is served as a page because the lookup is by what exists on disk, not by suffix.",
   "where": "host.py:760-777",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "The crafted wiki has no dotted page name.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.wiki_dotted_page"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.wiki_dotted_page",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1380,11 +1402,12 @@
   "area": "launcher",
   "behaviour": "The chooser lists serial ports labelled by what the VID proves (Espressif native USB / CH9102 / CP210x / FTDI / description), skips Bluetooth, /dev/tty.* and macOS debug ports, asks /_api/identify of 303A ports only and upgrades the row in place (NaviCore <v> lit / in use by another program / did not answer as a NaviCore / connected right now).",
   "where": "launcher.html:771-866",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_identify_states"
   ],
-  "gap": "The 'connected right now' upgrade (identify answering attached:true) and the identify-request failure fallback (.catch -> bare chip label) are unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_identify_states",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1395,11 +1418,12 @@
   "area": "launcher",
   "behaviour": "Discovered droids render as rows: a NaviCore with version/direct/via, a doorway with alias, 'a WCB, and the way to the mesh' or 'bridges to the mesh', its WCB number and what it sees; a routable host not yet answering keeps the chooser watching (4 s, up to 2 min); an empty list shows one hint.",
   "where": "launcher.html:681-769",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_wifi_watch"
   ],
-  "gap": "Rows, counts and 'watching…' are asserted; the empty-list hint text ('... — still watching…') and the end of the watch after 2 min are not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_wifi_watch",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1442,12 +1466,13 @@
   "area": "launcher",
   "behaviour": "The theme toggles light/dark (remembered in intellex_theme, OS preference on a first run, the mark swapped); the layout picker is built from VIEWS, defaults to wcb and is remembered in intellex_view; the picker is hidden inside the shell.",
   "where": "launcher.html:521-606, 626",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.ui_launcher",
-   "intellex.ui_shell"
+   "intellex.ui_shell",
+   "intellex.ui_launcher_theme_first_run"
   ],
-  "gap": "The first-run default from prefers-color-scheme and the mark image swap are unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_theme_first_run",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1474,9 +1499,11 @@
   "area": "launcher",
   "behaviour": "Update tools, Download firmware and Download docs POST their routes, disable their button meanwhile, report success/partial/failure in the status line and re-check; Rescan re-runs the scan and the checks.",
   "where": "launcher.html:929-941, 1128-1141, 1175-1191",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test clicks these buttons; with hostGuard they would get a 403 and should say 'update failed'. The success message shapes ('updated — config tool X, Wizard Y', 'firmware cached — safe to go offline now', 'docs updated') are unasserted.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.ui_launcher_maintenance_buttons"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_maintenance_buttons",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1487,11 +1514,12 @@
   "area": "launcher",
   "behaviour": "The branch dropdowns are filled from /_api/branch-list with the current value always present and 'Other…' revealing a text box; Set POSTs each product and says to download firmware; Refresh forces ?refresh=1 and reports the list error; a set branch missing from the list is called out.",
   "where": "launcher.html:1007-1090",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_branch_refresh"
   ],
-  "gap": "Other… + Set + the non-main warning are asserted; Refresh (?refresh=1 and its status line) and the 'no longer in the list' note are not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_branch_refresh",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1502,11 +1530,12 @@
   "area": "launcher",
   "behaviour": "Log shows/hides the tail of the host log; Docs opens /wiki/ in a second window (open-window, window.open fallback) and is disabled with no docs; the header shows the build version.",
   "where": "launcher.html:1116-1173",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_docs_version"
   ],
-  "gap": "Log toggle and the disabled Docs button are asserted; the Docs popup opening /wiki/ and the #appver text are not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_docs_version",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1517,11 +1546,12 @@
   "area": "launcher",
   "behaviour": "When something is attached the chooser shows Back and 'currently on <target>'; 'Open the tool anyway' opens the layout with nothing attached; F5 reloads; 'No droid found' is offered when both lists are empty.",
   "where": "launcher.html:332-338, 1196-1232",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_no_droid"
   ],
-  "gap": "Back, offline and F5 are asserted; the 'No droid found. You can still open the tool' status with empty lists is not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_launcher_no_droid",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1563,11 +1593,12 @@
   "area": "shell",
   "behaviour": "New window asks the host for a window for the tool not in front (window.open fallback), removes that pane's frame so the tool is not connected twice, and does not recreate it on preload; an explicit tab click brings it back.",
   "where": "shell.html:348-375, 152-163",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_shell"
+   "intellex.ui_shell",
+   "intellex.ui_shell_moved_out"
   ],
-  "gap": "The move-out and the view afterwards are asserted; that a later tab click re-creates the moved frame is not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_shell_moved_out",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1578,12 +1609,13 @@
   "area": "shell",
   "behaviour": "The bar shows the link every 2 s from /_api/status: 'USB <port>', 'WiFi <ip>', 'Relay ...', 'reconnecting…' while wanted and down, 'not attached'; clicking it opens the chooser overlay.",
   "where": "shell.html:380-396, 434",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.ui_shell",
-   "intellex.shell_split_w1"
+   "intellex.shell_split_w1",
+   "intellex.ui_shell_link_labels"
   ],
-  "gap": "'USB <port>' and 'not attached' are asserted; 'WiFi <ip>', the relay label, 'reconnecting…' and the click opening the overlay are not (ui_shell opens it via #target click, so the click is covered; the labels are not).",
+  "gap": "closed 2026-10-12/13 by intellex.ui_shell_link_labels",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1594,11 +1626,12 @@
   "area": "shell",
   "behaviour": "The chooser is an overlay over the live tool frames (never a navigation): opened from the label or a tool's open-chooser postMessage, closed by its Close button or the launcher's close-chooser message, same origin only; the frames keep their documents.",
   "where": "shell.html:397-444",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_shell"
+   "intellex.ui_shell",
+   "intellex.ui_shell_foreign_message"
   ],
-  "gap": "Same-origin messages and the timeOrigin check are asserted; a message from another origin being ignored is not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_shell_foreign_message",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1662,11 +1695,12 @@
   "area": "shim",
   "behaviour": "port.close() within 60 s of a loss counts as teardown (watchLink keeps reconnecting); a deliberate Disconnect long after things were healthy sets userClosed so the page stays disconnected.",
   "where": "intellex_shim.js:48-54, 224-246, 1595-1605",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.shim_close_intent"
+   "intellex.shim_close_intent",
+   "intellex.nc_close_intent"
   ],
-  "gap": "closed 2026-10-12 by intellex.shim_close_intent (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
+  "gap": "closed 2026-10-12/13 by intellex.shim_close_intent, intellex.nc_close_intent",
   "testable": "unattended",
   "bench_needs": "Intellex host + NaviCore",
   "risk": "L",
@@ -1708,11 +1742,12 @@
   "area": "shim",
   "behaviour": "In the Wizard rc_config_tool_url is pointed at '/' when unset or still at github.io, and a user's own URL is kept.",
   "where": "intellex_shim.js:360-366",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_tools_glue"
+   "intellex.ui_tools_glue",
+   "intellex.ui_rc_tool_url_kept"
   ],
-  "gap": "The '/' default is asserted; a pre-set custom URL being left alone is not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_rc_tool_url_kept",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1881,9 +1916,11 @@
   "area": "shim",
   "behaviour": "On hardware, when the doorway the Wizard is filed under drops and returns (NaviCore reboots while the Wizard manages the mesh through it), the shim waits for the Wizard's own reconnect and then reconnects the re-filed slot, not slot 1, and the relay routing waits until the relay is back.",
   "where": "intellex_shim.js:919-993, 1076-1086",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "The fake-based smoke covers the logic; no bench test restarts the doorway while the Wizard holds it (wifi_link_loss uses a raw tap, bridge_reboot_w1 no page). The 2026-09-10 incident (slot 1 wiped, 'Manage all: 0/1') has no hardware regression test.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.wifi_wizard_reconnect"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.wifi_wizard_reconnect; written, not yet run (needs the Mac screen unlocked for the WiFi switch)",
   "testable": "opt-in",
   "bench_needs": "Intellex host + NaviCore AP + W1",
   "risk": "H",
@@ -1949,16 +1986,17 @@
   "area": "shim",
   "behaviour": "The NaviCore tool gets a sibling span '· USB <port> ▾' / '· WiFi <ip> ▾' / '· WCB <ip> → mesh ▾' beside its status only while connected; the Wizard gets a fixed chip 'Intellex · <link> ▾' (hidden inside the shell); either click opens the chooser (postMessage in the shell, a navigation outside).",
   "where": "intellex_shim.js:1436-1550",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.nc_autoconnect",
    "intellex.wifi_nc_tool",
    "intellex.wifi_ap_hop_reidentify",
    "intellex.wizard_pull_w1",
    "intellex.ui_tools_glue",
-   "intellex.shell_split_w1"
+   "intellex.shell_split_w1",
+   "intellex.ui_chip_opens_chooser"
   ],
-  "gap": "The labels are asserted; clicking the label/chip (navigation to /_launcher outside the shell, open-chooser inside) is not.",
+  "gap": "closed 2026-10-12/13 by intellex.ui_chip_opens_chooser",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -1969,13 +2007,14 @@
   "area": "shim",
   "behaviour": "Every 2 s watchLink reconnects the page (5 s backoff) when the host is attached but the page's socket is not and the user did not close it; while the host wants a link and is down for over 20 s a banner says it is still trying with a link to the chooser, cleared once attached.",
   "where": "intellex_shim.js:1563-1618",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.flash_navicore_app",
    "intellex.wifi_ap_hop_reidentify",
-   "intellex.wifi_link_loss"
+   "intellex.wifi_link_loss",
+   "intellex.shim_still_trying_banner"
   ],
-  "gap": "The reconnect is proved by the flash and hop tests; the 'Still trying to reach the droid' banner (appearing after 20 s, not before, and removed on reattach) is unasserted.",
+  "gap": "closed 2026-10-12/13 by intellex.shim_still_trying_banner",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -2092,13 +2131,14 @@
   "area": "applog",
   "behaviour": "Every run tees stdout/stderr to <data>/logs/intellex-<stamp>.log with a header (version, start, python, frozen, bundle, data, argv), unbuffered; the newest 20 runs are kept across both name prefixes by timestamp; a log that cannot open never breaks the app.",
   "where": "applog.py:38-142",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.paths_logs_unit",
    "intellex.stage_selftest",
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.applog_unit"
   ],
-  "gap": "Prune and 'a log exists in the stage with a tail' are asserted; the header lines (argv recorded) and the unwritable-dir fallback are not.",
+  "gap": "closed 2026-10-12/13 by intellex.applog_unit",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "L",
@@ -2125,11 +2165,12 @@
   "area": "winsize",
   "behaviour": "winsize.fit clamps to the work area minus a margin, centres on it, never below 320x240, keeps min_size inside the window and falls back to the requested size when the screen cannot be measured; the macOS frame comes from NSScreen relative to its own screen.",
   "where": "winsize.py:49-166",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.paths_logs_unit"
+   "intellex.paths_logs_unit",
+   "intellex.winsize_mac_unit"
   ],
-  "gap": "fit() is asserted with the measurers patched; _mac_visible_frame itself (AppKit, the flipped y) is not.",
+  "gap": "closed 2026-10-12/13 by intellex.paths_logs_unit, intellex.winsize_mac_unit",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2323,9 +2364,11 @@
   "area": "host",
   "behaviour": "After an attach is superseded, api_attach writes lastError 'superseded by a newer attach' after the winning attach cleared it, so /_api/status shows an error while the newer link is attached.",
   "where": "Intellex src/host.py api_attach",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Seen 2026-10-12 by intellex.bridge_superseded_attach (recorded as a note, not asserted). Cosmetic; a product call whether the loser may set lastError.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.bridge_superseded_attach"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.bridge_superseded_attach",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2336,9 +2379,11 @@
   "area": "shim",
   "behaviour": "A CRLF split across two write chunks goes out as two frames ('...\\r' and '\\n'); the shim's comment calls it harmless.",
   "where": "Intellex src/intellex_shim.js (line framing)",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Characterisation not pinned by intellex.shim_line_framing.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.shim_crlf_split"
+  ],
+  "gap": "closed 2026-10-12/13 by intellex.shim_crlf_split",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",

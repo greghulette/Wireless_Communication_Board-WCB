@@ -4,11 +4,12 @@
   "area": "help",
   "behaviour": "A bare ?, ?HELP, ?help or an empty function line prints the top-level command reference.",
   "where": "WCB.ino:6243-6248; WCB_Help.cpp:1193-1265",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wcb.help_forms"
+   "wcb.help_forms",
+   "help.top_level_spellings"
   ],
-  "gap": "'??' (the form the page itself advertises) and a mixed-case ?Help (not matched: it answers 'Unknown command') are unasserted.",
+  "gap": "closed 2026-10-12/13 by help.top_level_spellings",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -34,14 +35,15 @@
   "area": "help",
   "behaviour": "MGMT, SEQ, FUNCCHAR, CMDCHAR, DELIM and WIFI (any letter case) are exempt from the trailing-'?' help shortcut, so '?DELIM,?', '!FUNCCHAR,?' and a FRAG ending in '?' reach their handlers.",
   "where": "WCB.ino:6262-6289",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "mesh.frag_trailing_q",
    "chars.funcchar_change_restore",
    "chars.delim_collision_refused",
-   "chars.legacy_lf_sets"
+   "chars.legacy_lf_sets",
+   "help.data_bearing_exempt"
   ],
-  "gap": "SEQ,SAVE with a value ending in '?', ?CMDCHAR,? (refused by prefixCharOk, not eaten), ?WIFI,...? and a mixed-case verb (?Mgmt,FRAG,...? / ?Seq,SAVE,...?) are unasserted; '?DELIM?' still printing help is unasserted.",
+  "gap": "closed 2026-10-12/13 by help.data_bearing_exempt",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -52,12 +54,13 @@
   "area": "help",
   "behaviour": "Each of the 30 topic pages prints on ?<TOPIC>? (DEBUG, MAP, BAUD, LABEL, BCAST, KYBER, ETM, MAC, EPASS, WCB, WCBQ, MAESTRO, MP3, DFP/DFPLAYER, HCR, WLED, MGMT, OTA/OTALOCAL, VAR, SEQ, STATS, WIFI, WDP, DELIM, FUNCCHAR, CMDCHAR, NVS, ERASE, LED, HW).",
   "where": "WCB_Help.cpp:16-1192",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "help.corrected_pages",
-   "wcb.help_trap"
+   "wcb.help_trap",
+   "help.topic_pages"
   ],
-  "gap": "Only the corrected lines of DEBUG, BAUD, LABEL, ETM, MAC, WCB, MAESTRO, VAR and the LABEL usage line are asserted; BCAST, STATS, DELIM, FUNCCHAR, CMDCHAR, LED, MAP, NVS, ERASE, HW, KYBER, MP3, DFP, HCR, WLED, MGMT, OTA, SEQ, WIFI, WDP, EPASS, WCBQ pages are never requested.",
+  "gap": "closed 2026-10-12/13 by help.topic_pages",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -252,9 +255,12 @@
   "area": "parse",
   "behaviour": "A checksum written unpadded by firmware <= 6.0.x (fewer than 8 hex digits, leading zero nibble stripped) is left-padded and still verifies.",
   "where": "WCB.ino:2817-2820, :8820-8821",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test sends a chain whose CRC has a leading zero nibble in its short (unpadded) spelling.",
+  "status": "tested",
+  "tested_by": [
+   "backup.one_line_restore",
+   "legacy.cs_checksum"
+  ],
+  "gap": "closed 2026-10-12/13 by backup.one_line_restore, legacy.cs_checksum",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -282,9 +288,11 @@
   "area": "parse",
   "behaviour": "A chain whose payload legitimately contains an earlier '^?CHK' (a stored sequence value) is verified against its FINAL token only, and the verified half is not re-entered into the gate.",
   "where": "WCB.ino:2798-2806, :2840-2843",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test stores a sequence whose value holds '^?CHK' and restores a checksummed chain carrying it.",
+  "status": "tested",
+  "tested_by": [
+   "backup.one_line_restore"
+  ],
+  "gap": "closed 2026-10-12/13 by backup.one_line_restore",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -295,9 +303,11 @@
   "area": "parse",
   "behaviour": "A ?-first chain carrying both a ;T token and a ?CHK token is NOT a timer chain: after verification its ;T token answers 'Invalid Serial Command' and the rest runs at once (characterisation).",
   "where": "WCB.ino:2760-2763",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Unasserted characterisation: a verified checksummed chain cannot carry delays.",
+  "status": "tested",
+  "tested_by": [
+   "serial.chk_chain_not_timed"
+  ],
+  "gap": "closed 2026-10-12/13 by serial.chk_chain_not_timed",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -404,11 +414,12 @@
   "area": "timer",
   "behaviour": "Consecutive delay tokens with no command between them add up, a comment token between them included.",
   "where": "command_timer.cpp:179-183",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "serial.timer_sum"
+   "serial.timer_sum",
+   "serial.timer_sum_across_comment"
   ],
-  "gap": "The comment-between-delays case (;t500^***note^;t300^cmd waits 800) is unasserted.",
+  "gap": "closed 2026-10-12/13 by serial.timer_sum_across_comment",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -465,13 +476,14 @@
   "area": "timer",
   "behaviour": "?STOP stops the running chain and prints 'Timer sequence manually stopped.': as a typed whole line (any case), inside a plain chain, as a sequence body, from the mesh, and as the FIRST command of a timer group; ?STOP with arguments is 'Unknown command'.",
   "where": "WCB.ino:6306-6309, :8777-8780; command_timer.cpp:78-89, :230-233",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "serial.timer_stop",
    "serial.timer_stop_mesh",
-   "serial.timer_stop_in_chain"
+   "serial.timer_stop_in_chain",
+   "serial.timer_stop_group_and_forms"
   ],
-  "gap": "A ?STOP placed as a timer GROUP's first command (;S1a^;T500^?STOP^;S1b stopping at that group) and the lowercase '?stop' whole-line form are unasserted; '?STOP,x' -> 'Unknown command' unasserted.",
+  "gap": "closed 2026-10-12/13 by serial.timer_stop_group_and_forms",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -596,9 +608,11 @@
   "area": "timer",
   "behaviour": "A chain ending in a delay with no command after it (;S1a^;T2000) completes at once: the trailing delay is dropped silently and a following chain prints no 'replaced mid-run'.",
   "where": "command_timer.cpp:208-210; :285-288",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Unasserted characterisation.",
+  "status": "tested",
+  "tested_by": [
+   "serial.timer_trailing_delay_dropped"
+  ],
+  "gap": "closed 2026-10-12/13 by serial.timer_trailing_delay_dropped",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -609,9 +623,11 @@
   "area": "timer",
   "behaviour": "Under ?DEBUG,ON each fired command prints '[TimerGroup n] Executing command: <cmd>' and the end prints 'Timer command sequence complete.'",
   "where": "command_timer.cpp:267-269, :280-281",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Diagnostic lines unasserted.",
+  "status": "tested",
+  "tested_by": [
+   "serial.timer_debug_lines"
+  ],
+  "gap": "closed 2026-10-12/13 by serial.timer_debug_lines",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -638,14 +654,15 @@
   "area": "serialcmd",
   "behaviour": ";S<1-5>[,]<text> writes the text plus one CR to that port, strips one optional comma after the digit, trims the payload and never flushes.",
   "where": "WCB.ino:8054-8096, :2428-2431",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "serial.comma",
    "serial.chain",
    "input.baud_flush_before_rate_change",
-   "input.softserial_tx_baud_table"
+   "input.softserial_tx_baud_table",
+   "serial.payload_trimmed"
   ],
-  "gap": "The payload's own trim (';S1  x  ' writes 'x\\r') is unasserted.",
+  "gap": "closed 2026-10-12/13 by serial.payload_trimmed",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -671,11 +688,12 @@
   "area": "serialcmd",
   "behaviour": ";S6-;S9 answer 'Invalid serial port number. Must be between 0 and 5 (0=USB).'; a non-digit port (';SX,text') parses as port 0 and prints on USB (toInt).",
   "where": "WCB.ino:8060-8066",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "serial.bad_port"
+   "serial.bad_port",
+   "serial.nondigit_port_usb"
   ],
-  "gap": "The non-digit-port -> USB quirk is unasserted.",
+  "gap": "closed 2026-10-12/13 by serial.nondigit_port_usb",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -686,12 +704,13 @@
   "area": "serialcmd",
   "behaviour": "A ';S' token goes to the serial writer only when its second character is not e/E: ';SEQ<key>' recalls a sequence, any other ';Se...' and a bare ';S' answer 'Invalid Serial Command'; the 'Invalid serial message format.' guard is unreachable.",
   "where": "WCB.ino:8021-8025, :8017-8019, :8055-8058",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "seq.fanout_wire_probe",
-   "seq.local"
+   "seq.local",
+   "serial.invalid_command_forms"
   ],
-  "gap": "Bare ';S' and ';Set' -> 'Invalid Serial Command' unasserted; the length<2 guard is dead (WP59 wcb.cmd.dead_dispatch_code).",
+  "gap": "closed 2026-10-12/13 by serial.invalid_command_forms",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -702,9 +721,11 @@
   "area": "serialcmd",
   "behaviour": "An unknown ';' verb (;Z..., ;T outside a timer chain, ;WHOAMI) answers 'Invalid Serial Command'.",
   "where": "WCB.ino:8050-8051",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Only asserted negatively (serial.timer_after_func_command, client_mesh.whoami_roundtrip check its absence).",
+  "status": "tested",
+  "tested_by": [
+   "serial.invalid_command_forms"
+  ],
+  "gap": "closed 2026-10-12/13 by serial.invalid_command_forms",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -715,9 +736,11 @@
   "area": "serialcmd",
   "behaviour": "Under ?DEBUG,ON a ;S write prints 'Sent to <port label>: <text>' / 'Sent to USB: <text>' (the label from ?LABEL).",
   "where": "WCB.ino:8077-8079, :8093-8095",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Diagnostic line unasserted (s26 only filters it).",
+  "status": "tested",
+  "tested_by": [
+   "serial.debug_sent_lines"
+  ],
+  "gap": "closed 2026-10-12/13 by serial.debug_sent_lines",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -761,16 +784,17 @@
   "area": "wroute",
   "behaviour": ";W<alias>,<cmd> resolves through the WDP table case-insensitively; the board's own alias runs locally; an unknown alias prints 'No board named'; an ambiguous one is refused.",
   "where": "WCB.ino:8136-8167",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "mesh.alias",
    "mesh.alias_case",
    "mesh.alias_ambiguous_wcb",
    "mesh.alias_ambiguous_client",
    "mesh.alias_client_devtype",
-   "wdp.forget_floor_relearn"
+   "wdp.forget_floor_relearn",
+   "mesh.alias_unknown_line"
   ],
-  "gap": "The 'No board named \"x\" is known - see ?WDP,LIST' line is only implied (wdp.forget_floor_relearn checks routing fails).",
+  "gap": "closed 2026-10-12/13 by mesh.alias_unknown_line",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -781,11 +805,12 @@
   "area": "wroute",
   "behaviour": ";W<own number>,<cmd> runs the command locally (enqueued, origin local) and sends nothing.",
   "where": "WCB.ino:8226-8235",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "mesh.alias_ambiguous_wcb"
+   "mesh.alias_ambiguous_wcb",
+   "mesh.self_numeric_local"
   ],
-  "gap": "Only the own-ALIAS form is asserted; the numeric self form (';W1,;S0<t>' on W1) is unasserted.",
+  "gap": "closed 2026-10-12/13 by mesh.self_numeric_local",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -982,11 +1007,12 @@
   "area": "bcast",
   "behaviour": "Under ?DEBUG,ON a broadcast prints 'Broadcasting command:', 'Sent to SerialN:', 'Skipping Sn (Maestro/MP3 Trigger/DFPlayer/HCR port)', 'Sent to S0/USB:' and 'Broadcasted via ESP-NOW:'.",
   "where": "WCB.ino:8492-8494, :8586-8617, :8625, :8637",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "input.bcast_maestro_port_excluded"
+   "input.bcast_maestro_port_excluded",
+   "input.bcast_debug_lines"
   ],
-  "gap": "Only 'Broadcasting command:' is asserted; the Sent/Skipping/Broadcasted lines are not.",
+  "gap": "closed 2026-10-12/13 by input.bcast_debug_lines",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1030,12 +1056,13 @@
   "area": "bcastcmd",
   "behaviour": "?BCAST,RESET (and legacy ?RESET_BROADCAST) clears the bdcst_set namespace, re-enables all five ports both ways (device ports included), turns the S0 echo off, persists BOTH namespaces and prints the Created lines and the Done line.",
   "where": "WCB.ino:6548-6549, :7368-7369; WCB_Storage.cpp:409-450",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "input.bcast_reset_persists",
-   "bcast.reset_legacy"
+   "bcast.reset_legacy",
+   "bcast.reset_survives_reboot"
   ],
-  "gap": "S0 echo being turned off, the 'Done. Broadcast output re-enabled ...' line and survival of the reset across a reboot are unasserted (bcast_reset_persists only re-reads ?config; reset_legacy checks the chain and one port).",
+  "gap": "closed 2026-10-12/13 by bcast.reset_survives_reboot",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -1079,9 +1106,11 @@
   "area": "bcastcmd",
   "behaviour": "When NVS refuses the write, the flags still apply live and the board says 'NVS could not store the broadcast output/input flags (full? see ?NVS) - they revert at the next reboot'.",
   "where": "WCB_Storage.cpp:384-396, :1983-1994",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "The opt-in nvs_fill tests cover labels, baud and mappings, not the two broadcast namespaces.",
+  "status": "tested",
+  "tested_by": [
+   "nvs.full_bcast_flags_warn"
+  ],
+  "gap": "closed 2026-10-12/13 by nvs.full_bcast_flags_warn",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -1403,13 +1432,15 @@
   "area": "map",
   "behaviour": "A mapping is refused on a PWM input port, a PWM output port, and an HCR / MP3 Trigger / DFPlayer port ('Cannot create mapping: ...'); 'Maximum serial mappings reached' cannot occur (5 slots for 5 ports).",
   "where": "WCB_Storage.cpp:2029-2046, :2064-2067",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "pwm.out_port_lines_and_guards",
    "devices.serial_mapped_port_refused",
-   "pwm.serial_mapped_input_refused"
+   "pwm.serial_mapped_input_refused",
+   "map.input_device_port_refused",
+   "pwm.serial_map_on_pwm_input_refused"
   ],
-  "gap": "'Cannot create mapping: Port is used for PWM input' and the MP3 / DFPlayer input refusals are unasserted (only the PWM-output and HCR lines are).",
+  "gap": "closed 2026-10-12/13 by map.input_device_port_refused, pwm.serial_map_on_pwm_input_refused",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1466,7 +1497,7 @@
   "area": "map",
   "behaviour": "In raw mode RawSerialForwardingTask forwards bytes verbatim in chunks of up to 64: local and own-WCB ports and S0 in place, remote ports as raw ESP-NOW frames (no ETM, no ACK, no stats change), a remote S0 refused at configure time, with '[RAW]' hex lines under ?DEBUG,RAW and a send-failure line for an unreachable board; the command reader stays off the port; the task skips the Kyber port, a Maestro get-query port and a port being re-begun.",
   "where": "WCB.ino:9025-9108; WCB_Storage.cpp:2140-2145",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "map.raw_local_verbatim",
    "map.raw_debug_lines",
@@ -1479,9 +1510,11 @@
    "map.raw_remote_soft_port",
    "map.baud_on_raw_mapped_port",
    "map.unreachable_board",
-   "pwm.p_guard_raw_mapped_input"
+   "pwm.p_guard_raw_mapped_input",
+   "maestro.get_reply_kept_from_raw_mapping",
+   "kyber.local_port_raw_mapping_skipped"
   ],
-  "gap": "The task's Kyber-port skip (a raw mapping whose input is the Kyber local port) and its maestroQueryPort skip are unasserted.",
+  "gap": "closed 2026-10-12/13 by maestro.get_reply_kept_from_raw_mapping, kyber.local_port_raw_mapping_skipped",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -1587,16 +1620,17 @@
   "area": "debug",
   "behaviour": "?DEBUG,ON|OFF, MAESTRO|KYBER,ON|OFF, PWM, ETM, HCR, MGMT and RAW ON|OFF flip RAM-only flags with their confirmation lines; anything else prints 'Invalid DEBUG command. Use: ?DEBUG ?'.",
   "where": "WCB.ino:6312-6345, :6402-6404",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wcb.pull_knobs",
    "map.raw_debug_lines",
    "pwm.p_output_port",
    "hcr.config_softport",
    "etm.rx_debug_lines",
-   "chars.legacy_debug_toggles"
+   "chars.legacy_debug_toggles",
+   "debug.toggles_ram_only"
   ],
-  "gap": "The 'MGMT debugging enabled/disabled' and 'HCR debugging enabled' lines of the new form, and lowercase '?debug,on', are unasserted; RAM-only is proven only by config_guard's byte-identity.",
+  "gap": "closed 2026-10-12/13 by debug.toggles_ram_only",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1640,14 +1674,15 @@
   "area": "debug",
   "behaviour": "'Processing input from SerialN: <line>' prints under ?DEBUG,ON except for a ?MGMT line, which prints only under ?DEBUG,MGMT; a ?STATS,RPT echo rides ?DEBUG,MGMT.",
   "where": "WCB.ino:8724-8728; :2311-2317",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "input.reader_map_w1",
    "kyber.normal_mode_s1",
    "input.bcast_mesh_under_traffic",
-   "etm.rx_debug_lines"
+   "etm.rx_debug_lines",
+   "debug.mgmt_input_line_gating"
   ],
-  "gap": "That a ?MGMT line typed on USB under ?DEBUG,ON prints NO 'Processing input' line (and does under ?DEBUG,MGMT) is unasserted.",
+  "gap": "closed 2026-10-12/13 by debug.mgmt_input_line_gating",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1846,11 +1881,12 @@
   "area": "reader",
   "behaviour": "A USB line is capped at 32 KB; one the heap cannot grow is dropped whole with '[SERIAL] S0: line too long for the free heap (N characters) - dropped' instead of running its head unverified.",
   "where": "WCB.ino:8663, :8748-8758",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "input.usb_line_over_heap_dropped_whole"
+   "input.usb_line_over_heap_dropped_whole",
+   "input.usb_line_cap_32k"
   ],
-  "gap": "The 32768 cap itself (a longer USB line on a board whose largest free block exceeds 32 KB) is unreachable in AP mode and skip-guarded; only the heap-failure arm is driven.",
+  "gap": "closed 2026-10-12/13 by input.usb_line_cap_32k",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2087,14 +2123,15 @@
   "area": "chars",
   "behaviour": "The function identifier may not equal the command character or the delimiter, nor be a control byte, DEL or more than one character; ?LF longer than 3 characters is not a setter.",
   "where": "WCB.ino:1008-1032, :7233-7234",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "chars.funcchar_change_restore",
    "chars.legacy_lf_guard",
    "chars.format_refusals",
-   "wcb.cmd.legacy_prefix_typos"
+   "wcb.cmd.legacy_prefix_typos",
+   "chars.prefix_delim_collision"
   ],
-  "gap": "The delimiter-collision arm ('?FUNCCHAR,|' after ?DELIM,|, or '?LF|') is unasserted: only '?' vs ';' and the format/printable arms are.",
+  "gap": "closed 2026-10-12/13 by chars.prefix_delim_collision",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2121,13 +2158,14 @@
   "area": "chars",
   "behaviour": "The command character may not equal the function identifier or the delimiter, nor be a control byte, DEL or more than one character; ?CCLEAR,ALL is not a setter.",
   "where": "WCB.ino:1008-1032, :7047-7058, :7237-7239",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "chars.cmdchar_lfi_guard",
    "chars.format_refusals",
-   "wcb.cmd.legacy_prefix_typos"
+   "wcb.cmd.legacy_prefix_typos",
+   "chars.prefix_delim_collision"
   ],
-  "gap": "The delimiter-collision arm ('?CMDCHAR,^' - arrives as '?CMDCHAR,' and is refused by format, so test it with a non-default delimiter: ?DELIM,| then ?CMDCHAR,|) is unasserted.",
+  "gap": "closed 2026-10-12/13 by chars.prefix_delim_collision",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",

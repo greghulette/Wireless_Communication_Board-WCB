@@ -70,13 +70,13 @@
   "area": "etm",
   "behaviour": "A receiver remembers the last 16 sequence numbers per sender (ETM_PENDING_MAX + 6): a repeat is ACKed and not executed ('Duplicate seq N from WCBn - ACKd but not executed'), so retries of up to the whole pending table never double-run.",
   "where": "Code/WCB/WCB.ino:739-756,5569-5594",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.dedup_ring_covers_pending",
    "client_mesh.rejoin_seq_reuse",
    "etm.seq_wrap"
   ],
-  "gap": "Asserted once-each for 8 and 9 in flight; 10 in flight (the full pending table, the ring's design bound) is sent by etm.pending_table_evict but only 'delivered', not 'exactly once', is asserted for commands 2-11.",
+  "gap": "closed 2026-10-12/13 by etm.dedup_ring_covers_pending",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -170,14 +170,15 @@
   "area": "etm",
   "behaviour": "A target-0 '{' broadcast is sent as an ETM frame but never tracked; on receive it is not ACKed, never enters the duplicate ring, is never enqueued as a command, and is relayed to USB only inside an RC-relay window.",
   "where": "Code/WCB/WCB.ino:3180-3185,5554-5567,5578-5585,5654-5684",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "input.bcast_under_json_flood",
    "client_mesh.json_broadcast_once",
    "etm.seq_wrap",
-   "client_mesh.rc_relay_drops_counted"
+   "client_mesh.rc_relay_drops_counted",
+   "etm.json_broadcast_unacked_outside_ring"
   ],
-  "gap": "The no-ACK rule and the ring exemption are not asserted directly: no test reads W1's ?DEBUG,ETM for the absence of 'Sent ACK' after a client JSON broadcast, and no test shows a real command's retry still deduplicating after a JSON burst from the same sender. 'Not enqueued as a command' is only implied (no 'Invalid Serial Command' check under the flood).",
+  "gap": "closed 2026-10-12/13 by etm.json_broadcast_unacked_outside_ring",
   "testable": "unattended",
   "bench_needs": "probe",
   "risk": "M",
@@ -259,11 +260,12 @@
   "area": "etm",
   "behaviour": "The came-ONLINE line is queued from the WiFi task and printed by loop() in one write, so it never lands inside a ?backup chain; a full 6-slot ring counts drops and loop() prints '[ETM] N status line(s) dropped - more peers came online at once than the queue holds'.",
   "where": "Code/WCB/WCB.ino:4573-4640",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "etm.came_online_outside_backup"
+   "etm.came_online_outside_backup",
+   "etm.status_lines_dropped_reported"
   ],
-  "gap": "The overflow count line is not asserted (six peers coming online inside one busy loop pass).",
+  "gap": "closed 2026-10-12/13 by etm.status_lines_dropped_reported",
   "testable": "unattended",
   "bench_needs": "probe",
   "risk": "L",
@@ -341,13 +343,14 @@
   "area": "etm",
   "behaviour": "etmSendAck, the retry path and the RTERM sender register the destination as an ESP-NOW peer on demand, so a sender above this board's floor (or evicted from the table) still gets its ACK and mirrored lines.",
   "where": "Code/WCB/WCB.ino:1715-1725,1789-1800; Code/WCB/WCB_RemoteTerm.cpp:123-132",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "client_mesh.rejoin_unadopted",
    "peers.controller_off_on",
-   "mesh.rterm_relay_navicore"
+   "mesh.rterm_relay_navicore",
+   "etm.on_demand_peer_registration"
   ],
-  "gap": "Never asserted directly: rejoin_unadopted proves the unadopted client's commands run (the ring would mask a lost ACK), controller_off_on only excuses a missing line when an ACK re-added WCB20, and rterm_relay_navicore notes that WCB20 is normally already W2's controller peer.",
+  "gap": "closed 2026-10-12/13 by etm.on_demand_peer_registration",
   "testable": "unattended",
   "bench_needs": "probe",
   "risk": "M",
@@ -358,11 +361,11 @@
   "area": "etm",
   "behaviour": "A command whose tokens would not fit the command queue is neither ACKed nor queued; the WiFi task counts it, loop() prints '[ETM] N command(s) refused unacknowledged: the command queue was full (the senders retry)', and ?STATS shows 'ETM: N command(s) refused unacknowledged'.",
   "where": "Code/WCB/WCB.ino:1221-1227,1503-1514,5557-5565,2195-2201",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.full_queue_refused_not_lost"
   ],
-  "gap": "The ?STATS line is not asserted; the test skips when the flood never fills the queue while a marker lands.",
+  "gap": "closed 2026-10-12/13 by etm.full_queue_refused_not_lost",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -456,7 +459,7 @@
   "area": "etm",
   "behaviour": "?ETM,CHAR (and legacy ?ETMCHAR) runs three phases over the online peers, clamps the per-board sample so no phase passes 200 messages, prints per-board Min/Max/Avg/Missed rows and a recommended timeout, restores ?DEBUG,ETM, refuses a second start, ETM off and WCBQ < 2, and phase 3 starts every peer's 10 s untracked load generator.",
   "where": "Code/WCB/WCB.ino:1823-2124,2320-2392",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.char_unicast",
    "etm.char_loaded",
@@ -465,9 +468,10 @@
    "etm.char_guard_wcbq",
    "etm.char_per_board_clamp",
    "etm.char_legacy",
-   "etm.off_local"
+   "etm.off_local",
+   "etm.char_no_online_peers"
   ],
-  "gap": "The 'Characterization aborted: no online peers' path (debug restored, a latched requester notified) and the 'Warning: >5% packet loss detected' footer are not asserted.",
+  "gap": "closed 2026-10-12/13 by etm.char_no_online_peers",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -478,13 +482,14 @@
   "area": "etm",
   "behaviour": "?MGMT,ETM,CHAR,n sends one ETM_REQ; the target latches the requester, runs, holds the result until its peers' load is off the air, then sends it in two frag passes; a run it cannot start is answered at once with the reason and the latch released; a request during a run is ignored.",
   "where": "Code/WCB/WCB.ino:4900-4919,2379-2404,5208-5219",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.char_relay_roundtrip",
    "etm.char_relay_refusal_reported",
-   "ncmesh.mgmt_etm_char"
+   "ncmesh.mgmt_etm_char",
+   "etm.char_relay_ignored_while_running"
   ],
-  "gap": "The 'ETM char already running — ignoring relay request' arm (no reply, no re-latch) is not asserted.",
+  "gap": "closed 2026-10-12/13 by etm.char_relay_ignored_while_running",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -513,14 +518,15 @@
   "area": "rx",
   "behaviour": "Each handler compares the frame's 40-byte password field with its own (strncmp) before acting: ETM, plain, MGMT push, config/stats/seq/ETM requests and their reply frags, raw serial, RTERM, OTA.",
   "where": "Code/WCB/WCB.ino:5435,5778,3594,4419,4662,4782,4796,4842,4904,4978,5018,5058,5098; Code/WCB/WCB_RemoteTerm.cpp:176",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "ident.epass_live",
    "ident.epass_window_gates",
    "client_mesh.auth_mismatch_silent",
-   "map.probe_mesh_raw_chunk_bounds"
+   "map.probe_mesh_raw_chunk_bounds",
+   "client_mesh.auth_mismatch_frag_ignored"
   ],
-  "gap": "Asserted for ETM commands, config pull, SEQ names, OTA BEGIN, RTERM and raw serial. Not asserted for a MGMT push frame (type 3/5, the fragmented-unicast path) or for the reply frags (STATS/SEQ/SEQVAL/ETM types 9/14/16/10) from a wrong-password sender.",
+  "gap": "closed 2026-10-12/13 by client_mesh.auth_mismatch_frag_ignored",
   "testable": "opt-in",
   "bench_needs": "probe",
   "risk": "M",
@@ -710,14 +716,15 @@
   "area": "mgmt",
   "behaviour": "A one-chunk ?MGMT,FRAG whose payload fits (186 under CHKSM, 198 without) is sent as one SOH-marked ETM unicast ('[MGMT] Single-chunk cmd → ETM unicast ..'); a longer single chunk falls to the fragment path, which refuses a payload over 179 with an ungated REJECTED line.",
   "where": "Code/WCB/WCB.ino:3517-3558",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "mgmt.frag_chksm_boundary",
    "mesh.frag_chain",
    "mesh.mgmt_errors",
-   "mesh.frag_trailing_q"
+   "mesh.frag_trailing_q",
+   "mgmt.frag_single_chunk_chksm_off"
   ],
-  "gap": "The CHKSM-off ceiling (198) is not exercised (s18 never changes W2's checksum setting).",
+  "gap": "closed 2026-10-12/13 by mgmt.frag_single_chunk_chksm_off",
   "testable": "opt-in",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -728,7 +735,7 @@
   "area": "mgmt",
   "behaviour": "Multi-chunk FRAGs are broadcast as 226-byte type-3 packets; the target keeps one session (busy guard 2 s, takeover when stale, 15 s timeout, chunk index/total bounds, target filter), reassembles when every chunk is in and runs the whole ^ chain through the splitter (or the timer queue); a type-5 session keeps unicast origin.",
   "where": "Code/WCB/WCB.ino:3560-3699",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "mesh.frag_push_chain",
    "mesh.frag_push_reboot",
@@ -737,9 +744,10 @@
    "client_mesh.fragmented_unicast_limits",
    "mesh.timer_chain_two_chunks",
    "mesh.timer_chain_long",
-   "inv.seqget_multichunk"
+   "inv.seqget_multichunk",
+   "mesh.frag_completed_session_ring"
   ],
-  "gap": "The completed-session ring (the last 8 session ids: a retransmitted chunk of a finished session is discarded, '[MGMT] Duplicate session XXXX — discarding') is not asserted; a re-sent session executing twice would double-run a push.",
+  "gap": "closed 2026-10-12/13 by mesh.frag_completed_session_ring",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -925,9 +933,11 @@
   "area": "mgmt",
   "behaviour": "Half-received SEQ and SEQVAL relay sessions are reaped 10 s after their last frag ('Sequence-names/-value session XXXX timed out' under debug); STATS and ETM sessions are never reaped but a new sessionId resets them.",
   "where": "Code/WCB/WCB.ino:5276-5289,4986-4993,5106-5113",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "inv.seqget_largest reads the SEQVAL reap line only as a diagnostic; nothing asserts it.",
+  "status": "tested",
+  "tested_by": [
+   "mgmt.seqval_session_reaped"
+  ],
+  "gap": "closed 2026-10-12/13 by mgmt.seqval_session_reaped",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -993,9 +1003,11 @@
   "area": "rterm",
   "behaviour": "A mirrored line the relay's 2560-byte ring cannot hold is counted and loop() prints '[RTERM] N line(s) from WCBn lost at this relay: its queue was full' after what did arrive.",
   "where": "Code/WCB/WCB_RemoteTerm.cpp:185-191,211-215",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "mesh.rterm_long_output treats any loss as a failure and has not seen one; the report line itself is never asserted.",
+  "status": "tested",
+  "tested_by": [
+   "rterm.relay_ring_loss_reported"
+  ],
+  "gap": "closed 2026-10-12/13 by rterm.relay_ring_loss_reported",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1021,14 +1033,15 @@
   "area": "route",
   "behaviour": ";W<n>,<cmd> routes to board n (two-digit ids with the comma); the legacy ;w<d><payload> takes one digit as the target and the rest, digits included, as payload; a bare ;W prints its usage; the local number runs the payload here.",
   "where": "Code/WCB/WCB.ino:8098-8111,8166-8180,8215-8224",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "mesh.w_usage",
    "mesh.w_legacy_digits",
    "mesh.unicast_acked",
-   "navicore.cli_over_mesh"
+   "navicore.cli_over_mesh",
+   "mesh.self_numeric_local"
   ],
-  "gap": "The numeric self form (;W1,<cmd> typed on W1 runs locally without a send) is not asserted; only the alias self form is (mesh.alias_ambiguous_wcb).",
+  "gap": "closed 2026-10-12/13 by mesh.self_numeric_local",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1401,16 +1414,17 @@
   "area": "peers",
   "behaviour": "Learned membership is a 20-bit mask in NVS learned_peers with the MAC-octet fingerprint, flushed 5 s after a change (and just before a deferred restart), restored at boot ('[PEER] restored n learned peer(s) from NVS'), discarded when the octets differ, and frozen after ?ERASE,NVS.",
   "where": "Code/WCB/WCB.ino:662-673,9436-9503,10140-10145",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wdp.autojoin_permanent_downgrade",
    "wdp.peers.forget_learned_persists",
    "wdp.peers.add_forget_survive_quick_reboot",
    "wdp.peers.fingerprint_discard",
    "wdp.clear_learned_relearn",
-   "nvs.erase_defaults_restore"
+   "nvs.erase_defaults_restore",
+   "nvs.erase_freezes_learned_peers"
   ],
-  "gap": "The post-erase freeze (nothing writes the table between ?ERASE,NVS and the restart) is not asserted; the erase tests re-add the learned peers afterwards, which would also pass if the freeze failed and the erase ran first.",
+  "gap": "closed 2026-10-12/13 by nvs.erase_freezes_learned_peers",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -1479,16 +1493,17 @@
   "area": "peers",
   "behaviour": "?CONTROLLER,ON[,id] (?SPECIAL alias) registers the controller live ('registered (live)', 'Controller peer ID set to n.'), persists both, keeps it out of the learned set, shows it as 'WCBn (special)' in ?STATS and CTRL=n in the self row; OFF frees the out-of-band slot and makes ;W<id> unreachable while its commands still run; invalid ids refused; the query prints state and usage; all of it survives a reboot.",
   "where": "Code/WCB/WCB.ino:6888-6921,9212-9250; Code/WCB/WCB_Storage.cpp:475-512",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "peers.controller_off_on",
    "peers.controller_other_id_persist",
    "peers.controller_off_still_executes",
    "peers.controller_off_reboot_readopted",
    "wcb.chain_partial_tokens",
-   "etm.controller_unicast_tracked"
+   "etm.controller_unicast_tracked",
+   "peers.controller_clears_learned_bit"
   ],
-  "gap": "enableControllerPeer clearing the learned bit of an id that was auto-joined earlier (so it is not dual-tracked) is not asserted.",
+  "gap": "closed 2026-10-12/13 by peers.controller_clears_learned_bit",
   "testable": "unattended",
   "bench_needs": "probe",
   "risk": "L",
@@ -1545,7 +1560,7 @@
   "area": "stats",
   "behaviour": "?STATS prints the unicast summary and success rate (ETM or MAC counters), the PWM and raw blocks when non-zero, the heap line, the given-up-frame, queue-refused and USB-overflow lines when non-zero, the per-board ETM rows with online/age, the '(special)' row and the reported rows; ?STATS,RESET (legacy ?STATSRESET) clears them all.",
   "where": "Code/WCB/WCB.ino:2127-2264,7042-7057,7343-7346",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.ack_lost_retry_fail",
    "etm.pending_table_evict",
@@ -1555,9 +1570,10 @@
    "etm.off_local",
    "stats.usb_rx_overflow_line",
    "etm.controller_unicast_tracked",
-   "wcb.mgmt_result_too_large"
+   "wcb.mgmt_result_too_large",
+   "stats.optional_lines_and_reset"
   ],
-  "gap": "The 'ESP-NOW: N frame(s) not sent - the radio's queue stayed full', 'ETM: N command(s) refused unacknowledged', 'Raw Data (Kyber Bridging)' and 'Heap: ..' lines are not asserted.",
+  "gap": "closed 2026-10-12/13 by stats.optional_lines_and_reset",
   "testable": "unattended",
   "bench_needs": "probe",
   "risk": "L",
@@ -1587,7 +1603,7 @@
   "area": "wdp",
   "behaviour": "This board's advert carries magic/version, alias (<=24), firmware (<=27), HW, the capability bitmap, the controller id when linked, Maestro and WLED id@baud records, remote PWM targets, the sequence-inventory hash, then one label per port (a user label or the WDP-DA device type), dropping labels that no longer fit the 200-byte payload.",
   "where": "Code/WCB/WCB_WDP.cpp:114-139,242-327",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wdp.dump_fields",
    "wdp.dump_neighbor_fields",
@@ -1595,9 +1611,10 @@
    "inv.hash_matches_wdp",
    "ncmesh.wdp_neighbour_table",
    "pwm.passthrough_mesh",
-   "wdp.da_announce_propagates"
+   "wdp.da_announce_propagates",
+   "wdp.advert_label_budget"
   ],
-  "gap": "The budget rule (labels dropped gracefully when the payload would exceed 200 bytes) is not asserted.",
+  "gap": "closed 2026-10-12/13 by wdp.advert_label_budget",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1628,15 +1645,16 @@
   "area": "wdp",
   "behaviour": "?WDP,POLL advertises and broadcasts a SOLICIT; a receiver arms one prompt advert staggered by its number and does not decode the solicit as an advert (the sender's row is kept); POLL is refused while WDP or ETM is off.",
   "where": "Code/WCB/WCB_WDP.cpp:351-372,513-527,1871-1879",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wdp.poll_refreshes_age",
    "wdp.off_on",
    "etm.off_local",
    "wdp.forget_floor_relearn",
-   "ncmesh.wdp_solicit_keeps_rows"
+   "ncmesh.wdp_solicit_keeps_rows",
+   "wdp.poll_keeps_sender_row"
   ],
-  "gap": "The 'solicit keeps the sender's row' rule is asserted on NaviCore's table only, not on a WCB's: W2's row for W1 after W1's POLL is never compared.",
+  "gap": "closed 2026-10-12/13 by wdp.poll_keeps_sender_row",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1771,12 +1789,13 @@
   "area": "client",
   "behaviour": "A client unicast over 187 characters arrives as type-5 fragments ('New session .. (client unicast)'), is reassembled and run once, and keeps unicast origin so its broadcastable tokens never fan out to other boards.",
   "where": "Code/WCB/WCB.ino:3634,3666-3688",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "client_mesh.fragmented_unicast_limits",
-   "navicore.wcb_send_fragmented_unicast"
+   "navicore.wcb_send_fragmented_unicast",
+   "client_mesh.fragmented_unicast_stays_local"
   ],
-  "gap": "Run-once on W1 and the session lines are asserted; that the 188/400-character ;S2 unicast never reaches W2's port (the no-re-broadcast half) is not.",
+  "gap": "closed 2026-10-12/13 by client_mesh.fragmented_unicast_stays_local",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",

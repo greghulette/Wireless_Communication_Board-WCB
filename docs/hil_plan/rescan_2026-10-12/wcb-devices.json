@@ -22,13 +22,14 @@
   "area": "maestro",
   "behaviour": ";M<dev>,<n> (dev 0-9, n 0-127) is the same subroutine trigger as the short form; a 2+ digit dev, a letter verb or an empty device field falls to the verb path.",
   "where": "Code/WCB/WCB.ino:8379-8400",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "maestro.comma_int",
    "maestro.no_alias",
-   "maestro.fallback_unicast_wcbq_probe"
+   "maestro.fallback_unicast_wcbq_probe",
+   "maestro.sub_comma_form_edges"
   ],
-  "gap": "';M,5' (empty device) and ';M12,5' (two-digit dev through WcbMaestro::build, device 12) are never sent; only ;M1,7 / ;M5,7 / ;M1,200 are.",
+  "gap": "closed 2026-10-12/13 by maestro.sub_comma_form_edges",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -159,12 +160,12 @@
   "area": "maestro",
   "behaviour": "Every legacy-S1 fallback (own id, target 9, the ;M0 extra frame, a get on the own id) is skipped, naming the owner, when the Kyber, an HCR, MP3, DFPlayer, WLED, PWM output or PWM input owns S1; CLEAR,ALL says legacy routing is off.",
   "where": "Code/WCB/WCB_Maestro.cpp:113-124, 264-270, 301-311, 319-323, 446-451, 467-473, 481-484, 556-559, 1088-1091",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "kyber.local_s1_legacy_fallback_skips_kyber_port",
    "maestro.legacy_s1_owner_devices"
   ],
-  "gap": "Only the Kyber, HCR and WLED owners are exercised; the MP3 Trigger, DFPlayer, PWM-output and PWM-input owners (the strings 'the MP3 Trigger port', 'the DFPlayer port', 'a PWM output', 'a PWM input') are never asserted.",
+  "gap": "closed 2026-10-12/13 by maestro.legacy_s1_owner_devices",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -337,12 +338,13 @@
   "area": "maestro",
   "behaviour": "A standalone ;M<dev>,get… received over the mesh is rewritten to ;MG<dev>,<sender>,… so the reply goes to the sender; chains ('^') and actuation verbs are left alone.",
   "where": "Code/WCB/WCB_Maestro.cpp:665-678; Code/WCB/WCB.ino:5754, 6001",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "maestro.mesh_get_rewrite_probe",
-   "navicore.maestro_get_reply_mqr"
+   "navicore.maestro_get_reply_mqr",
+   "maestro.mesh_get_rewrite_non_etm"
   ],
-  "gap": "Only the ETM receive site (WCB.ino:5754) is exercised; the non-ETM site (WCB.ino:6001, a sender with ETM off) is not.",
+  "gap": "closed 2026-10-12/13 by maestro.mesh_get_rewrite_non_etm",
   "testable": "unattended",
   "bench_needs": "probe (mesh client)",
   "risk": "M",
@@ -387,12 +389,13 @@
   "area": "maestro",
   "behaviour": "While a get reads, the Kyber bridge tasks, the command parser and the raw-forwarding task stay off that port (maestroQueryPort), so the reply is not stolen.",
   "where": "Code/WCB/WCB_Maestro.cpp:11, 585-594; Code/WCB/WCB.ino:6133-6138, 6163-6168, 8689-8690, 8705, 9050, 9060",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "maestro.get_local_replies",
-   "maestro.get_off_s1_ports"
+   "maestro.get_off_s1_ports",
+   "maestro.get_reply_kept_from_raw_mapping"
   ],
-  "gap": "The raw-mapping reader's skip (RawSerialForwardingTask, WCB.ino:9050, 9060) is never exercised: no test runs a get on a Maestro port that is also a raw ?MAP,SERIAL input.",
+  "gap": "closed 2026-10-12/13 by maestro.get_reply_kept_from_raw_mapping",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -403,9 +406,11 @@
   "area": "maestro",
   "behaviour": "A bare ';M' or ';M<letter>…' without a comma is ignored silently.",
   "where": "Code/WCB/WCB.ino:8370",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Never sent.",
+  "status": "tested",
+  "tested_by": [
+   "maestro.bare_or_letter_ignored"
+  ],
+  "gap": "closed 2026-10-12/13 by maestro.bare_or_letter_ignored",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -514,9 +519,11 @@
   "area": "maestro",
   "behaviour": "A local Maestro is refused on the Kyber's own port ('S<n> is the Kyber port - use another port, or move the Kyber first').",
   "where": "Code/WCB/WCB_Maestro.cpp:808-813",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test sends ?MAESTRO for the port a Kyber_Local board holds; only the reverse (?KYBER,LOCAL refusing a Maestro port) is asserted.",
+  "status": "tested",
+  "tested_by": [
+   "maestro.local_refused_on_kyber_port"
+  ],
+  "gap": "closed 2026-10-12/13 by maestro.local_refused_on_kyber_port",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -527,11 +534,11 @@
   "area": "maestro",
   "behaviour": "A local Maestro is refused on a port an HCR, MP3 Trigger, DFPlayer, WLED, PWM output or PWM input owns, naming the owner.",
   "where": "Code/WCB/WCB_Maestro.cpp:113-122, 816-820",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "devices.maestro_port_refused"
   ],
-  "gap": "Only the WLED owner is asserted ('S2 is the WLED port'); the HCR, MP3, DFPlayer, PWM-output and PWM-input refusals from the Maestro side are not.",
+  "gap": "closed 2026-10-12/13 by devices.maestro_port_refused",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -542,11 +549,12 @@
   "area": "maestro",
   "behaviour": "On a targeted Kyber_Local board a newly claimed local slot adds its (id, self, port) Kyber target and saves it; a re-issued line does not touch the target table; a full target table warns.",
   "where": "Code/WCB/WCB_Maestro.cpp:133-178, 866-868",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "kyber.local_clear_maestro_drops_target"
+   "kyber.local_clear_maestro_drops_target",
+   "kyber.local_slot_add_targets"
   ],
-  "gap": "The 'Kyber target table is full (9)' warning and the 'already there' no-op on a re-issued line are not asserted.",
+  "gap": "closed 2026-10-12/13 by kyber.local_slot_add_targets",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -894,9 +902,11 @@
   "area": "kyber",
   "behaviour": "A local Kyber target whose port an HCR/MP3/DFP/WLED or PWM output now owns is skipped (deviceOwnedPorts), so the sabre stream never enters a device port.",
   "where": "Code/WCB/WCB.ino:6040-6051, 6071",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Never asserted; a slot-less local target exists only when ?KYBER,LOCAL's explicit list adds a target with the slot table full, or from older NVS.",
+  "status": "tested",
+  "tested_by": [
+   "kyber.local_device_owned_port_mask"
+  ],
+  "gap": "closed 2026-10-12/13 by kyber.local_device_owned_port_mask",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -1043,11 +1053,12 @@
   "area": "kyber",
   "behaviour": "An explicit target with id outside 1-8, WCB outside 1-20, port outside 1-5 or a baud off the 13-rate list is skipped with its reason; a target to a board that is not a mesh peer prints the 'not a current mesh peer' warning.",
   "where": "Code/WCB/WCB_Storage.cpp:1611-1660, 1739-1748",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "kyber.target_id9_rejected"
+   "kyber.target_id9_rejected",
+   "kyber.target_validation_lines"
   ],
-  "gap": "Only id 9 is asserted (as a should). The WCB-range, port-range and baud skip lines and the 'not a current mesh peer' warning are never asserted.",
+  "gap": "closed 2026-10-12/13 by kyber.target_validation_lines",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1108,13 +1119,14 @@
   "area": "kyber",
   "behaviour": "?KYBER,CLEAR / ?KYBER_CLEAR leave both modes, release only the port the Kyber held, clear targeting, save, print 'Kyber cleared. Run ?MAESTRO_DEFAULT…' and the reboot notice only when the board was in a Kyber mode.",
   "where": "Code/WCB/WCB_Storage.cpp:1540-1570",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "kyber.clear_warns_reboot_single_reader",
    "kyber.legacy_clear_remote",
-   "kyber.normal_mode_s1"
+   "kyber.normal_mode_s1",
+   "kyber.clear_quiet_when_not_kyber"
   ],
-  "gap": "The quiet form (no reboot notice, no port release) on a board that was never in a Kyber mode - what every Wizard push sends to a plain board - is not asserted.",
+  "gap": "closed 2026-10-12/13 by kyber.clear_quiet_when_not_kyber",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1322,13 +1334,14 @@
   "area": "hcr",
   "behaviour": "?HCR,CLEAR drops the local host, keeps the remote route (saying so), resets pollSec to 10, re-enables broadcasts, resets 9600 and clears the label on the freed port; nothing is released when no port was configured.",
   "where": "Code/WCB/WCB_HCR.cpp:656-694",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "hcr.config_softport",
    "hcr.route_to_unconfigured_host",
-   "port.move_release_hcr_mp3"
+   "port.move_release_hcr_mp3",
+   "hcr.clear_resets_poll"
   ],
-  "gap": "pollSec going back to 10 on CLEAR is not asserted (conflict.dfp_port_unguarded works around it).",
+  "gap": "closed 2026-10-12/13 by hcr.clear_resets_poll",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2045,12 +2058,12 @@
   "area": "dfp",
   "behaviour": "The DFPlayer port's 10-byte reply frames are decoded: 0x3D/0x3C finish fires ONFIN once (PLAY, FOLDER and bare-key forms), 0x40 runs ONERR, 0x3F prints 'Online', STOP/RESET cancel the pending key, the checksum is not checked, junk before a frame is skipped.",
   "where": "WcbCmd/src/WcbDfPlayer.cpp:173-219; Code/WCB/WCB_DFP.cpp:42-49, 100-103",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "dfp.rx_frames",
    "dfp.onerr_backup_and_clear"
   ],
-  "gap": "RESET cancelling a pending ONFIN is not asserted (only STOP is).",
+  "gap": "closed 2026-10-12/13 by dfp.rx_frames",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -2061,11 +2074,12 @@
   "area": "dfp",
   "behaviour": "A truncated frame re-anchors on the next 0x7E (header validated as it arrives), and a partial older than 200 ms is abandoned, so a later finish frame is not swallowed.",
   "where": "WcbCmd/src/WcbDfPlayer.cpp:180-191",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "dfp.partial_frame_resync"
+   "dfp.partial_frame_resync",
+   "dfp.partial_frame_stale_timeout"
   ],
-  "gap": "Only the header-mismatch resync is asserted; the 200 ms stale-partial timeout is not (a 7E FF 06 prefix, a pause over 200 ms, then a whole frame).",
+  "gap": "closed 2026-10-12/13 by dfp.partial_frame_stale_timeout",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -2173,12 +2187,13 @@
   "area": "wled",
   "behaviour": "An unknown ;L verb, an empty one, PS/FX/PAL with no number, COL with a bad length or JSON with no payload print their usage and write nothing.",
   "where": "WcbCmd/src/WcbWled.cpp:33-43, 55-58, 62-67, 72-74, 85-87, 100-102",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wled.bad_verb",
-   "ncdev.wled_remote"
+   "ncdev.wled_remote",
+   "wled.bad_args_usage"
   ],
-  "gap": "Only the unknown verb is asserted (silence); the empty ;L, PS/FX/PAL without a number, COL with a bad length and JSON without a payload (each with its '[WLED] Usage…' line) are not.",
+  "gap": "closed 2026-10-12/13 by wled.bad_args_usage",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -2422,9 +2437,11 @@
   "area": "wled",
   "behaviour": "With ?DEBUG,ON each WLED send prints '[WLED-DBG] TX -> <json>' and a remote forward prints '[WLED] n -> WCBm: …'.",
   "where": "Code/WCB/WCB_WLED.cpp:95, 157",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Never asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wled.debug_tx_lines"
+  ],
+  "gap": "closed 2026-10-12/13 by wled.debug_tx_lines",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2501,15 +2518,16 @@
   "area": "pwm",
   "behaviour": "?MAP,PWM,OUT,S<n> / ?PO<n> / ?POS<n> declare an output port live (pin LOW, saved with the port's prior broadcast flags and a source tag), idempotent ('already configured'), refusing a bad port, a reserved port (Kyber mode, a device, a local Maestro) and a serial-mapped input; the cap is 5 ports.",
   "where": "Code/WCB/WCB_PWM.cpp:83-119, 962-993; Code/WCB/WCB.ino:6465-6468, 7309-7316",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "pwm.out_port_lines_and_guards",
    "pwm.legacy_pos_pclear",
    "kyber.local_free_port_takes_pwm",
    "pwm.serial_mapped_input_refused",
-   "pwm.declare_on_serial_map_destination"
+   "pwm.declare_on_serial_map_destination",
+   "pwm.out_port_device_refused"
   ],
-  "gap": "The device-reserved refusal for ?MAP,PWM,OUT ('Cannot use PWM on Serial<n> - reserved for HCR/MP3/WLED/Maestro/DFP') is never asserted (only the Kyber-reserved S1 and the serial-map refusal are); 'Maximum PWM output ports reached' is unreachable (the cap equals the port count).",
+  "gap": "closed 2026-10-12/13 by pwm.out_port_device_refused",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2989,15 +3007,16 @@
   "area": "wdpda",
   "behaviour": "?WDP,DA lists each port's devices (unconfirmed marked 'heard once', quiet ones with age, reloaded ones 'not heard since boot', hw/caps lines) and the forget hint, or '(none — a wired device self-identifies…)'; ?WDP,DUMP emits one [WDPDA:…SEEN,AGE] line per confirmed record, '-' age for a neighbour's.",
   "where": "Code/WCB/WCB_WDP.cpp:1171-1222, 1517-1526",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "input.wdpda_basic",
    "input.wdpda_fields",
    "input.wdpda_persists_reboot",
    "input.wdpda_ttl",
-   "wdp.da_announce_propagates"
+   "wdp.da_announce_propagates",
+   "input.wdpda_empty_list"
   ],
-  "gap": "The empty-list '(none — a wired device self-identifies by sending @WDP1)' line is never asserted (the bench boards always hold devices).",
+  "gap": "closed 2026-10-12/13 by input.wdpda_empty_list",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -3141,11 +3160,12 @@
   "area": "devices",
   "behaviour": "Mesh-received raw bytes for a soft port go through the mesh-to-port queue (bit-banged by MeshSerialOutTask); a full queue drops the chunk and reports it once.",
   "where": "Code/WCB/WCB.ino:2595-2635",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "kyber.remote_roundtrip"
+   "kyber.remote_roundtrip",
+   "kyber.remote_soft_port_maestro"
   ],
-  "gap": "The soft-port path (a local Maestro on S3-S5 of a Maestro_Remote board receiving Kyber bytes) and the queue-full drop line are not exercised; every bridge test uses S1.",
+  "gap": "closed 2026-10-12/13 by kyber.remote_soft_port_maestro",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",

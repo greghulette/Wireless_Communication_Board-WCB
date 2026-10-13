@@ -4,14 +4,15 @@
   "area": "var",
   "behaviour": ";V,<name>,<int|true|false|TOGGLE|INC[,n]|DEC[,n]> sets a volatile variable and ;VP the persistent one (verb any case, the comma after V/VP required, non-numeric literals read 0, INC/DEC default 1); malformed forms print their usage/needs-a-value line and create nothing.",
   "where": "WCB_Variables.cpp:241-308; WCB.ino:8044-8045",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "var.v_set_get_list",
    "var.v_verbs",
    "var.v_errors",
-   "var.if"
+   "var.if",
+   "var.lowercase_verbs"
   ],
-  "gap": "The lower-case command letter (';v,' and ';vp,' / ';Vp,') is dispatched at WCB.ino:8044 and the p at :247 but no test sends it.",
+  "gap": "closed 2026-10-12/13 by var.lowercase_verbs",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -364,9 +365,11 @@
   "area": "seqstore",
   "behaviour": "A value over SEQ_VALUE_MAX (3999) is refused with 'Failed to store sequence <k> (it is N characters - the limit is 3999). Not stored.'.",
   "where": "WCB_SeqStore.h:60; WCB_SeqStore.cpp:866; WCB_Storage.cpp:809-811",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test reaches the TOOBIG refusal: inv.seqget_largest's ladder tops at 2950 and W1 in AP mode runs out of heap copying a 4 KB line first (its refusal is the OOM line).",
+  "status": "tested",
+  "tested_by": [
+   "seq.value_over_3999_refused"
+  ],
+  "gap": "closed 2026-10-12/13 by seq.value_over_3999_refused",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -395,12 +398,13 @@
   "area": "seqstore",
   "behaviour": "seqStoreBegin at boot: a partition with no file system is formatted ('Setting up the sequence store (first use)...'), an unreadable one is started over with its sequences lost, a crash while mounting last boot or ?DEBUG,SEQNVS puts this boot on the NVS fallback (its sequences in the file unseen), no spiffs partition / out of memory / a store that will not open fall back too, a file with no seq_mig_done marker (NVS blanked) is cleared, NVS sequences are moved in, and '[SEQ] N stored sequence(s) in the sequence store (x of 32768 bytes)' prints.",
   "where": "WCB_SeqStore.cpp:775-832, :185-232",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "seq.store_moves_from_nvs",
-   "seq.nvs_full_consistency"
+   "seq.nvs_full_consistency",
+   "mesh.rterm_errors"
   ],
-  "gap": "Asserted: the SEQNVS fallback line and the move. Not asserted: the first-use format line, the 'could not be read - starting it over' line, the crash-while-mounting guard (RTC word), the no-marker clear (an NVS blanked under a live file: only an esptool NVS erase does that), and the '[SEQ] N stored sequence(s)' count line on an ordinary boot (boot.banner_w1/w2 do not check it).",
+  "gap": "closed 2026-10-12/13 by mesh.rterm_errors",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -411,11 +415,12 @@
   "area": "seqstore",
   "behaviour": "Sequences a fallback boot (or older firmware) saved in NVS move into the file at the next boot: a key both hold takes NVS's value in its own place, a new one goes last, each is read back before NVS lets go, the key list keeps what did not move, and the move line says how many; a phantom listed with no value is dropped, a value over 3999 or with a line break or one that does not fit the file stays in NVS with its own line.",
   "where": "WCB_SeqStore.cpp:598-766",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "seq.store_moves_from_nvs"
+   "seq.store_moves_from_nvs",
+   "seq.move_does_not_fit"
   ],
-  "gap": "The phantom drop ('was listed with no sequence stored under it'), the 'cannot move into the sequence store' (over 3999 / line break), the 'does not fit in the sequence store', the 'did not read back' count and the rewrite-failure line are not asserted.",
+  "gap": "closed 2026-10-12/13 by seq.move_does_not_fit",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "M",
@@ -474,12 +479,13 @@
   "area": "seqstore",
   "behaviour": "?NVS ends with the store line 'Sequences: N in the sequence store, x of 32768 bytes (partition spiffs: u of t bytes used)' with READ ERROR / damaged suffixes, or on the fallback 'Sequences: kept in the settings store this boot (<why>)'.",
   "where": "WCB_SeqStore.cpp:927-948; WCB_Storage.cpp:1123",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "seq.store_accounting",
-   "seq.store_moves_from_nvs"
+   "seq.store_moves_from_nvs",
+   "seq.store_report_line"
   ],
-  "gap": "Only the 'Sequences: N in the sequence store, x of y bytes' head is matched (STORE_RX); the partition-usage tail and the fallback line's exact text ('kept in the settings store this boot (?DEBUG,SEQNVS asked for it ...)') are not asserted (the fallback test only checks the head is absent).",
+  "gap": "closed 2026-10-12/13 by seq.store_report_line",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -947,13 +953,14 @@
   "area": "storage",
   "behaviour": "?BCAST,OUT/IN flags save bdcst_set / bcast_block (S0 echo included), load at boot, warn when NVS refused them ('they revert at the next reboot'); ?RESET_BROADCAST / ?BCAST,RESET rebuild the namespace with every port open and S0 off.",
   "where": "WCB_Storage.cpp:384-449, :1974-1993",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "persist.bcast_flags_reboot",
    "bcast.reset_legacy",
-   "persist.flags_and_etm_reboot"
+   "persist.flags_and_etm_reboot",
+   "nvs.full_bcast_flags_warn"
   ],
-  "gap": "The full-NVS warning lines for the output and input flags (:394-395, :1991-1992) are only used as a Skip condition, never asserted.",
+  "gap": "closed 2026-10-12/13 by nvs.full_bcast_flags_warn",
   "testable": "opt-in",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -1126,7 +1133,7 @@
   "area": "backup",
   "behaviour": "collectConfigCommands emits, in order: HW, LED,PIN (HW 3.x only), MAC,2/3, WCB, ALIAS (if set), WCBQ, WCBCH, WIFI (AP/JOIN with passphrase, or OFF), PEERSLIVE (factory chain only), EPASS, DELIM/FUNCCHAR (factory only, non-default), CMDCHAR, the Kyber release (KYBER,CLEAR or MAESTRO,REMOTE), BAUD x5, LABELs, BCAST OUT S1-S5+S0, BCAST IN, MAP,SERIAL lines, Maestro/MP3/DFP/HCR/WLED/VAR sub-emitters, KYBER,LOCAL (after the Maestros), ETM x8, CONTROLLER (ON,<id> or ON,<id>+OFF for a custom id), WDP,OFF / WDP,AUTOJOIN,OFF only when off, SEQ,SAVE per sequence, MAP,PWM,OUT and MAP,PWM last.",
   "where": "WCB.ino:3737-3933",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wcb.backup_crc",
    "wcb.chain_partial_tokens",
@@ -1134,9 +1141,10 @@
    "backup.replay_idempotent",
    "persist.flags_and_etm_reboot",
    "wdp.off_reboot",
-   "map.set_flags_list_backup"
+   "map.set_flags_list_backup",
+   "backup.chain_order"
   ],
-  "gap": "Asserted: HW first, PEERSLIVE factory-only, CONTROLLER forms, VAR before ETM, WDP OFF tokens present, replay idempotent. Not asserted as an order: the Kyber release before the BAUD lines and KYBER,LOCAL after the Maestro lines (the restore-ordering rule), SEQ,SAVE after the ETM/WDP block, MAP,PWM last, WIFI,OFF emitted when off (only checked after an erase), LED,PIN on HW 3.x (needs an S3 board).",
+  "gap": "closed 2026-10-12/13 by backup.chain_order",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1196,7 +1204,7 @@
   "area": "config",
   "behaviour": "?config / ?CONFIG prints the identity block, the port rows (RAM tables, not a re-read of NVS), Broadcast Blocking, Serial Monitoring (always None), the ESP-NOW block (password, MACs, peers with Online/last seen/Not yet seen, the controller row), the mappings, the command settings, Stored Sequences, the ETM settings and the Kyber/Maestro block.",
   "where": "WCB.ino:2993-3126, :7239-7240",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "seq.config_lists_sequences",
    "persist.flags_and_etm_reboot",
@@ -1204,9 +1212,10 @@
    "chars.delim_reboot",
    "peers.wcbq_reboot",
    "etm.settings_roundtrip",
-   "seq.nvs_full_consistency"
+   "seq.nvs_full_consistency",
+   "config.print_sections"
   ],
-  "gap": "Not asserted: the 'Broadcast Blocking:' section (a blocked port with its label), the 'Controller Peer: ENABLED (ID n)' line, the Peers 'Online (last seen Ns ago)' row for W2, and the Mirror lines (dead, known WP59 row 14).",
+  "gap": "closed 2026-10-12/13 by config.print_sections",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1285,9 +1294,11 @@
   "area": "boot",
   "behaviour": "printBootloaderInfo prints 'Bootloader: stock (<date>)' on a stock bootloader and 'Bootloader: CUSTOM short-WDT ...' on the S3 custom one.",
   "where": "WCB.ino:8921-",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No WCB test asserts the line (s46 asserts NaviCore's); WCB-WP59 says the classic 'stock' half is testable today.",
+  "status": "tested",
+  "tested_by": [
+   "mesh.rterm_errors"
+  ],
+  "gap": "closed 2026-10-12/13 by mesh.rterm_errors",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1314,9 +1325,11 @@
   "area": "boot",
   "behaviour": "On HW 2.1/2.3/2.4/3.x the NeoPixel is initialised with up to 5 retries ('Initializing NeoPixel LED...', '✅ NeoPixel initialized successfully' or the failure warning); HW 1.0 sets the plain LED pin; the status LED shows boot and turns off at the end.",
   "where": "WCB.ino:9665-9684, :9118-9164, :10033",
-  "status": "partial",
-  "tested_by": [],
-  "gap": "The success line on W2 (HW 2.4) is never asserted; the retry/failure path and the LED colours need LED sensing (known: WCB-WP59 boot.hw_specific_inits).",
+  "status": "tested",
+  "tested_by": [
+   "mesh.rterm_errors"
+  ],
+  "gap": "closed 2026-10-12/13 by mesh.rterm_errors",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1357,9 +1370,11 @@
   "area": "boot",
   "behaviour": "WiFi.persistent(false) keeps the driver from rewriting nvs.net80211 on every WiFi.begin/softAP (a JOIN retrying every 5 s grew it 36 -> 95 entries).",
   "where": "WCB.ino:9821-9825",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test reads the nvs.net80211 entry count across a JOIN retry window.",
+  "status": "tested",
+  "tested_by": [
+   "wifi.join_w2_ap"
+  ],
+  "gap": "closed 2026-10-12/13 by wifi.join_w2_ap",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -1405,7 +1420,7 @@
   "area": "reboot",
   "behaviour": "?reboot / ?REBOOT / <lfi>reboot and a pushed or mesh ?reboot set rebootPending ('Reboot queued - restarting once the command queue is quiet'); loop() restarts once the queue is empty and quiet for 4 s, or 20 s after the request ('Restart held off N s ...'), never while a config pull job is sending; exempt commands (an RTERM re-arm to the same relay, ?STATS,RPT) do not hold it; the learned-peer table is flushed first; 'Rebooting now...' or the PWM variant; no ETM command is ACKed from then on.",
   "where": "WCB.ino:1060-1064, :7237-7238, :10114-10156",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "etm.reboot_rterm_rearm",
    "etm.reboot_stats_rpt",
@@ -1415,9 +1430,10 @@
    "wdp.peers.add_forget_survive_quick_reboot",
    "etm.acked_not_executed_reboot",
    "chars.funcchar_reboot",
-   "pwm.legacy_pos_pclear"
+   "pwm.legacy_pos_pclear",
+   "misc.reboot_mixed_case_unknown"
   ],
-  "gap": "Only the exact spellings 'reboot' and 'REBOOT' are matched (:7237): a mixed-case '?Reboot' is an unknown command and no test says so either way.",
+  "gap": "closed 2026-10-12/13 by misc.reboot_mixed_case_unknown",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1539,16 +1555,17 @@
   "area": "ota",
   "behaviour": "?OTALOCAL,BAUD,<115200|230400|460800|921600|1000000> needs a live session, ACKs at the old rate then switches 20 ms later, is refused otherwise with [OTA:BAUD,ERR,115200]; the rate is restored to 115200 by ABORT, the idle timeout, END ERR, a rejected re-BEGIN, and by the reboot after END OK; BAUD does not refresh the idle window.",
   "where": "WCB_OTA.cpp:49-65, :246-272, :282-288, :328-334",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "ota.local_baud_bump_abort",
    "ota.local_baud_invalid",
    "ota.local_baud_timeout_restore",
    "ota.local_baud_rejected_rebegin_restores",
    "ota.local_sha_corrupt_full",
-   "ota.local_full_same_image_wcb1"
+   "ota.local_full_same_image_wcb1",
+   "ota.local_baud_other_rates"
   ],
-  "gap": "Only 921600/460800 (whichever the host carries) and 115200 are ever switched to; 230400 and 1000000 are accepted by the parser but never exercised.",
+  "gap": "closed 2026-10-12/13 by ota.local_baud_other_rates",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -1559,13 +1576,14 @@
   "area": "ota",
   "behaviour": "?OTA,<BEGIN|DATA|END|ABORT>,<target 1-20>,<session>,... builds the packet and unicasts it: a bad target, sub-command or DATA usage sends nothing; a DATA offset with a ':<crc32>' suffix is dropped on a CRC mismatch ('DROPPED: crc a != b', blaming a serial RX overflow within 2 s), the no-suffix warning prints once per boot, base64 errors (-42 chunk over 192 B, -44 junk) send nothing.",
   "where": "WCB_OTA.cpp:488-598; WCB.ino:6849-6856",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "ota.relay_local_rejects",
    "ota.relay_crc_ok_and_nocrc_no_session",
-   "ota.local_sha_corrupt_full"
+   "ota.local_sha_corrupt_full",
+   "ota.relay_crc_drop_blames_overflow"
   ],
-  "gap": "The overflow-blame suffix ('— serial RX HAS OVERFLOWED, this is the cause') is only asserted absent; the positive case (a CRC mismatch within 2 s of a counted overflow) is untested.",
+  "gap": "closed 2026-10-12/13 by ota.relay_crc_drop_blames_overflow",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1576,9 +1594,11 @@
   "area": "ota",
   "behaviour": "A relay frame or an ACK to a board not yet an ESP-NOW peer registers it on demand (otaEnsurePeer) so relay OTA works between boards never peered; a send that still fails prints '[OTA] <sub> -> WCB<n> send failed rc=... (ESP-NOW peer table full? cap 20)'.",
   "where": "WCB_OTA.cpp:354-376",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Every relay test targets W2 (a floor peer) or NaviCore (the registered special peer); the on-demand registration and the failure line are never exercised.",
+  "status": "tested",
+  "tested_by": [
+   "ota.relay_unpeered_boards"
+  ],
+  "gap": "closed 2026-10-12/13 by ota.relay_unpeered_boards",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1832,11 +1852,12 @@
   "area": "ws",
   "behaviour": "Console output is teed to every client from a 2 KB sink flushed on the loop task, each text frame cut on a UTF-8 boundary; ?backup over the socket is whole and CRC-valid and ?HELP arrives line for line; overflow drops whole lines and reports '[WS] dropped N output line(s) — client too slow' from loop().",
   "where": "WCB_WS.cpp:96-214, :448-453",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "ws.backup_over_ws"
+   "ws.backup_over_ws",
+   "ws.drop_reports"
   ],
-  "gap": "The whole-line drop and its report (sinkDropping, :210-213; :448-449) are never produced: the sink only overflows off the loop task (a WiFi-task print burst) or faster than TCP drains.",
+  "gap": "closed 2026-10-12/13 by ws.drop_reports; written, not yet run (needs the Mac screen unlocked for the WiFi switch)",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -1879,11 +1900,12 @@
   "area": "ws",
   "behaviour": "Inbound lines go through a 6-deep queue, one run per loop() pass; the handler waits up to 50 ms for room and counts a refused line ('[WS] dropped N inbound command(s) — queue full or oversized').",
   "where": "WCB_WS.cpp:28-32, :250-252, :425-443",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "ws.line_framing"
+   "ws.line_framing",
+   "ws.drop_reports"
   ],
-  "gap": "Only the oversized-frame count is asserted; a queue-full drop (more than 6 lines in one frame while loop() is held) is not.",
+  "gap": "closed 2026-10-12/13 by ws.drop_reports; written, not yet run (needs the Mac screen unlocked for the WiFi switch)",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
