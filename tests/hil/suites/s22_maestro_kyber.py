@@ -27,6 +27,7 @@ from hil.runner import Skip, test
 from hil.wcb import WCB
 from suites.common import (Watch, config_guard, link, marker, nonce, padded, probe_in_mesh, require_tokens, snapshot,
                            token, usb_wcb)
+from suites.s14_pwm import _pwm_reboot
 
 NEEDS = ["wcb1", "probe1"]
 
@@ -2908,7 +2909,7 @@ def daisy_chain_same_port(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("maestro.legacy_s1_owner_devices", "With no Maestro slot and no Kyber mode, the legacy S1 fallbacks skip an S1 an HCR or a WLED owns and name the owner (;M11, ;M9,stopScript, ;M1,getErrors, the ;M0 extra frame, CLEAR,ALL's routing line); with S1 free the legacy frame goes out (WDP off; 1 reboot)", needs=NEEDS, links=["W1S1"])
+@test("maestro.legacy_s1_owner_devices", "With no Maestro slot and no Kyber mode, the legacy S1 fallbacks skip an S1 an HCR, a WLED, an MP3 Trigger, a DFPlayer, a PWM output or a PWM input owns and name the owner (;M11, ;M9,stopScript, ;M1,getErrors, the ;M0 extra frame, CLEAR,ALL's routing line); with S1 free the legacy frame goes out (WDP off; 2 reboots)", needs=NEEDS, links=["W1S1"])
 def legacy_s1_owner_devices(bench):
     """WCB-WP53 row 3. With no slot for the board's own id, sendMaestroCommand, sendMaestroServoVerb and handleMaestroGet
     fall back to a Maestro on S1 with id = WCB number (WCB_Maestro.cpp), and legacyS1Owner() stops each of them when a
@@ -2918,7 +2919,15 @@ def legacy_s1_owner_devices(bench):
     reboot is needed until the restore - and ?MAESTRO,CLEAR,ALL removes every slot, NaviCore's M1 proxy included, so
     ;M11 cannot reach a real servo. The HCR polls nothing (?HCR,POLL,OFF first). A local HCR drops W1's ;H route, so the
     baseline route is re-sent, which also releases S1 (configureHCR's REMOTE branch). WDP stays off, so no advert reverts
-    W1 to Maestro_Remote or re-adds a proxy; the restore rebuilds the table and reboots W1 into Maestro_Remote."""
+    W1 to Maestro_Remote or re-adds a proxy; the restore rebuilds the table and reboots W1 into Maestro_Remote.
+
+    Coverage re-scan 2026-10-12, maestro.legacy_s1_owner_guard: localPortOwner's other four owners - 'the MP3 Trigger
+    port', 'the DFPlayer port', 'a PWM output' and 'a PWM input' - each named in the four 'not sent' lines and in
+    CLEAR,ALL's routing line. The MP3 and DFP releases are W1's baseline route or a CLEAR. ?MAP,PWM,OUT,S1 is live at
+    once; its CLEAR,OUT queues a PWM reboot, which the PWM-input arm (?MAP,PWM,S1,<free port>, live at once too: the
+    mapping is committed before its own deferred reboot) runs inside - every command restarts the 4 s quiet window - and
+    the input's CLEAR is followed by that one reboot. In both PWM arms Serial1's TX pin is a GPIO held low, so a legacy
+    frame could not reach the wire anyway: the wire check there is only that no 0xAA frame byte appears."""
     s1 = link(bench, 1, "S1")
     _require_remote_pair(bench)
     w = usb_wcb(bench)
@@ -2937,11 +2946,19 @@ def legacy_s1_owner_devices(bench):
         busy = [t for t in _port_busy(before[1], "S1") if not t.upper().startswith("?MAESTRO,")]
         if busy:
             raise Skip(f"W1 S1 is in use: {busy}")
+        if any(t.upper().startswith("?MAP,PWM") for t in before[1]):
+            raise Skip("W1 already has PWM configuration")
+        pwm_out = next((p for p in ("S5", "S4", "S3") if not _port_busy(before[1], p)), None)
+        if pwm_out is None:
+            raise Skip("W1 has no free port among S3-S5 for the PWM-input arm's local output")
         wid = next((i for i in range(1, 10) if not any(t.upper().startswith(f"?WLED,{i}:") for t in before[1])), None)
         if wid is None:
             raise Skip("W1 has a WLED on every id 1-9")
         hcr_release = token(before[1], "?HCR,REMOTE,") or "?HCR,CLEAR"
+        mp3_release = token(before[1], "?MP3,REMOTE,") or "?MP3,CLEAR"
+        dfp_release = token(before[1], "?DFP,REMOTE,") or "?DFP,CLEAR"
         ports = _port_tokens(before[1], "S1") + [t for t in before[1] if re.match(r"^\?LABEL,S1,", t, re.I)]
+        pwm_left = False
         with _wdp_off(w, before[1]):
             try:
                 if not _has(w.run("?KYBER,CLEAR", timeout=6), "Kyber is Not used"):
@@ -2963,10 +2980,18 @@ def legacy_s1_owner_devices(bench):
                 for owner, setup, confirm, release in (
                         ("the HCR port", ["?HCR,POLL,OFF", "?HCR,PORT,S1:9600"], "[HCR] Configured on S1 at 9600 baud", hcr_release),
                         ("the WLED port", [f"?WLED,{wid}:W1S1:9600"], f"[WLED] WLED {wid}: local S1 at 9600 baud (slot",
-                         f"?WLED,CLEAR,{wid}")):
+                         f"?WLED,CLEAR,{wid}"),
+                        ("the MP3 Trigger port", ["?MP3,S1:9600:V20"], "[MP3] Configured: S1 at 9600 baud", mp3_release),
+                        ("the DFPlayer port", ["?DFP,S1"], "[DFP] Configured: S1 at 9600 baud", dfp_release),
+                        ("a PWM output", ["?MAP,PWM,OUT,S1"], "Serial1 configured as PWM output port", "?MAP,PWM,CLEAR,OUT,S1"),
+                        ("a PWM input", [f"?MAP,PWM,S1,{pwm_out}"], "PWM configuration stored", "?MAP,PWM,CLEAR,S1")):
+                    pwm = owner.startswith("a PWM")
                     out = [x for cmd in setup for x in w.run(cmd)]
+                    pwm_left = pwm_left or pwm
                     if not _has(out, confirm):
                         raise AssertionError(f"setup for {owner}: {setup} printed {out}")
+                    if pwm:
+                        time.sleep(0.3)              # the pin taken low as a GPIO reads as a break on the probe
                     s1.listen(9600)
                     watch = Watch(s1)
                     for cmd, line in ((";M11", f"→ Maestro 1: no slot, and S1 is {owner} - not sent (configure it with ?MAESTRO), Script 1"),
@@ -2985,17 +3010,35 @@ def legacy_s1_owner_devices(bench):
                     want = f"Legacy routing (Maestro ID = WCB Number on S1) is off - S1 is {owner}"
                     if want not in [x.rstrip() for x in w.run("?MAESTRO,CLEAR,ALL", timeout=8)]:
                         bad.append(f"{owner}: ?MAESTRO,CLEAR,ALL printed no '{want}'")
-                    try:
-                        watch.silent(s1, window=0.5)
-                    except AssertionError as e:
-                        bad.append(f"{owner}: a legacy fallback wrote into S1: {e}")
+                    if pwm:
+                        time.sleep(0.5)
+                        if b"\xaa" in watch.got(s1):
+                            bad.append(f"{owner}: a legacy fallback frame reached S1: {watch.got(s1).hex(' ')}")
+                    else:
+                        try:
+                            watch.silent(s1, window=0.5)
+                        except AssertionError as e:
+                            bad.append(f"{owner}: a legacy fallback wrote into S1: {e}")
+                    rm = w.dev.mark()
                     w.run(release)
+                    if owner == "a PWM input":
+                        _pwm_reboot(w, rm)           # the one restart both PWM clears queued
+                        pwm_left = False
             finally:
                 s1.probe.rule_clear()
                 for kind in ("MAESTRO,", "ETM,"):
                     w.run(f"?DEBUG,{kind}OFF")
                 w.run(f"?WLED,CLEAR,{wid}")       # 'not configured' when already released
                 w.run(hcr_release)                  # idempotent: the route again, or a CLEAR with nothing local
+                w.run(mp3_release)
+                w.run(dfp_release)
+                if pwm_left or any(t.upper().startswith("?MAP,PWM") for t in snapshot(bench, 1)):
+                    rm = w.dev.mark()                # an arm failed between a PWM setup and its reboot
+                    w.send("?MAP,PWM,CLEAR,ALL")
+                    try:
+                        _pwm_reboot(w, rm)
+                    except AssertionError as e:
+                        bad.append(f"cleanup: no PWM reboot after ?MAP,PWM,CLEAR,ALL ({e})")
                 bad += _restore_remote_table(w, lines, ports)
     assert not bad, "; ".join(bad)
 
@@ -3352,4 +3395,127 @@ def wdp_autolearn_folds_target(bench):
             finally:
                 w.run("?WDP,OFF")                   # the rebuild must not race an advert (module rules)
                 bad += _restore_remote_table(w, lines, ports)
+    assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan 2026-10-12: Maestro and Kyber (wcb-devices)
+@test("maestro.mesh_get_rewrite_non_etm", "With ETM off on W1 and W2 (under 40 s), W1's ;W2,;M2,getErrors arrives on W2's non-ETM receive path and is still rewritten to answer the sender: W2 reads its Maestro 2 (AA 02 21 on W2 S1) and sends ;M!m2err=<v> back, and W1 stores m2err=<v>; both boards are put back to ETM on, W2 first", needs=["wcb1", "wcb2"], links=["W2S1"])
+def mesh_get_rewrite_non_etm(bench):
+    """Coverage re-scan 2026-10-12, maestro.inbound_get_rewrite. espNowReceiveCallback (WCB.ino) calls
+    maestroRewriteInboundGet (WCB_Maestro.cpp) at two sites: the ETM branch, which maestro.mesh_get_rewrite_probe covers
+    with a WCB_Client sender, and the normal (non-ETM) path, for a sender whose ETM is off. A WCB_Client always sends ETM
+    frames (WCB_Client::_transmit), so the non-ETM site is reached as etm.off_fleet_normal_path reaches it: ETM off on
+    both WCBs, each switched on its own USB, W2 back on first (CLAUDE.md rule 4). Without the rewrite there W2 runs
+    ;M2,getErrors as its own read - m2err set on W2 only - and W1 hears nothing. handleMaestroGet answers a WCB asker
+    with ;M!<var>=<value> by sendESPNowMessage, a plain frame while W2's ETM is off, and W1's normal path hands it to
+    handleMaestroResult. getErrors reads the real Maestro 2 and clears its error flags, as _settle_maestro2 does."""
+    tap = link(bench, 2, "S1")
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB connection of its own: its ETM is never switched over the mesh")
+    _require_remote_pair(bench)
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    bad = []
+    lines1 = lines2 = []
+    tapped = b""
+    with config_guard(bench, 1, 2) as before:
+        if "?ETM,ON" not in before[1] or "?ETM,ON" not in before[2]:
+            raise Skip("ETM is not on on both WCBs")
+        tap.listen()
+        for b in (w, w2):
+            b.run("?VAR,CLEAR,m2err")
+            b.run("?DEBUG,MAESTRO,ON")
+        t0 = time.monotonic()
+        on1 = on2 = []
+        try:
+            if not _has(w2.run("?ETM,OFF"), "ETM disabled") or not _has(w.run("?ETM,OFF"), "ETM disabled"):
+                raise AssertionError("?ETM,OFF did not confirm on both WCBs")
+            wm, m2, tm = w.dev.mark(), w2.dev.mark(), tap.mark()
+            w.send(";W2,;M2,getErrors")
+            try:
+                w.dev.expect(r"^\[MAESTRO\] result m2err=-?\d+ \(from mesh\)", timeout=4, since=wm)
+            except AssertionError:
+                pass
+            time.sleep(0.5)
+            lines1 = [x.rstrip() for x in w.dev.since(wm)]
+            lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+            tapped = tap.received(tm)
+            got1 = _get(w, "m2err")
+        finally:
+            try:
+                on2 = w2.run("?ETM,ON")          # W2 first, on its own USB: never leave the fleet split
+            finally:
+                on1 = w.run("?ETM,ON")
+                window = round(time.monotonic() - t0, 1)
+                for b in (w, w2):
+                    b.run("?DEBUG,MAESTRO,OFF")
+                w.run("?WDP,POLL")
+        for b in (w, w2):
+            b.run("?VAR,CLEAR,m2err")
+    bench.note(f"maestro.mesh_get_rewrite_non_etm: ETM-off window {window} s")
+    reply = next((re.match(r"^\[MAESTRO\] get reply -> WCB1: ;M!m2err=(-?\d+)$", x) for x in lines2
+                  if x.startswith("[MAESTRO] get reply -> WCB1:")), None)
+    if not _has(lines2, "[MAESTRO] get 2 'getErrors' -> m2err="):
+        bad.append(f"W2 did not read its Maestro 2 for the non-ETM get: {[x for x in lines2 if 'MAESTRO' in x][:4]}")
+    if not reply:
+        bad.append("W2 sent no ';M!m2err=' reply to WCB1: the non-ETM receive site did not rewrite the get to ;MG2,1,...")
+    else:
+        v = reply.group(1)
+        if f"[MAESTRO] result m2err={v} (from mesh)" not in lines1:
+            bad.append(f"W1 did not store W2's reply m2err={v} (no '[MAESTRO] result' line)")
+        if got1 != f"[VAR] m2err = {v}":
+            bad.append(f"W1's m2err after the reply: {got1}")
+    if tapped[:3] != GET_ERRORS_2:
+        bad.append(f"W2 S1 should carry the getErrors frame AA 02 21, got {tapped.hex(' ') or 'nothing'}")
+    if not _has(on2, "ETM enabled") or not _has(on1, "ETM enabled"):
+        bad.append(f"?ETM,ON printed W2 {on2} / W1 {on1}")
+    if window > 40:
+        bad.append(f"the ETM-off window lasted {window} s")
+    assert not bad, "; ".join(bad)
+
+
+@test("maestro.local_refused_on_kyber_port", "On W1 as Kyber_Local on S2 (live, before its reboot) ?MAESTRO,M5:W1S2:57600 is refused with 'S2 is the Kyber port - use another port, or move the Kyber first', and the slot table, ?MAESTRO,LIST and S2's 115200 are unchanged (WDP off; 1 reboot)", needs=["wcb1"], links=[])
+def local_refused_on_kyber_port(bench):
+    """Coverage re-scan 2026-10-12, maestro.cfg_kyber_port_refused. configureMaestro (WCB_Maestro.cpp) refuses a LOCAL
+    slot on kyberLocalPort while Kyber_Local, before localPortOwner and the baud change: the Maestro's baud would replace
+    the Kyber's 115200, and KyberLocalTask writes a local Maestro's bytes to the Kyber port. ?KYBER,LOCAL,S2 sets
+    Kyber_Local and kyberLocalPort at once (storeKyberSettings), so the refusal is live before the reboot the tasks
+    need; only the reverse (?KYBER,LOCAL refusing a Maestro's port) was asserted. WDP is off, so no advert reverts W1 to
+    Maestro_Remote meanwhile (kyber.wdp_auto_remote_revert); _restore_remote puts W1 back with S2's saved tokens."""
+    w = usb_wcb(bench)
+    _require_remote_pair(bench)
+    _require_kyber_broadcast_remote(w)
+    bad = []
+    with config_guard(bench, 1) as before:
+        busy = _port_busy(before[1], "S2")
+        if busy:
+            raise Skip(f"W1 S2 is in use: {busy}")
+        ports = _port_tokens(before[1], "S2") + [t for t in before[1] if re.match(r"^\?LABEL,S2,", t, re.I)]
+        with _wdp_off(w, before[1]):
+            try:
+                out = w.run("?KYBER,LOCAL,S2", timeout=8)
+                if _has(out, "Cannot set Kyber LOCAL"):
+                    raise Skip(f"W1 S2 cannot take the Kyber: {out}")
+                if not _has(out, "Kyber is LOCAL on Serial2"):
+                    raise AssertionError(f"setup: ?KYBER,LOCAL,S2 printed {out[:6]}")
+                toks = snapshot(bench, 1)
+                ref_m, ref_list = _m_lines(toks), [x.rstrip() for x in w.run("?MAESTRO,LIST") if x.startswith("  ")]
+                if "?BAUD,S2,115200" not in toks:
+                    raise AssertionError("setup: ?KYBER,LOCAL,S2 did not set S2 to 115200")
+                out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S2:57600")]
+                want = "❌ Maestro 5: S2 is the Kyber port - use another port, or move the Kyber first."
+                if want not in out:
+                    bad.append(f"?MAESTRO,M5:W1S2:57600 printed {out}, not {want!r}")
+                if _has(out, "✓ Maestro 5") or _has(out, "Baud rate for Serial2") or _has(out, "Disabled broadcast"):
+                    bad.append(f"the refused add still changed something: {out}")
+                toks = snapshot(bench, 1)
+                if _m_lines(toks) != ref_m:
+                    bad.append(f"the slot table changed: {ref_m} -> {_m_lines(toks)}")
+                if "?BAUD,S2,115200" not in toks:
+                    bad.append(f"S2 left 115200: {[t for t in toks if t.upper().startswith('?BAUD,S2,')]}")
+                lst = [x.rstrip() for x in w.run("?MAESTRO,LIST") if x.startswith("  ")]
+                if lst != ref_list:
+                    bad.append(f"?MAESTRO,LIST changed: {ref_list} -> {lst}")
+            finally:
+                _restore_remote(w, ports)
     assert not bad, "; ".join(bad)

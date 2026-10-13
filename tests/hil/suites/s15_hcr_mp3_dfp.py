@@ -1511,18 +1511,39 @@ def soft_ports_fast_baud(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("devices.maestro_port_refused", "A local Maestro's port refuses a WLED, an MP3 Trigger, a DFPlayer and an HCR ('S2 is a local Maestro's port - config blocked'), and a port a WLED holds refuses a local Maestro; each refusal changes nothing (re-scan #15; W1's WDP off)", needs=["wcb1"], links=[])
+@test("devices.maestro_port_refused", "A local Maestro's port refuses a WLED, an MP3 Trigger, a DFPlayer and an HCR ('S2 is a local Maestro's port - config blocked'), and a port a WLED, an HCR, an MP3 Trigger, a DFPlayer, a PWM output or a PWM input holds refuses a local Maestro, naming the owner; each refusal changes nothing (re-scan #15; W1's WDP off; 1 reboot)", needs=["wcb1"], links=[])
 def maestro_port_refused(bench):
     """WCB coverage re-scan #15 (docs/hil_plan/WCB.md WCB-WP26 row 3). The HCR, MP3, DFPlayer and WLED guards checked
     each other, PWM and the Kyber but never a local Maestro, and a local ?MAESTRO add checked only the Kyber port: a
     Maestro and a device could share a UART, and one module's CLEAR reset the port's baud and flags under the other.
     The existing '... already in use by ...' lines are matched by tests and tools, so the Maestro conflict has its own
-    line. W1's WDP is off throughout, so no board or client learns the throwaway Maestro 5 or WLED 5 (s22's rules)."""
+    line. W1's WDP is off throughout, so no board or client learns the throwaway Maestro 5 or WLED 5 (s22's rules).
+
+    Coverage re-scan 2026-10-12, maestro.cfg_device_port_refused: configureMaestro's localPortOwner refusal for the other
+    owners - 'the HCR port' (polling off first), 'the MP3 Trigger port', 'the DFPlayer port', 'a PWM output' and 'a PWM
+    input' - with the ?MAESTRO lines of the chain unchanged after each. ?MAP,PWM,OUT,S2 and the mapping ?MAP,PWM,S2,<free
+    port> are live at once; the CLEAR,OUT queues a PWM reboot that the input arm runs inside (every command restarts the
+    4 s quiet window), and the input's CLEAR is followed by that one reboot. Each device's release resets S2 to 9600 with
+    broadcasts on and no label - the baseline this needs - and S2's label goes back at the end."""
     w = usb_wcb(bench)
     problems = []
     with config_guard(bench, 1) as before:
+        if any(t.upper().startswith("?MAP,PWM") for t in before[1]):
+            raise Skip("W1 already has PWM configuration")
+        require_tokens(bench, 1, "?BAUD,S2,9600", "?BCAST,OUT,S2,ON", "?BCAST,IN,S2,ON")
+        hosted = [t for t in before[1] if t.upper().startswith(("?HCR,", "?MP3,", "?DFP,"))
+                  and not re.match(r"^\?(HCR|MP3|DFP),REMOTE,W\d+$", t, re.I)]
+        if hosted:
+            raise Skip("W1 already hosts an HCR, MP3 Trigger or DFPlayer")
+        pwm_out = next((p for p in ("S5", "S4", "S3")
+                        if not any(re.search(rf"(?:\b|W1){p}\b", t) for t in before[1]
+                                   if not t.upper().startswith(("?BAUD,", "?BCAST,", "?LABEL,", "?SEQ,")))), None)
+        if pwm_out is None:
+            raise Skip("W1 has no free port among S3-S5 for the PWM-input arm's local output")
+        releases = {k: token(before[1], f"?{k},REMOTE,") or f"?{k},CLEAR" for k in ("HCR", "MP3", "DFP")}
         with _wdp_off(w, before[1]):
             undo = []
+            pwm_left = False
             try:
                 out = w.run("?MAESTRO,M5:W1S2:9600")
                 if not _has(out, "Maestro 5: Local S2 at 9600 baud"):
@@ -1541,9 +1562,44 @@ def maestro_port_refused(bench):
                 out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S2:9600")]
                 if "❌ Maestro 5: S2 is the WLED port - use another port, or clear it first." not in out:
                     problems.append(f"?MAESTRO,M5:W1S2:9600 beside WLED 5 printed {out}")
+                w.run(undo.pop())
+
+                maestros = [t for t in snapshot(bench, 1) if t.upper().startswith("?MAESTRO,")]
+                for owner, setup, confirm, release in (
+                        ("the HCR port", ["?HCR,POLL,OFF", "?HCR,PORT,S2:9600"], "[HCR] Configured on S2 at 9600 baud", releases["HCR"]),
+                        ("the MP3 Trigger port", ["?MP3,S2:9600:V20"], "[MP3] Configured: S2 at 9600 baud", releases["MP3"]),
+                        ("the DFPlayer port", ["?DFP,S2"], "[DFP] Configured: S2 at 9600 baud", releases["DFP"]),
+                        ("a PWM output", ["?MAP,PWM,OUT,S2"], "Serial2 configured as PWM output port", "?MAP,PWM,CLEAR,OUT,S2"),
+                        ("a PWM input", [f"?MAP,PWM,S2,{pwm_out}"], "PWM configuration stored", "?MAP,PWM,CLEAR,S2")):
+                    out = [x.rstrip() for cmd in setup for x in w.run(cmd)]
+                    undo.append(release)
+                    pwm_left = pwm_left or owner.startswith("a PWM")
+                    if not _has(out, confirm):
+                        raise AssertionError(f"setup for {owner}: {setup} printed {out}")
+                    out = [x.rstrip() for x in w.run("?MAESTRO,M5:W1S2:9600")]
+                    want = f"❌ Maestro 5: S2 is {owner} - use another port, or clear it first."
+                    if want not in out:
+                        problems.append(f"?MAESTRO,M5:W1S2:9600 beside {owner} printed {out}, not {want!r}")
+                    if _has(out, "✓ Maestro 5") or _has(out, "Baud rate for Serial2"):
+                        problems.append(f"beside {owner} the refused add still changed something: {out}")
+                    now = [t for t in snapshot(bench, 1) if t.upper().startswith("?MAESTRO,")]
+                    if now != maestros:
+                        problems.append(f"beside {owner} the ?MAESTRO lines changed: {maestros} -> {now}")
+                    rm = w.dev.mark()
+                    w.run(undo.pop())
+                    if owner == "a PWM input":
+                        _pwm_reboot(w, rm)           # the one restart both PWM clears queued
+                        pwm_left = False
             finally:
                 for cmd in reversed(undo):
                     w.run(cmd)
+                if pwm_left or any(t.upper().startswith("?MAP,PWM") for t in snapshot(bench, 1)):
+                    rm = w.dev.mark()                # an arm failed between a PWM setup and its reboot
+                    w.send("?MAP,PWM,CLEAR,ALL")
+                    try:
+                        _pwm_reboot(w, rm)
+                    except AssertionError as e:
+                        problems.append(f"cleanup: no PWM reboot after ?MAP,PWM,CLEAR,ALL ({e})")
                 # A WLED labels its port 'WLED <id>' and its CLEAR empties the label (s24 pins both), so S2's own
                 # label goes back by hand.
                 w.run(token(before[1], "?LABEL,S2,") or "?LABEL,CLEAR,S2")
