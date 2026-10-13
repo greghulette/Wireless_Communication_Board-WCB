@@ -40,6 +40,7 @@ from hil.ws import WsClient
 from suites.common import Console, Watch, config_guard, link, marker, nonce, snapshot, token, usb_wcb
 from suites.s03_wcb import _w2_online
 from suites.s45_navicore_wifi import navicore_home as _navicore_home
+from suites.s18_etm_config_wdp import HOLD_BAUD, _hold_line
 
 
 def _has(lines, text):
@@ -995,31 +996,48 @@ def _drops(lines, what):
     return sum(int(m.group(1)) for x in lines for m in [re.match(rf"^\[WS\] dropped (\d+) {what}", x)] if m)
 
 
-@test("ws.drop_reports", "OPT-IN (wifi_pc): the WebSocket endpoint reports what it drops. With W1's loop held by 400 ?VERSION typed on USB, one frame of 40 ;S0 lines overflows the 6-deep inbound queue: every line either runs or is counted by '[WS] dropped N inbound command(s) — queue full or oversized', at least one is dropped. With the loop held again and W2 sending W1 30 long unicasts under ?DEBUG,ETM,ON, the WiFi task's receive lines meet a full output sink: '[WS] dropped N output line(s) — client too slow'", needs=["wcb1", "wcb2"], links=[], opt_in="wifi_pc")
+@test("ws.drop_reports", "OPT-IN (wifi_pc): the WebSocket endpoint reports what it drops. With W1's loop held by a slow ;S3 write (S3 at 600 baud, nothing printed), one frame of 40 ;S0 lines overflows the 6-deep inbound queue: every line either runs or is counted by '[WS] dropped N inbound command(s) — queue full or oversized', and six run. With the loop held again under ?DEBUG,ON, 40 long lines typed on USB make the serial task print 'Processing input from Serial0: ...' into a full output sink: '[WS] dropped N output line(s) — client too slow'", needs=["wcb1"], links=["W1S3"], opt_in="wifi_pc")
 def ws_drop_reports(bench):
     """Coverage re-scan 2026-10-12, ws.queue_backpressure and ws.output_tee. wsHandler (httpd task) feeds each line to
     accFeed, which waits WS_ENQUEUE_WAIT_MS (50 ms) for room in the 6-deep queue and counts a refusal (cmdDrops); the
-    loop runs one queued WebSocket line per pass, and no pass comes while loop() drains a long USB chain. The tee
-    (wcbWsSinkWrite) flushes a full 2 KB sink inline only on the loop task; a byte printed on any other task - the ESP-NOW
-    receive callback's '[ETM] Received seq' and '[ETM] Sent ACK seq' lines under ?DEBUG,ETM,ON - that finds it full drops
-    its whole line and counts it (sinkDrops). Both counts are printed from loop() when it next runs wcbWsService.
-    Nothing here changes a setting: ?DEBUG is RAM only and turned off again."""
+    loop runs one queued WebSocket line per pass, and no pass comes while the loop is held. The tee (wcbWsSinkWrite)
+    flushes a full 2 KB sink inline only on the loop task; a line printed on any other task - here the serial reader's
+    'Processing input from Serial0' under ?DEBUG,ON - that finds it full drops whole and is counted (sinkDrops). Both
+    counts are printed from loop() when it next runs wcbWsService.
+
+    The loop is held by one long ;S3 line, whose soft-serial write waits for the wire at 600 baud (s18 HOLD_BAUD; at
+    9600 the write returns at once and nothing is held, run 20261013-084347). The first cut held it with 400 ?VERSION,
+    which mirrored ~16 KB of replies to the client, and with W2's unicasts under ?DEBUG,ETM: both times W1 closed the
+    live session (sinkPump closes a session whose async send fails, #113) and the unicasts tripped the transmit-stall
+    report while the held loop could not ACK them (runs 20261013-082616, -084533). ?DEBUG and S3's baud are put back."""
     problems = []
     with _pc_on_w1_ap(bench, problems) as (w, ip, _):
         ws = _ws_open(ip)
         assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
-        w2 = WCB(bench.dev(bench.usb_wcbs()[2])) if 2 in bench.usb_wcbs() else None
+        base_s3 = token(snapshot(bench, 1), "?BAUD,S3,") or "?BAUD,S3,9600"
+
+        def drain(why, fatal=True):
+            try:
+                _ws_until(ws, lambda t: False, 3.0)
+                return True
+            except ConnectionError:
+                if fatal:
+                    problems.append(f"W1 closed the WebSocket {why}")
+                else:   # re-scan row ws.burst_closes_live_client: noted, not this test's claim
+                    bench.note(f"ws.drop_reports: W1 closed the live WebSocket {why} (sinkPump's close on a failed "
+                               f"send after the burst; row ws.burst_closes_live_client)")
+                return False
         try:
+            if not any(f"Baud rate for Serial3 updated to {HOLD_BAUD}" in x for x in w.run(f"?BAUD,S3,{HOLD_BAUD}")):
+                raise AssertionError(f"setup: ?BAUD,S3,{HOLD_BAUD} did not confirm")
             # (a) the inbound queue
             tag = marker("Q")
             m = w.dev.mark()
-            w.dev.send("^".join(["?VERSION"] * 400))
+            w.dev.send(_hold_line(6.0))                      # holds W1's loop ~6 s, printing nothing
             time.sleep(0.6)
             ws.send_text("".join(f";S0{tag}{k:02d}\n" for k in range(40)))
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline and sum(x.count("Software Version:") for x in w.dev.since(m)) < 400:
-                ws.read_until("\x00never\x00", timeout=0.3)
-            _ws_until(ws, lambda t: False, 3.0)
+            w.run(f";S0{marker('E')}", timeout=20)          # answers once the hold is over
+            alive = drain("after the inbound burst")
             out = [x.rstrip() for x in w.dev.since(m)]
             ran = {k for k in range(40) if f"{tag}{k:02d}" in out}
             dropped = _drops(out, r"inbound command\(s\)")
@@ -1029,30 +1047,29 @@ def ws_drop_reports(bench):
             if len(ran) + dropped != 40:
                 problems.append(f"{len(ran)} lines ran and {dropped} were reported dropped, of 40")
             # (b) the output tee
-            if w2 is None:
-                problems.append("the output-tee half needs W2's own USB console to send the burst from")
-            else:
-                w.run("?DEBUG,ETM,ON")
+            if alive:
+                tag2 = marker("T")
+                w.run("?DEBUG,ON")
                 m = w.dev.mark()
-                w.dev.send("^".join(["?VERSION"] * 600))
+                w.dev.send(_hold_line(6.0))
                 time.sleep(0.5)
-                w2.send("^".join(f";W1,;S0{marker('T')}{'z' * 120}" for _ in range(30)))
-                deadline = time.monotonic() + 40
-                while time.monotonic() < deadline and sum(x.count("Software Version:") for x in w.dev.since(m)) < 600:
-                    ws.read_until("\x00never\x00", timeout=0.3)
-                _ws_until(ws, lambda t: False, 3.0)
-                w.run("?DEBUG,ETM,OFF")
+                for k in range(40):                          # each printed by the serial task while the loop is held
+                    w.dev.send(f";S0{tag2}{k:02d}{'z' * 100}")
+                w.run(f";S0{marker('E')}", timeout=25)
+                w.run("?DEBUG,OFF")
+                drain("after the output sink overflowed", fatal=False)
                 out = [x.rstrip() for x in w.dev.since(m)]
-                received = sum(1 for x in out if x.startswith("[ETM] Received seq") and "from WCB2" in x)
+                printed = sum(1 for x in out if x.startswith(f"Processing input from Serial0: ;S0{tag2}"))
                 dropped = _drops(out, r"output line\(s\) — client too slow")
-                bench.note(f"ws.drop_reports tee: {received} '[ETM] Received' lines on USB, {dropped} output line(s) "
+                bench.note(f"ws.drop_reports tee: {printed} 'Processing input' lines on USB, {dropped} output line(s) "
                            f"reported dropped")
-                if not received:
-                    problems.append("W1 printed no '[ETM] Received seq ... from WCB2' line: the burst never arrived")
+                if not printed:
+                    problems.append("W1 printed no 'Processing input from Serial0' line under ?DEBUG,ON")
                 if not dropped:
                     problems.append("no '[WS] dropped N output line(s) — client too slow' line")
         finally:
-            w.run("?DEBUG,ETM,OFF")
+            w.run("?DEBUG,OFF")
+            w.run(base_s3, timeout=20)                       # after any hold still running
             ws.close()
     _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)

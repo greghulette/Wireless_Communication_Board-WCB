@@ -1926,5 +1926,18 @@
   "bench_needs": "none",
   "risk": "M",
   "how": ""
+ },
+ {
+  "id": "ws.burst_closes_live_client",
+  "area": "ws",
+  "behaviour": "A live WebSocket client on W1's access point stays connected through a burst of console output.",
+  "where": "WCB_WS.cpp sinkPump (httpd_ws_send_frame_async failure closes the session), wcbWsBegin send_wait_timeout = 2",
+  "status": "untested",
+  "tested_by": [],
+  "gap": "Found 2026-10-13 building ws.drop_reports: after W1's loop was held and released, the flush of the backlog (~10-16 KB) closed the live test client three times (runs 20261013-082616, -084533, -084748). sinkPump closes a session on any failed send - meant for a dead peer (#113) - and the send is synchronous with a 2 s timeout, so a stalled AP link during a burst ends a healthy session. Cause of the stall unmeasured (radio shared with the mesh?). A grace window (close only after failures persist for some seconds) would keep #113's protection; a product/firmware decision.",
+  "testable": "opt-in",
+  "bench_needs": "PC on W1's AP (wifi_pc)",
+  "risk": "M",
+  "how": "Hold W1's loop (600-baud ;S3), then release a ~10 KB backlog to a connected client; assert the client is still connected and receives the backlog; ws.vanished_client_released must still pass."
  }
 ]
