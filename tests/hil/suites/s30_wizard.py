@@ -287,6 +287,27 @@ for _key, _title in _FAKE_RESCAN_M:
     test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan_m)
 
 
+# The low-risk Wizard rows of the same re-scan (risk L, named at the end of each title): start-up, General and toasts
+# (specs/init_general_rescan_l_fake.spec.js), the grid and the cards (specs/cards_rescan_l_fake.spec.js), the sequence
+# and variable editors and the terminal (specs/editors_term_rescan_l_fake.spec.js), pulls, pushes, relay management
+# and the flash/erase/OTA guards (specs/pull_push_rescan_l_fake.spec.js), the stats modal, the mesh panel and the RC
+# panel (specs/mesh_rescan_l_fake.spec.js), the setup wizard (specs/wiz_rescan_l_fake.spec.js). No board and no real
+# port, so CI runs them too. The batch's node rows (parser.tokens_misc, version.watch_script) are
+# tests/wizard/unit/tokens_misc.test.js and watch_version.test.js, run by wizard.parser.
+_FAKE_RESCAN_L = (
+    ("init_fake_boot_steps", "The page starts with the splash open and the UI version in the footer; a start-up step that throws is logged and every later one still runs, the terminal's drag-to-resize included (init.boot_steps)"),
+    ("init_fake_browser_warning", "A browser without Web Serial sees the warning banner, one with it never does (init.browser_warning)"),
+    ("init_fake_theme_mode_prefs", "Advanced shows every advanced-only part and the ETM details only with ETM on; the mode and the light/dark theme survive a reload (init.theme_mode_prefs)"),
+    ("init_fake_splash_choice", "The splash's Setup Wizard opens the guided setup on its welcome step; Config Tool only closes the splash (init.splash_choice)"),
+    ("init_fake_stale_branch_warning", "A leftover wcb_fw_branch override warns until dismissed, above the splash; a /dev/<branch>/Wizard preview says nothing (init.stale_branch_warning)"),
+    ("toast_fake_ui", "Toasts escape their text, carry Copy and Dismiss, sit above an open modal; errors stay 12 s at least, duration 0 until dismissed (toast.ui)"),
+)
+for _key, _title in _FAKE_RESCAN_L:
+    def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan_l)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their
