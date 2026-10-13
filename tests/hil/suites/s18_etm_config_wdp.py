@@ -3406,3 +3406,359 @@ def on_demand_peer_registration(bench):
             if autojoin:
                 w2.run("?WDP,AUTOJOIN,ON")
     assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan 2026-10-12: low-risk rows (wcb-mesh)
+HOLD_BAUD = 600           # W1 S3 at this rate makes a long ;S3 line hold loop() (WcbSoftSerial::write waits for the wire)
+
+
+def _hold_line(seconds):
+    """A ;S3 line that keeps W1's loop() busy about `seconds` at HOLD_BAUD (10 bits a character)."""
+    return ";S3" + padded("HOLD", int(seconds * HOLD_BAUD / 10))
+
+
+@test("etm.status_lines_dropped_reported", "With W1's loop() held over 10 s by a slow ;S3 line while W2 and W3 reboot together, their six boot announces overflow the five-line status ring: loop() prints the lines it kept and '[ETM] N status line(s) dropped - more peers came online at once than the queue holds', and printed plus dropped add up to the announces W1 received (W2 and W3 reboot; up to 2 tries)", needs=["wcb1", "wcb2"], links=[])
+def status_lines_dropped_reported(bench):
+    """Coverage re-scan 2026-10-12, etm.status_lines_queued_to_loop. espNowReceiveCallback queues '[ETM] WCBn came ONLINE
+    (boot)' for every boot announce from an active peer (statusQueueOut, WCB.ino) into a six-slot ring - five lines -
+    that only loop() drains (drainStatusOut), counting a line the full ring cannot take and reporting the count after
+    the lines it kept. A board sends three announces 1.2 s apart after a boot, so W2 and W3 rebooting at once send six,
+    all landing inside the hold. ?DEBUG,ETM on W1 prints '[ETM] Boot announce from WCBn' straight from the WiFi task for
+    each, which is the count the printed and dropped lines must add up to. The hold is a ;S3 line at 600 baud, which
+    WcbSoftSerial::write sends on loop()'s task and waits out, started as the two boards restart: their announces come
+    4-8 s later (run 20261013-002216: a 6 s hold caught four of six). An announce lost on the air leaves five, which
+    fit: that try is inconclusive and runs once more."""
+    own2, own3 = bench.usb_wcbs().get(2), bench.usb_wcbs().get(3)
+    if not own2 or not own3:
+        raise Skip("W2 and W3 need their own USB consoles here (to reboot them at the same moment)")
+    w, w2, w3 = usb_wcb(bench), WCB(bench.dev(own2)), WCB(bench.dev(own3))
+    if not any(x.startswith("WCB3: ") for x in _stats(w)):
+        raise Skip("W1 does not track W3 as a peer, so W3's announces queue nothing")
+    online = re.compile(r"^\[ETM\] WCB[23] came ONLINE \(boot\)")
+    announce = re.compile(r"^\[ETM\] Boot announce from WCB[23]$")
+    dropped = re.compile(r"^\[ETM\] (\d+) status line\(s\) dropped - more peers came online at once than the queue holds$")
+    result, notes = None, []
+    with config_guard(bench, 1) as before:
+        base = token(before[1], "?BAUD,S3,") or "?BAUD,S3,9600"
+        try:
+            w.run("?DEBUG,ETM,ON")
+            if not _has(w.run(f"?BAUD,S3,{HOLD_BAUD}"), f"Baud rate for Serial3 updated to {HOLD_BAUD}"):
+                raise AssertionError(f"setup: ?BAUD,S3,{HOLD_BAUD} did not confirm")
+            for attempt in (1, 2):
+                m2, m3 = w2.dev.mark(), w3.dev.mark()
+                w2.send("?reboot")
+                w3.send("?reboot")
+                w2.dev.expect(r"^Rebooting now", timeout=25, since=m2)
+                w3.dev.expect(r"^Rebooting now", timeout=25, since=m3)
+                wm, end, t0 = w.dev.mark(), marker("E"), time.monotonic()
+                w.send(_hold_line(15.0))
+                w.send(f";S0,{end}")
+                w.dev.expect(rf"^{end}$", timeout=30, since=wm)
+                held = round(time.monotonic() - t0, 1)
+                time.sleep(1.5)
+                lines = [x.rstrip() for x in w.dev.since(wm)]
+                for b in (w2, w3):
+                    b.wait_boot(m2 if b is w2 else m3, timeout=30)
+                n_ann = sum(1 for x in lines if announce.match(x))
+                n_on = sum(1 for x in lines if online.match(x))
+                drops = [(i, int(m.group(1))) for i, x in enumerate(lines) for m in [dropped.match(x)] if m]
+                notes.append(f"try {attempt}: held {held} s, {n_ann} announces, {n_on} lines printed, drop lines "
+                             f"{[d for _, d in drops]}")
+                if drops:
+                    result = (n_ann, n_on, drops, lines)
+                    break
+                time.sleep(3.0)
+        finally:
+            w.run(base)
+            w.run("?DEBUG,ETM,OFF")
+            _peers_back(w)
+    bench.note("etm.status_lines_dropped_reported: " + "; ".join(notes))
+    if result is None:
+        raise Skip("no try overflowed the five-line ring (an announce lost on the air leaves five): " + "; ".join(notes))
+    n_ann, n_on, drops, lines = result
+    bad = []
+    if n_on + sum(d for _, d in drops) != n_ann:
+        bad.append(f"{n_on} lines printed and {sum(d for _, d in drops)} reported dropped do not add up to the {n_ann} "
+                   f"announces W1 received")
+    first = drops[0][0]
+    kept = [x for x in lines[:first] if online.match(x)]
+    if len(kept) < 5:
+        bad.append(f"only {len(kept)} status lines came out before the first drop line: the ring holds five")
+    assert not bad, "; ".join(bad)
+
+
+@test("mgmt.frag_single_chunk_chksm_off", "With ?ETM,CHKSM off on W1 and W2 (under 40 s) a single-chunk ?MGMT,FRAG of 190 and of 198 characters goes to W2 as one SOH-marked ETM unicast and runs; 199 falls to the fragment path and is REJECTED as over 179, and nothing arrives; both boards are put back to CHKSM on, W2 first", needs=["wcb1", "wcb2"], links=["W2S2"])
+def frag_single_chunk_chksm_off(bench):
+    """Coverage re-scan 2026-10-12, mgmt.frag_single_chunk_via_etm. handleMgmtForward (WCB.ino) sends a one-chunk FRAG as
+    an ETM unicast while the payload fits singleChunkMax: ETM_MAX_CMD_WITH_CRC - 1 under ?ETM,CHKSM
+    (mgmt.frag_chksm_boundary) and 198 without it - the SOH marker and the payload filling the 199-character field.
+    Longer goes to the fragment path, whose 179-character ceiling refuses it, ungated. W2's checksum has to be off as
+    well or it drops the frame for a missing CRC, so it is switched on its own USB, like etm.off_fleet_normal_path's
+    ETM switch, and put back first. W3 and NaviCore keep their checksum on and get nothing from W1 or W2 meanwhile but
+    heartbeats, which carry no CRC."""
+    s22 = link(bench, 2, "S2")
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here: its checksum is never switched over the mesh")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    bad = []
+    with config_guard(bench, 1, 2) as before:
+        if "?ETM,CHKSM,ON" not in before[1] or "?ETM,CHKSM,ON" not in before[2]:
+            raise Skip("?ETM,CHKSM is not on on both WCBs")
+        t0 = time.monotonic()
+        on1 = on2 = []
+        try:
+            w.run("?DEBUG,MGMT,ON")
+            if not _has(w2.run("?ETM,CHKSM,OFF"), "ETM checksum verification disabled") or \
+                    not _has(w.run("?ETM,CHKSM,OFF"), "ETM checksum verification disabled"):
+                raise AssertionError("?ETM,CHKSM,OFF did not confirm on both WCBs")
+            for n in (190, 198):
+                text = padded(f"F{n}", n - 3)                 # ';S2' + text = n characters
+                sid = nonce()[:4]
+                pm, wm = s22.mark(), w.dev.mark()
+                w.send(f"?MGMT,FRAG,2,{sid},0,1,;S2{text}")
+                try:
+                    s22.expect(text.encode() + b"\r", timeout=3, since=pm)
+                except AssertionError:
+                    bad.append(f"the {n}-character payload did not run on W2")
+                try:
+                    w.dev.expect(re.escape(f"[MGMT] Single-chunk cmd → ETM unicast to WCB2 session {sid}: ;S2{text}"),
+                                 timeout=3, since=wm)
+                except AssertionError:
+                    bad.append(f"the {n}-character payload did not go as one ETM unicast")
+            text = padded("F199", 196)
+            pm, wm = s22.mark(), w.dev.mark()
+            w.send(f"?MGMT,FRAG,2,{nonce()[:4]},0,1,;S2{text}")
+            time.sleep(3)
+            lines, got = [x.rstrip() for x in w.dev.since(wm)], s22.received(pm)
+        finally:
+            try:
+                on2 = w2.run("?ETM,CHKSM,ON")
+            finally:
+                on1 = w.run("?ETM,CHKSM,ON")
+                window = round(time.monotonic() - t0, 1)
+                w.run("?DEBUG,MGMT,OFF")
+    bench.note(f"mgmt.frag_single_chunk_chksm_off: CHKSM-off window {window} s")
+    if "[MGMT] FRAG payload 199 > 179 chars — REJECTED (sender must fragment at 179)" not in lines:
+        bad.append("no REJECTED line for the 199-character payload")
+    if text.encode() in got:
+        bad.append("the 199-character payload arrived on W2 S2")
+    if not _has(on2, "ETM checksum verification enabled") or not _has(on1, "ETM checksum verification enabled"):
+        bad.append(f"?ETM,CHKSM,ON printed W2 {on2} / W1 {on1}")
+    if window > 40:
+        bad.append(f"the CHKSM-off window lasted {window} s")
+    assert not bad, "; ".join(bad)
+
+
+@test("peers.controller_clears_learned_bit", "?CONTROLLER,ON,<id> for an id W1 had auto-joined as a learned peer drops the learned bit: the probe learned permanently at 13 (PEER=2, ?PEERSLIVE one higher) reads PEER=0 and ?PEERSLIVE falls back by one once 13 is the controller; ON,20 puts the controller back (auto-join off meanwhile)", needs=["wcb1", "probe2"], links=[])
+def controller_clears_learned_bit(bench):
+    """Coverage re-scan 2026-10-12, peers.controller_special_peer. enableControllerPeer (WCB.ino) clears wcbPeerLearned for
+    the new controller id and rebuilds the active set, so a client auto-joined earlier is not tracked twice - as the
+    special peer and as a learned member - for online and ACK accounting; activePeerCount counts the active set only. The
+    probe joins as a PERMANENT client (_joined), which W1 learns on its second advert. Auto-join is turned off before
+    the switch, as in peers.controller_other_id_persist, so NaviCore - a plain client while 13 is the controller - is
+    not learned meanwhile. _joined forgets 13 everywhere, NaviCore included, after the leave."""
+    w = usb_wcb(bench)
+    _require_id_free(w, 13)
+    bad = []
+    with config_guard(bench, 1) as before:
+        if "?CONTROLLER,ON,20" not in before[1]:
+            raise Skip("controller 20 is not enabled on W1")
+        if any("AUTOJOIN=0" in x for x in _dump(w)):
+            raise Skip("W1's auto-join is off")
+        n0, _ = _live_peers(w)
+        with _joined(bench, "probe2", 13, temporary=False):
+            deadline, row = time.monotonic() + 40, None
+            while time.monotonic() < deadline:
+                row = _row(_dump(w), 13)
+                if row and "PEER=2]" in row:
+                    break
+                w.run("?WDP,POLL")
+                time.sleep(3)
+            if not row or "PEER=2]" not in row:
+                raise AssertionError(f"setup: W1 never learned the probe at 13 as a persisted peer: {row}")
+            n1, _ = _live_peers(w)
+            if n1 != n0 + 1:
+                bad.append(f"learning 13 took ?PEERSLIVE {n0} -> {n1}, not one higher")
+            try:
+                w.run("?WDP,AUTOJOIN,OFF")
+                out = [x.rstrip() for x in w.run("?CONTROLLER,ON,13")]
+                if "Controller peer ID set to 13." not in out:
+                    bad.append(f"?CONTROLLER,ON,13 printed {out}")
+                row = _row(_dump(w), 13)
+                if _field(row, "PEER") != "0":
+                    bad.append(f"with 13 the controller its row reads {row}, not PEER=0")
+                n2, line = _live_peers(w)
+                if n2 != n1 - 1:
+                    bad.append(f"with 13 the controller ?PEERSLIVE went {n1} -> {n2}, not one lower ({line!r})")
+            finally:
+                back = [x.rstrip() for x in w.run("?CONTROLLER,ON,20")]
+                w.run("?WDP,AUTOJOIN,ON")
+            if "Controller peer ID set to 20." not in back:
+                bad.append(f"?CONTROLLER,ON,20 printed {back}")
+        _peers_back(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("stats.optional_lines_and_reset", "?STATS prints a 'Heap: <free> free, largest block <n>, min free since boot <n>' line whose numbers agree, and prints the 'Raw Data (Kyber Bridging)' block only once a raw frame has gone out since the last ?STATS,RESET: absent after a reset, 'Attempts: n, Success: n, Failed: 0' after bytes W1 S1 bridges to the mesh, absent again after the next reset", needs=["wcb1", "probe1"], links=["W1S1"])
+def stats_optional_lines_and_reset(bench):
+    """Coverage re-scan 2026-10-12, stats.print_and_reset. buildStatsString (WCB.ino) adds the Raw Data block only when
+    espnowRawAttempts is not zero, always the Heap line (heap_caps free, largest free block and the minimum since boot),
+    and the 'ESP-NOW: N frame(s) not sent' and 'ETM: N command(s) refused' lines only when their counts are not zero;
+    resetESPNowStats zeroes all four. W1 is Maestro_Remote, so bytes into its Maestro port S1 go out as Kyber raw
+    frames (sendESPNowRaw) to W2's real Maestro 2: they stay below 0x80, and Maestro 2's error flags are read after.
+    The refusal line's count is etm.full_queue_refused_not_lost's; the not-sent line needs a radio flood."""
+    s1 = link(bench, 1, "S1")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?MAESTRO,REMOTE")
+    heap = re.compile(r"^Heap: (\d+) free, largest block (\d+), min free since boot (\d+)$")
+    raw = re.compile(r"^  Attempts: (\d+), Success: (\d+), Failed: (\d+)$")
+    bad = []
+
+    def raw_block(st):
+        i = next((k for k, x in enumerate(st) if x == "Raw Data (Kyber Bridging):"), None)
+        return None if i is None else (raw.match(st[i + 1]) if i + 1 < len(st) else None)
+
+    try:
+        if not _has(w.run("?STATS,RESET"), "ESP-NOW statistics reset."):
+            raise AssertionError("?STATS,RESET did not confirm")
+        st = _stats(w)
+        h = next((m for x in st for m in [heap.match(x)] if m), None)
+        if not h:
+            bad.append(f"no Heap line in ?STATS: {[x for x in st if 'eap' in x]}")
+        else:
+            free, largest, low = (int(v) for v in h.groups())
+            if not (0 < largest <= free and 0 < low <= free):
+                bad.append(f"the Heap line's numbers disagree: free {free}, largest {largest}, min {low}")
+        if _has(st, "Raw Data (Kyber Bridging):"):
+            bad.append("the Raw Data block printed right after ?STATS,RESET")
+        for line in ("frame(s) not sent - the radio's queue stayed full", "command(s) refused unacknowledged"):
+            if _has(st, line):
+                bad.append(f"after ?STATS,RESET a '{line}' line printed")
+        s1.listen()
+        s1.send(bytes(range(0x10, 0x30)))
+        time.sleep(1.5)
+        m = raw_block(_stats(w))
+        if not m:
+            bad.append("no Raw Data block after W1 S1 bridged bytes to the mesh")
+        else:
+            a, s, f = (int(v) for v in m.groups())
+            if a < 1 or s != a or f:
+                bad.append(f"Raw Data block: Attempts {a}, Success {s}, Failed {f}")
+        w.run("?STATS,RESET")
+        if raw_block(_stats(w)) or _has(_stats(w), "Raw Data (Kyber Bridging):"):
+            bad.append("the Raw Data block outlived ?STATS,RESET")
+    finally:
+        w.send(";M2,getErrors")                      # read (and clear) Maestro 2's error flags
+        time.sleep(1.5)
+        w.run("?VAR,CLEAR,m2err")
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.advert_label_budget", "When W2's advert would pass 200 bytes - a 24-character alias and five 24-character port labels on top of its identity, Maestro and WLED records - the labels that do not fit are left out from the end: W1's row for W2 keeps every identity field intact with the new alias, and its [WDPIF] rows are W2's labels S1..Sk exactly, k under 5 (W2's labels and alias put back)", needs=["wcb1", "wcb2"], links=[])
+def advert_label_budget(bench):
+    """Coverage re-scan 2026-10-12, wdp.advert_payload. wdpBuildPayload (WCB_WDP.cpp) fills a 200-byte payload in order -
+    alias, firmware, hardware, capabilities, controller, Maestro and WLED records, PWM targets, the sequence hash - and
+    the port labels last, and putTLV skips a record that would not fit, so a long label set loses its trailing labels
+    while the identity always fits. Each 24-character label is a 27-byte record. W2's own advert length shows under
+    ?DEBUG,MGMT ('[WDP] advert sent (N B)'); its labels and alias change the payload, so it re-advertises within a
+    second (the dirty check) and W1's row follows. W2 is driven on its own USB, and config_guard checks it is put back."""
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    keep = ("ALIAS", "AGE", "SEEN")
+    alias = padded("AL", 24)
+    labels = {p: padded(f"LB{p}", 24) for p in range(1, 6)}
+    bad = []
+    with config_guard(bench, 2) as before:
+        row0 = _row(_dump(w), 2)
+        if not row0:
+            raise Skip("W1 has no WDP row for W2")
+        fields0 = {k: v for k, v in re.findall(r"[,\[]([A-Z]+)=([^,\]]*)", row0) if k not in keep}
+        try:
+            w2.run("?DEBUG,MGMT,ON")
+            m2 = w2.dev.mark()
+            w2.run(f"?ALIAS,{alias}")
+            for p, text in labels.items():
+                w2.run(f"?LABEL,S{p},{text}")
+            time.sleep(1.5)
+            w2.run("?WDP,POLL")                      # one more advert for sure, in case the dirty check's was lost
+            time.sleep(2.0)
+            sizes = [int(m.group(1)) for x in w2.dev.since(m2) for m in [re.match(r"^\[WDP\] advert sent \((\d+) B\)", x)] if m]
+            dump = _dump(w)
+            row = _row(dump, 2)
+            ifs = {int(m.group(1)): m.group(2) for x in dump for m in [re.match(r"^\[WDPIF:N=2,S=(\d),DEV=(.*)\]$", x)] if m}
+        finally:
+            w2.run("?DEBUG,MGMT,OFF")
+            for p in range(1, 6):
+                w2.run(token(before[2], f"?LABEL,S{p},") or f"?LABEL,CLEAR,S{p}")
+            w2.run(token(before[2], "?ALIAS,") or "?ALIAS,CLEAR")
+            time.sleep(1.5)
+            w2.run("?WDP,POLL")
+    bench.note(f"wdp.advert_label_budget: W2's adverts were {sizes} bytes; W1 lists labels on {sorted(ifs)}")
+    if not sizes or max(sizes) > 200:
+        bad.append(f"W2's advert sizes {sizes}: none printed, or over 200 bytes")
+    if _field(row, "ALIAS") != alias:
+        bad.append(f"W1's row for W2 does not carry the new alias whole: {_field(row, 'ALIAS')!r}")
+    fields = {k: v for k, v in re.findall(r"[,\[]([A-Z]+)=([^,\]]*)", row or "") if k not in keep}
+    if fields != fields0:
+        changed = sorted(k for k in set(fields) | set(fields0) if fields.get(k) != fields0.get(k))
+        bad.append(f"identity fields changed in W1's row for W2: {changed}")
+    k = len(ifs)
+    if sorted(ifs) != list(range(1, k + 1)) or any(ifs[p] != labels[p] for p in ifs):
+        bad.append(f"W1's [WDPIF] rows for W2 are not S1..S{k} with W2's labels exactly: {ifs}")
+    if k >= 5:
+        bad.append("all five 24-character labels fit: the payload never reached its budget")
+    elif k == 0:
+        bad.append("no label fitted at all")
+    assert not bad, "; ".join(bad)
+
+
+@test("wdp.poll_keeps_sender_row", "A ?WDP,POLL from W1 (its advert, then a bare SOLICIT) leaves W2's row and [WDPIF] rows for W1 exactly as they were except a fresh AGE (0-2 s), and W2's answering advert refreshes W1's row for W2 (AGE 0-3 s)", needs=["wcb1", "wcb2"], links=[])
+def poll_keeps_sender_row(bench):
+    """Coverage re-scan 2026-10-12, wdp.poll_solicit. wdpOnAdvertReceived (WCB_WDP.cpp) looks for a SOLICIT record first
+    and only arms a staggered advert, returning before the memset that rebuilds the sender's row from an advert; a
+    solicit decoded as an advert would blank W1's alias, capabilities and Maestro records in W2's table. ?WDP,POLL sends
+    W1's advert and then the solicit, so the solicit is the last word W2 hears from W1. ncmesh.wdp_solicit_keeps_rows
+    covers NaviCore's table. Every frame is one unacknowledged broadcast: a try whose advert was lost (AGE not fresh)
+    polls once more."""
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    skip = ("AGE", "SEEN")
+
+    def snap():
+        d = [x.rstrip() for x in w2.run("?WDP,DUMP", timeout=8)]
+        row = _row(d, 1)
+        fields = {k: v for k, v in re.findall(r"[,\[]([A-Z]+)=([^,\]]*)", row or "") if k not in skip}
+        return row, fields, sorted(x for x in d if x.startswith("[WDPIF:N=1,"))
+
+    row0, f0, if0 = snap()
+    if not row0:
+        raise Skip("W2 has no WDP row for W1")
+    bad, notes = [], []
+    for attempt in (1, 2):
+        poll = w.run("?WDP,POLL")
+        if not _has(poll, "[WDP] polled: advertised + solicited the mesh"):
+            raise AssertionError(f"?WDP,POLL printed {poll}")
+        time.sleep(1.5)
+        row, f1, if1 = snap()
+        mine = _row(_dump(w), 2)
+        age2, age1 = int(_field(row, "AGE") or 99), int(_field(mine, "AGE") or 99)
+        notes.append(f"try {attempt}: W2's row for W1 AGE {age2}, W1's row for W2 AGE {age1}")
+        if f1 != f0:
+            changed = sorted(k for k in set(f0) | set(f1) if f0.get(k) != f1.get(k))
+            bad.append(f"W2's row for W1 changed after the poll: {changed} ({row})")
+            break
+        if if1 != if0:
+            bad.append(f"W2's [WDPIF] rows for W1 changed after the poll: {if0} -> {if1}")
+            break
+        if age2 <= 2 and age1 <= 3:
+            break
+        time.sleep(2.0)
+    else:
+        bad.append("no poll in 2 refreshed both rows: " + "; ".join(notes))
+    bench.note("wdp.poll_keeps_sender_row: " + "; ".join(notes))
+    assert not bad, "; ".join(bad)
