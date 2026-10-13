@@ -426,17 +426,19 @@ def ack_lost_retry_fail(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("etm.dedup_ring_covers_pending", "(should) Nine in-flight unicasts to one board whose ACKs are lost each execute once, as eight do", needs=["wcb1"])
+@test("etm.dedup_ring_covers_pending", "(should) Nine and ten in-flight unicasts to one board whose ACKs are lost - ten fills the sender's pending table - each execute once, as eight do", needs=["wcb1"])
 def dedup_ring_covers_pending(bench):
     """Probable bug: the receiver's per-sender duplicate ring ETM_SEQ_HISTORY=8 (WCB.ino:591) is smaller than the
     sender's pending table ETM_PENDING_MAX=10 (WCB.ino:541), so a burst of 9-10 ensured commands whose ACKs are lost
-    re-executes on every retry round. Eight is the control."""
+    re-executes on every retry round. Eight is the control. Coverage re-scan 2026-10-12, etm.dedup_ring_per_sender: the
+    ring is ETM_PENDING_MAX + 6 = 16 now, and ten in flight - the whole pending table, the ring's design bound - is held
+    to exactly once per command too (etm.pending_table_evict sends ten plus one but asserts delivery only)."""
     s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     counts = {}
     with config_guard(bench, 1) as before:
         _require_w2_online(w)
-        for n in (8, 9):
+        for n in (8, 9, 10):
             ms = [marker(f"{n}{k}") for k in range(n)]
             pm = s2.mark()
             with _deaf_w1(w, before[1]):
@@ -448,6 +450,7 @@ def dedup_ring_covers_pending(bench):
     bench.note(f"executions per command with lost ACKs: {counts}")
     assert counts[8] == [1] * 8, f"control (8 in flight): {counts[8]}"
     assert counts[9] == [1] * 9, f"9 in flight re-executed: {counts[9]}"
+    assert counts[10] == [1] * 10, f"10 in flight (the full pending table) re-executed: {counts[10]}"
 
 
 @test("etm.pending_table_evict", "The 11th in-flight unicast evicts the oldest pending entry and counts it failed", needs=["wcb1"])
@@ -3136,4 +3139,191 @@ def neighbor_stale_after_ttl(bench):
         bad.append(f"?WDP,15 detail: {detail}")
     if _has(lines, "temporarily joined WCB15") or _has(lines, "[PEER] WCB15 registered") or _has(lines, "temporary WCB15 evicted"):
         bad.append("W1 joined or evicted the probe with auto-join off")
+    assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (wcb-mesh)
+@test("etm.json_broadcast_unacked_outside_ring", "A target-0 '{' broadcast is never ACKed and never enters the duplicate ring: a client's ensured JSON broadcast reaches W1 with no 'Sent ACK' while the client's next ;S0 is ACKed; and with W1 deaf, a ;W2,;S2 unicast followed by 24 JSON broadcasts typed on W1 has its retries logged Duplicate on W2 after 16 or more of those JSON frames, runs once, and W2 ACKs no JSON frame and prints no 'Invalid Serial Command'", needs=["wcb1", "wcb2", "probe2"], links=["W2S2"])
+def json_broadcast_unacked_outside_ring(bench):
+    """Coverage re-scan 2026-10-12, etm.best_effort_json. sendESPNowMessage sends a target-0 '{' payload as an ETM frame
+    but never into the pending table (bestEffortTelemetry); the receiver's ETM path (espNowReceiveCallback) sends no ACK
+    for it, keeps it out of the per-sender duplicate ring and returns at the JSON relay, before the command parser.
+    Arm A: WCB_Client::broadcast forces a '{' broadcast to best-effort; the client's next ensured ;S0 is the control that
+    ACK lines print. A JSON frame whose seq matches a stale ring entry of this id prints 'Duplicate' instead of
+    'Received' (the duplicate check still runs for it), so either line shows it arrived. Arm B: with W1 deaf (_deaf_w1)
+    and ?ETM,TIMEOUT 2000, so the burst lands before the first retry, W1 types 24 '{"t":...}' lines - broadcast to the
+    mesh as best-effort JSON from the same sender, W1's port broadcasts off meanwhile; were they ringed, 16 of them
+    would push the unicast's seq out of W2's 16-entry ring and a retry would run it again. W2's console (its own USB,
+    ?DEBUG,ETM) shows the duplicates. NaviCore and W3 get the JSON too and ignore it."""
+    s22 = link(bench, 2, "S2")
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    _require_id_free(w, 14)
+    bad = []
+
+    # Arm A: a client's JSON broadcast is not ACKed
+    text = '{"t":"HIL' + nonce() + '"}'
+    ctl = marker("ack")
+    try:
+        w.run("?DEBUG,ETM,ON")
+        with probe_in_mesh(bench, "probe2", 14) as probe:
+            time.sleep(2.0)
+            wm = w.dev.mark()
+            probe.mesh_broadcast(text, ensured=True)
+            time.sleep(1.5)
+            cm = w.dev.mark()
+            probe.mesh_send(1, f";S0,{ctl}", ensured=True)
+            time.sleep(1.5)
+            json_lines = [x.rstrip() for x in w.dev.since(wm)[:cm - wm]]
+            ctl_lines = [x.rstrip() for x in w.dev.since(cm)]
+    finally:
+        w.run("?DEBUG,ETM,OFF")
+    if not any(re.search(r"\[ETM\] Received seq \d+ from WCB14: " + re.escape(text), x) for x in json_lines) and \
+            not any(re.search(r"\[ETM\] Duplicate seq \d+ from WCB14 ", x) for x in json_lines):
+        bad.append("arm A: W1 logged no receive of the client's JSON broadcast")
+    acks = [x for x in json_lines if re.search(r"\[ETM\] Sent ACK seq \d+ to WCB14\b", x)]
+    if acks:
+        bad.append(f"arm A: W1 ACKed the client's JSON broadcast: {acks}")
+    if not any(re.search(r"\[ETM\] Sent ACK seq \d+ to WCB14, result: 0", x) for x in ctl_lines):
+        bad.append("arm A control: W1 printed no 'Sent ACK ... to WCB14, result: 0' for the client's ;S0")
+    if _has(json_lines, "Invalid Serial Command") or _has(json_lines, "Unknown command"):
+        bad.append("arm A: the JSON broadcast reached W1's command parser")
+
+    # Arm B: JSON frames from the same sender do not push a real command's seq out of the ring
+    jsons = ['{"t":"HILJ%02d%s"}' % (k, nonce()) for k in range(24)]
+    m = marker("J")
+    with config_guard(bench, 1) as before:
+        orig = _etm(before[1])["TIMEOUT"]
+        ports = [p for p in ("S2", "S3", "S4", "S5") if f"?BCAST,OUT,{p},ON" in before[1]]
+        _require_w2_online(w)
+        try:
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},OFF")
+            w.run("?ETM,TIMEOUT,2000")
+            w.run("?DEBUG,ETM,ON")
+            w2.run("?DEBUG,ETM,ON")
+            pm, wm, m2 = s22.mark(), w.dev.mark(), w2.dev.mark()
+            with _deaf_w1(w, before[1]):
+                w.send(f";W2,;S2{m}")
+                for j in jsons:
+                    w.send(j)
+                time.sleep(8.5)                      # 3 retries 2 s apart, then the failure
+            time.sleep(1.0)
+            lines1 = [x.rstrip() for x in w.dev.since(wm)]
+            lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+            got = s22.received(pm)
+        finally:
+            w.run(f"?ETM,TIMEOUT,{orig}")
+            w.run("?DEBUG,ETM,OFF")
+            w2.run("?DEBUG,ETM,OFF")
+            for p in ports:
+                w.run(f"?BCAST,OUT,{p},ON")
+    seq = next((int(g.group(1)) for g in (re.match(rf"^\[ETM\] Sent seq (\d+): ;S2{m}$", x) for x in lines1) if g), None)
+    jseq = {int(g.group(1)) for g in (re.match(r'^\[ETM\] Sent seq (\d+): \{"t":"HILJ', x) for x in lines1) if g}
+    retry1 = next((i for i, x in enumerate(lines1) if re.match(rf"^\[ETM\] Retry 1 to WCB2 for seq {seq}\b", x)), None)
+    before_retry = [x for x in lines1[:retry1] if re.match(r'^\[ETM\] Sent seq \d+: \{"t":"HILJ', x)] if retry1 else []
+    if seq is None or len(jseq) != len(jsons):
+        bad.append(f"arm B setup: W1 sent the unicast as seq {seq} and {len(jseq)} of the {len(jsons)} JSON lines")
+    elif len(before_retry) != len(jsons):
+        bad.append(f"arm B setup: only {len(before_retry)} JSON frames went out before W1's first retry")
+    else:
+        recv = [i for i, x in enumerate(lines2) if re.match(r'^\[ETM\] Received seq \d+ from WCB1: \{"t":"HILJ', x)]
+        dups = [i for i, x in enumerate(lines2) if x.startswith(f"[ETM] Duplicate seq {seq} from WCB1 - ACKd but not executed")]
+        if not dups:
+            bad.append(f"arm B: W2 logged no 'Duplicate seq {seq} from WCB1' for the unicast's retries")
+        elif sum(1 for i in recv if i < dups[0]) < 16:
+            bad.append(f"arm B inconclusive: only {sum(1 for i in recv if i < dups[0])} JSON frames reached W2 before the "
+                       f"first retry (16 would fill the ring)")
+        json_acks = [x for x in lines2 if any(x.startswith(f"[ETM] Sent ACK seq {j} to WCB1,") for j in jseq)]
+        if json_acks:
+            bad.append(f"arm B: W2 ACKed JSON broadcasts: {json_acks[:3]}")
+        if _has(lines2, "Invalid Serial Command") or _has(lines2, "Unknown command"):
+            bad.append("arm B: a JSON broadcast reached W2's command parser")
+        runs = got.count(m.encode() + b"\r")
+        if runs != 1:
+            bad.append(f"arm B: the unicast ran {runs} times on W2 S2 after the JSON burst")
+        bench.note(f"etm.json_broadcast_unacked_outside_ring: {len(recv)} of {len(jsons)} JSON frames reached W2, "
+                   f"{len(dups)} duplicate retries")
+    assert not bad, "; ".join(bad)
+
+
+@test("etm.on_demand_peer_registration", "A sender outside the receiver's ESP-NOW peer table still gets its ETM ACK and its remote-terminal lines: a client W1 never adopted (WDP off, ?WDP,FORGET just before) has its ensured ;S0 ACKed with 'result: 0', and with W2's controller turned off (its WCB20 peer deleted) ?RTERM,START,20 on W2 still prints the session start and a ?VERSION on NaviCore", needs=["wcb1", "wcb2", "navicore", "probe2"], links=[])
+def on_demand_peer_registration(bench):
+    """Coverage re-scan 2026-10-12, etm.on_demand_peer_registration. etmSendAck (WCB.ino) and WCBSerial::_sendPacket
+    (WCB_RemoteTerm.cpp) add the destination as an ESP-NOW peer when esp_now_is_peer_exist says it is not one, because
+    esp_now_send to an unregistered unicast address fails ESP_ERR_ESPNOW_NOT_FOUND (12393) and the ACK or the mirrored
+    line is lost. Arm A: W1's WDP is off, so the probe's adverts register nothing (addTemporaryPeer is WDP's), and
+    ?WDP,FORGET right before the command unregisters it if anything had; the ACK line's result is the send's. Arm B:
+    ?CONTROLLER,OFF deletes WCB20's peer on W2 (a peer out of W2's floor and not learned), and the same line starts the
+    session, so no NaviCore traffic can re-add it by an ACK in between; W2's auto-join is held off meanwhile, so it does
+    not take NaviCore as a learned peer (peers.controller_off_on). W2 is driven on its own USB and put back first."""
+    from suites.s05_mesh import _nc_wait
+    w = usb_wcb(bench)
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w2, nc = WCB(bench.dev(own2)), bench.dev("navicore")
+    _require_id_free(w, 14)
+    bad = []
+
+    # Arm A: an unadopted client's ensured command is ACKed
+    t = marker("od")
+    with config_guard(bench, 1) as before:
+        if "?WDP,OFF" in before[1]:
+            raise Skip("W1's WDP is already off")
+        if not _has(w.run("?WDP,OFF"), "[WDP] disabled"):
+            raise AssertionError("?WDP,OFF did not confirm")
+        try:
+            w.run("?DEBUG,ETM,ON")
+            with probe_in_mesh(bench, "probe2", 14) as probe:
+                time.sleep(3.0)
+                w.run("?WDP,FORGET,14")
+                row = _row(_dump(w), 14)
+                if row and "PEER=0]" not in row:
+                    raise AssertionError(f"setup: W1 has the client as a peer with WDP off: {row}")
+                wm = w.dev.mark()
+                probe.mesh_send(1, f";S0,{t}", ensured=True)
+                time.sleep(2.0)
+                lines = [x.rstrip() for x in w.dev.since(wm)]
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            w.run("?WDP,ON")
+    acks = [x for x in lines if re.search(r"\[ETM\] Sent ACK seq \d+ to WCB14, result: ", x)]
+    if not acks:
+        bad.append("arm A: W1 printed no ACK line for the unadopted client's command")
+    elif not all(x.endswith("result: 0") for x in acks):
+        bad.append(f"arm A: the ACK to an unregistered sender failed: {acks}")
+
+    # Arm B: the remote terminal registers the relay on demand
+    with config_guard(bench, 2) as before:
+        if "?CONTROLLER,ON,20" not in before[2]:
+            raise Skip("W2's controller is not ?CONTROLLER,ON,20")
+        row = _row(_dump(w2), 20) or ""
+        if "PEER=2]" in row:
+            raise Skip("NaviCore is a learned peer of W2: ?CONTROLLER,OFF would keep its registration")
+        autojoin = "?WDP,AUTOJOIN,OFF" not in before[2]
+        started = False
+        try:
+            if autojoin:
+                w2.run("?WDP,AUTOJOIN,OFF")
+            mn, m2 = nc.mark(), w2.dev.mark()
+            w2.send("?CONTROLLER,OFF^?RTERM,START,20")
+            started = True
+            try:
+                _nc_wait(nc, r"^\[TERM:2\]\[RTERM\] Session started", mn)
+                mn = nc.mark()
+                w2.send("?VERSION")
+                _nc_wait(nc, r"^\[TERM:2\]End of Version", mn)
+            except AssertionError as e:
+                bad.append(f"arm B: NaviCore got no mirrored line from W2 with W2's controller off: {e}")
+            if not _has(w2.dev.since(m2), "Controller peer (ID 20) DISABLED."):
+                bad.append("arm B setup: W2's ?CONTROLLER,OFF did not confirm")
+        finally:
+            if started:
+                w2.run("?RTERM,STOP")
+            w2.run("?CONTROLLER,ON,20")
+            if autojoin:
+                w2.run("?WDP,AUTOJOIN,ON")
     assert not bad, "; ".join(bad)

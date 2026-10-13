@@ -547,7 +547,9 @@ REFUSED = re.compile(r"^\[ETM\] (\d+) command\(s\) refused unacknowledged")
 
 @test("etm.full_queue_refused_not_lost", "An ETM command that finds W1's command queue full is refused unacknowledged, "
       "never ACKed and then discarded: with the queue held full by a console flood, each ;W1,;S2<marker> W2 sends "
-      "either reaches W1 S2 or W2 reports it failed (tracker #108; ~40 s)", needs=["wcb1", "wcb2"], links=["W1S2"])
+      "either reaches W1 S2 or W2 reports it failed; ?STATS then shows 'ETM: N command(s) refused unacknowledged' with "
+      "the N loop()'s refusal lines added up to, and ?STATS,RESET clears it with no stray refusal line after "
+      "(tracker #108; ~40 s)", needs=["wcb1", "wcb2"], links=["W1S2"])
 def full_queue_refused_not_lost(bench):
     """Tracker #108. espNowReceiveCallback sent the ETM ACK (etmSendAck) before it parsed and queued the command, and a
     WiFi-task enqueue never waits (CLAUDE.md rule 11), so a command that found W1's 200-slot queue full was discarded
@@ -559,7 +561,13 @@ def full_queue_refused_not_lost(bench):
     in a retry W2 cancelled for W1 going offline. The flood is etm.seq_wrap's: '{}' tokens typed on W1's console, which
     the console reader keeps the queue topped up with while loop() drains it at the radio's pace (tracker #102's
     pacing); W1's port broadcasts are off meanwhile. It skips when no refusal and no discard showed that the queue was
-    ever full while the markers arrived."""
+    ever full while the markers arrived.
+
+    Coverage re-scan 2026-10-12, etm.full_queue_refused_unacked: buildStatsString prints etmQueueFullRefused as 'ETM: N
+    command(s) refused unacknowledged - the command queue was full' when it is not zero, and resetESPNowStats zeroes
+    it; reportEtmQueueRefusals re-syncs its own count when it finds the counter below it, so the reset is not reported
+    as a refusal (with the counter unsigned, a missed re-sync would print a four-billion count). ?STATS,RESET runs
+    before the flood, so the ?STATS count and the sum of loop()'s lines since then must agree."""
     near = link(bench, 1, "S2")
     w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
     require_tokens(bench, 1, "?ETM,ON")
@@ -588,6 +596,7 @@ def full_queue_refused_not_lost(bench):
             for p in ports:
                 w.run(f"?BCAST,OUT,{p},OFF")
             w2.run("?DEBUG,ETM,ON")
+            w.run("?STATS,RESET")
             watch = Watch(near)
             m1, m2 = w.dev.mark(), w2.dev.mark()
             th = threading.Thread(target=flood, daemon=True)
@@ -603,6 +612,14 @@ def full_queue_refused_not_lost(bench):
             got = watch.got(near)
             lines1 = [x.rstrip() for x in w.dev.since(m1)]
             lines2 = [x.rstrip() for x in w2.dev.since(m2)]
+            stats = [x.rstrip() for x in w.run("?STATS")]
+            time.sleep(1.5)                       # loop() reports at most once a second: let the last line out
+            reported = sum(int(m.group(1)) for m in map(REFUSED.match, w.dev.since(m1)) if m)
+            rm = w.dev.mark()
+            w.run("?STATS,RESET")
+            after_reset = [x.rstrip() for x in w.run("?STATS")]
+            time.sleep(1.5)
+            stray = [x.rstrip() for x in w.dev.since(rm) if REFUSED.match(x)]
         finally:
             stop.set()
             if th is not None:
@@ -630,6 +647,14 @@ def full_queue_refused_not_lost(bench):
     bench.note(f"etm.full_queue_refused_not_lost: {len(mine)} markers sent, {len(arrived)} arrived, {len(failed)} "
                f"reported failed, {len(canceled)} cancelled offline; W1 refused {refused}, discarded {discarded}; "
                f"flood {facts}")
+    stat_lines = [x for x in stats if "refused unacknowledged" in x]
+    want = [f"ETM: {reported} command(s) refused unacknowledged - the command queue was full"] if reported else []
+    if stat_lines != want:
+        raise AssertionError(f"?STATS refusal line {stat_lines} does not match the {reported} refusal(s) loop() reported")
+    if any("refused unacknowledged" in x for x in after_reset):
+        raise AssertionError(f"?STATS,RESET left the refusal line: {[x for x in after_reset if 'refused' in x]}")
+    if stray:
+        raise AssertionError(f"after ?STATS,RESET loop() still reported refusals: {stray}")
     if not mine:
         raise AssertionError("W2 printed no '[ETM] Sent seq' line for any marker (is ?DEBUG,ETM on, is W1 a peer?)")
     if lost:
