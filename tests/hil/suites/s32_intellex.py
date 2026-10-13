@@ -722,10 +722,15 @@ def ghget_retry_unit(bench):
 
 
 @test("intellex.paths_logs_unit", "Where Intellex keeps things: a frozen build's user copy only when non-empty, wikis per "
-      "subdirectory, updates in the user directory, the NaviLink move done once and never merged; the log prune across "
-      "both prefixes by timestamp; winsize.fit clamping and centring; certs.is_cert_error on a buried failure (IX-WP3)")
+      "subdirectory, updates in the user directory, the platform's own data directory with no INTELLEX_DATA_DIR and "
+      "the NaviLink move there done once and never merged - on every platform; the log prune across both prefixes by "
+      "timestamp; winsize.fit clamping and centring; certs.is_cert_error on a buried failure (IX-WP3; IX re-scan "
+      "paths.data_dir_rules)")
 def paths_logs_unit(bench):
-    """tests/intellex/py/paths_logs.py, in a scratch directory inside the stage (LOCALAPPDATA re-pointed per case)."""
+    """tests/intellex/py/paths_logs.py, in a scratch directory inside the stage. The frozen rules re-point
+    INTELLEX_DATA_DIR per case; the NaviLink move, which INTELLEX_DATA_DIR bypasses, re-points the platform's base
+    (LOCALAPPDATA on Windows, HOME on macOS and Linux) - so neither case skips off Windows any more, as both did until
+    the IX re-scan's paths.data_dir_rules row."""
     run_intellex_py(bench, "intellex.paths_logs_unit", "paths_logs.py")
 
 
@@ -1789,3 +1794,35 @@ def app_browser_mode(bench):
     except AssertionError as e:
         problems.append(f"in-process (host_units.py app): {e}")
     assert not problems, "; ".join(problems)
+
+
+@test("intellex.certs_context_unit", "certs.context() verifies on this venv; with an empty platform store (a stock "
+      "python.org macOS build) it loads certifi's bundle with verification still on, built once; a populated store is "
+      "left alone; with no certifi it fails honestly rather than turning verification off (IX re-scan certs.context)")
+def certs_context_unit(bench):
+    """tests/intellex/py/paths_logs.py group certs: Intellex src/certs.py context() (:33-48), every HTTPS fetch's
+    context (flash._get, the tool and wiki fetchers, the version check), with ssl.create_default_context stood in for
+    to make the store empty or populated."""
+    run_intellex_py(bench, "intellex.certs_context_unit", "paths_logs.py", args={"group": "certs"})
+
+
+@test("intellex.fetch_firmware_unit", "tools/fetch_firmware.py caches NaviCore's set and the WCB sets for ESP32 and both "
+      "ESP32-S3 flash sizes and exits 0; a product whose listing 404s fails alone (exit 1, the other cached); a build "
+      "with no 8 MB S3 bootloader is a note (GitHub stood in for; IX re-scan tools.fetch_firmware)")
+def fetch_firmware_unit(bench):
+    """tests/intellex/py/fetch_units.py group fetch_firmware: Intellex tools/fetch_firmware.py main() (:36-98) in the venv
+    process with flash/wcb_flash reachable() and _get() answered there; the cache is the stage's src/firmware.
+    intellex.update_routes runs the route that starts it."""
+    run_intellex_py(bench, "intellex.fetch_firmware_unit", "fetch_units.py", args={"group": "fetch_firmware"})
+
+
+@test("intellex.fetch_wiki_unit", "tools/fetch_wiki.py: both link dialects and image tags read into pages and assets, a "
+      "dotted page name not taken for a file; with no page index the crawl from Home and _Sidebar, a 404 page skipped, "
+      "an image over 1 MB left online after a HEAD, an asset path out of the wiki refused; the swap recovering a "
+      "half-swap and putting the old copy back; one empty wiki kept on disk while the others update; offline, nothing "
+      "touched (GitHub stood in for; IX re-scan tools.fetch_wiki)")
+def fetch_wiki_unit(bench):
+    """tests/intellex/py/fetch_units.py group fetch_wiki: Intellex tools/fetch_wiki.py _targets, _is_asset, fetch_one,
+    _swap_in and main() (:132-381), with page_index, _get and _size_of answered in the venv process and the wikis in a
+    scratch directory inside the stage."""
+    run_intellex_py(bench, "intellex.fetch_wiki_unit", "fetch_units.py", args={"group": "fetch_wiki"})

@@ -1,10 +1,14 @@
 """Where Intellex keeps things, under its venv, in a scratch directory inside the stage (intellex.paths_logs_unit,
 IX-WP3). Nothing outside the stage is read or written: INTELLEX_DATA_DIR and LOCALAPPDATA point into the stage
-(run_intellex_py), and each case re-points LOCALAPPDATA at its own subdirectory, lifting INTELLEX_DATA_DIR meanwhile.
+(run_intellex_py), and each case re-points the data directory at its own subdirectory - INTELLEX_DATA_DIR for the frozen
+rules, and for the NaviLink move (which INTELLEX_DATA_DIR bypasses) the platform's own base with INTELLEX_DATA_DIR
+lifted: LOCALAPPDATA on Windows, HOME on macOS and Linux (XDG_DATA_HOME lifted too). So every case runs on every
+platform (the IX re-scan's paths.data_dir_rules: they used to skip off Windows).
 
-- paths.py (Intellex src/paths.py:81-144): a frozen build reads the user copy only when it is non-empty (data_dir), the
-  wikis decide per subdirectory (data_subdir), updates are written to the user directory (write_dir), and the pre-rename
-  NaviLink directory is moved once and never merged into an existing Intellex one (_migrate_legacy, :56-78).
+- paths.py (Intellex src/paths.py:56-152): a frozen build reads the user copy only when it is non-empty (data_dir), the
+  wikis decide per subdirectory (data_subdir), updates are written to the user directory (write_dir); with no
+  INTELLEX_DATA_DIR the directory is the platform's own (~/Library/Application Support/Intellex on macOS), and the
+  pre-rename NaviLink directory there is moved once and never merged into an existing Intellex one (_migrate_legacy).
 - applog._prune (src/applog.py:91-106): keeps the newest KEEP_RUNS (20) runs across both name prefixes, ordered by the
   timestamp in the name, not by the name.
 - winsize.fit (src/winsize.py:49-84): clamps to the work area less MARGIN, centres, never shrinks below 320x240, keeps
@@ -34,45 +38,72 @@ def _touch(path, text="x"):
 
 
 class _Frozen:
-    """paths as a frozen build sees it: FROZEN set, BUNDLE_DIR at `bundle`, LOCALAPPDATA at `appdata`; put back after.
-    INTELLEX_DATA_DIR, which run_intellex_py sets for the stage, is lifted meanwhile: it would win over LOCALAPPDATA."""
+    """paths as a frozen build sees it: FROZEN set, BUNDLE_DIR at `bundle`, and the user data directory at `user`
+    (INTELLEX_DATA_DIR); put back after."""
 
-    def __init__(self, bundle, appdata):
+    def __init__(self, bundle, user):
         import paths
-        self.paths, self.bundle, self.appdata = paths, bundle, appdata
+        self.paths, self.bundle, self.user = paths, bundle, user
 
     def __enter__(self):
-        p = self.paths
-        self.saved = (p.FROZEN, p.BUNDLE_DIR, p._migrated, os.environ.get("LOCALAPPDATA"))
-        self.data_dir = os.environ.pop("INTELLEX_DATA_DIR", None)
         import pathlib
+        p = self.paths
+        self.saved = (p.FROZEN, p.BUNDLE_DIR, p._migrated, os.environ.get("INTELLEX_DATA_DIR"))
         p.FROZEN, p.BUNDLE_DIR, p._migrated = True, pathlib.Path(self.bundle), False
-        os.environ["LOCALAPPDATA"] = self.appdata
+        os.environ["INTELLEX_DATA_DIR"] = self.user
         return p
 
     def __exit__(self, *exc):
         p = self.paths
-        p.FROZEN, p.BUNDLE_DIR, p._migrated, local = self.saved
-        if local is None:
-            os.environ.pop("LOCALAPPDATA", None)
+        p.FROZEN, p.BUNDLE_DIR, p._migrated, d = self.saved
+        if d is None:
+            os.environ.pop("INTELLEX_DATA_DIR", None)
         else:
-            os.environ["LOCALAPPDATA"] = local
-        if self.data_dir is not None:
-            os.environ["INTELLEX_DATA_DIR"] = self.data_dir
+            os.environ["INTELLEX_DATA_DIR"] = d
+
+
+class _PlatformHome:
+    """paths.user_data_dir() with no INTELLEX_DATA_DIR, the platform's base re-pointed into `root`: LOCALAPPDATA on
+    Windows, HOME on macOS and Linux (XDG_DATA_HOME lifted) -> (paths, the base the Intellex directory sits in)."""
+    KEYS = ("INTELLEX_DATA_DIR", "LOCALAPPDATA", "HOME", "XDG_DATA_HOME")
+
+    def __init__(self, root):
+        import paths
+        self.paths, self.root = paths, root
+
+    def __enter__(self):
+        p = self.paths
+        self.saved = (p._migrated, {k: os.environ.get(k) for k in self.KEYS})
+        p._migrated = False
+        os.environ.pop("INTELLEX_DATA_DIR", None)
+        os.environ.pop("XDG_DATA_HOME", None)
+        if sys.platform == "win32":
+            os.environ["LOCALAPPDATA"] = self.root
+            base = self.root
+        else:
+            os.environ["HOME"] = self.root
+            base = (os.path.join(self.root, "Library", "Application Support") if sys.platform == "darwin"
+                    else os.path.join(self.root, ".local", "share"))
+        return p, base
+
+    def __exit__(self, *exc):
+        self.paths._migrated, env = self.saved
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @case("a frozen build reads a user copy only when it is non-empty; wikis decide per subdirectory; updates go to the "
       "user directory", group="main")
 def frozen_paths(ctx):
-    if sys.platform != "win32":
-        raise _ixpy.SkipCase("paths.user_data_dir() reads LOCALAPPDATA on Windows only")
     root = _scratch(ctx, "frozen")
-    bundle, appdata = os.path.join(root, "bundle"), os.path.join(root, "appdata")
+    bundle, user = os.path.join(root, "bundle"), os.path.join(root, "user")
     _touch(os.path.join(bundle, "webui", "index.html"))
     _touch(os.path.join(bundle, "wiki", "wcb", "Home.md"))
     _touch(os.path.join(bundle, "wiki", "navicore", "Home.md"))
-    with _Frozen(bundle, appdata) as p:
-        user = os.path.join(appdata, "Intellex")
+    with _Frozen(bundle, user) as p:
         check(str(p.user_data_dir()) == user, f"user_data_dir {p.user_data_dir()}, expected {user}")
         check(str(p.data_dir("webui")) == os.path.join(bundle, "webui"), "no user copy: data_dir left the bundle")
         os.makedirs(os.path.join(user, "webui"), exist_ok=True)
@@ -85,30 +116,42 @@ def frozen_paths(ctx):
               "the downloaded intellex wiki was not used")
         check(str(p.data_subdir("wiki", "wcb")) == os.path.join(bundle, "wiki", "wcb"),
               "one downloaded wiki hid a sibling that exists only in the bundle")
+        os.makedirs(os.path.join(user, "wiki", "navicore"), exist_ok=True)
+        check(str(p.data_subdir("wiki", "navicore")) == os.path.join(bundle, "wiki", "navicore"),
+              "an EMPTY downloaded wiki directory shadowed the bundled one")
         check(str(p.write_dir("firmware")) == os.path.join(user, "firmware"), "a frozen update would write the bundle")
-    with _Frozen(bundle, appdata) as p:
+    with _Frozen(bundle, user) as p:
         p.FROZEN = False
+        check(str(p.data_dir("webui")) == os.path.join(bundle, "webui"), "from source, a user copy was read")
         check(str(p.write_dir("firmware")) == os.path.join(bundle, "firmware"), "from source, updates stay in src/")
 
 
-@case("the NaviLink data directory is moved to Intellex once, and never merged into an existing one", group="main")
+@case("with no INTELLEX_DATA_DIR the data directory is the platform's own; the NaviLink one there is moved to "
+      "Intellex once, and never merged into an existing one", group="main")
 def legacy_move(ctx):
-    if sys.platform != "win32":
-        raise _ixpy.SkipCase("paths.user_data_dir() reads LOCALAPPDATA on Windows only")
     root = _scratch(ctx, "legacy")
-    appdata, bundle = os.path.join(root, "appdata"), os.path.join(root, "bundle")
-    _touch(os.path.join(appdata, "NaviLink", "settings.json"), '{"branch": {"wcb": "old"}}')
-    with _Frozen(bundle, appdata) as p:
+    with _PlatformHome(root) as (p, base):
+        _touch(os.path.join(base, "NaviLink", "settings.json"), '{"branch": {"wcb": "old"}}')
         d = p.user_data_dir()
+        check(str(d) == os.path.join(base, "Intellex"), f"user_data_dir {d}, expected {os.path.join(base, 'Intellex')} "
+                                                        f"(the platform's own place for {sys.platform})")
         check(os.path.isfile(os.path.join(d, "settings.json")), "the NaviLink directory was not moved to Intellex")
-        check(not os.path.exists(os.path.join(appdata, "NaviLink")), "NaviLink is still there after the move")
-    _touch(os.path.join(appdata, "NaviLink", "other.json"))
-    with _Frozen(bundle, appdata) as p:
+        check(not os.path.exists(os.path.join(base, "NaviLink")), "NaviLink is still there after the move")
+    _touch(os.path.join(base, "NaviLink", "other.json"))
+    with _PlatformHome(root) as (p, base):
         p.user_data_dir()
-        check(os.path.isfile(os.path.join(appdata, "NaviLink", "other.json")),
+        check(os.path.isfile(os.path.join(base, "NaviLink", "other.json")),
               "a second NaviLink directory was touched although Intellex already existed")
-        check(not os.path.exists(os.path.join(appdata, "Intellex", "other.json")),
+        check(not os.path.exists(os.path.join(base, "Intellex", "other.json")),
               "a NaviLink directory was merged into an existing Intellex one")
+    with _PlatformHome(root) as (p, base):
+        os.environ["INTELLEX_DATA_DIR"] = os.path.join(root, "override")
+        try:
+            check(str(p.user_data_dir()) == os.path.join(root, "override"), "INTELLEX_DATA_DIR did not win")
+            check(os.path.isfile(os.path.join(base, "NaviLink", "other.json")),
+                  "with INTELLEX_DATA_DIR set the legacy directory was still moved")
+        finally:
+            os.environ.pop("INTELLEX_DATA_DIR", None)
 
 
 @case("applog keeps the newest 20 runs across both prefixes, by the timestamp in the name", group="main")
@@ -178,6 +221,84 @@ def cert_errors(ctx):
     loop = OSError("self-referential")
     loop.reason = loop
     check(not certs.is_cert_error(loop), "an error whose reason is itself (the walk must be bounded)")
+
+
+# ------------------------------------------------------------------ group "certs" (intellex.certs_context_unit)
+@case("certs.context() can verify on this venv; with an empty platform store it loads certifi's bundle, keeps "
+      "verification on, and is built once; a populated store is left alone; with no certifi it fails honestly",
+      group="certs")
+def certs_context(ctx):
+    import certifi
+    import certs
+    problems = []
+    certs.context.cache_clear()
+    try:
+        c = certs.context()
+        n = c.cert_store_stats()["x509_ca"]
+        if n <= 0 or c.verify_mode != ssl.CERT_REQUIRED or not c.check_hostname:
+            problems.append(f"this venv's context: {n} CA(s), verify_mode {c.verify_mode}, check_hostname "
+                            f"{c.check_hostname} - every HTTPS fetch would fail or go unverified")
+        platform = ssl.create_default_context().cert_store_stats()["x509_ca"]
+        ctx.note(f"certs_context: the platform store holds {platform} CA(s); the context Intellex uses holds {n}")
+
+        ref = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ref.load_verify_locations(cafile=certifi.where())
+        want = ref.cert_store_stats()["x509_ca"]
+        real = ssl.create_default_context
+        made = []
+
+        def empty(*a, **k):                     # a stock python.org macOS build: nothing in the store
+            e = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            made.append(e)
+            return e
+        certs.context.cache_clear()
+        ssl.create_default_context = empty
+        try:
+            got = certs.context()
+            again = certs.context()
+        finally:
+            ssl.create_default_context = real
+        if got is not made[0] or got.cert_store_stats()["x509_ca"] != want:
+            problems.append(f"an empty store: the context holds {got.cert_store_stats()['x509_ca']} CA(s), expected "
+                            f"certifi's {want}")
+        if got.verify_mode != ssl.CERT_REQUIRED or not got.check_hostname:
+            problems.append("an empty store: verification was turned off instead of CAs found")
+        if again is not got or len(made) != 1:
+            problems.append(f"the context was built {len(made)} times for two calls (it is cached)")
+
+        with open(certifi.where(), encoding="ascii", errors="replace") as f:
+            pem = f.read()
+        one = pem[pem.index("-----BEGIN CERTIFICATE-----"):pem.index("-----END CERTIFICATE-----") + 25]
+
+        def populated(*a, **k):                 # a store with something in it - one CA, so certifi's would show
+            e = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            e.load_verify_locations(cadata=one)
+            made.append(e)
+            return e
+        certs.context.cache_clear()
+        ssl.create_default_context = populated
+        try:
+            got = certs.context()
+        finally:
+            ssl.create_default_context = real
+        if got.cert_store_stats()["x509_ca"] != 1:
+            problems.append(f"a populated store (1 CA) now holds {got.cert_store_stats()['x509_ca']}: it should be "
+                            f"left alone")
+
+        saved = sys.modules.get("certifi")
+        sys.modules["certifi"] = None
+        certs.context.cache_clear()
+        ssl.create_default_context = empty
+        try:
+            got = certs.context()
+        finally:
+            ssl.create_default_context = real
+            sys.modules["certifi"] = saved
+        if got.cert_store_stats()["x509_ca"] != 0 or got.verify_mode != ssl.CERT_REQUIRED or not got.check_hostname:
+            problems.append("no certifi and an empty store: expected the empty context with verification still on")
+    finally:
+        certs.context.cache_clear()
+    check(not problems, "; ".join(problems))
 
 
 if __name__ == "__main__":
