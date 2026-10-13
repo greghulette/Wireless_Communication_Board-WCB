@@ -1721,6 +1721,85 @@ def legacy_debug_toggles(bench):
     assert not bad, "; ".join(bad)
 
 
+@test("debug.toggles_ram_only", "Every ?DEBUG form prints its own line - ON/OFF in any case, MAESTRO and KYBER (one flag), PWM, ETM, HCR, MGMT and RAW ON/OFF - a bare or unknown ?DEBUG prints 'Invalid DEBUG command. Use: ?DEBUG ?', and ?DEBUG,ON does not outlive a reboot: a ;S0 typed after it prints no 'Processing input from Serial0' line (1 reboot)", needs=["wcb1"], links=[])
+def debug_toggles_ram_only(bench):
+    """Coverage re-scan 2026-10-12, debug.toggles. processLocalCommand's DEBUG branch (WCB.ino) compares argsUpper, so
+    the forms are case-blind, and only sets RAM flags (debugEnabled, debugMaestro, debugPWMPassthrough, debugETM,
+    debugHCR, debugMGMT, debugRawSerial), which a boot starts false; chars.legacy_debug_toggles covers the old ?D...
+    spellings. processIncomingSerial prints 'Processing input from Serial0: <line>' under debugEnabled, which is how the
+    reboot half tells the flag is gone."""
+    w = usb_wcb(bench)
+    checks = [("?DEBUG,ON", "Debugging enabled"), ("?DEBUG,OFF", "Debugging disabled"),
+              ("?debug,on", "Debugging enabled"), ("?Debug,Off", "Debugging disabled"),
+              ("?DEBUG,MAESTRO,ON", "Maestro debugging enabled"), ("?DEBUG,MAESTRO,OFF", "Maestro debugging disabled"),
+              ("?DEBUG,KYBER,ON", "Maestro debugging enabled"), ("?DEBUG,KYBER,OFF", "Maestro debugging disabled"),
+              ("?DEBUG,PWM,ON", "PWM debugging enabled"), ("?DEBUG,PWM,OFF", "PWM debugging disabled"),
+              ("?DEBUG,ETM,ON", "ETM debugging enabled"), ("?DEBUG,ETM,OFF", "ETM debugging disabled"),
+              ("?DEBUG,HCR,ON", "HCR debugging enabled"), ("?DEBUG,HCR,OFF", "HCR debugging disabled"),
+              ("?DEBUG,MGMT,ON", "MGMT debugging enabled"), ("?DEBUG,MGMT,OFF", "MGMT debugging disabled"),
+              ("?DEBUG,RAW,ON", "Raw serial debugging enabled"), ("?DEBUG,RAW,OFF", "Raw serial debugging disabled"),
+              ("?DEBUG,BOGUS", "Invalid DEBUG command. Use: ?DEBUG ?"), ("?DEBUG", "Invalid DEBUG command. Use: ?DEBUG ?")]
+    bad = []
+    try:
+        for cmd, want in checks:
+            out = [x.rstrip() for x in w.run(cmd)]
+            if want not in out:
+                bad.append(f"{cmd}: {out[:3]}")
+        if not _has(w.run("?DEBUG,ON"), "Debugging enabled"):
+            raise AssertionError("?DEBUG,ON did not confirm before the reboot")
+        t = marker()
+        m = w.send(f";S0{t}")
+        w.dev.expect(rf"^{t}$", timeout=3, since=m)
+        if not _has(w.dev.since(m), f"Processing input from Serial0: ;S0{t}"):
+            bad.append("with ?DEBUG,ON a typed ;S0 printed no 'Processing input from Serial0' line (the control)")
+        w.reboot()
+        t = marker()
+        m = w.send(f";S0{t}")
+        w.dev.expect(rf"^{t}$", timeout=3, since=m)
+        time.sleep(0.3)
+        if _has(w.dev.since(m), "Processing input from Serial0"):
+            bad.append("?DEBUG,ON survived the reboot: a typed ;S0 still printed 'Processing input from Serial0'")
+    finally:
+        for cmd in ("?DEBUG,OFF", "?DEBUG,MAESTRO,OFF", "?DEBUG,PWM,OFF", "?DEBUG,ETM,OFF", "?DEBUG,HCR,OFF",
+                    "?DEBUG,MGMT,OFF", "?DEBUG,RAW,OFF"):
+            w.run(cmd)
+        _peers_back(w)
+    assert not bad, "; ".join(bad)
+
+
+@test("debug.mgmt_input_line_gating", "'Processing input from Serial0' for a ?MGMT line rides ?DEBUG,MGMT, not ?DEBUG,ON: under ?DEBUG,ON alone a typed ?MGMT,BOGUS,1 prints none while ;S0<t> does; under ?DEBUG,MGMT,ON alone ?MGMT,BOGUS,1 prints it and ;S0<t> does not", needs=["wcb1"], links=[])
+def mgmt_input_line_gating(bench):
+    """Coverage re-scan 2026-10-12, debug.gating_of_input_lines. processIncomingSerial (WCB.ino) prints the line it is
+    about to run under debugMGMT when it starts '<lfi>MGMT' (relay traffic, which a Wizard push sends in bursts) and
+    under debugEnabled otherwise. ?MGMT,BOGUS,1 is an unknown sub-command: refused, nothing sent."""
+    w = usb_wcb(bench)
+    bad = []
+
+    def lines(cmd):
+        m = w.send(cmd)
+        time.sleep(0.8)
+        return [x.rstrip() for x in w.dev.since(m)]
+
+    try:
+        for flag, mgmt_shows, plain_shows in (("?DEBUG,ON", False, True), ("?DEBUG,MGMT,ON", True, False)):
+            for off in ("?DEBUG,OFF", "?DEBUG,MGMT,OFF"):
+                w.run(off)
+            w.run(flag)
+            got = any(x == "Processing input from Serial0: ?MGMT,BOGUS,1" for x in lines("?MGMT,BOGUS,1"))
+            if got != mgmt_shows:
+                bad.append(f"under {flag} alone a typed ?MGMT line {'printed' if got else 'did not print'} "
+                           f"'Processing input from Serial0'")
+            t = marker()
+            got = any(x == f"Processing input from Serial0: ;S0{t}" for x in lines(f";S0{t}"))
+            if got != plain_shows:
+                bad.append(f"under {flag} alone a typed ;S0 {'printed' if got else 'did not print'} "
+                           f"'Processing input from Serial0'")
+    finally:
+        for off in ("?DEBUG,OFF", "?DEBUG,MGMT,OFF"):
+            w.run(off)
+    assert not bad, "; ".join(bad)
+
+
 @test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, free heap", needs=["wcb1"], links=[])
 def wifi_status(bench):
     """wcbWifiPrintStatus (WCB_WiFi.cpp). Read-only, so it runs in whatever mode the board is in (W1 hosts an AP on the

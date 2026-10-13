@@ -994,6 +994,27 @@ def self_numeric_local(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("mesh.alias_unknown_line", ";W<a name no board carries>,;S0<t> prints '[;w] No board named \"<name>\" is known — see ?WDP,LIST' and routes nothing: no '[ETM] Sent seq' carries it and <t> is not printed", needs=["wcb1"], links=[])
+def alias_unknown_line(bench):
+    """Coverage re-scan 2026-10-12, wroute.alias_forms. processWCBMessage (WCB.ino) takes a ;W target that does not start
+    with a digit as an alias, matches the board's own alias first and then wdpResolveAlias; 0 (no neighbour carries it)
+    prints the 'No board named' line, naming the live function identifier, and returns before any send."""
+    w = usb_wcb(bench)
+    name = "zzhil" + nonce().lower()
+    t = marker()
+    w.debug("ETM", True)
+    try:
+        m = w.send(f";W{name},;S0{t}")
+        time.sleep(1.5)
+        out = [x.rstrip() for x in w.dev.since(m)]
+    finally:
+        w.debug("ETM", False)
+    want = f'[;w] No board named "{name}" is known — see ?WDP,LIST'
+    assert want in out, f"no {want!r}: {[x for x in out if x.startswith('[;w]')]}"
+    assert not [x for x in out if x.startswith("[ETM] Sent seq") and t in x], "the command went out over ESP-NOW"
+    assert t not in out, "the command ran"
+
+
 @test("mesh.alias_ambiguous_client", "A temporary client advertising W2's alias as its device type makes ;W<alias> ambiguous on W1: refused, nothing reaches W2 S2; once the client has left and been forgotten, the alias reaches W2 again", needs=["wcb1", "probe1"])
 def alias_ambiguous_client(bench):
     """WCB-WP54. wdpResolveAlias (WCB_WDP.cpp) counts every valid neighbor whose alias matches, WCBs and clients alike,

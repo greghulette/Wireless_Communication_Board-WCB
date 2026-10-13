@@ -900,6 +900,103 @@ def bcast_maestro_port_excluded(bench):
             w.send(";M2,getErrors")
 
 
+def _bcast_written(tokens, me):
+    """The ports processBroadcastCommand (WCB.ino) writes a USB-typed broadcast to, from a config chain: output ON, not
+    S1 on a Maestro_Remote board, not the Kyber's port, a PWM output or a port a local Maestro / MP3 / DFPlayer / HCR
+    owns."""
+    up = [t.upper() for t in tokens]
+    out = set()
+    for p in range(1, 6):
+        if f"?BCAST,OUT,S{p},ON" not in up or (p == 1 and "?MAESTRO,REMOTE" in up):
+            continue
+        owned = (rf"^\?KYBER,LOCAL,S{p}\b", rf"^\?MAP,PWM,OUT,S{p}$", rf"^\?MAP,PWM,S\d(,[^,]+)*,(W{me})?S{p}(,|$)",
+                 rf"^\?MAESTRO,M\d:W{me}S{p}:", rf"^\?MP3,S{p}:", rf"^\?DFP,S{p}:", rf"^\?HCR,PORT,S{p}:")
+        if any(re.match(rx, t) for rx in owned for t in up):
+            continue
+        out.add(p)
+    return out
+
+
+@test("input.bcast_debug_lines", "Under ?DEBUG,ON a broadcast typed on USB prints 'Broadcasting command:', one 'Sent to SerialN:' for exactly the ports the chain lets it write, 'Sent to S0/USB:' only with S0 echo on, and 'Broadcasted via ESP-NOW:'; with S5 output forced on, a Maestro, an MP3 Trigger, a DFPlayer and an HCR there each give 'Skipping S5 (<device> port)' instead of a write (W1, WDP off; no reboot)", needs=["wcb1"], links=[])
+def bcast_debug_lines(bench):
+    """Coverage re-scan 2026-10-12, bcast.debug_lines. processBroadcastCommand (WCB.ino) skips a port silently for the
+    Maestro_Remote S1, the Kyber port, a PWM output, the source and an output flag that is off, then names a Maestro /
+    MP3 Trigger / DFPlayer / HCR port it skips under debugEnabled, and prints 'Sent to SerialN' for each write. Each
+    device sits on W1 S5 for a moment with WDP off (pwm.p_guard_device_ports' pattern), with S5's output forced on so
+    the device term is what skips it; each kind's baseline route is re-sent or the kind cleared, Maestro 5 is cleared,
+    and S5's baud, flags and label are replayed from the baseline."""
+    from suites.s14_pwm import _no_pwm, _require_free_ports
+    from suites.s22_maestro_kyber import _m_lines, _wdp_off
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    _no_pwm(bench, 1)
+    _require_free_ports(bench, 1, "S5")
+    hosted = [t for t in bench.config_tokens(1) if t.upper().startswith(("?HCR,", "?MP3,", "?DFP,"))
+              and not re.match(r"^\?(HCR|MP3|DFP),REMOTE,W\d+$", t, re.I)]
+    if hosted:
+        raise Skip(f"W1 already hosts a device: {hosted}")
+    problems = []
+
+    def broadcast():
+        t = marker()
+        m = w.send(t)
+        w.dev.expect(rf"^Broadcasted via ESP-NOW: {t}$", timeout=3, since=m)
+        time.sleep(0.3)
+        return t, [x.rstrip() for x in w.dev.since(m)]
+
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        if len(lines) > 8 or any(re.match(r"^\?MAESTRO,M5:", x, re.I) for x in lines):
+            raise Skip("W1 needs a free Maestro slot and no Maestro 5")
+        s5_tokens = [x for x in before[1] if re.match(r"^\?(BAUD,S5,|BCAST,(IN|OUT),S5,|LABEL,S5,)", x, re.I)]
+        want = _bcast_written(before[1], me)
+        with _wdp_off(w, before[1]):
+            try:
+                w.debug(None, True)
+                t, out = broadcast()
+                sent = {int(x[len("Sent to Serial")]) for x in out if re.match(rf"^Sent to Serial\d: {t}$", x)}
+                if f"Broadcasting command: {t}" not in out:
+                    problems.append("no 'Broadcasting command:' line")
+                if sent != want:
+                    problems.append(f"'Sent to SerialN' for S{sorted(sent)}, the chain lets it write S{sorted(want)}")
+                if (f"Sent to S0/USB: {t}" in out) != ("?BCAST,OUT,S0,ON" in before[1]):
+                    problems.append("the 'Sent to S0/USB' line does not follow the S0 echo flag")
+                if _has(out, "Skipping S"):
+                    problems.append(f"a plain broadcast printed {[x for x in out if 'Skipping' in x]}")
+                for kind, cmd, ok, name in (
+                        ("MAESTRO", "?MAESTRO,M5:W1S5:9600", "✓ Maestro 5: Local S5 at 9600 baud (slot", "Maestro"),
+                        ("MP3", "?MP3,S5:9600:V64", "[MP3] Configured: S5 at 9600 baud", "MP3 Trigger"),
+                        ("DFP", "?DFP,S5:9600:V0", "[DFP] Configured: S5 at 9600 baud", "DFPlayer"),
+                        ("HCR", "?HCR,PORT,S5:9600", "[HCR] Configured on S5 at 9600 baud", "HCR")):
+                    if kind == "HCR" and not _has(w.run("?HCR,POLL,OFF"), "[HCR] Poll interval = 0s (off)"):
+                        raise AssertionError("?HCR,POLL,OFF did not confirm")
+                    out = w.run(cmd)
+                    if not _has(out, ok):
+                        raise AssertionError(f"setup: {cmd} printed {out}")
+                    w.run("?BCAST,OUT,S5,ON")
+                    t, out = broadcast()
+                    if f"Skipping S5 ({name} port)" not in out:
+                        problems.append(f"with {kind} on S5: {[x for x in out if x.startswith(('Skipping', 'Sent to Serial5'))]}")
+                    if f"Sent to Serial5: {t}" in out:
+                        problems.append(f"with {kind} on S5 the broadcast was written to S5")
+                    if kind == "MAESTRO":
+                        w.run("?MAESTRO,CLEAR,M5:W1S5")
+                    else:
+                        route = token(before[1], f"?{kind},REMOTE,")
+                        w.run(route if route else f"?{kind},CLEAR")
+            finally:
+                w.debug(None, False)
+                w.run("?MAESTRO,CLEAR,M5:W1S5")
+                for kind in ("DFP", "MP3", "HCR"):
+                    route = token(before[1], f"?{kind},REMOTE,")
+                    w.run(route if route else f"?{kind},CLEAR")
+                if not token(before[1], "?LABEL,S5,"):
+                    w.run("?LABEL,CLEAR,S5")
+                for x in s5_tokens:
+                    w.run(x)
+    assert not problems, "; ".join(problems)
+
+
 @test("input.bcast_dfp_port_excluded", "A DFPlayer port is excluded from broadcasts and its input is not read as commands", needs=["wcb1"])
 def bcast_dfp_port_excluded(bench):
     s2, s3, s4, s5 = link(bench, 1, "S2"), link(bench, 1, "S3"), link(bench, 1, "S4"), link(bench, 1, "S5")

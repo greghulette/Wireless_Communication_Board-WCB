@@ -228,6 +228,88 @@ def help_data_bearing_exempt(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("help.top_level_spellings", "'??' and '? ?' print the top-level command reference, as ?, ?HELP and ?help do; the mixed-case ?Help is not a help spelling and answers 'Unknown command: Help' (characterisation)", needs=["wcb1"], links=[])
+def help_top_level_spellings(bench):
+    """Coverage re-scan 2026-10-12, help.top_level_forms. processLocalCommand (WCB.ino) gives the reference for an empty
+    message, '?', 'HELP' or 'help' exactly - so '??' (the message '?') is one, and '? ?' is the trailing-'?' shortcut on
+    '? ' (trimmed to '?', no topic, so the reference: the line 'Unknown command' itself suggests it). 'Help' matches
+    neither spelling and no verb, so it reaches the legacy table's 'Unknown command'. wcb.help_forms covers ?, ?HELP
+    and ?help."""
+    w = usb_wcb(bench)
+    bad = [cmd for cmd in ("??", "? ?") if not _has(w.run(cmd, timeout=8), HELP_HEAD)]
+    out = [x.rstrip() for x in w.run("?Help", timeout=8)]
+    assert not bad, f"no command reference for {bad}"
+    assert "Unknown command: Help" in out and not _has(out, HELP_HEAD), f"?Help printed {out[:3]}"
+
+
+HELP_TOPICS = (('DEBUG', 'Usage: ?DEBUG,<command>[,value]'),
+              ('MAP', 'Usage: ?MAP,<type>,<options>'),
+              ('BAUD', 'Usage: ?BAUD,Sx,<rate>'),
+              ('LABEL', 'Usage: ?LABEL,Sx,<text>  /  ?LABEL,CLEAR,Sx  /  ?LABEL,CLEAR,ALL'),
+              ('BCAST', 'Usage: ?BCAST,<IN/OUT>,Sx,<ON/OFF>  /  ?BCAST,RESET'),
+              ('KYBER', 'Usage: ?KYBER,<command>'),
+              ('ETM', 'Usage: ?ETM,<command>[,value]'),
+              ('MAC', 'Usage: ?MAC,<octet>,<hex_value>'),
+              ('EPASS', 'Usage: ?EPASS,<password>'),
+              ('WCB', 'Usage: ?WCB,<number>'),
+              ('WCBQ', 'Usage: ?WCBQ,<quantity>'),
+              ('MAESTRO', 'Usage: ?MAESTRO,<command>[,options]'),
+              ('MP3', 'Usage: ?MP3,<command>[,options]'),
+              ('DFP', 'Usage: ?DFP,<command>[,options]   (config/query)'),
+              ('DFPLAYER', 'Usage: ?DFP,<command>[,options]   (config/query)'),
+              ('HCR', 'Usage: ?HCR,<command>[,options]   (config/query)'),
+              ('WLED', 'Usage: ?WLED,<command>[,options]   (config/query)'),
+              ('MGMT', 'Usage: ?MGMT,<verb>,<target WCB>[,...]'),
+              ('OTA', 'Firmware Update (OTA)'),
+              ('OTALOCAL', 'Firmware Update (OTA)'),
+              ('VAR', 'User Variables + Conditional Execution'),
+              ('SEQ', 'Usage: ?SEQ,<command>[,key[,value]]'),
+              ('STATS', 'Usage: ?STATS  /  ?STATS,RESET  /  ?STATS,RPT,...'),
+              ('WIFI', 'Usage: ?WIFI[,<mode>[,<ssid>,<password>]]'),
+              ('WDP', 'Usage: ?WDP[,<subcommand>]'),
+              ('DELIM', '  Sets the command delimiter character used to chain multiple'),
+              ('FUNCCHAR', 'Usage: ?FUNCCHAR,<character>'),
+              ('CMDCHAR', 'Usage: ?CMDCHAR,<character>'),
+              ('NVS', 'Usage: ?NVS'),
+              ('ERASE', 'Usage: ?ERASE,NVS'),
+              ('LED', 'Usage: ?LED,PIN,<gpio_number>'),
+              ('HW', 'Usage: ?HW,<version>'))
+
+
+@test("help.topic_pages", "Every one of the 32 topic spellings (?DEBUG? ... ?HW?, DFPLAYER and OTALOCAL included) prints its own page - its Usage line or, for OTA, VAR and DELIM, its heading - and never the top-level reference", needs=["wcb1"], links=[])
+def help_topic_pages(bench):
+    """Coverage re-scan 2026-10-12, help.topic_pages. printCommandHelp (WCB_Help.cpp) upper-cases the topic and prints
+    one page per branch; an unknown topic falls through to the reference. help.corrected_pages reads single corrected
+    lines from nine pages; this asks for every page once. '?<TOPIC>?' has no comma, so even the data-bearing verbs
+    (SEQ, MGMT, WIFI, DELIM ...) take the help shortcut. Read-only."""
+    w = usb_wcb(bench)
+    bad = []
+    for topic, line in HELP_TOPICS:
+        out = [x.rstrip() for x in w.run(f"?{topic}?", timeout=8)]
+        if line not in out:
+            bad.append(f"?{topic}? lacks {line.strip()!r}")
+        if _has(out, HELP_HEAD):
+            bad.append(f"?{topic}? printed the top-level reference")
+    assert not bad, "; ".join(bad)
+
+
+@test("misc.reboot_mixed_case_unknown", "?reboot and ?REBOOT are the only spellings: a mixed-case ?Reboot answers 'Unknown command: Reboot' and W1 does not queue a restart or reboot within 6 s (characterisation)", needs=["wcb1"], links=[])
+def reboot_mixed_case_unknown(bench):
+    """Coverage re-scan 2026-10-12, reboot.deferred. The legacy table (processLocalCommand, WCB.ino) matches 'reboot'
+    and 'REBOOT' exactly, and no new-format branch takes REBOOT, unlike the verbs matched through rootUpper. Whether
+    ?Reboot should be accepted is a product call; this pins what the firmware does. etm.reboot_* and friends cover the
+    deferred restart itself."""
+    w = usb_wcb(bench)
+    m = w.send("?Reboot")
+    time.sleep(6.0)
+    out = [x.rstrip() for x in w.dev.since(m)]
+    rebooted = w.rebooted_since(m) or any(x.startswith(("Reboot queued", "Rebooting now")) for x in out)
+    if rebooted:
+        w.wait_boot(m, timeout=30)
+    assert not rebooted, "?Reboot queued a restart"
+    assert "Unknown command: Reboot" in out, f"?Reboot printed {out[:3]}"
+
+
 @test("persist.baud_label_validation", "?BAUD and ?LABEL refusals: no rate, an unknown rate, a port outside 1-5, a soft port above 115200; the soft-port warning above 57600, where the rate still applies (put back at once); ?LABEL without text, an unknown form, a bad CLEAR target, and a port outside 1-5, which ?LABEL and the old ?SLCS spelling now name (F7); ?LABEL,CLEAR,ALL clears all five, put back from the baseline", needs=["wcb1"], links=[])
 def baud_label_validation(bench):
     """The ?BAUD and ?LABEL handlers (WCB.ino), updateBaudRate and saveSerialLabelToPreferences (WCB_Storage.cpp).

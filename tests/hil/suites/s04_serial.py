@@ -6,8 +6,8 @@ import re
 import time
 
 from hil.runner import test
-from hil.wcb import WCB
-from suites.common import config_guard, link, marker, usb_wcb, wire
+from hil.wcb import WCB, chain_crc
+from suites.common import config_guard, link, marker, token, usb_wcb, wire
 
 NEEDS = ["wcb1", "probe1"]
 
@@ -331,3 +331,168 @@ def timer_stop_group_and_forms(bench):
     if any(re.search(stop, x) for x in w.dev.since(wm)):
         problems.append("?STOP,x printed the stop line")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ coverage re-scan 2026-10-12, low-risk rows
+def _out(w, line, wait=0.8):
+    """dev.send a line and return W1's console lines after it, rstripped (for lines that print and return)."""
+    m = w.dev.mark()
+    w.dev.send(line)
+    time.sleep(wait)
+    return [x.rstrip() for x in w.dev.since(m)]
+
+
+@test("serial.chk_chain_not_timed", "A ?-first chain holding a ;T and a ^?CHK is not a timer chain: ?VERSION^;S1a^;T800^;S1b^?CHK<crc> verifies, its ;T answers 'Invalid Serial Command' once, and a and b reach S1 together, not 800 ms apart (characterisation)", needs=NEEDS)
+def chk_chain_not_timed(bench):
+    """Coverage re-scan 2026-10-12, parse.chk_excludes_timer. isTimerChain / funcFirstChainIsTimed (WCB.ino) scan a
+    chain that starts with the function identifier with checksumBars: a <lfi>CHK token makes it false, so the chain goes
+    through the checksum gate (parseCommandsAndEnqueue), which has no timer: parseCommandsNoChecksum enqueues the ;T800
+    token as a command, and processCommandCharcter answers 'Invalid Serial Command'. A verified chain cannot carry a
+    delay; this pins that limitation."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    a, b = marker("a"), marker("b")
+    chain = f"?VERSION^;S1{a}^;T800^;S1{b}"
+    m, wm = probe.dev.mark(), w.dev.mark()
+    w.send(f"{chain}^?CHK{chain_crc(chain)}")
+    probe.expect_bytes(ch, b.encode(), timeout=3, since=m)
+    time.sleep(0.5)
+    out = [x.rstrip() for x in w.dev.since(wm)]
+    gap = probe.time_of(ch, b.encode(), m) - probe.time_of(ch, a.encode(), m)
+    bench.note(f"a -> b {gap} ms")
+    assert any("Command checksum VERIFIED" in x for x in out), "the chain did not verify"
+    assert sum(x == "Invalid Serial Command" for x in out) == 1, \
+        f"{sum(x == 'Invalid Serial Command' for x in out)} 'Invalid Serial Command' line(s), not 1 for the ;T800"
+    assert gap < 300, f"b came {gap} ms after a: the checksummed chain ran its ;T as a delay"
+
+
+@test("serial.timer_sum_across_comment", "Consecutive ;T delays with a *** comment between them still add up: ;S1a^;T600^***n^;T600^;S1b puts b about 1200 ms after a", needs=NEEDS)
+def timer_sum_across_comment(bench):
+    """Coverage re-scan 2026-10-12, timer.sum_consecutive. parseCommandGroups (command_timer.cpp) drops a comment token
+    before the IF gate and adds each delay to the group being built (delayAfterPrevious +=), so a comment between two
+    delays leaves the group empty and the second delay adds to the first; serial.timer_sum is the case without it."""
+    a, b = marker("a"), marker("b")
+    gap = _timer_gap(bench, f";S1{a}^;T600^***{marker('n')}^;T600^;S1{b}", a, b, timeout=4)
+    bench.note(f"timer gap {gap} ms")
+    assert 1100 <= gap <= 1500, f"gap {gap} ms, expected ~1200"
+
+
+@test("serial.timer_trailing_delay_dropped", "A chain ending in a delay with nothing after it (;S1a^;T3000) is over once a has gone out: a chain typed 300 ms later prints no 'replaced mid-run' and runs its own ;T100 (c to d about 100 ms)", needs=NEEDS)
+def timer_trailing_delay_dropped(bench):
+    """Coverage re-scan 2026-10-12, timer.trailing_delay_dropped. parseCommandGroups (command_timer.cpp) pushes a group
+    only when it holds a command, so a trailing ;T3000 opens a group that is never pushed; processCommandGroups ends
+    the chain (commandTimerModeEnabled false) after a's group, and the next chain finds nothing running to replace."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    a, c, d = marker("a"), marker("c"), marker("d")
+    m, wm = probe.dev.mark(), w.dev.mark()
+    w.send(f";S1{a}^;T3000")
+    probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+    time.sleep(0.3)
+    w.send(f";S1{c}^;T100^;S1{d}")
+    probe.expect_bytes(ch, d.encode(), timeout=3, since=m)
+    time.sleep(0.5)
+    gap = probe.time_of(ch, d.encode(), m) - probe.time_of(ch, c.encode(), m)
+    said = [x.rstrip() for x in w.dev.since(wm) if "replaced mid-run" in x]
+    bench.note(f"c -> d {gap} ms")
+    assert not said, f"the second chain replaced the first: {said[0]!r}"
+    assert 60 <= gap <= 400, f"d came {gap} ms after c, expected ~100"
+
+
+@test("serial.timer_debug_lines", "Under ?DEBUG,ON a timer chain ;S0a^;T200^;S0b prints '[TimerGroup 1] Executing command: ;S0a', '[TimerGroup 2] Executing command: ;S0b' and 'Timer command sequence complete.', in that order", needs=["wcb1"], links=[])
+def timer_debug_lines(bench):
+    """Coverage re-scan 2026-10-12, timer.debug_group_lines. processCommandGroups (command_timer.cpp) prints each fired
+    command under debugEnabled, with its 1-based group number, and the completion line when the last group has run.
+    ?DEBUG is RAM only and is turned off again in a finally."""
+    w = usb_wcb(bench)
+    a, b = marker("a"), marker("b")
+    try:
+        w.debug(None, True)
+        m = w.send(f";S0{a}^;T200^;S0{b}")
+        w.dev.expect(r"Timer command sequence complete\.", timeout=4, since=m)
+        out = [x.rstrip() for x in w.dev.since(m)]
+    finally:
+        w.debug(None, False)
+    want = [f"[TimerGroup 1] Executing command: ;S0{a}", f"[TimerGroup 2] Executing command: ;S0{b}",
+            "✅ Timer command sequence complete."]
+    i = 0
+    for x in out:
+        if i < len(want) and x == want[i]:
+            i += 1
+    assert i == len(want), f"missing {want[i]!r} (in order) among {[x for x in out if 'Timer' in x]}"
+
+
+@test("serial.payload_trimmed", ";S1,  <t>  ^... and ;S1  <t2> write exactly '<t>\\r' and '<t2>\\r': the optional comma goes and the payload is trimmed both ends", needs=NEEDS)
+def payload_trimmed(bench):
+    """Coverage re-scan 2026-10-12, serialcmd.write_port. processSerialMessage (WCB.ino) strips one comma after the port
+    digit and then trims the payload, so leading spaces never reach the device; the chain splitter trims each token's
+    ends first. serial.comma covers the comma alone."""
+    probe, ch = wire(bench, 1, "S1")
+    t, t2 = marker("t"), marker("u")
+    m = probe.dev.mark()
+    usb_wcb(bench).send(f";S1,  {t}  ^;S1  {t2}")
+    probe.expect_bytes(ch, t2.encode(), timeout=3, since=m)
+    time.sleep(0.4)
+    got = probe.received(ch, m)
+    assert got == f"{t}\r{t2}\r".encode(), f"S1 got {got!r}"
+
+
+@test("serial.nondigit_port_usb", ";SX,<t> (a letter where the port digit goes) prints <t> on USB and nothing else: toInt reads the port as 0, the USB console (characterisation)", needs=NEEDS)
+def nondigit_port_usb(bench):
+    """Coverage re-scan 2026-10-12, serialcmd.port_range. processSerialMessage (WCB.ino) takes the port from
+    message.substring(1, 2).toInt(), which is 0 for a letter, and 0 is the USB console: no range error. serial.bad_port
+    covers ;S7."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    t = marker()
+    m = probe.dev.mark()
+    out = _out(w, f";SX,{t}")
+    assert t in out, f";SX,{t} did not print {t} on USB: {out[-3:]}"
+    assert not [x for x in out if "Invalid" in x], f";SX printed {[x for x in out if 'Invalid' in x]}"
+    assert t.encode() not in probe.received(ch, m), ";SX wrote to S1"
+
+
+@test("serial.invalid_command_forms", "A bare ;S, ;Setx (a ;Se... that is not ;SEQ) and an unknown verb ;Zx each answer exactly one 'Invalid Serial Command' and write nothing to S1", needs=NEEDS)
+def invalid_command_forms(bench):
+    """Coverage re-scan 2026-10-12, serialcmd.dispatch_s_vs_seq and serialcmd.invalid_serial_command.
+    processCommandCharcter (WCB.ino) hands a token to processSerialMessage only when it is longer than one character and
+    its second is not e/E (;SEQ<key> is a recall, isSeqRecall); every other letter without a branch, ;Z included, ends
+    in its 'Invalid Serial Command' line. 'Invalid serial message format.' is unreachable (known: WCB-WP59)."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    problems = []
+    m = probe.dev.mark()
+    for line in (";S", f";Set{marker()}", f";Z{marker()}"):
+        out = _out(w, line)
+        n = sum(x == "Invalid Serial Command" for x in out)
+        if n != 1:
+            problems.append(f"{line} printed {n} 'Invalid Serial Command' line(s): {out[-3:]}")
+    time.sleep(0.3)
+    if probe.received(ch, m):
+        problems.append(f"S1 got {probe.received(ch, m)!r}")
+    assert not problems, "; ".join(problems)
+
+
+@test("serial.debug_sent_lines", "Under ?DEBUG,ON ;S5<t> prints 'Sent to Serial5 (<S5's label>): <t>' and ;S0<t2> prints <t2> then 'Sent to USB: <t2>'", needs=["wcb1"], links=[])
+def debug_sent_lines(bench):
+    """Coverage re-scan 2026-10-12, serialcmd.debug_sent_lines. processSerialMessage (WCB.ino) names the port with
+    getSerialLabel (WCB_Storage.cpp: 'Serial5 (<label>)', or 'Serial5' with none) under debugEnabled. S5 is given a
+    throwaway label when it has none; config_guard checks it is gone again."""
+    w = usb_wcb(bench)
+    t, t2 = marker("t"), marker("u")
+    with config_guard(bench, 1) as before:
+        lab = token(before[1], "?LABEL,S5,")
+        label = lab.split(",", 2)[2] if lab else "HILLAB"
+        try:
+            if not lab:
+                w.run(f"?LABEL,S5,{label}")
+            w.debug(None, True)
+            out5 = _out(w, f";S5{t}")
+            out0 = _out(w, f";S0{t2}")
+        finally:
+            w.debug(None, False)
+            if not lab:
+                w.run("?LABEL,CLEAR,S5")
+    assert f"Sent to Serial5 ({label}): {t}" in out5, f";S5 under ?DEBUG,ON printed {[x for x in out5 if 'Sent' in x]}"
+    i = out0.index(t2) if t2 in out0 else -1
+    assert i >= 0 and f"Sent to USB: {t2}" in out0[i + 1:], f";S0 under ?DEBUG,ON printed {out0[-4:]}"
