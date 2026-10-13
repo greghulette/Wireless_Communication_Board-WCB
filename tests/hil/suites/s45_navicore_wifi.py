@@ -1349,6 +1349,12 @@ def refuse_short_password(bench):
     if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip(f"{NOT_WINDOWS_SKIP}: this test's fresh scan and its join attempt are the PC's own, and off Windows "
                    f"the harness joins nothing")
+    if not wlan.ON_WINDOWS:
+        # realtek_scan reads the menu directly, without realtek_on_ap's readiness check: a locked screen failed this
+        # test instead of skipping it (full run 20261013-021405). Ask first, before NaviCore's password changes.
+        why = wlan.realtek_ready()
+        if why:
+            raise Skip(why)
     _reboot_too(bench)
     adapter = _spare_adapter(bench) if wlan.ON_WINDOWS else None
     nc = _nc(bench)
@@ -1801,6 +1807,10 @@ def ap_ssid_change_at_boot(bench):
     _reboot_too(bench)
     if not wlan.ON_WINDOWS and not wlan.realtek_enabled(bench):
         raise Skip("off Windows the scan and the join need the Realtek adapter (bench.json wifi_switch: realtek)")
+    if not wlan.ON_WINDOWS:
+        why = wlan.realtek_ready()       # _ssid_listed reads the menu directly: a locked screen must skip, not fail
+        if why:
+            raise Skip(why)
     adapter = _spare_adapter(bench) if wlan.ON_WINDOWS else None
     nc = _nc(bench)
     _restartable(nc)
