@@ -1558,6 +1558,88 @@ def store_full(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("seq.move_does_not_fit", "A sequence a fallback boot saved in NVS that does not fit the full store stays in NVS: the next boot says \"[SEQ] 'HILNF' does not fit in the sequence store: it stays in the settings store, unused.\" and 'Moved 0', ?SEQ,NAMES and ?SEQ,GET do not see it and stored_cmds still holds it; once the fill is cleared, the boot after moves it ('Moved 1') and it reads back exactly (3 reboots)", needs=["wcb1"], links=[])
+def move_does_not_fit(bench):
+    """Coverage re-scan 2026-10-12, seq.move_nvs_to_file (the does-not-fit arm). moveNvsSequences (WCB_SeqStore.cpp)
+    writes the file's records, then each NVS sequence while size + key + value + 2 stays within SEQ_FILE_MAX; one that
+    would pass it prints the 'does not fit' line, is counted as stayed, and keeps its place in NVS's key list, so it
+    moves at a later boot with room. The fill is seq.store_full's (1000/200/40-character ;S0 + comment values until a
+    40-character save is refused), the NVS sequence 200 characters, saved on a ?DEBUG,SEQNVS boot as in
+    seq.store_moves_from_nvs. The phantom, over-3999 and line-break arms cannot be reached: a fallback save refuses each
+    (nvsPut, saveStoredCommandsToPreferences), and only older firmware or a failed list rewrite left them in NVS."""
+    w = usb_wcb(bench)
+    n0, b0, _ = _store_or_skip(w)
+    e0 = _stored_cmds(w)
+    key, value = "HILNF", f";S0{marker('n')}^***" + "y" * 180
+    keys, problems = [], []
+    on_nvs = in_nvs = moved = False
+    with config_guard(bench, 1):
+        _clear_seq(w, key)
+        try:
+            n = 0
+            for size in (1000, 200, 40):
+                while n < 60:
+                    n += 1
+                    k = f"HILNF{n:02d}"
+                    head = f";S0{marker('f')}^***"
+                    if _has(w.run(f"?SEQ,SAVE,{k},{head}{'x' * (size - len(head))}", timeout=8), f"Stored: Key='{k}'"):
+                        keys.append(k)
+                        continue
+                    break
+            full = _store(w)
+            bench.note(f"{len(keys)} fill sequence(s); the store then {full}")
+            if full[1] + len(key) + len(value) + 2 <= full[2]:
+                raise AssertionError(f"setup: the store {full} still has room for {len(key) + len(value) + 2} bytes")
+            if not _has(w.run("?DEBUG,SEQNVS"), "The next boot keeps stored sequences in NVS"):
+                raise AssertionError("?DEBUG,SEQNVS was not accepted")
+            m = w.reboot()
+            on_nvs = True
+            if not any(NVS_BOOT in x for x in w.dev.since(m)):
+                raise AssertionError("the ?DEBUG,SEQNVS boot did not say it keeps sequences in NVS")
+            if not _has(w.run(f"?SEQ,SAVE,{key},{value}", timeout=8), f"Stored: Key='{key}'"):
+                raise AssertionError(f"setup: the fallback boot did not store {key}")
+            in_nvs = True
+            m = w.reboot()
+            on_nvs = False
+            boot = [x.rstrip() for x in w.dev.since(m) if x.startswith("[SEQ]")]
+            want = f"[SEQ] '{key}' does not fit in the sequence store: it stays in the settings store, unused."
+            if want not in boot:
+                problems.append(f"the boot after did not say {key} does not fit: {boot}")
+            if "[SEQ] Moved 0 sequence(s) from the settings store into the sequence store." not in boot:
+                problems.append(f"the boot after did not report moving 0: {boot}")
+            _, _, names = _names(w)
+            if key in names:
+                problems.append(f"{key}, left in NVS, is listed by ?SEQ,NAMES")
+            if _seqval(w, key) != f"[MGMT:SEQVAL,1]{key},NOTFOUND,":
+                problems.append(f"{key}, left in NVS, reads {_seqval(w, key)!r}")
+            if e0 is not None and _stored_cmds(w) <= e0:
+                problems.append(f"stored_cmds is back to {_stored_cmds(w)} entries: NVS let go of {key}")
+            _clear_seq(w, *keys)
+            keys = []
+            m = w.reboot()
+            boot = [x.rstrip() for x in w.dev.since(m) if x.startswith("[SEQ]")]
+            if "[SEQ] Moved 1 sequence(s) from the settings store into the sequence store." not in boot:
+                problems.append(f"with room again the boot did not move {key}: {boot}")
+            else:
+                moved = True
+            if _seqval(w, key) != f"[MGMT:SEQVAL,1]{key},OK,{value}":
+                problems.append(f"after the move {key} reads {_seqval(w, key)!r}")
+            if e0 is not None and _stored_cmds(w) != e0:
+                problems.append(f"after the move stored_cmds holds {_stored_cmds(w)} entries, not {e0}")
+        finally:
+            if on_nvs:                                      # NVS's copy goes before a boot that would move it
+                _clear_seq(w, key)
+                in_nvs = False
+                w.reboot()
+            _clear_seq(w, *keys)
+            if in_nvs and not moved and e0 is not None and _stored_cmds(w) != e0:
+                w.reboot()                                  # the fill is gone: this boot moves it into the store
+            _clear_seq(w, key)
+        if _store(w)[:2] != (n0, b0):
+            problems.append(f"after the clears the store reads {_store(w)[:2]}, not {(n0, b0)}")
+    assert not problems, "; ".join(problems)
+
+
 @test("seq.store_moves_from_nvs", "Sequences a boot on the store's NVS fallback saved (?DEBUG,SEQNVS) move into the store at the next boot: it says how many, a key both held takes NVS's value in its own place, a new one goes last, each reads back exactly, and stored_cmds is back to its size before; on the fallback boot the store's own sequences are unseen (2 reboots)", needs=["wcb1"], links=[])
 def store_moves_from_nvs(bench):
     """seqStoreBegin -> moveNvsSequences (WCB_SeqStore.cpp). NVS only holds a sequence while the file exists when a

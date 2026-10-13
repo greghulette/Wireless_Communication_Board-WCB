@@ -744,6 +744,91 @@ def chain_restore_funcchar(bench):
     assert not problems, "; ".join(problems)
 
 
+# ============================================================ the chain's token order (coverage re-scan 2026-10-12)
+# collectConfigCommands (WCB.ino) emits one family after another; each family's rank, in emit order. A verb is matched by
+# its prefix only, so a message can name a family without quoting the token (?WIFI and ?EPASS carry secrets).
+_ORDER = (("HW", r"\?HW,"), ("LED,PIN", r"\?LED,PIN,"), ("MAC,2", r"\?MAC,2,"), ("MAC,3", r"\?MAC,3,"),
+          ("WCB", r"\?WCB,"), ("ALIAS", r"\?ALIAS,"), ("WCBQ", r"\?WCBQ,"), ("WCBCH", r"\?WCBCH,"), ("WIFI", r"\?WIFI,"),
+          ("PEERSLIVE", r"\?PEERSLIVE,"), ("EPASS", r"\?EPASS,"), ("DELIM", r"\?DELIM,"), ("FUNCCHAR", r"\?FUNCCHAR,"),
+          ("CMDCHAR", r"\?CMDCHAR,"), ("Kyber release", r"\?(MAESTRO,REMOTE|KYBER,CLEAR)$"), ("BAUD", r"\?BAUD,S[1-5],"),
+          ("LABEL", r"\?LABEL,S[1-5],"), ("BCAST,OUT", r"\?BCAST,OUT,S[0-5],"), ("BCAST,IN", r"\?BCAST,IN,S[1-5],"),
+          ("MAP,SERIAL", r"\?MAP,SERIAL,"), ("MAESTRO", r"\?MAESTRO,M\d"), ("MP3", r"\?MP3,"), ("DFP", r"\?DFP,"),
+          ("HCR", r"\?HCR,"), ("WLED", r"\?WLED,"), ("VAR", r"\?VAR,SET,"), ("KYBER,LOCAL", r"\?KYBER,LOCAL"),
+          ("ETM", r"\?ETM,"), ("CONTROLLER", r"\?CONTROLLER,"), ("WDP", r"\?WDP,"), ("SEQ,SAVE", r"\?SEQ,SAVE,"),
+          ("MAP,PWM,OUT", r"\?MAP,PWM,OUT,"), ("MAP,PWM", r"\?MAP,PWM,S\d"))
+# Families every chain carries, and the exact token sequence of the fixed ones.
+_ALWAYS = ("HW", "MAC,2", "MAC,3", "WCB", "WCBQ", "WCBCH", "WIFI", "EPASS", "CMDCHAR", "Kyber release", "BAUD",
+           "BCAST,OUT", "BCAST,IN", "ETM")
+_INNER = {"BAUD": [f"?BAUD,S{p}," for p in range(1, 6)],
+          "BCAST,OUT": [f"?BCAST,OUT,S{p}," for p in (1, 2, 3, 4, 5, 0)],
+          "BCAST,IN": [f"?BCAST,IN,S{p}," for p in range(1, 6)],
+          "ETM": ["?ETM,O", "?ETM,TIMEOUT,", "?ETM,HB,", "?ETM,MISS,", "?ETM,BOOT,", "?ETM,COUNT,", "?ETM,DELAY,",
+                  "?ETM,CHKSM,"]}
+
+
+def _family(t):
+    return next((k for k, (name, rx) in enumerate(_ORDER) if re.match(rx, t, re.I)), None)
+
+
+def _chain_order_problems(tokens, who):
+    """Problems with the order of one configured chain; names families and verbs, never a token's value. A token that
+    does not start with '?' is the rest of the value before it (a device's ONERR / ONFIN command chain split at '^';
+    group_tokens rejoins only sequence values), so it takes no place of its own."""
+    tokens = [t for t in tokens if t.startswith("?")]
+    p, fams = [], [_family(t) for t in tokens]
+    odd = sorted({t.split(",")[0][:12] for t, f in zip(tokens, fams) if f is None})
+    if odd:
+        p.append(f"{who}: token verb(s) no family claims: {odd}")
+    seen = [f for f in fams if f is not None]
+    for i in range(1, len(seen)):
+        if seen[i] < seen[i - 1]:
+            p.append(f"{who}: a {_ORDER[seen[i]][0]} token comes after a {_ORDER[seen[i - 1]][0]} token")
+            break
+    names = {_ORDER[f][0] for f in seen}
+    p += [f"{who}: no {n} token" for n in _ALWAYS if n not in names]
+    if "PEERSLIVE" in names or "DELIM" in names or "FUNCCHAR" in names:
+        p.append(f"{who}: the configured chain carries a factory-only token")
+    if not tokens or _family(tokens[0]) != 0:
+        p.append(f"{who}: the chain does not start with ?HW")
+    for name, want in _INNER.items():
+        got = [t for t, f in zip(tokens, fams) if f is not None and _ORDER[f][0] == name]
+        if len(got) != len(want) or any(not t.upper().startswith(w) for t, w in zip(got, want)):
+            p.append(f"{who}: the {name} tokens are {[t.split(',')[0] + ',' + t.split(',')[1] for t in got]}, "
+                     f"expected the order {want}")
+    labels = [int(t[8]) for t in tokens if re.match(r"\?LABEL,S[1-5],", t, re.I)]
+    if labels != sorted(labels):
+        p.append(f"{who}: the labels are in port order {labels}")
+    ctl = [t.upper() for t in tokens if t.upper().startswith("?CONTROLLER,")]
+    if ctl and not (len(ctl) in (1, 2) and ctl[0].startswith("?CONTROLLER,ON,") and ctl[1:] in ([], ["?CONTROLLER,OFF"])):
+        p.append(f"{who}: the controller tokens are {ctl}")
+    wdp = [t.upper() for t in tokens if t.upper().startswith("?WDP,")]
+    if wdp not in ([], ["?WDP,OFF"], ["?WDP,AUTOJOIN,OFF"], ["?WDP,OFF", "?WDP,AUTOJOIN,OFF"]):
+        p.append(f"{who}: the WDP tokens are {wdp}")
+    return p
+
+
+@test("backup.chain_order", "Every bench WCB's configured chain follows collectConfigCommands' order: ?HW first (?LED,PIN next on HW 3.x), identity, ?WIFI (present on every board, OFF included), ?EPASS, ?CMDCHAR, the Kyber release (?MAESTRO,REMOTE or ?KYBER,CLEAR) before the first ?BAUD, BAUD S1-S5, labels by port, BCAST OUT S1-S5 then S0, BCAST IN S1-S5, serial mappings, the Maestro / MP3 / DFP / HCR / WLED / VAR lines, ?KYBER,LOCAL after the last ?MAESTRO, the eight ?ETM tokens in order, the controller, the WDP OFF lines, every ?SEQ,SAVE after the ETM block, and the PWM lines last; no factory-only token (read-only)", needs=["wcb1"], links=[])
+def chain_order(bench):
+    """Coverage re-scan 2026-10-12, backup.chain_order. collectConfigCommands (WCB.ino) is the one emitter behind
+    ?backup and the config pull, and its order is the restore order: the Kyber release before the BAUD/BCAST lines so a
+    later release cannot undo them, KYBER,LOCAL after the Maestro lines (?KYBER,LOCAL refuses a local Maestro's port),
+    the sequences after ETM/WDP, ?MAP,PWM last because it reboots. wcb.backup_crc, var.backup_emit_position and
+    wcb.chain_partial_tokens check single tokens; this checks the families' order on every board. Each board's chain
+    is read as config_guard reads it (?backup on its own USB, else ?MGMT,PULL); token values are never quoted."""
+    problems = []
+    for n in bench.wcb_numbers():
+        try:
+            tokens = snapshot(bench, n)
+        except AssertionError as e:
+            problems.append(f"W{n}: chain not read ({str(e)[:80]})")
+            continue
+        problems += _chain_order_problems(tokens, f"W{n}")
+        hw = token(tokens, "?HW,")
+        if hw and hw.split(",")[1] in ("31", "32") and _family(tokens[1]) != 1:
+            problems.append(f"W{n}: HW {hw.split(',')[1]} but ?LED,PIN does not follow ?HW")
+    assert not problems, "; ".join(problems)
+
+
 # ============================================================ a full store: mappings and the device list (WCB-WP42)
 TEN = {"S2": ",".join(f"W{n}S{p}" for n in (3, 4) for p in range(1, 6)),        # boards the bench does not have
        "S3": ",".join(f"W{n}S{p}" for n in (5, 6) for p in range(1, 6)),

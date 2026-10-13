@@ -24,7 +24,7 @@ from contextlib import contextmanager
 
 from hil.runner import Skip, test
 from hil.wcb import WCB, Pull
-from suites.common import Console, Watch, config_guard, link, nonce, usb_wcb
+from suites.common import Console, Watch, config_guard, link, nonce, token, usb_wcb
 from suites.s03_wcb import _at, _clear, _factory_reply, _grow_over, _knob, _reply_problems
 
 SLOTS = {"app0": "010000", "app1": "1f0000"}          # min_spiffs.csv:4-5
@@ -306,6 +306,107 @@ def relay_navicore_brick_guard(bench):
     ack = _relay(w, f"?OTA,BEGIN,20,{s},4096,0", 20, s, timeout=8)
     nav.expect(r"\[OTA\] BEGIN rejected: image chip family 0 != this board 1 \(brick guard\)", timeout=5, since=nm)
     assert ack == (0, 1), f"NaviCore ACKed {ack}"
+
+
+def _unpeer(console, n, autojoin_on):
+    """Take learned peer WCB<n> off a board's ESP-NOW peer table: auto-join off, then ?WDP,FORGET,<n>, which unregisters
+    an out-of-floor peer at once (removeActivePeer, WCB.ino). -> the lines FORGET printed."""
+    if autojoin_on and not _has(_crun(console, "?WDP,AUTOJOIN,OFF", 0.8), "[WDP] auto-join disabled"):
+        raise AssertionError("?WDP,AUTOJOIN,OFF did not confirm")
+    return _crun(console, f"?WDP,FORGET,{n}", 0.8)
+
+
+def _repeer(console, n, autojoin_on, problems, who):
+    """Put learned peer WCB<n> back (?WDP,ADD persists it, as the learn did) and auto-join as it was."""
+    if not _has(_crun(console, f"?WDP,ADD,{n}", 0.8), f"[WDP] added WCB{n} as a peer"):
+        problems.append(f"{who}: ?WDP,ADD,{n} did not confirm")
+    if autojoin_on and not _has(_crun(console, "?WDP,AUTOJOIN,ON", 0.8), "[WDP] auto-join enabled"):
+        problems.append(f"{who}: ?WDP,AUTOJOIN,ON did not confirm")
+
+
+@test("ota.relay_unpeered_boards", "Relay OTA between boards that are not ESP-NOW peers registers the peer on demand: with W3 taken off W1's peer table, W1's relay BEGIN to W3 (a family W3's brick guard refuses) reaches W3 and its ACK comes back ([OTA:ACK,3,<s>,0,1]); with W3 taken off W2's, W3's relay BEGIN to W2 is refused there and W2's ACK reaches W3; neither board prints 'send failed', nothing is erased, and both peers and auto-join are put back", needs=["wcb1", "wcb2", "wcb3"], links=[])
+def relay_unpeered_boards(bench):
+    """Coverage re-scan 2026-10-12, ota.relay_send_peer. otaUnicast (WCB_OTA.cpp) calls otaEnsurePeer, which registers
+    the destination's derived MAC when esp_now_is_peer_exist says it is missing, before every relay frame (the relay's
+    leg) and every ACK (the target's leg); without it esp_now_send returns ESP_ERR_ESPNOW_NOT_FOUND and the frame is
+    lost, which otaUnicast reports as '[OTA] <sub> -> WCB<n> send failed rc=...'. Every other relay test targets W2 (a
+    WCBQ floor peer) or NaviCore (the registered controller), so neither leg ever needed it. Here W3 - a learned peer,
+    above both boards' WCBQ floor - is forgotten with auto-join off, which unregisters it live (removeActivePeer):
+    on W1 for the relay leg (W1 -> W3; W3 keeps W1, a floor peer of every board, for its ACK), and on W2 for the ACK
+    leg (W3 relays from its own console; W2 is a floor peer of W3). Each BEGIN carries the family the target's brick
+    guard refuses (the other one than its ?OTALOCAL,STATUS chip family), so nothing is erased. The full-table failure
+    line needs 20 registered peers (known-blocked: WCB-WP59)."""
+    w = usb_wcb(bench)
+    if 3 not in bench.usb_wcbs():
+        raise Skip("W3 has no USB console here: the ACK leg is typed on it")
+    problems = []
+    with config_guard(bench, 1, 2, 3) as before, Console(bench, 1) as c1, Console(bench, 2) as c2, \
+            Console(bench, 3) as c3:
+        floors = {n: int(token(before[n], "?WCBQ,").split(",")[1]) for n in (1, 2, 3)}
+        auto = {n: "?WDP,AUTOJOIN,OFF" not in before[n] and "?WDP,OFF" not in before[n] for n in (1, 2)}
+        if floors[1] >= 3 or floors[2] >= 3:
+            raise Skip(f"W3 is inside a WCBQ floor (W1 {floors[1]}, W2 {floors[2]}): it is never unregistered there")
+        if floors[3] < 2:
+            raise Skip("W2 is not a floor peer of W3, so W3's relay leg would need the same registration")
+        fam = {}
+        for n, con in ((2, c2), (3, c3)):
+            st = _status(_crun(con, "?OTALOCAL,STATUS"))
+            if st["session"] != "idle" or st["family"] not in (0, 1):
+                raise Skip(f"W{n}: OTA session {st['session']!r}, chip family {st['family']}")
+            fam[n] = st["family"]
+        # the relay leg: W1 -> W3, with W3 off W1's peer table
+        if _has(w.run(";W3,?PEERSLIVE"), "WCB 3 is not a reachable target"):
+            raise Skip("W3 is not a learned peer of W1")
+        try:
+            out = _unpeer(c1, 3, auto[1])
+            if "[PEER] WCB3 unregistered." not in out:
+                raise AssertionError(f"setup: ?WDP,FORGET,3 on W1 printed {out}: W3 is still registered")
+            s = _session_id()
+            bad_family = 1 - fam[3]
+            m, cm = w.dev.mark(), c3.mark()
+            try:
+                ack = _relay(w, f"?OTA,BEGIN,3,{s},4096,{bad_family}", 3, s, timeout=8)
+                if ack != (0, 1):
+                    problems.append(f"relay leg: W3 ACKed {ack}, not (0, 1)")
+            except AssertionError:
+                problems.append("relay leg: no [OTA:ACK,3,...] reached W1 for its BEGIN to an unregistered W3")
+            time.sleep(1.0)
+            failed = [x.rstrip() for x in w.dev.since(m) if "send failed" in x]
+            if failed:
+                problems.append(f"relay leg: W1 printed {failed[0]!r}")
+            want = f"[OTA] BEGIN rejected: image chip family {bad_family} != this board {fam[3]} (brick guard)"
+            if not _has(c3.lines(cm), want):
+                problems.append("relay leg: W3 printed no brick-guard rejection, so the BEGIN never arrived")
+        finally:
+            _repeer(c1, 3, auto[1], problems, "W1")
+        # the ACK leg: W3 -> W2, with W3 off W2's peer table
+        if _has(_crun(c2, ";W3,?PEERSLIVE", 0.8), "WCB 3 is not a reachable target"):
+            problems.append("ACK leg not run: W3 is not a learned peer of W2")
+        else:
+            try:
+                out = _unpeer(c2, 3, auto[2])
+                if "[PEER] WCB3 unregistered." not in out:
+                    raise AssertionError(f"setup: ?WDP,FORGET,3 on W2 printed {out}: W3 is still registered")
+                s = _session_id()
+                bad_family = 1 - fam[2]
+                m2, m3 = c2.mark(), c3.send(f"?OTA,BEGIN,2,{s},4096,{bad_family}")
+                try:
+                    c3.expect(rf"^\[OTA:ACK,2,{s},0,1\]$", timeout=8, since=m3)
+                except AssertionError:
+                    problems.append("ACK leg: W2's ACK to an unregistered W3 never reached it")
+                time.sleep(1.0)
+                want = f"[OTA] BEGIN rejected: image chip family {bad_family} != this board {fam[2]} (brick guard)"
+                if not _has(c2.lines(m2), want):
+                    problems.append("ACK leg: W2 printed no brick-guard rejection, so the BEGIN never arrived")
+                failed = [x.rstrip() for x in c2.lines(m2) + c3.lines(m3) if "send failed" in x]
+                if failed:
+                    problems.append(f"ACK leg: {failed[0]!r}")
+            finally:
+                _repeer(c2, 3, auto[2], problems, "W2")
+        for n, con in ((2, c2), (3, c3)):
+            if _status(_crun(con, "?OTALOCAL,STATUS"))["session"] != "idle":
+                problems.append(f"W{n} was left with an OTA session open")
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ USB input lost to a full RX ring (WCB-WP56 row 2)
