@@ -315,6 +315,11 @@ _FAKE_RESCAN_L = (
     ("kyber_fake_marc_port", "Moving the Marcduino port sets the new port to 9600 with broadcasts on, no ?KYBER line; the picker leaves out the Kyber port (kyber.marc_port)"),
     ("kyber_fake_targets_info", "The Kyber Targets panel lists every board's Maestros, a board pulled later included, or says none are configured (kyber.targets_info)"),
     ("kyber_fake_repush_warning", "A Maestro edit on another board reminds to re-push the Kyber board, once per 30 s (kyber.repush_warning)"),
+    ("audio_fake_hcr_status_button", "The HCR Status button shows only with HCR configured and is enabled only while the board is reachable (audio.hcr_status_button)"),
+    ("wled_fake_remote_rows", "A WLED hosted elsewhere is a read-only row, never pushed, and a live-control target (wled.remote_rows)"),
+    ("mapping_fake_ghost_rows", "A port another board drives as PWM output is a locked ghost row, naming the source once it is loaded (mapping.ghost_rows)"),
+    ("seq_fake_shared_indicator", "A sequence key other boards hold shows 'also on Wx', refreshed on typing, saving, removing and loading (seq.shared_indicator)"),
+    ("seq_fake_buttons_counts", "TEST and SAVE need a connected or relayed board; the key and value counters follow the typing (seq.buttons_counts)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):

@@ -351,3 +351,77 @@ test('wizard.kyber_fake_repush_warning a Maestro edit on another board reminds t
   expect(await warned(m), 'an edit on the Kyber board itself').toEqual([]);
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.audio_fake_hcr_status_button the HCR Status button shows only on a board with HCR configured, and is enabled only while that board is reachable (on USB, or through a connected relay)', async ({ page }) => {
+  // updateHCRStatusBtn (app.js:13190-13199), called from updateConnectionUI and the HCR handlers. The modal is
+  // wizard.editors_fake_live_controls'. Row audio.hcr_status_button.
+  await setup(page);
+  const btn = (n) => page.evaluate((n) => {
+    const b = document.getElementById(`b${n}-btn-hcr-status`);
+    return [b.style.display !== 'none', !b.disabled];
+  }, n);
+  await pullFake(page, 1, board(['HCR,PORT,S2:9600', 'HCR,POLL,10']));
+  await pullFake(page, 2, board([], { wcb: 2 }));
+  await page.evaluate(() => { updateConnectionUI(1, true); updateConnectionUI(2, true); });
+  expect(await btn(1)).toEqual([true, true]);
+  expect(await btn(2), 'no HCR on WCB2').toEqual([false, true]);
+  await page.evaluate(() => { boardConnections[1]._connected = false; updateConnectionUI(1, false); });
+  expect(await btn(1), 'shown, but not while unreachable').toEqual([true, false]);
+  // HCR turned on for WCB2 by hand: the button appears.
+  await edit(page, '#b2-hcr-enable', true);
+  expect((await btn(2))[0]).toBe(true);
+  await edit(page, '#b2-hcr-enable', false);
+  expect((await btn(2))[0]).toBe(false);
+
+  // Through a relay: enabled while the relay is connected.
+  await setup(page);
+  await relayFake(page, 1, { 3: chain(board(['HCR,PORT,S2:9600', 'HCR,POLL,10'], { wcb: 3, wcbq: 3 })) });
+  await page.evaluate(() => updateHCRStatusBtn(3));
+  expect(await btn(3)).toEqual([true, true]);
+  await page.evaluate(() => { boardConnections[1]._connected = false; updateHCRStatusBtn(3); });
+  expect(await btn(3)).toEqual([true, false]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.wled_fake_remote_rows a WLED another board hosts shows as a dim read-only row (host, baud, lock, no pickers), is never pushed, and is offered with the local ones as a live-control target', async ({ page }) => {
+  // populateWLEDsFromConfig, appendRemoteWLEDRow (app.js:3118-3141), updateWLEDSectionUI (3255-3270), syncWLEDsToConfig's
+  // data-remote skip. Row wled.remote_rows.
+  await setup(page);
+  await pullFake(page, 1, board(['BAUD,S1,115200', 'WLED,1:W1S1:115200', 'WLED,2:W2S0:115200']));
+  await holdVerifyPulls(page);
+  const remote = await page.evaluate(() => {
+    const tr = document.querySelector('#b1-wled-tbody tr[data-remote="1"]');
+    return { cells: [...tr.cells].map((c) => c.textContent.trim()), selects: tr.querySelectorAll('select, input').length,
+             lock: tr.querySelector('[title]')?.title, opacity: tr.style.opacity };
+  });
+  expect(remote).toEqual({ cells: ['2', '2', '→ WCB2', '115,200', '🔒'], selects: 0,
+                           lock: 'Hosted on WCB2 — auto-learned from the mesh, managed by that board', opacity: '0.65' });
+  expect(await page.evaluate(() => document.querySelectorAll('#b1-wled-tbody tr').length)).toBe(2);
+  expect(await options(page, 'b1-wled-target')).toEqual(['1', '2']);
+  expect(await shown(page, 'b1-wled-controls')).toBe(true);
+  // Never pushed: untouched, nothing to send; the local table keeps the local WLED only.
+  expect((await push(page, 1, { skipReboot: true })).outcome.reason).toBe('no changes to push');
+  expect(await page.evaluate(() => [boardConfigs[1].wleds.map((w) => w.id), boardConfigs[1].wledRemotes.map((w) => w.id)]))
+    .toEqual([[1], [2]]);
+  // A board with only a remote WLED still gets the controls, for that id.
+  await setup(page);
+  await pullFake(page, 1, board(['WLED,4:W3S0:57600']));
+  expect([await shown(page, 'b1-wled-controls'), await options(page, 'b1-wled-target')]).toEqual([true, ['4']]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.mapping_fake_ghost_rows a port another board drives as a PWM output shows as a locked ghost row - "source unknown" until that board is loaded, then naming it (W1 S1)', async ({ page }) => {
+  // appendPWMOutputGhostRows, findPWMOutputSource, refreshPWMGhostRows (app.js:4542-4607), populateMappingsFromConfig's
+  // refresh of the destination's rows (4612-4633). Row mapping.ghost_rows.
+  await setup(page);
+  const ghosts = () => page.evaluate(() => [...document.querySelectorAll('#b2-mappings-container .pwm-output-ghost')]
+    .map((g) => g.textContent.replace(/\s+/g, ' ').trim()));
+  await pullFake(page, 2, board(['MAP,PWM,OUT,S5'], { wcb: 2 }));
+  expect(await ghosts()).toEqual(['PWM Output S5 ← Source unknown — waiting for source board to come online 🔒']);
+  expect(await text(page, 'b2-s5-claim')).toBe('Managed by PWM');
+  await pullFake(page, 1, board(['MAP,PWM,S1,W2S5']));
+  expect(await ghosts()).toEqual(['PWM Output S5 ← Managed by WCB 1 / Source of PWM signal is W1 S1 🔒']);
+  expect(await page.evaluate(() => document.querySelectorAll('#b1-mappings-container .pwm-output-ghost').length), 'none on the source')
+    .toBe(0);
+  expect(page.wizErrors).toEqual([]);
+});
