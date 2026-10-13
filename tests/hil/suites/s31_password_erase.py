@@ -30,7 +30,7 @@ import time
 from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
 from hil.wcb import WCB, chain_crc, group_tokens, parse_pull_line
-from suites.common import Console, config_guard, link, marker, nonce, padded, prime, snapshot, token, usb_wcb
+from suites.common import Console, Watch, config_guard, link, marker, nonce, padded, prime, snapshot, token, usb_wcb
 from suites.s12_serial_input import _da_forget, _da_scrub, _da_types
 from suites.s18_etm_config_wdp import _chains, _live_chars, _sent
 from suites.s27_identity_destructive import _learned_peers
@@ -960,6 +960,117 @@ def full_map_and_device_save(bench):
     if not warned.get("S2") and not any(warned.get(p) for p in ("S3", "S4")) and da_refused is None:
         raise Skip("the store took every mapping and device-list write, so no refusal path ran (the mappings and the "
                    "device still came back right)")
+
+
+OUT_REFUSED = "⚠️  NVS could not store the broadcast output flags (full? see ?NVS) - they revert at the next reboot"
+IN_REFUSED = "⚠️  NVS could not store the broadcast input flags (full? see ?NVS) - they revert at the next reboot"
+
+
+@test("nvs.full_bcast_flags_warn", "OPT-IN (nvs_fill): on a full NVS, toggling W1 S5's broadcast output and input flags until NVS refuses each write gives 'NVS could not store the broadcast output flags ... they revert at the next reboot' and the input twin; the refused value still applies at once (a typed broadcast reaches S5 or not, a line typed into S5 is blocked or not), and after a reboot each flag is the value NVS last took, then the baseline flags go back (2 reboots)", needs=["wcb1"], links=["W1S5"], opt_in="nvs_fill")
+def full_bcast_flags_warn(bench):
+    """Coverage re-scan 2026-10-12, bcastcmd.nvs_full_warning and storage.broadcast_flags. The ?BCAST handler (WCB.ino)
+    sets the RAM flag and calls saveBroadcastSettingsToPreferences / saveBroadcastBlockSettings (WCB_Storage.cpp),
+    which check every put and print the warning when one failed; the flag runs as set until the next boot loads what
+    NVS holds. NVS fills on the sequence store's NVS fallback (_sequences_into_nvs, _fill_store). A store that refused
+    a 40-character sequence can still take a one-entry int or bool or two, so each flag is flipped until a write is
+    refused (at most 12 flips). The live effect is read on W1 S5: a typed broadcast reaches it only with output ON, and
+    a line typed into it prints 'Broadcast blocked from Serial5' only with input OFF. The sequences are cleared before
+    the reboot that checks what was stored; the baseline ?BCAST tokens are replayed at the end."""
+    s5 = link(bench, 1, "S5")
+    w = usb_wcb(bench)
+    keys, refused, problems = [], [], []
+    on_nvs = rebooted = False
+    with config_guard(bench, 1) as before:
+        flags = [t for t in before[1] if t.upper().startswith("?BCAST,")]
+        for t in ("?BCAST,OUT,S5,ON", "?BCAST,IN,S5,ON"):
+            if t not in before[1]:
+                raise Skip(f"W1's chain lacks {t}")
+        if token(before[1], "?MAP,SERIAL,S5"):
+            raise Skip("W1 maps S5")
+
+        def out_live():
+            t = marker()
+            watch = Watch(s5)
+            w.send(t)
+            time.sleep(1.2)
+            return t.encode() in watch.got(s5)
+
+        def in_blocked():
+            prime(s5)
+            time.sleep(0.3)
+            m = w.dev.mark()
+            s5.send(marker().encode() + b"\r")
+            time.sleep(1.0)
+            return any(x.startswith("Broadcast blocked from Serial5") for x in w.dev.since(m))
+
+        mapped = []
+        try:
+            on_nvs = _sequences_into_nvs(w)
+            if not _fill_store(w, keys, refused):
+                problems.append("NVS never refused a 40-character save; the store did not fill")
+            # A store that refused a 40-character value still has an entry or two, and an int or bool overwrite takes
+            # one entry and frees the old: it would be taken forever. Ten-destination mappings (about 26 one-entry
+            # keys each, their ports' flags set first so a mapping writes nothing else) take the last ones, as in
+            # nvs.full_map_and_device_save, until one is refused.
+            for p in ("S3", "S4", "S2"):
+                if token(before[1], f"?MAP,SERIAL,{p}"):
+                    continue
+                w.run(f"?BCAST,IN,{p},OFF")
+                w.run(f"?BCAST,OUT,{p},OFF")
+                out = w.run(f"?MAP,SERIAL,{p},{TEN[p]}")
+                mapped.append(p)
+                if _has(out, MAP_REFUSED.format(p)):
+                    break
+            stored = {"OUT": True, "IN": True}          # what NVS holds: ON / ON (open) to start
+            live = dict(stored)
+            warned = {}
+            for _ in range(12):
+                for d, warn in (("OUT", OUT_REFUSED), ("IN", IN_REFUSED)):
+                    if d in warned:
+                        continue
+                    live[d] = not live[d]
+                    out = [x.rstrip() for x in w.run(f"?BCAST,{d},S5,{'ON' if live[d] else 'OFF'}")]
+                    if warn in out:
+                        warned[d] = live[d]
+                    else:
+                        stored[d] = live[d]
+                if len(warned) == 2:
+                    break
+            bench.note(f"full store (mappings {mapped}): refused flag writes {warned}; NVS holds OUT {stored['OUT']}, "
+                       f"IN {stored['IN']}")
+            if not warned:
+                raise Skip("NVS took every one of 24 flag writes on the full store: an overwrite of an existing key "
+                           "is refused only when no free or erased entry is left anywhere, which this fill did not reach")
+            if len(warned) < 2:
+                problems.append(f"NVS took every flag write in 12 flips; refused only {sorted(warned)}")
+            if "OUT" in warned and out_live() != warned["OUT"]:
+                problems.append(f"the refused output flag ({'ON' if warned['OUT'] else 'OFF'}) did not apply at once")
+            if "IN" in warned and in_blocked() != (not warned["IN"]):
+                problems.append(f"the refused input flag ({'ON' if warned['IN'] else 'OFF'}) did not apply at once")
+            for k in keys + refused:
+                w.run(f"?SEQ,CLEAR,{k}")
+            keys, refused = [], []
+            w.reboot()
+            rebooted = True
+            after = snapshot(bench, 1)
+            for d in ("OUT", "IN"):
+                want = f"?BCAST,{d},S5,{'ON' if stored[d] else 'OFF'}"
+                if want not in after:
+                    problems.append(f"after the reboot the chain lacks {want} (the value NVS last took)")
+            if "OUT" in warned and out_live() != stored["OUT"]:
+                problems.append("after the reboot S5's output does not follow the stored flag")
+        finally:
+            for k in keys + refused:
+                w.run(f"?SEQ,CLEAR,{k}")
+            for p in mapped:
+                w.run(f"?MAP,SERIAL,CLEAR,{p}")
+            if on_nvs and not rebooted:
+                w.reboot()
+            for p in mapped:                                 # a refused mapping may have come back from NVS in part
+                w.run(f"?MAP,SERIAL,CLEAR,{p}")
+            for t in flags:
+                w.run(t)
+    assert not problems, "; ".join(problems)
 
 
 # ============================================================ the mesh-password window (WCB-WP43)

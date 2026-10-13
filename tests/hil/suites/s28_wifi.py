@@ -104,6 +104,18 @@ def _restore_ap(w, tok, ssid, problems):
 
 
 # ============================================================ setter validation (no opt-in: nothing applies before a reboot)
+def _net80211(w):
+    """The entries ?NVS counts for the WiFi driver's own namespace, nvs.net80211 (0 when it has none). setup() calls
+    WiFi.persistent(false) (WCB.ino) so no WiFi.begin / softAP / mode change writes it; with persistence on, a JOIN's
+    begin stores the station config there (a JOIN retrying every 5 s once grew it from 36 to 95 entries; coverage
+    re-scan 2026-10-12, boot.wifi_persistent_off)."""
+    for x in w.run("?NVS", timeout=6):
+        m = re.match(r"^  nvs\.net80211\s+(\d+)$", x.rstrip())
+        if m:
+            return int(m.group(1))
+    return 0
+
+
 def _derived_ssid(tokens, n):
     """The name wcbWifiDefaultSsid() builds from the chain: 'WCB-<alias>', or 'WCB-<n>' with no alias, cut to 32
     characters (WCB_WiFi.cpp:71-79). An SSID: compared, never printed."""
@@ -321,7 +333,7 @@ def off_and_back(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("wifi.join_w2_ap", "W1 joins W2's access point: JOIN saved for the next boot, then W1 associates on the mesh channel (boot lines, the ?WIFI JOIN block with an address and a WS endpoint, W2 counting a client, the WebSocket ready line) and the mesh still delivers; with wifi_pc ticked as well, the PC joins W2's access point too and ?VERSION is answered over W1's endpoint on its joined address; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes")
+@test("wifi.join_w2_ap", "W1 joins W2's access point: JOIN saved for the next boot, then W1 associates on the mesh channel (boot lines, the ?WIFI JOIN block with an address and a WS endpoint, W2 counting a client, the WebSocket ready line) and the mesh still delivers; W1's nvs.net80211 entry count is the same joined and back on its own access point (WiFi.persistent(false)); with wifi_pc ticked as well, the PC joins W2's access point too and ?VERSION is answered over W1's endpoint on its joined address; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes")
 def join_w2_ap(bench):
     """wcbWifiJoinTry pins the association to meshChannel, and the JOIN state machine verifies the radio stayed there
     (WCB_WiFi.cpp). W2's AP is on the same mesh channel, so the join is expected to settle 'connected'. Once joined,
@@ -341,6 +353,7 @@ def join_w2_ap(bench):
         if _mesh_channel(before[2]) != ch:
             raise Skip("W1 and W2 are on different mesh channels")
         changed = False
+        net0 = _net80211(w)
         try:
             out = w.run(f"?WIFI,JOIN,{ssid2},{pw2}")
             changed = True
@@ -377,11 +390,18 @@ def join_w2_ap(bench):
             if "wifi_pc" in optin.enabled(bench.cfg):
                 _pc_reaches_joined_w1(bench, problems, ssid2, pw2, st.get("IP address", ""))
             _unicast_ok(w, w2s2, problems, "while joined to W2's AP")
+            net1 = _net80211(w)
+            if net1 != net0:
+                problems.append(f"joining W2's access point changed W1's nvs.net80211 from {net0} to {net1} entries: "
+                                f"the WiFi driver is persisting its config")
         finally:
             if changed:
                 _restore_ap(w, tok1, ssid1, problems)
         if _status(w).get("Mode") != "AP":
             problems.append("W1 is not back in AP mode")
+        net2 = _net80211(w)
+        if net2 != net0:
+            problems.append(f"after its own access point came back W1's nvs.net80211 holds {net2} entries, {net0} before")
     assert not problems, "; ".join(problems)
 
 
@@ -966,6 +986,74 @@ def ws_client_slots(bench):
         finally:
             for c in clients:
                 c.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+def _drops(lines, what):
+    """The total N of W1's '[WS] dropped N <what>' report lines (wcbWsService, WCB_WS.cpp)."""
+    return sum(int(m.group(1)) for x in lines for m in [re.match(rf"^\[WS\] dropped (\d+) {what}", x)] if m)
+
+
+@test("ws.drop_reports", "OPT-IN (wifi_pc): the WebSocket endpoint reports what it drops. With W1's loop held by 400 ?VERSION typed on USB, one frame of 40 ;S0 lines overflows the 6-deep inbound queue: every line either runs or is counted by '[WS] dropped N inbound command(s) — queue full or oversized', at least one is dropped. With the loop held again and W2 sending W1 30 long unicasts under ?DEBUG,ETM,ON, the WiFi task's receive lines meet a full output sink: '[WS] dropped N output line(s) — client too slow'", needs=["wcb1", "wcb2"], links=[], opt_in="wifi_pc")
+def ws_drop_reports(bench):
+    """Coverage re-scan 2026-10-12, ws.queue_backpressure and ws.output_tee. wsHandler (httpd task) feeds each line to
+    accFeed, which waits WS_ENQUEUE_WAIT_MS (50 ms) for room in the 6-deep queue and counts a refusal (cmdDrops); the
+    loop runs one queued WebSocket line per pass, and no pass comes while loop() drains a long USB chain. The tee
+    (wcbWsSinkWrite) flushes a full 2 KB sink inline only on the loop task; a byte printed on any other task - the ESP-NOW
+    receive callback's '[ETM] Received seq' and '[ETM] Sent ACK seq' lines under ?DEBUG,ETM,ON - that finds it full drops
+    its whole line and counts it (sinkDrops). Both counts are printed from loop() when it next runs wcbWsService.
+    Nothing here changes a setting: ?DEBUG is RAM only and turned off again."""
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        w2 = WCB(bench.dev(bench.usb_wcbs()[2])) if 2 in bench.usb_wcbs() else None
+        try:
+            # (a) the inbound queue
+            tag = marker("Q")
+            m = w.dev.mark()
+            w.dev.send("^".join(["?VERSION"] * 400))
+            time.sleep(0.6)
+            ws.send_text("".join(f";S0{tag}{k:02d}\n" for k in range(40)))
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and sum(x.count("Software Version:") for x in w.dev.since(m)) < 400:
+                ws.read_until("\x00never\x00", timeout=0.3)
+            _ws_until(ws, lambda t: False, 3.0)
+            out = [x.rstrip() for x in w.dev.since(m)]
+            ran = {k for k in range(40) if f"{tag}{k:02d}" in out}
+            dropped = _drops(out, r"inbound command\(s\)")
+            bench.note(f"ws.drop_reports inbound: {len(ran)} of 40 lines ran, {dropped} reported dropped")
+            if not dropped:
+                problems.append(f"no '[WS] dropped N inbound command(s)' line ({len(ran)} of 40 lines ran)")
+            if len(ran) + dropped != 40:
+                problems.append(f"{len(ran)} lines ran and {dropped} were reported dropped, of 40")
+            # (b) the output tee
+            if w2 is None:
+                problems.append("the output-tee half needs W2's own USB console to send the burst from")
+            else:
+                w.run("?DEBUG,ETM,ON")
+                m = w.dev.mark()
+                w.dev.send("^".join(["?VERSION"] * 600))
+                time.sleep(0.5)
+                w2.send("^".join(f";W1,;S0{marker('T')}{'z' * 120}" for _ in range(30)))
+                deadline = time.monotonic() + 40
+                while time.monotonic() < deadline and sum(x.count("Software Version:") for x in w.dev.since(m)) < 600:
+                    ws.read_until("\x00never\x00", timeout=0.3)
+                _ws_until(ws, lambda t: False, 3.0)
+                w.run("?DEBUG,ETM,OFF")
+                out = [x.rstrip() for x in w.dev.since(m)]
+                received = sum(1 for x in out if x.startswith("[ETM] Received seq") and "from WCB2" in x)
+                dropped = _drops(out, r"output line\(s\) — client too slow")
+                bench.note(f"ws.drop_reports tee: {received} '[ETM] Received' lines on USB, {dropped} output line(s) "
+                           f"reported dropped")
+                if not received:
+                    problems.append("W1 printed no '[ETM] Received seq ... from WCB2' line: the burst never arrived")
+                if not dropped:
+                    problems.append("no '[WS] dropped N output line(s) — client too slow' line")
+        finally:
+            w.run("?DEBUG,ETM,OFF")
+            ws.close()
     _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)
 

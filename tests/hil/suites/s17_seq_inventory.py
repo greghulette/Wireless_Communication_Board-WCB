@@ -1563,7 +1563,7 @@ def store_full(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("seq.move_does_not_fit", "A sequence a fallback boot saved in NVS that does not fit the full store stays in NVS: the next boot says \"[SEQ] 'HILNF' does not fit in the sequence store: it stays in the settings store, unused.\" and 'Moved 0', ?SEQ,NAMES and ?SEQ,GET do not see it and stored_cmds still holds it; once the fill is cleared, the boot after moves it ('Moved 1') and it reads back exactly (3 reboots)", needs=["wcb1"], links=[])
+@test("seq.move_does_not_fit", "On a ?DEBUG,SEQNVS boot ?NVS says 'Sequences: kept in the settings store this boot (?DEBUG,SEQNVS asked for it ...)'. A sequence that fallback boot saved in NVS that does not fit the full store stays in NVS: the next boot says \"[SEQ] 'HILNF' does not fit in the sequence store: it stays in the settings store, unused.\" and 'Moved 0', ?SEQ,NAMES and ?SEQ,GET do not see it and stored_cmds still holds it; once the fill is cleared, the boot after moves it ('Moved 1') and it reads back exactly (3 reboots)", needs=["wcb1"], links=[])
 def move_does_not_fit(bench):
     """Coverage re-scan 2026-10-12, seq.move_nvs_to_file (the does-not-fit arm). moveNvsSequences (WCB_SeqStore.cpp)
     writes the file's records, then each NVS sequence while size + key + value + 2 stays within SEQ_FILE_MAX; one that
@@ -1601,6 +1601,9 @@ def move_does_not_fit(bench):
             on_nvs = True
             if not any(NVS_BOOT in x for x in w.dev.since(m)):
                 raise AssertionError("the ?DEBUG,SEQNVS boot did not say it keeps sequences in NVS")
+            line = next((x.rstrip() for x in w.run("?NVS", timeout=6) if x.startswith("Sequences:")), None)
+            if line != NVS_FALLBACK_LINE:
+                problems.append(f"on the fallback boot ?NVS ends {line!r}, not the fallback line naming ?DEBUG,SEQNVS")
             if not _has(w.run(f"?SEQ,SAVE,{key},{value}", timeout=8), f"Stored: Key='{key}'"):
                 raise AssertionError(f"setup: the fallback boot did not store {key}")
             in_nvs = True

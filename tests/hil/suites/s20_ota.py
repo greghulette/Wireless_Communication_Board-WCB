@@ -781,6 +781,70 @@ def local_baud_invalid(bench):
     assert active["session"] == "ACTIVE id=1  0 / 4096 B", "BAUD touched the session"
 
 
+@test("ota.local_baud_other_rates", "OPT-IN (ota_erase): ?OTALOCAL,BAUD takes 230400 and 1000000 too ([OTA:BAUD,OK,<rate>]); where this host's link carries the rate cleanly, STATUS and ?VERSION answer at it and ABORT brings W1 back to 115200; a rate the link garbles or drops is ABORTed or waited out to the session timeout", needs=["wcb1"], links=[], opt_in="ota_erase")
+def local_baud_other_rates(bench):
+    """Coverage re-scan 2026-10-12, ota.baud_bump. processOtaLocalCommand's BAUD (WCB_OTA.cpp) accepts 115200, 230400,
+    460800, 921600 and 1000000 with a live session; the other tests only ever switch to the fastest rate _host_rate
+    finds (921600 or 460800). Each rate gets its own small session (4 KB erased). Whether the HOST carries a rate is the
+    driver's business (_host_rate's docstring: Apple's CH34x driver carries 1000000 to W1), so a rate it does not carry
+    is noted, W1 is left to its 30 s session timeout, and only a carried rate is driven."""
+    w = usb_wcb(bench)
+    version = w.version()
+    carried, garbled, problems = [], [], []
+    for r in (230400, 1000000):
+        with _local(w):
+            m0 = w.dev.mark()
+            _begin(w, 4096)
+            began = _line_time(w.dev, m0, r"^\[OTA:BEGIN,OK,0\]")
+            try:
+                _bump(w, r)
+            except AssertionError:
+                problems.append(f"?OTALOCAL,BAUD,{r} was not acknowledged OK")
+                continue
+            m = w.dev.mark()
+            w.dev.send("?OTALOCAL,STATUS")
+            time.sleep(1.0)
+            got = [x.rstrip() for x in w.dev.since(m)]
+            # Carried means read cleanly: Apple's CH34x driver passes 230400 to W1's CH9102 with bytes corrupted
+            # (run 20261013-002733: 'Firmware:    6.2.<junk>'), though the board still reads what the host sends.
+            ok = "Session:     ACTIVE id=1  0 / 4096 B" in got and f"Firmware:    {version}" in got
+            if not ok and got:
+                garbled.append(r)
+            if ok:
+                carried.append(r)
+                fast = w.version()
+                m = w.dev.mark()
+                w.dev.send("?OTALOCAL,ABORT")
+                w.dev.expect(r"^\[OTA\] aborted: local abort command \(current app intact\)$", timeout=3, since=m)
+                time.sleep(0.15)
+                w.dev.set_baud(115200)
+                time.sleep(0.1)
+                slow = w.version()
+                if fast != slow:
+                    problems.append(f"?VERSION at {r} {fast!r}, at 115200 {slow!r}")
+            else:
+                w.dev.send("?OTALOCAL,ABORT")          # a garbled link still carries host-to-board: back to 115200
+                time.sleep(0.2)
+                w.dev.set_baud(115200)
+                time.sleep(0.2)
+                w.dev.send("")
+                try:
+                    w.version()
+                except AssertionError:
+                    time.sleep(max(0.0, began + 31.5 - time.monotonic()))   # else the session timeout restores it
+                    w.dev.send("")
+                    time.sleep(0.2)
+                    try:
+                        w.version()
+                    except AssertionError:
+                        w.version()
+    bench.note(f"?OTALOCAL,BAUD driven at {carried}; garbled on this host's link: {garbled}; not answered at all: "
+               f"{[r for r in (230400, 1000000) if r not in carried and r not in garbled]}")
+    assert not problems, "; ".join(problems)
+    if not carried:
+        raise Skip("this host's link carried neither 230400 nor 1000000 (both were acknowledged)")
+
+
 @test("ota.local_baud_timeout_restore", "OPT-IN (ota_erase): the idle timeout at a raised baud restores the board to 115200; BAUD does not refresh the window (~35 s)", needs=["wcb1"], links=[], opt_in="ota_erase")
 def local_baud_timeout_restore(bench):
     w = usb_wcb(bench)

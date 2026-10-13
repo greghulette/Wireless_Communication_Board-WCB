@@ -2280,12 +2280,13 @@ GATED = {
                                      "and reboots W2"),
     **{t: ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard")
        for t in ("wifi.pc_joins_ap_ws", "ws.line_framing", "ws.backup_over_ws", "ws.client_slots",
-                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released")},
+                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released", "ws.drop_reports")},
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "seq.nvs_full_consistency": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
     "nvs.full_map_and_device_save": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
+    "nvs.full_bcast_flags_warn": ("nvs_fill", "fills W1's settings storage with throwaway sequences, then removes them (two extra reboots per test)"),
     "ident.epass_window_gates": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_led_and_tails": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     **{f"ota.{n}": ("ota_erase", _ERASE) for n in (
@@ -2294,7 +2295,7 @@ GATED = {
         "local_write_refreshes_timeout", "local_baud_bump_abort", "local_baud_invalid", "local_baud_timeout_restore",
         "local_baud_rejected_rebegin_restores", "relay_cursor_dup_gap_wrong_session_abort", "relay_teardown_frame_err",
         "relay_end_incomplete_and_verify_fail", "relay_timeout_keepalive", "cross_transport_remote_abort_kills_local",
-        "begin_abandons_config_pull")},
+        "begin_abandons_config_pull", "local_baud_other_rates")},
     "ota.local_sha_corrupt_full": ("ota_full", "erases the whole inactive app slot"),
     "ota.local_full_same_image_wcb1": ("ota_full", "erases and rewrites W1's inactive app slot and switches its boot "
                                                    "slot twice"),
