@@ -229,8 +229,9 @@ for _key, _title in _FAKE_RESCAN:
 # (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
 # devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js), the Connect button,
 # BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js), the shared-port hub and the
-# wrong-slot pull (specs/hub_rescan_fake.spec.js), the flasher's choices and write (specs/flasher_rescan_fake.spec.js).
-# No board and no real port, so CI runs them too.
+# wrong-slot pull (specs/hub_rescan_fake.spec.js), the flasher's choices and write (specs/flasher_rescan_fake.spec.js),
+# the flash and OTA paths around it (specs/flash_ota_rescan_fake.spec.js). No board and no real port, so CI runs them
+# too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -268,6 +269,12 @@ _FAKE_RESCAN_M = (
     ("flasher_fake_image_choice", "The flasher's image set: an update with an unreadable layout stays app-only unless the app outgrew the legacy slot (refused); unreadable, blank or corrupted flash writes the full set; no bootloader files refuses a full flash; ascending order (flasher.image_choice)"),
     ("flasher_fake_fetch", "getBinaryData picks files by suffix, falls back to the legacy S3 bootloader for 16 MB, warns when the 8 MB one is missing (an 8 MB full flash then refused), and with no bootloader/partition files warns loudly and returns app only (flasher.fetch)"),
     ("flasher_fake_write_retry_reset", "A write failing once is retried; twice stops with the recovery steps when boot or partitions were written; progress is weighted per file; the board is reset by afterFlash or a DTR/RTS pulse and the port released (flasher.write_retry_reset)"),
+    ("push_fake_post_flash_general", "The push after a flash or erase restores the pre-flash General fields and sends those, once; the next push reads General as it is (push.post_flash_general_restore)"),
+    ("flash_fake_failure_recovery", "A failed flash reopens the same port; in the setup wizard a board already on the target firmware is pushed its config whole with the pre-flash General, another version told to retry; on Windows the port is closed (retried) first (flash.failure_recovery)"),
+    ("flash_fake_factory_modal", "Factory Reset opens its modal for a USB board (refused relayed or disconnected); Erase NVS + Load Fresh Firmware runs boardGo in factory mode with the push-config box as ticked; Cancel runs nothing (flash.factory_modal)"),
+    ("ota_fake_serial_stream", "An OTA over USB follows the board's cursor (a NAK rewinds), verifies with END, reconnects (direct) or waits on the shared port, and pulls; END failing or the cursor collapsing sends ABORT and restores a raised baud (ota.serial_stream)"),
+    ("ota_fake_relay", "A wireless OTA through a relay frames BEGIN / 192-byte DATA / END by target and session following the target's cursor, re-arms the link and pulls with 12 attempts 8 s later; a non-zero status or collapsed cursor stops it with ABORT (ota.relay)"),
+    ("ota_fake_edges_replay", "Once the last OTA ends, the ETM edges held during it are replayed one board at a time (pull, then terminal re-armed), skipping the OTA's target and a board with no relay; kept while another OTA runs (ota.suppressed_edges_replay)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
