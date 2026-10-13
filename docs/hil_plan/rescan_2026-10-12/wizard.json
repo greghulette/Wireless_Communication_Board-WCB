@@ -3118,9 +3118,11 @@
   "area": "wiz",
   "behaviour": "The Connect & Push tip says 'Or click Use → to pick a port directly', but nothing calls wizPortUse any more: the panel offers Detect, + Authorize and Select by COM# only.",
   "where": "Wizard/app.js Connect & Push tip; wizPortUse",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Found 2026-10-12 building wizard.wiz_fake_connect_step. Product call: restore the port list or drop the sentence.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.wiz_fake_connect_tip"
+  ],
+  "gap": "closed 2026-10-13: Greg's call - the 'Use ->' sentence is dropped (57d9892); wizard.wiz_fake_connect_tip checks it is gone and every button the tip names is offered",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
