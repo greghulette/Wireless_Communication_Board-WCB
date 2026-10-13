@@ -80,4 +80,5 @@ int    seqStoreHash(uint32_t &hash);
 bool   seqListHas(const String &list, const String &key);   // is key an entry of a "k1,k2,...," list
 void   seqStoreReport();         // ?NVS: one "Sequences: ..." line
 void   seqStoreForceNvsNextBoot();          // ?DEBUG,SEQNVS: the next boot runs on the NVS fallback (a test knob)
+int    seqStoreAppendDamaged(char kind);    // ?DEBUG,FAULT,SEQDAMAGE: a raw damaged record at the end (a test knob)
 const char *seqStoreError(int code);        // a short reason for a SEQ_E_* code, for messages

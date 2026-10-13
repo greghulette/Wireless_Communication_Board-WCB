@@ -72,6 +72,8 @@ void wcbWifiStart();
 // Serviced every loop() pass. Non-blocking. Carries a pending JOIN association
 // forward and re-checks that the radio has not drifted off the mesh channel.
 void wcbWifiService();
+// ?DEBUG,FAULT,JOINNOIP: a joined JOIN board drops its association so the knob bites the next one (a test knob).
+void wcbWifiFaultRejoin();
 
 // ---- Status ---------------------------------------------------------------
 // True when an interface is up AND on the mesh channel (i.e. actually usable).

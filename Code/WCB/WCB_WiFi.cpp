@@ -2,6 +2,7 @@
 #include "WCB_WiFi.h"
 #include "WCB_WS.h"           // wcbWsClientCount() for the status block
 #include "WCB_Storage.h"
+#include "WCB_Fault.h"         // ?DEBUG,FAULT,JOINCHAN / JOINNOIP / CHANDRIFT test knobs
 
 #include <WiFi.h>
 #include <esp_heap_caps.h>
@@ -287,7 +288,8 @@ void wcbWifiService() {
             // mesh channel, so joining it is a no-op channel-wise — but if we
             // land anywhere else we are off the mesh, and being deaf is worse
             // than having no WiFi. Hang up rather than sit there silently.
-            const uint8_t ch = ap.primary;
+            // ?DEBUG,FAULT,JOINCHAN: this check reads the AP one channel off the mesh's, once (WCB_Fault.h).
+            const uint8_t ch = faultJoinChan.take() ? (uint8_t)(meshChannel % 11 + 1) : ap.primary;
             if (ch != meshChannel) {
                 Serial.printf("[WIFI] joined \"%s\" but its AP is on channel %u, not %u — "
                               "that is OFF-MESH. Disconnecting.\n",
@@ -304,7 +306,8 @@ void wcbWifiService() {
                 return;
             }
             if (!wifiUp) {
-                if (WiFi.STA.hasIP()) {  // edge — announce once, not every pass
+                // ?DEBUG,FAULT,JOINNOIP hides the address until the arm below has fired.
+                if (WiFi.STA.hasIP() && !faultJoinNoIp.active()) {  // edge — announce once, not every pass
                     wifiUp = true;
                     joinAssocMs = 0;
                     Serial.printf("[WIFI] joined \"%s\" on channel %u after %u attempt(s) — ws://%s/ws\n",
@@ -317,6 +320,7 @@ void wcbWifiService() {
                                   wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_ADDR_MS / 1000));
                     WiFi.disconnect();
                     joinAssocMs = 0;
+                    faultJoinNoIp.arm(false);   // the knob has done its job: the next association is real
                 }
             }
             return;                      // associated: nothing to retry
@@ -353,6 +357,17 @@ void wcbWifiService() {
     // has drifted means every ESP-NOW packet is being dropped with no other
     // symptom, so it is worth naming out loud rather than leaving to be
     // discovered as "the mesh went weird".
+    // ?DEBUG,FAULT,CHANDRIFT (WCB_Fault.h): the radio really moves off the mesh channel for this one check, and back
+    // right after it, so the check below runs on a drifted radio. Only reached with an interface up outside a pending
+    // JOIN (the JOIN branch above returns first): in practice, AP mode.
+    bool driftFault = false;
+    if (wifiUp && faultChanDrift.take()) {
+        const uint8_t off = (uint8_t)(meshChannel % 11 + 1);
+        driftFault = esp_wifi_set_channel(off, WIFI_SECOND_CHAN_NONE) == ESP_OK;
+        Serial.printf("[FAULT] CHANDRIFT: %s channel %u for one drift check\n",
+                      driftFault ? "radio moved to" : "the radio refused to move to", off);
+        if (driftFault) lastChannelWarn = now - CHAN_CHECK_MS;
+    }
     if (wifiUp && (now - lastChannelWarn) >= CHAN_CHECK_MS) {
         lastChannelWarn = now;
         const uint8_t ch = wcbWifiRadioChannel();
@@ -360,6 +375,19 @@ void wcbWifiService() {
             Serial.printf("[WIFI] WARNING: radio is on channel %u but the mesh is on %u — "
                           "this board cannot reach the mesh.\n", ch, meshChannel);
     }
+    if (driftFault) {
+        esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
+        Serial.printf("[FAULT] CHANDRIFT: radio back on channel %u\n", wcbWifiRadioChannel());
+    }
+}
+
+// ?DEBUG,FAULT,JOINNOIP (WCB.ino debugFaultCommand): a joined JOIN board drops its association now, so the knob bites
+// the very next one. WiFi.disconnect(), not disconnect(true): see the off-mesh guard.
+void wcbWifiFaultRejoin() {
+    if (wcbWifiMode != WCB_WIFI_JOIN || joinSettled) return;
+    WiFi.disconnect();
+    wifiUp      = false;
+    joinAssocMs = 0;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

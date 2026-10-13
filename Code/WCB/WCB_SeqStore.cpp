@@ -1,6 +1,7 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_SeqStore.h"
 #include "WCB_Storage.h"     // SEQ_KEY_MAX_LEN, seqKeyReserved
+#include "WCB_Fault.h"       // ?DEBUG,FAULT,SEQREAD / SEQLIST test knobs
 #include <Preferences.h>
 #include <nvs.h>             // nvsRead: a string through the heap
 #include <vector>
@@ -523,8 +524,9 @@ static int nvsRemove(const String &name) {
   // Checked (F9). The value goes first on purpose: on a full NVS, removing it is what frees the room this rewrite
   // needs. If the rewrite still fails, the name stays listed with no value (SEQ_E_LIST, said so by the caller).
   const bool listed = updated != existing;
-  const bool listOk = !listed || (updated.length() ? preferences.putString("key_list", updated) == updated.length()
-                                                   : preferences.remove("key_list"));
+  const bool listOk = !listed || (!faultSeqList.take() &&   // ?DEBUG,FAULT,SEQLIST: this rewrite fails, once
+                                  (updated.length() ? preferences.putString("key_list", updated) == updated.length()
+                                                    : preferences.remove("key_list")));
   preferences.end();
   if (!listOk) return SEQ_E_LIST;
   return removed ? SEQ_OK : SEQ_NOTFOUND;
@@ -835,6 +837,7 @@ bool seqStoreOnFile() { return onFile; }
 
 int seqStoreKeyList(String &list) {
   list = "";
+  if (faultSeqRead.take()) return SEQ_E_IO;   // ?DEBUG,FAULT,SEQREAD: this read fails, once (WCB_Fault.h)
   SeqLock lock;
   if (!onFile) return nvsKeyList(list);
   int rc = mountLocked();
@@ -852,6 +855,7 @@ int seqStoreKeyList(String &list) {
 int seqStoreGet(const String &key, String &value) {
   value = String();
   if (key.length() == 0 || key.length() > SEQ_KEY_MAX_LEN || seqKeyReserved(key)) return SEQ_NOTFOUND;
+  if (faultSeqRead.take()) return SEQ_E_IO;   // ?DEBUG,FAULT,SEQREAD: this read fails, once (WCB_Fault.h)
   SeqLock lock;
   if (!onFile) return nvsGet(key, value);
   const int rc = mountLocked();
@@ -948,6 +952,29 @@ void seqStoreReport() {
 }
 
 void seqStoreForceNvsNextBoot() { seqForceNvs = SEQ_FORCE_NVS; }
+
+// ?DEBUG,FAULT,SEQDAMAGE (a test knob, WCB.ino debugFaultCommand): one raw damaged record at the end of /seqs - what no
+// save can write (LittleFS commits a file only at close, and a failed write leaves it as it was) - so the walks'
+// skip-and-count, ?NVS's 'damaged lines skipped', a rewrite dropping it and an append starting a new line first can
+// be driven on the bench. kind: 'C' a line with no comma, 'E' an empty key, 'L' a key over SEQ_KEY_MAX_LEN, 'N' a
+// line with no comma and no final newline. The next rewrite (a replace or a remove) drops it.
+int seqStoreAppendDamaged(char kind) {
+  SeqLock lock;
+  if (!onFile) return SEQ_E_IO;
+  const int rc = mountLocked();
+  if (rc != SEQ_OK) return rc;
+  const char *line = kind == 'E' ? ",HILDAMAGED\n"
+                   : kind == 'L' ? "HILDAMAGEDLONGKEY,1\n"   // 17 characters of key
+                   : kind == 'N' ? "HILDAMAGEDNONL"
+                                 : "HILDAMAGEDNOCOMMA\n";
+  const int fd = ::open(SEQ_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  if (fd < 0) return errnoCode();
+  SeqWriter w(fd);
+  w.put(line);
+  const int c = ::close(fd);
+  if (w.code != SEQ_OK) return w.code;
+  return c == 0 ? SEQ_OK : errnoCode();
+}
 
 const char *seqStoreError(int code) {
   switch (code) {

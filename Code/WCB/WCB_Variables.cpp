@@ -1,5 +1,6 @@
 #include "WCB_RemoteTerm.h"   // must be first — redirects Serial -> WCBDebugSerial
 #include "WCB_Variables.h"
+#include "WCB_Fault.h"    // ?DEBUG,FAULT,VARNVS test knob
 #include <Preferences.h>
 
 extern char        LocalFunctionIdentifier;
@@ -95,7 +96,7 @@ static bool saveVarsToNVS() {
     blob += String((long)vars[i].value);
     blob += '\n';
   }
-  if (!varPrefs.begin("wcb_vars", false)) {
+  if (faultVarNvs.take() || !varPrefs.begin("wcb_vars", false)) {   // ?DEBUG,FAULT,VARNVS: this open fails, once
     Serial.println("[VAR] ERROR: could not open NVS (wcb_vars) to save");
     return false;
   }

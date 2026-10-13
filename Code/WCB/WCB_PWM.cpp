@@ -1,6 +1,7 @@
 #include "WCB_RemoteTerm.h"  // Must be first — redirects Serial → WCBDebugSerial
 #include "WCB_PWM.h"
 #include "WCB_Storage.h"
+#include "WCB_Fault.h"      // ?DEBUG,FAULT,ESPNOWDOWN test knob
 #include "wcb_pin_map.h"
 #include <Preferences.h>
 #include <sdkconfig.h>
@@ -71,7 +72,7 @@ extern bool espNowInitialized;
 // success, while the remote board was never told. setup() registers the peers right after esp_now_init(), and an
 // ETM send to a peer not yet seen online still goes out and retries.
 bool canSendESPNow() {
-    if (espNowInitialized) return true;
+    if (espNowInitialized && !faultEspNowDown.take()) return true;   // ?DEBUG,FAULT,ESPNOWDOWN: not running, once
     Serial.println("⚠️  ESP-NOW is not running — remote PWM configuration was NOT sent");
     return false;
 }

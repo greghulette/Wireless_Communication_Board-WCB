@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_130953ROCT2026                                  *****////
+///*****                                          Version 6.2.1_131025ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -111,6 +111,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
 #include "WCB_EspNow.h"   // wcbEspNowSend: every ESP-NOW send is paced to the radio (CLAUDE.md rule 16)
 #include "WCB_ConfigParts.h"  // mesh config pull: parts split/framing arithmetic (pure; tests/config_parts_test.cpp)
+#include "WCB_Fault.h"         // ?DEBUG,FAULT,<NAME> test knobs (debugFaultCommand)
 #include "driver/gpio.h"  // clearStaleGpioInterrupts (boot): gpio_intr_disable / gpio_set_intr_type
 #include "hal/gpio_ll.h"  // ...and the GPIO register block it inspects
 
@@ -199,7 +200,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_130953ROCT2026";
+String SoftwareVersion = "6.2.1_131025ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -529,7 +530,8 @@ static inline void enqueuePendingTimerChain(const String& chain, int originEspno
   PendingTimerChainSlot slot;
   slot.longBuf = nullptr;
   if (chain.length() >= sizeof(slot.buf)) {   // was cut to the slot and run (re-scan #22)
-    slot.longBuf = (char *)malloc(chain.length() + 1);
+    slot.longBuf = faultTimerMem.take() ? nullptr   // ?DEBUG,FAULT,TIMERMEM: this copy fails, once (WCB_Fault.h)
+                                        : (char *)malloc(chain.length() + 1);
     if (!slot.longBuf) {
       timerChainsNoMemory++;
       return;
@@ -6251,6 +6253,94 @@ static bool isLegacySerialSetting(const String &m) {
   return true;
 }
 
+// ── ?DEBUG,FAULT,<NAME>[,arg] - test knobs (WCB_Fault.h) ──────────────────────────────────────────────────────────
+// Each drives one failure branch no bench board reaches on its own, so the HIL harness can assert what the firmware
+// does there. The RAM knobs fire once (JOINNOIP holds until it fires) and lapse unfired after WCB_FAULT_ARM_MS;
+// ?DEBUG,FAULT,OFF and a reboot clear them. BAUD0, HWOTHER and SEQDAMAGE write saved state on purpose - a state only
+// older firmware or a damaged flash leaves, which no command can make - and the test that uses one puts it back.
+WcbFault faultTimerMem, faultSeqRead, faultSeqList, faultVarNvs, faultEspNowDown, faultJoinChan, faultJoinNoIp,
+         faultChanDrift;
+
+static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," in upper case
+  struct Knob { const char *name; WcbFault *k; const char *what; };
+  static const Knob knobs[] = {
+    {"TIMERMEM",   &faultTimerMem,   "the next received timer chain too long for a queue slot fails its heap copy"},
+    {"SEQREAD",    &faultSeqRead,    "the next sequence-store read (a key list or one value) fails as unreadable"},
+    {"SEQLIST",    &faultSeqList,    "the next NVS-layout sequence clear fails its list rewrite after the value went"},
+    {"VARNVS",     &faultVarNvs,     "the next persistent variable save cannot open NVS"},
+    {"ESPNOWDOWN", &faultEspNowDown, "the next remote PWM configuration finds ESP-NOW not running"},
+    {"JOINCHAN",   &faultJoinChan,   "the next JOIN association check reads its AP off the mesh channel"},
+    {"JOINNOIP",   &faultJoinNoIp,   "the next JOIN association gets no address (a joined board rejoins now)"},
+    {"CHANDRIFT",  &faultChanDrift,  "the next WiFi drift check runs with the radio moved off the mesh channel"},
+  };
+  if (f == "OFF") {
+    for (const Knob &k : knobs) k.k->arm(false);
+    configPullFaultArm(false);
+    configLineFaultArm(false);
+    Serial.println("[FAULT] All fault knobs disarmed");
+    return;
+  }
+  for (const Knob &k : knobs) {
+    if (f != k.name) continue;
+    k.k->arm(true);
+    if (k.k == &faultJoinNoIp) wcbWifiFaultRejoin();
+    Serial.printf("[FAULT] %s armed: %s (once; lapses in %lu s)\n", k.name, k.what,
+                  (unsigned long)(WCB_FAULT_ARM_MS / 1000));
+    return;
+  }
+  if (f.startsWith("BAUD0,")) {                    // ?DEBUG,FAULT,BAUD0,S<n>: a saved baud of 0, as 483b4d8..f5d758f left
+    String p = f.substring(6);
+    if (p.startsWith("S")) p = p.substring(1);
+    const int port = p.toInt();
+    if (port < 1 || port > 5 || p != String(port)) {
+      Serial.println("[FAULT] BAUD0 needs a port: ?DEBUG,FAULT,BAUD0,S<1-5>");
+      return;
+    }
+    const String key = "Serial" + String(port);
+    bool ok = preferences.begin("serial_baud", false);
+    if (ok) {
+      ok = preferences.putInt(key.c_str(), 0) == sizeof(int32_t);
+      preferences.end();
+    }
+    if (ok) Serial.printf("[FAULT] BAUD0: saved a baud of 0 for Serial%d straight to NVS; it runs at %lu until the next "
+                          "boot, which repairs it to 9600\n", port, baudRates[port - 1]);
+    else    Serial.printf("[FAULT] BAUD0: NVS refused the write for Serial%d - nothing changed\n", port);
+    return;
+  }
+  if (f == "HWOTHER") {                            // a HW version saved for the other chip, as older firmware allowed
+#if CONFIG_IDF_TARGET_ESP32S3
+    const int other = 24;
+#else
+    const int other = 32;
+#endif
+    bool ok = preferences.begin("hw_version", false);
+    if (ok) {
+      ok = preferences.putInt("hw_version", other) == sizeof(int32_t);
+      preferences.end();
+    }
+    if (ok) Serial.printf("[FAULT] HWOTHER: saved HW version %d (the other chip's) straight to NVS; the next boot "
+                          "ignores it and runs with no pin map until ?HW,%d and a reboot\n", other, wcb_hw_version);
+    else    Serial.println("[FAULT] HWOTHER: NVS refused the write - nothing changed");
+    return;
+  }
+  if (f == "SEQDAMAGE" || f.startsWith("SEQDAMAGE,")) {   // one raw damaged record at the end of /seqs
+    const String kind = f.length() > 10 ? f.substring(10) : String("NOCOMMA");
+    const char k = kind == "NOCOMMA" ? 'C' : kind == "EMPTYKEY" ? 'E' : kind == "LONGKEY" ? 'L' : kind == "NONL" ? 'N' : 0;
+    if (!k) {
+      Serial.println("[FAULT] SEQDAMAGE kinds: NOCOMMA (default), EMPTYKEY, LONGKEY, NONL");
+      return;
+    }
+    const int rc = seqStoreAppendDamaged(k);
+    if (rc == SEQ_OK) Serial.printf("[FAULT] SEQDAMAGE: appended a damaged line (%s) to the sequence store\n",
+                                    kind.c_str());
+    else              Serial.printf("[FAULT] SEQDAMAGE: nothing appended (%s)\n",
+                                    seqStoreOnFile() ? seqStoreError(rc) : "the store is in NVS this boot");
+    return;
+  }
+  Serial.println("Invalid FAULT knob. Use: ?DEBUG,FAULT,<TIMERMEM|SEQREAD|SEQLIST|VARNVS|ESPNOWDOWN|JOINCHAN|"
+                 "JOINNOIP|CHANDRIFT|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
+}
+
 void processLocalCommand(const String &message) {
 
     // ---- Help: bare ? or HELP ----
@@ -6381,6 +6471,8 @@ void processLocalCommand(const String &message) {
             configPullFaultArm(false);
             configLineFaultArm(false);
             Serial.println("Config pull fault disarmed");
+        } else if (argsUpper == "FAULT" || argsUpper.startsWith("FAULT,")) {
+            debugFaultCommand(argsUpper.substring(argsUpper.length() > 5 ? 6 : 5));
         } else if (argsUpper == "SEQNVS") {
             // Test knob (RTC memory, never saved): the next boot keeps stored sequences in NVS - the sequence store's
             // fallback - so the HIL harness can run the NVS layout (F9's full-NVS paths, the fill that makes NVS full)
