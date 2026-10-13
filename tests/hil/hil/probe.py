@@ -5,7 +5,8 @@ import time
 from .serialdev import ExpectTimeout
 
 PROBE_BAUD = 921600
-PROBE_MIN_VERSION = 8           # v8 binds a listen-only tap on a soft channel that once had a TX pin (v5-7 failed it
+PROBE_MIN_VERSION = 9           # v9 adds MESH MAESTRO and MESH JOIN TYPE=- (mesh_maestro);
+                                # v8 binds a listen-only tap on a soft channel that once had a TX pin (v5-7 failed it
                                 # with "software serial begin failed", so a tap worked or not by the channel's past);
                                 # v5 holds a re-bound channel's TX line high (tracker #79)
 PROBE_BAD_VERSIONS = ("6",)     # v6 panic-loops whenever a wired WCB reboots (a soft-RX level arm survives a CPU reset, #78)
@@ -294,6 +295,13 @@ class Probe:
         self.bound.clear()
         self.mesh_id = 0
         self.dev.expect(r"BOOT wcb_probe \S+ mac=", timeout=timeout, since=m)
+
+    def mesh_maestro(self, recs):
+        """Advertise [(maestro_id, baud), ...] as Maestros hosted on this client (WDP MAESTRO + MAESTRO_CFG, WCB_Client
+        setMaestroIds); [] clears the advert. A baud off the WDP table goes out as its code: 0 for 0, 0xFF otherwise.
+        wcb_probe 9."""
+        spec = ",".join(f"{int(i)}:{int(b)}" for i, b in recs) or "OFF"
+        return self._cmd(f"MESH MAESTRO {spec}")
 
     def mesh_send(self, target, text, ensured=True):
         return self._cmd(f"MSEND {target} {int(ensured)} {text.encode().hex().upper()}").endswith("1")

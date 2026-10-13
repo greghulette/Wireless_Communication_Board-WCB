@@ -43,7 +43,11 @@
 //   LEVEL <S1-S5> <TX|RX> READ|0|1|Z
 //   STAT | CLEAR
 //   MESH JOIN ID=<n> OCT2=<hex> OCT3=<hex> QTY=<n> PASS=<pw> [CHAN=1] [CHK=1] [TEMP=1] [TYPE=HILProbe]
+//                                          TYPE=- joins with no WDP identity: the probe never advertises (v9)
 //   MESH LEAVE (reboots the probe) | MESH FORGET | MESH STATE
+//   MESH MAESTRO <id>:<baud>[,<id>:<baud>...] | MESH MAESTRO OFF   advertise these Maestros as hosted here (WDP
+//                                          MAESTRO + MAESTRO_CFG, WCB_Client setMaestroIds; a baud off the WDP table,
+//                                          0 included, goes out as its code: 0 for 0, 0xFF for any other) (v9)
 //   MSEND <wcb> <ensured 0|1> <hex text> | MBROADCAST <ensured 0|1> <hex text> | MRAW <wcb> <port> <hex>
 // probe -> host
 //   BOOT wcb_probe <ver> mac=<mac>
@@ -72,7 +76,8 @@
 // (the WCB's patched EspSoftwareSerial, tracker #78). 5: an unbound channel's TX line stays high (unbindChannel,
 // tracker #79). 4: TXSKEW (tracker #78). 3: GPIO ISR service at level 3 (setup()). Otherwise the USB protocol is
 // unchanged from 2.
-static const char *PROBE_VERSION = "8";
+// 9: MESH MAESTRO (advertise Maestros through WDP) and MESH JOIN TYPE=- (no WDP identity, so no adverts of its own).
+static const char *PROBE_VERSION = "9";
 
 // V2.4 header pins — must match wcb_hw_version 24 in Code/WCB/wcb_pin_map.cpp.
 static const int8_t HDR_TX[6] = {-1, 8, 20, 25, 14, 13};
@@ -1038,7 +1043,7 @@ static void handleLine(String line) {
       mesh->setMeshChannel(chan.length() ? (uint8_t)chan.toInt() : 1);
       mesh->setChecksum(chk.length() ? chk.toInt() != 0 : true);
       mesh->setTemporary(temp.length() ? temp.toInt() != 0 : true);
-      mesh->setIdentity(meshType, "wcb_probe-2");
+      mesh->setIdentity(strcmp(meshType, "-") ? meshType : "", "wcb_probe-2");   // "-": no identity, no adverts
       if (!mesh->begin()) {
         Serial.println("ERR WCB_Client begin failed — MESH LEAVE to reboot");
         return;
@@ -1055,6 +1060,34 @@ static void handleLine(String line) {
       Serial.flush();
       delay(50);
       ESP.restart();
+    } else if (sub == "MAESTRO") {
+      // The Maestros a WCB_Client device hosts, as WCBs learn them from its advert (setMaestroIds). The ids and bauds
+      // go out as given: what a receiver does with an id or a rate it cannot use is the thing under test.
+      if (!mesh) { Serial.println("ERR not joined"); return; }
+      uint8_t ids[9];
+      uint32_t bauds[9];
+      uint8_t n = 0;
+      String spec = tok[2];
+      if (!spec.equalsIgnoreCase("OFF")) {
+        int start = 0;
+        while (start < (int)spec.length()) {
+          int comma = spec.indexOf(',', start);
+          if (comma < 0) comma = spec.length();
+          String rec = spec.substring(start, comma);
+          int colon = rec.indexOf(':');
+          long id = colon > 0 ? rec.substring(0, colon).toInt() : -1;
+          if (n >= 9 || id < 0 || id > 255 || colon < 0 || colon + 1 >= (int)rec.length()) {
+            Serial.println("ERR usage: MESH MAESTRO <id>:<baud>[,<id>:<baud>...] (up to 9) | MESH MAESTRO OFF");
+            return;
+          }
+          ids[n] = (uint8_t)id;
+          bauds[n] = (uint32_t)strtoul(rec.substring(colon + 1).c_str(), nullptr, 10);
+          n++;
+          start = comma + 1;
+        }
+      }
+      mesh->setMaestroIds(n ? ids : nullptr, n, n ? bauds : nullptr);
+      Serial.printf("OK MESH MAESTRO n=%u\n", n);
     } else if (sub == "FORGET") {
       if (!mesh) { Serial.println("ERR not joined"); return; }
       mesh->clearLearnedPeers();
@@ -1066,7 +1099,7 @@ static void handleLine(String line) {
           if (mesh->isOnline(i)) online += (online.length() ? "," : "") + String(i);
       Serial.printf("MSTATE id=%u online=%s\n", meshId, online.length() ? online.c_str() : "-");
     } else {
-      Serial.println("ERR usage: MESH JOIN|LEAVE|FORGET|STATE");
+      Serial.println("ERR usage: MESH JOIN|LEAVE|FORGET|STATE|MAESTRO");
     }
 
   } else if (verb == "MSEND" || verb == "MBROADCAST" || verb == "MRAW") {
