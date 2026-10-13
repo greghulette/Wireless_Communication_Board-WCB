@@ -198,3 +198,121 @@ test('intellex.ui_launcher the chooser with fixture ports and droids', async ({ 
   await Promise.all([page.waitForURL(/\/_shell\?view=wcb$/, { timeout: 15_000 }), page.click('#offline')]);
   expect(rec.errors, 'page errors').toEqual([]);
 });
+
+// IX re-scan launcher.connect (launcher.html:647-657 connect): an attach the host refuses leaves the chooser where it
+// is, with the host's words in #status in the error style, and opens nothing.
+test('intellex.ui_launcher_connect_error a refused attach stays on the chooser and says why', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  let reply = { status: 502, json: { ok: false, error: 'HIL refused: COM91 is busy' } };
+  await context.route(/\/_api\/ports(\?|$)/, r => r.fulfill({ json: { ports: PORTS } }));
+  const calls = await hostGuard(context, rec, {
+    identify: (route, req) => route.fulfill({ json: IDENTIFY[req.postDataJSON().port] ||
+                                              { ok: false, version: null, busy: false } }),
+    discover: route => route.fulfill({ json: DISCOVER }),
+    attach: route => route.fulfill({ status: reply.status, json: reply.json }),
+    'open-window': route => route.fulfill({ status: 501, json: { ok: false, error: 'no window backend' } }),
+  });
+  const navigations = [];
+  page.on('framenavigated', f => { if (f === page.mainFrame()) navigations.push(f.url()); });
+  const popups = [];
+  context.on('page', p => popups.push(p.url()));
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await expect.poll(async () => (await rows(page, 'serial')).length, { timeout: 10_000 }).toBe(5);
+  const status = () => page.evaluate(() => {
+    const s = document.getElementById('status');
+    return { text: s.textContent, cls: s.className };
+  });
+
+  for (const view of ['wcb', 'sep']) {
+    await page.click(`.pick[data-view="${view}"]`);
+    await page.locator('#serial .row', { hasText: 'COM91' }).click();
+    const n = calls.filter(c => c.name === 'attach').length;
+    const nav0 = navigations.length;
+    await page.click('#go');
+    await expect.poll(() => calls.filter(c => c.name === 'attach').length, { timeout: 5_000 }).toBe(n + 1);
+    expect(calls.filter(c => c.name === 'attach').pop().body, 'the attach body').toEqual({ kind: 'serial',
+                                                                                         port: 'COM91' });
+    await expect.poll(status, { timeout: 5_000, message: `layout ${view}: the refusal is not shown` })
+      .toEqual({ text: 'HIL refused: COM91 is busy', cls: 'status err' });
+    await page.waitForTimeout(2_000);
+    expect(new URL(page.url()).pathname, `layout ${view}: the page left the chooser`).toBe('/_launcher');
+    expect(navigations.slice(nav0), `layout ${view}: navigated after a refused attach`).toEqual([]);
+    expect(calls.filter(c => c.name === 'open-window').length, `layout ${view}: asked for a second window`).toBe(0);
+    expect(popups, `layout ${view}: opened a window`).toEqual([]);
+  }
+
+  // A refusal with no words: the chooser's own.
+  reply = { status: 502, json: { ok: false } };
+  await page.click('#go');
+  await expect.poll(status, { timeout: 5_000 }).toEqual({ text: 'could not connect', cls: 'status err' });
+  expect(new URL(page.url()).pathname).toBe('/_launcher');
+
+  // And then it works: the same button goes on to the tools (a control that the refusals above left it usable).
+  reply = { status: 200, json: { ok: true, target: 'serial COM91', role: 'navicore' } };
+  await page.click('.pick[data-view="wcb"]');
+  await Promise.all([page.waitForURL(/\/_shell\?view=wcb$/, { timeout: 15_000 }), page.click('#go')]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.maintenance_summary (launcher.html:343-394 paintMaint, :868-901 checkUi, :1176-1191 Update tools):
+// a stale bundled tool shows in the folded summary and in the attention count, and the summary's Update drives the
+// panel's own Update tools button.
+test('intellex.ui_launcher_tools_stale a stale tool is called out in the summary and its Update works', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const ver = (stale, wstale) => ({
+    bundled: 'HILNC-a', published: stale ? 'HILNC-b' : 'HILNC-a', stale, checked: true, reason: '',
+    wcb: { bundled: 'HILWIZ-a', published: wstale ? 'HILWIZ-b' : 'HILWIZ-a', stale: wstale, checked: true, reason: '' },
+  });
+  let current = ver(true, true);
+  await context.route(/\/_api\/webui-version(\?|$)/, r => r.fulfill({ json: current }));
+  await context.route(/\/_api\/ports(\?|$)/, r => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, { discover: route => route.fulfill({ json: { candidates: [] } }) });
+  const updates = [];
+  await context.route(/\/_api\/update-webui(\?.*)?$/, (route, req) => {
+    updates.push(new URL(req.url()).search);
+    rec.fulfilled.add(req.url());
+    current = ver(false, false);           // what the host reports once the update has landed
+    return route.fulfill({ json: { ok: true, version: 'HILNC-b', wcbVersion: 'HILWIZ-b', log: 'HIL stub' } });
+  });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  const mline = (id) => page.evaluate((i) => {
+    const el = document.getElementById(i);
+    const a = el.querySelector('a');
+    return { text: el.querySelector('.t').textContent, warn: el.querySelector('.dot').classList.contains('warn'),
+             action: a.style.display === 'none' ? null : a.textContent };
+  }, id);
+  await expect.poll(() => mline('m-tools'), { timeout: 10_000, message: 'the stale-tool summary line' })
+    .toEqual({ text: 'config tool + Wizard update available', warn: true, action: 'Update' });
+  await expect.poll(() => text(page, '#attntext'), { timeout: 10_000 }).toBe('3 things need attention');
+  const uiver = await page.evaluate(() => document.getElementById('uiver').textContent);
+  expect(uiver, 'the panel\'s tool line').toBe('config tool HILNC-a — update available (HILNC-b)WCB Wizard HILWIZ-a — '
+                                               + 'update available (HILWIZ-b)');
+  expect(await page.evaluate(() => document.getElementById('maint').open), 'the summary opened the folded panel')
+    .toBe(false);
+  expect(await page.evaluate(() => document.getElementById('maint-sum').textContent), 'the folded panel\'s own line')
+    .toContain('config tool + Wizard update available');
+
+  // One stale tool is named alone.
+  current = ver(false, true);
+  await page.click('#rescan');
+  await expect.poll(() => mline('m-tools'), { timeout: 10_000 })
+    .toEqual({ text: 'Wizard update available', warn: true, action: 'Update' });
+  current = ver(true, false);
+  await page.click('#rescan');
+  await expect.poll(() => mline('m-tools'), { timeout: 10_000 })
+    .toEqual({ text: 'config tool update available', warn: true, action: 'Update' });
+
+  // The summary's Update is the panel's Update tools: both tools (no ?tool=), then the line clears.
+  await page.click('#m-tools-a');
+  await expect.poll(() => updates.length, { timeout: 5_000, message: 'Update did not POST /_api/update-webui' }).toBe(1);
+  expect(updates[0], 'Update tools asks for both tools').toBe('');
+  expect(await page.evaluate(() => document.getElementById('maint').open), 'Update opened the panel').toBe(true);
+  await expect.poll(() => text(page, '#status'), { timeout: 10_000 }).toBe('updated — config tool HILNC-b, Wizard HILWIZ-b');
+  // The summary's action stays offered when the tools are current (paintMaint passes 'Update' either way).
+  await expect.poll(() => mline('m-tools'), { timeout: 10_000 })
+    .toEqual({ text: 'Tools up to date', warn: false, action: 'Update' });
+  await expect.poll(() => text(page, '#attntext'), { timeout: 10_000 }).toBe('2 things need attention');
+  expect(rec.errors, 'page errors').toEqual([]);
+});

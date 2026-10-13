@@ -21,8 +21,8 @@ import subprocess
 import sys
 import urllib.parse
 
-from hil.intellex import (IntellexHost, require, run_intellex_py, run_intellex_test, run_venv, seed_firmware,
-                          seed_wiki, stage)
+from hil.intellex import (FW_REPOS, IntellexHost, require, run_intellex_py, run_intellex_test, run_venv,
+                          seed_firmware, seed_wiki, stage)
 from hil.runner import Skip, test
 from hil.ws import WsClient, WsEndpoint
 
@@ -1507,3 +1507,141 @@ def nc_fetch_store_unit(bench):
     (:266-371) with flash.reachable and flash._get answered in the venv process; the cache is the stage's src/firmware.
     intellex.flash_rules_unit covers the offline pairing rules."""
     run_intellex_py(bench, "intellex.nc_fetch_store_unit", "flash_units.py", args={"group": "nc_fetch_store"})
+
+
+# settings.json as a hand edit, a crash or another version could leave it -> (label, bytes, or None for a directory).
+_BAD_SETTINGS = (("not JSON", b"not json"), ("binary garbage", b"\xff\xfe\x00{"),
+                 ("invalid stored names", b'{"branch": {"wcb": "a b", "navicore": "../x"}}'),
+                 ("a JSON list", b"[]"), ("a JSON string", b'"main"'), ("JSON null", b"null"),
+                 ("a branch that is not a map", b'{"branch": "wcb"}'), ("a branch list", b'{"branch": ["main"]}'),
+                 ("names that are not strings", b'{"branch": {"wcb": 5, "navicore": null}}'),
+                 ("a directory where the file goes", None))
+
+
+@test("intellex.settings_branch_fallback", "A corrupt, unreadable or wrongly shaped settings.json never stops the host: "
+      "it starts, /_api/branches says main for both products, the shim and /_api/firmware are served, and POST "
+      "/_api/branch replaces the bad file with a good one (IX re-scan settings.branch_fallback)")
+def settings_branch_fallback(bench):
+    """Intellex src/settings.py branch() and branches() (:46-54, :82-90): 'falls back to main on anything unset or
+    malformed rather than raising: a corrupt settings file must not make the app unable to flash'. branch() runs for
+    every page (the shim prelude, host.py shim_js), /_api/branches, /_api/firmware and both flashers. One host per
+    shape of bad file, each in its own stage's appdata. A directory in the file's place cannot be written either, so
+    Set answers 400 there ('could not write the settings file')."""
+    require(bench)
+    problems = []
+    for label, data in _BAD_SETTINGS + (("control: wcb on WIFI", b'{"branch": {"wcb": "WIFI"}}'),):
+        sd = stage(bench, "intellex.settings_branch_fallback", tools="none")
+        f = os.path.join(sd, "appdata", "Intellex", "settings.json")
+        if data is None:
+            os.makedirs(f)
+        else:
+            with open(f, "wb") as fh:
+                fh.write(data)
+        want = {"navicore": "main", "wcb": "WIFI" if label.startswith("control") else "main"}
+        try:
+            host = IntellexHost(bench, sd).start()
+        except AssertionError as e:
+            problems.append(f"{label}: the host did not start ({str(e).splitlines()[0]})")
+            continue
+        try:
+            st, br = host.json("GET", "/_api/branches")
+            if st != 200 or br != want:
+                problems.append(f"{label}: /_api/branches {st} {br}, expected {want}")
+            st, _, js = host.http("GET", "/_intellex.js")
+            if st != 200 or not js.startswith(("window.__intellexBranches = " + json.dumps(
+                    want, separators=(",", ":"))).encode()):
+                problems.append(f"{label}: /_intellex.js {st} {js[:60]!r} - every page loses its shim")
+            st, fw = host.json("GET", "/_api/firmware")
+            if st != 200 or (fw.get("wcb") or {}).get("branch") != want["wcb"]:
+                problems.append(f"{label}: /_api/firmware {st} {str(fw)[:80]}")
+            st, body = host.json("POST", "/_api/branch", {"product": "wcb", "branch": "hil-fixed"})
+            st2, br = host.json("GET", "/_api/branches")
+            if data is None:
+                if st != 400 or "could not write" not in str(body.get("error")) or br != want:
+                    problems.append(f"{label}: Set answered {st} {body}, branches {br}; expected 400 'could not write "
+                                    f"the settings file' and nothing changed")
+            elif st != 200 or br != {"navicore": "main", "wcb": "hil-fixed"}:
+                problems.append(f"{label}: Set wcb=hil-fixed answered {st} {body}, then /_api/branches {br} - the bad "
+                                f"file was not replaced")
+        finally:
+            host.stop()
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.fwcache_branch_slash", "The firmware cache for a branch with a slash: feature/x, cached under its "
+      "flattened name feature__x, is reported by /_api/firmware and served by the GitHub proxy offline, while "
+      "feature/y is not; a frozen build reads each set from the user directory first, per set, and writes there "
+      "(IX re-scan fwcache.key_and_lookup)")
+def fwcache_branch_slash(bench):
+    """Intellex src/fwcache.py _key (:81-89), load/load_listing (:92-105, :196-204) and _dirs (:65-78). On a staged host
+    whose settings.json names feature/x for both products, with a cache seeded for feature/x (seed_firmware flattens
+    it as fwcache._key does). The frozen two-location precedence is tests/intellex/py/fwcache_units.py group
+    frozen_lookup, on the same stage."""
+    require(bench)
+    tid = "intellex.fwcache_branch_slash"
+    branch = "feature/x"
+    sd = stage(bench, tid, tools="none", settings={"branch": {"wcb": branch, "navicore": branch}})
+    files = _fw_files()
+    for product, fs in files.items():
+        d = seed_firmware(sd, product, branch, fs)
+        if os.path.basename(d) != "feature__x":
+            raise AssertionError(f"seed_firmware filed {branch} under {os.path.basename(d)}, not feature__x")
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, summary = host.json("GET", "/_api/firmware")
+        for product, fs in files.items():
+            s = (summary or {}).get(product) or {}
+            if s.get("branch") != branch or s.get("count") != len(fs):
+                problems.append(f"/_api/firmware {product}: {s}, expected branch {branch} with {len(fs)} files")
+        st, br = host.json("GET", "/_api/branches")
+        if br != {"navicore": branch, "wcb": branch}:
+            problems.append(f"/_api/branches: {br}")
+        for product, (owner, repo, path) in FW_REPOS.items():
+            q = urllib.parse.urlencode({"owner": owner, "repo": repo, "path": path, "ref": branch})
+            st, hdr, body = host.http("GET", f"/_api/gh/contents?{q}", timeout=30)
+            if st != 200 or _hdr(hdr, "x-intellex-source") != "cache":
+                problems.append(f"{product} listing for {branch}: {st}, X-Intellex-Source "
+                                f"{_hdr(hdr, 'x-intellex-source')!r}")
+                continue
+            for f in json.loads(body.decode("utf-8")):
+                st, hdr, data = host.http("GET", f["download_url"], timeout=30)
+                if st != 200 or data != files[product].get(f["name"]):
+                    problems.append(f"{product} {f['name']} for {branch}: {st}, {len(data)} bytes")
+            q = urllib.parse.urlencode({"owner": owner, "repo": repo, "path": path, "ref": "feature/y"})
+            st, _, _ = host.http("GET", f"/_api/gh/contents?{q}", timeout=30)
+            if st != 502:
+                problems.append(f"{product} listing for the uncached feature/y: {st}, not 502")
+    try:
+        run_intellex_py(bench, tid, "fwcache_units.py", args={"group": "frozen_lookup"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"frozen (fwcache_units.py): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.fwcache_atomic_unit", "fwcache.store writes through a .part file and renames it, records the image in "
+      "the manifest with the time it arrived, never stores an empty payload, and a failing rename leaves nothing under "
+      "the build's name and raises nothing (IX re-scan fwcache.atomic_store)")
+def fwcache_atomic_unit(bench):
+    """tests/intellex/py/fwcache_units.py group atomic: Intellex src/fwcache.py store/store_listing (:108-140,
+    :183-193) in a scratch directory inside the stage, pathlib.Path.replace made to fail for the last part."""
+    run_intellex_py(bench, "intellex.fwcache_atomic_unit", "fwcache_units.py", args={"group": "atomic"})
+
+
+@test("intellex.ui_launcher_connect_error", "The chooser's Connect when the host refuses the attach: the page stays on "
+      "/_launcher with the host's words in #status in the error style ('could not connect' when it gives none), nothing "
+      "opens in either layout, and the next Connect still works (Playwright, attach fulfilled; IX re-scan "
+      "launcher.connect)")
+def ui_launcher_connect_error(bench):
+    """Intellex src/launcher.html connect() (:647-657), openTools() (:628-645); tests/intellex/specs/ui_launcher.spec.js.
+    The attach is fulfilled in the page, so nothing is attached."""
+    run_intellex_test(bench, "intellex.ui_launcher_connect_error")
+
+
+@test("intellex.ui_launcher_tools_stale", "A stale bundled tool shows in the chooser's folded summary ('config tool + "
+      "Wizard update available', each alone when only one is) and in the attention count, the panel line says 'update "
+      "available (<published>)', and the summary's Update runs the panel's Update tools for both tools and clears the "
+      "line (Playwright, webui-version and update-webui fulfilled; IX re-scan launcher.maintenance_summary)")
+def ui_launcher_tools_stale(bench):
+    """Intellex src/launcher.html paintMaint (:343-394), checkUi (:868-901), Update tools (:1176-1191);
+    tests/intellex/specs/ui_launcher.spec.js. Nothing reaches GitHub: both routes are fulfilled in the page."""
+    run_intellex_test(bench, "intellex.ui_launcher_tools_stale")
