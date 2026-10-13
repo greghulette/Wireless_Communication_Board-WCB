@@ -6,7 +6,7 @@
 // under the harness by id (s30_wizard.py). Verify pulls are held back where a spec pushes more than once
 // (lib/rescan.js holdVerifyPulls).
 const { test, expect } = require('../lib/fixtures');
-const { board, pullFake, push, edit } = require('../lib/fake');
+const { board, chain, pullFake, push, edit, relayFake } = require('../lib/fake');
 const { setup, holdVerifyPulls, toastMark, toastsSince, sent } = require('../lib/rescan');
 
 const rowIds = (page, tbody) => page.evaluate((tbody) => [...document.querySelectorAll(`#${tbody} tr`)].map((r) => r.id), tbody);
@@ -175,9 +175,10 @@ test('wizard.mapping_fake_rows a mapping card: the destination WCB list covers t
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.seq_fake_validate_if a sequence with IF inside a ;t or ;w payload is refused on Test and on Save/Update with a toast naming IF and nothing is sent; IF ahead of the token, or "if" inside a payload, is not; a push sends such a row all the same (today)', async ({ page }) => {
-  // validateSequenceValue (app.js:4666-4672), playSequence (4926-4964), updateSequence (4966-5077). Whether a push should
-  // refuse the row too is left as it is. Row seq.validate_if.
+test('wizard.seq_fake_validate_if a sequence with IF inside a ;t or ;w payload is refused on Test, on Save/Update and on Push (direct or through a relay) with a toast naming IF and nothing is sent; IF ahead of the token, or "if" inside a payload, is not', async ({ page }) => {
+  // validateSequenceValue, playSequence, updateSequence, _pushRowProblem (app.js). A push sent such a row all the same;
+  // since 2026-10-13 boardGo and boardGoRemote refuse it as Test and Save do - a row the push would send, that is: one
+  // the board already holds is not sent and not checked. Row seq.validate_if.
   await setup(page);
   await pullFake(page, 1, board(['SEQ,SAVE,hello,;S1hi']));
   await holdVerifyPulls(page);
@@ -204,8 +205,40 @@ test('wizard.seq_fake_validate_if a sequence with IF inside a ;t or ;w payload i
   r = await run('playSequence');
   expect(r.sent).toEqual([';SEQhello,L']);
 
-  // The push does not check: an embedded IF typed into the row goes out with it.
-  await setText(';t500,IF,x=1');
-  expect(await sent(page, 1)).toEqual(['1:?SEQ,SAVE,hello,;t500,IF,x=1']);
+  // A push refuses it too, naming the sequence and IF: nothing is sent, not even the row's other changes.
+  await edit(page, '#b1-s5-label', 'HIL5');
+  for (const bad of [';t500,IF,x=1', ';S1a\n;w2,IF,lights=1']) {
+    await setText(bad);
+    const m = await toastMark(page);
+    const p = await push(page, 1, { skipReboot: true });
+    expect.soft([p.sent, p.outcome], bad).toEqual([[], { ok: false, aborted: true, reason: 'sequence "hello" has IF inside a ;t or ;w payload — nothing was sent' }]);
+    expect.soft(await toastsSince(page, m), bad).toContain('WCB 1: sequence "hello" — IF cannot be embedded in a ;t or ;w payload');
+  }
+  // IF ahead of the token goes out.
+  await setText('IF,x=1\n;t500\n;S1on');
+  expect(await sent(page, 1)).toEqual(['1:?LABEL,S5,HIL5', '1:?SEQ,SAVE,hello,IF,x=1^;t500^;S1on']);
+
+  // Through a relay: refused the same, no session sent.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board(['SEQ,SAVE,hello,;S1hi'], { wcb: 2 })) });
+  await page.evaluate(() => {
+    const e = document.querySelector('#b2-seq-tbody tr .seq-val-textarea');
+    e.value = ';w3,IF,x=1';
+    e.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const rr = await page.evaluate(async () => {
+    __fake.log.length = 0;
+    await boardGo(2);
+    return { frags: __fake.sent(1).filter((s) => s.includes('MGMT,FRAG,2,') && !s.includes('RTERM')), outcome: boardPushOutcome[2] };
+  });
+  expect(rr).toEqual({ frags: [], outcome: { ok: false, aborted: true, reason: 'sequence "hello" has IF inside a ;t or ;w payload — nothing was sent' } });
+
+  // A row the board already holds with an embedded IF (stored before the firmware refused it) is not sent, so it
+  // does not stop a push of something else.
+  await setup(page);
+  await pullFake(page, 1, board(['SEQ,SAVE,old,;t500,IF,x=1']));
+  await holdVerifyPulls(page);
+  await edit(page, '#b1-s5-label', 'HIL5');
+  expect(await sent(page, 1)).toEqual(['1:?LABEL,S5,HIL5']);
   expect(page.wizErrors).toEqual([]);
 });

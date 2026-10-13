@@ -5,8 +5,8 @@
 // and only the wire is recorded. Runs standalone, in CI, and under the harness by id (s30_wizard.py). Verify pulls are
 // held back where a spec pushes more than once (lib/rescan.js holdVerifyPulls).
 const { test, expect } = require('../lib/fixtures');
-const { board, pullFake, push, edit } = require('../lib/fake');
-const { setup, holdVerifyPulls, shown, sent } = require('../lib/rescan');
+const { board, chain, pullFake, push, edit, relayFake } = require('../lib/fake');
+const { setup, holdVerifyPulls, shown, sent, toastMark, toastsSince } = require('../lib/rescan');
 
 const label = (page, n, p) => page.evaluate(({ n, p }) => [boardConfigs[n].serialPorts[p - 1].label,
   document.getElementById(`b${n}-s${p}-label`).value], { n, p });
@@ -63,9 +63,10 @@ test('wizard.kyber_fake_mode_radio the Kyber radio: Local claims the Kyber port 
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.kyber_fake_port_dropdown the Kyber port picker offers S1 and S2 only, hides one any other feature holds (a local Maestro on S1), keeps the port the Kyber is on, shows a legacy S3-S5 Kyber port disabled, and says when both are taken - a choice that still pushes ?KYBER,LOCAL,S2 today', async ({ page }) => {
-  // updateKyberPortDropdown (app.js:1111-1152), syncKyberToConfig (2365-2385); the ?KYBER,LOCAL emit's `|| 2`
-  // (parser.js:1638-1643). Row kyber.port_dropdown.
+test('wizard.kyber_fake_port_dropdown the Kyber port picker offers S1 and S2 only, hides one any other feature holds (a local Maestro on S1), keeps the port the Kyber is on, shows a legacy S3-S5 Kyber port disabled, and says when both are taken - and a push of Kyber Local with no port is then refused with a message, nothing sent', async ({ page }) => {
+  // updateKyberPortDropdown, syncKyberToConfig, _pushRowProblem (app.js). A push of Kyber Local with both ports taken
+  // sent ?KYBER,LOCAL,S2 over the device on S2 (the emit's `|| 2`, parser.js); since 2026-10-13 boardGo and
+  // boardGoRemote refuse it before anything is sent. Row kyber.port_dropdown.
   await setup(page);
   await pullFake(page, 1, board(['BAUD,S1,57600', 'MAESTRO,M1:W1S1:57600', 'BAUD,S2,115200', 'LABEL,S2,Kyber Maestro',
                                  'BCAST,OUT,S2,OFF', 'BCAST,IN,S2,OFF', 'KYBER,LOCAL,S2,M1:W1S1:57600']));
@@ -86,9 +87,21 @@ test('wizard.kyber_fake_port_dropdown the Kyber port picker offers S1 and S2 onl
   await edit(page, 'input[name="b1-kyber"][value="local"]', true);
   expect(await optionTexts(page, 'b1-kyber-port')).toEqual([['', '— S1 and S2 both in use —', true, true]]);
   expect(await page.evaluate(() => [boardConfigs[1].kyber.mode, boardConfigs[1].kyber.port])).toEqual(['local', null]);
-  // What a push then sends: the claim on S2 regardless (the emit's `|| 2`), over the MP3 there.
+  // A push then refuses, saying why: nothing is sent (no ?KYBER,LOCAL,S2 over the MP3 there).
+  const m = await toastMark(page);
   const r = await push(page, 1, { skipReboot: true });
-  expect(r.sent.filter((s) => s.includes('KYBER'))).toEqual(['1:?KYBER,LOCAL,S2']);
+  expect([r.sent, r.outcome]).toEqual([[], { ok: false, aborted: true, reason: 'Kyber Local has no free port (S1 and S2 both in use) — nothing was sent' }]);
+  expect(await toastsSince(page, m)).toContain('WCB 1: Kyber is set to Local, but S1 and S2 are both in use — free one of them for the Kyber, or set Kyber to None. Nothing was sent.');
+  // Through a relay too: no session is sent.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board(['HCR,PORT,S1:9600', 'HCR,POLL,10', 'MP3,S2:9600:V0'], { wcb: 2 })) });
+  await edit(page, 'input[name="b2-kyber"][value="local"]', true);
+  const rr = await page.evaluate(async () => {
+    __fake.log.length = 0;
+    await boardGo(2);
+    return { frags: __fake.sent(1).filter((s) => s.includes('MGMT,FRAG,2,') && !s.includes('RTERM')), outcome: boardPushOutcome[2] };
+  });
+  expect(rr).toEqual({ frags: [], outcome: { ok: false, aborted: true, reason: 'Kyber Local has no free port (S1 and S2 both in use) — nothing was sent' } });
   expect(page.wizErrors).toEqual([]);
 });
 

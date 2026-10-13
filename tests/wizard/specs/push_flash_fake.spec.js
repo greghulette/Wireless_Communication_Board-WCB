@@ -122,12 +122,13 @@ const typeOnly = (page, id, value) => page.evaluate(({ id, value }) => {
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }, { id, value });
 
-test('wizard.push_fake_mac_validate (should) a MAC octet that is not hex turns its General field red with an error when it is left, a single hex digit is padded to two; and a push - direct or through a relay - checks the octets itself, sending nothing for a bad one and the padded value for a single digit', async ({ page }) => {
+test('wizard.push_fake_mac_validate a MAC octet that is not hex turns its General field red with an error when it is left, a single hex digit is padded to two; a push - direct or through a relay - checks the octets itself, sending nothing for a bad one and the padded value for a single digit; Push All checks them once before any board starts, with one message and nothing pushed anywhere', async ({ page }) => {
   // validateMacOctet (app.js:1324-1340, the General MAC fields' onblur) only marks the field, and boardGo and
   // boardGoRemote read the inputs as they were, so a push sent ?MAC,2,ZZ, which the firmware saves (WCB.md s3 #5); its
   // pad branch was unreachable too (a single digit failed the length test first). Fixed 2026-10-12: the blur pads, and
-  // both pushes check the octets through _pushMacOctets (1342-1357; boardGo 8147-8153, boardGoRemote 8574-8579).
-  // Row general.mac_validate.
+  // both pushes check the octets through _pushMacOctets (_badMacOctet; boardGo, boardGoRemote). Push All with a bad octet
+  // aborted every board, one error toast each; since 2026-10-13 boardGoAll checks once (_badMacOctet) before any board
+  // starts. Row general.mac_validate.
   await setup(page);
   await pullFake(page, 1, board());
   const field = (id) => page.evaluate((id) => [document.getElementById(id).value, document.getElementById(id).style.borderColor], id);
@@ -172,6 +173,22 @@ test('wizard.push_fake_mac_validate (should) a MAC octet that is not hex turns i
              confirm: document.getElementById('network-group-change-modal').classList.contains('open') };
   });
   expect(r).toEqual({ frags: [], outcome: { ok: false, aborted: true, reason: 'invalid MAC octet — nothing was sent' }, confirm: false });
+
+  // Push All - a board on USB, the relay itself and the board through it: the octets are checked once, before any board
+  // starts. One message, no per-board toast, nothing sent to any board, and General still pending.
+  await typeOnly(page, 'g-mac3', '4B');
+  await pullFake(page, 3, board([], { wcb: 3 }));
+  await typeOnly(page, 'g-mac2', 'Q7');
+  m = await toastMark(page);
+  const all = await page.evaluate(async () => {
+    __fake.log.length = 0;
+    await boardGoAll();
+    return { sent: __fake.log.filter((e) => (e.op === 'send' || e.op === 'await') && !e.s.includes('RTERM')).map((e) => `${e.slot}:${e.s}`),
+             dirty: generalSettingsDirty };
+  });
+  expect(all).toEqual({ sent: [], dirty: true });
+  expect(await page.evaluate((m) => __fake.toasts.slice(m).map((t) => [t.type, t.message]), m))
+    .toEqual([['error', 'MAC octet 2 "Q7" is not a hex value 00–FF — fix it in General first. Nothing was pushed to any board.']]);
   expect(page.wizErrors).toEqual([]);
 });
 

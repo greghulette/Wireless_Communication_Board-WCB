@@ -1357,19 +1357,47 @@ function validateMacOctet(input) {
 }
 
 // The General MAC octets as a push sends them, [octet2, octet3]: two hex digits each, a single digit padded, empty
-// '00' (as the push has always defaulted). null, with a toast naming the octet, when either is not hex - the firmware
-// saves whatever ?MAC,<n>,<value> carries (?MAC,2,ZZ included), so such a push must send nothing at all.
+// '00' (as the push has always defaulted). null, with a toast naming the octet, when either is not hex - a push of
+// ?MAC,2,ZZ is refused by the firmware, so such a push must send nothing at all.
 function _pushMacOctets(n) {
-  const out = [];
+  const bad = _badMacOctet();
+  if (bad) {
+    showToast(`WCB ${n}: MAC octet ${bad.k} "${bad.v}" is not a hex value 00–FF — fix it in General first. Nothing was sent.`, 'error', 8000);
+    return null;
+  }
+  return [2, 3].map(k => (document.getElementById(`g-mac${k}`)?.value ?? '').trim().toUpperCase().padStart(2, '0'));
+}
+
+// The first General MAC octet that is not 0-2 hex digits, as { k, v }, or null. Push All asks once, before any board
+// starts (boardGoAll), so a bad octet is one message rather than one per board.
+function _badMacOctet() {
   for (const k of [2, 3]) {
     const v = (document.getElementById(`g-mac${k}`)?.value ?? '').trim().toUpperCase();
-    if (!/^[0-9A-F]{0,2}$/.test(v)) {
-      showToast(`WCB ${n}: MAC octet ${k} "${v}" is not a hex value 00–FF — fix it in General first. Nothing was sent.`, 'error', 8000);
-      return null;
-    }
-    out.push(v.padStart(2, '0'));
+    if (!/^[0-9A-F]{0,2}$/.test(v)) return { k, v };
   }
-  return out;
+  return null;
+}
+
+// What a push of board n must refuse before anything is sent, as { reason } with the toast already shown, or null.
+// boardGo and boardGoRemote ask once the page is synced into the config (config.kyber, config.sequences).
+//  - Kyber Local with no port: S1 and S2 both held by other features (updateKyberPortDropdown says "S1 and S2 both in
+//    use"), so the select reads back no port, and the ?KYBER,LOCAL emit's fallback (parser.js, `|| 2`) would claim S2
+//    over the device there.
+//  - A sequence with IF inside a ;t or ;w payload, refused as TEST and SAVE/UPDATE refuse it (validateSequenceValue):
+//    the firmware rejects it as a timer payload. Only a row the push would send - one that differs from what the
+//    board holds - is checked.
+function _pushRowProblem(n, config, baseline) {
+  if (config.kyber?.mode === 'local' && !config.kyber.port) {
+    showToast(`WCB ${n}: Kyber is set to Local, but S1 and S2 are both in use — free one of them for the Kyber, or set Kyber to None. Nothing was sent.`, 'error', 10000);
+    return { reason: 'Kyber Local has no free port (S1 and S2 both in use) — nothing was sent' };
+  }
+  const held = new Map((baseline?.sequences ?? []).map(s => [s.key, s.value]));
+  const seq  = (config.sequences ?? []).find(s => held.get(s.key) !== s.value && SEQ_EMBEDDED_IF_RES.some(re => re.test(s.value)));
+  if (seq) {
+    showToast(`WCB ${n}: sequence "${seq.key}" — IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd. Nothing was sent.`, 'error', 10000);
+    return { reason: `sequence "${seq.key}" has IF inside a ;t or ;w payload — nothing was sent` };
+  }
+  return null;
 }
 
 // srcEl is the General input the user just typed into (index.html passes `this`). Only a user's edit is checked
@@ -8205,6 +8233,13 @@ async function boardGo(n, opts = {}) {
       btn.textContent = 'Push Config';
       return;
     }
+    const rowProblem = _pushRowProblem(n, config, boardBaselines[n]);
+    if (rowProblem) {
+      boardPushOutcome[n].reason = rowProblem.reason;
+      btn.disabled = false;
+      btn.textContent = 'Push Config';
+      return;
+    }
     config.variables     = uiVariables;
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     [config.macOctet2, config.macOctet3] = macOctets;
@@ -8628,6 +8663,12 @@ async function boardGoRemote(n, opts = {}) {
   const macOctets = _pushMacOctets(n);
   if (!macOctets) {
     boardPushOutcome[n].reason = 'invalid MAC octet — nothing was sent';
+    if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+    return;
+  }
+  const rowProblem = _pushRowProblem(n, config, boardBaselines[n]);
+  if (rowProblem) {
+    boardPushOutcome[n].reason = rowProblem.reason;
     if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
     return;
   }
@@ -9461,6 +9502,13 @@ async function boardGoAll() {
   const total = directSlots.length + remoteSlots.length;
   if (total === 0) {
     showToast('No boards connected', 'error');
+    return;
+  }
+  // The General MAC octets go to every board, so a bad one stops Push All before any board starts: one message, nothing
+  // pushed anywhere, General left pending. Each board's push checks again (_pushMacOctets) for a single Push.
+  const badMac = _badMacOctet();
+  if (badMac) {
+    showToast(`MAC octet ${badMac.k} "${badMac.v}" is not a hex value 00–FF — fix it in General first. Nothing was pushed to any board.`, 'error', 8000);
     return;
   }
 
