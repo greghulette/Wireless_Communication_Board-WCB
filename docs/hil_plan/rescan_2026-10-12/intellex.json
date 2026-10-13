@@ -66,9 +66,11 @@
   "area": "host.serve",
   "behaviour": "The server binds 127.0.0.1 only (BIND_HOST), never a routable address, so the unauthenticated command channel is not on the network.",
   "where": "host.py:118-121, 2069",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test connects to the host on a non-loopback address and expects a refusal.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.loopback_only"
+  ],
+  "gap": "closed 2026-10-12 by intellex.loopback_only (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -145,9 +147,11 @@
   "area": "host.api",
   "behaviour": "On a ws attach the SSID is asked of the OS (discover.ssid_for_host, Windows only) and only when the OS cannot say is the body's ssid used; it is what the bounce and the move check compare later.",
   "where": "host.py:1273-1276",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Nothing asserts which SSID the spec carries after an attach: the OS-wins rule, the body fallback (the only path on macOS) and a blank body ssid being dropped. /_api/status does not expose it; only the bounce's log line and _reidentify_if_moved reveal it.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.attach_ws_ssid"
+  ],
+  "gap": "closed 2026-10-12 by intellex.attach_ws_ssid (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -196,12 +200,13 @@
   "status": "partial",
   "tested_by": [
    "intellex.identify_direct_pong",
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.identify_route"
   ],
-  "gap": "The route is never called against the host: the 400, the attached:true short-circuit (the launcher's 'connected right now' row) and the real probe through the route are unasserted; ui_launcher fulfils identify in the page and identify_direct_pong tests discover.identify_serial directly.",
+  "gap": "closed 2026-10-12 by intellex.identify_route (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
   "testable": "unattended",
   "bench_needs": "Intellex host + NaviCore",
-  "risk": "M",
+  "risk": "L",
   "how": "attached_host on NaviCore's port: POST identify for that port -> {ok:true,attached:true,version:null}; POST with no port -> 400; from a host allowed NaviCore's port but unattached, POST identify -> the PONG version."
  },
  {
@@ -371,11 +376,12 @@
   "area": "host.api",
   "behaviour": "POST /_api/update-webui?tool=, /_api/update-firmware and /_api/update-wiki run the fetch tools as subprocesses (re-invoking the exe when frozen), report ok/error/log and what landed; a bad ?tool= is 400; offline they refuse without touching the bundles.",
   "where": "host.py:636-669, 828-854, 912-965",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.offline_con_floor"
+   "intellex.offline_con_floor",
+   "intellex.update_routes"
   ],
-  "gap": "Only the offline refusal (not ok, bundle untouched) is asserted. Unasserted: ?tool= validation (400), a successful update's version/wcbVersion/log fields, a partial failure reported as 502 with what landed, and the frozen --run-* re-invocation.",
+  "gap": "closed 2026-10-12 by intellex.update_routes (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -404,9 +410,11 @@
   "area": "host.api",
   "behaviour": "Online the proxy fetches from GitHub, stores the listing only once it parsed as a list, stores each raw file, and still rewrites download_url to the host (X-Intellex-Source github).",
   "where": "ghproxy.py:88-124, 137-147",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "The online path (store-on-the-way-past, parse-before-store, source header 'github') is never exercised; the plan lists real GitHub as not testable but flash._get and flash.reachable can be patched in-process.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.gh_proxy_online"
+  ],
+  "gap": "closed 2026-10-12 by intellex.gh_proxy_online (GUI run 20261012-201207; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -644,9 +652,11 @@
   "area": "host.reconnect",
   "behaviour": "After BOUNCE_AFTER_FAILS (2) failed reattaches on a ws link, when the OS would route to the host off its subnet, the loop re-associates the adapter (asking the OS for the SSID first, falling back to the recorded one), at most once per 10 s cooldown, giving up after 3 failed bounces and resetting the count on success or on a network change; --no-auto-bounce disables it.",
   "where": "host.py:1532-1553, 1810-1871, 2033-2034",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Every test starts the host with --no-auto-bounce (wifi_link_loss asserts no 're-associating' line under it), and smoke_reconnect_identity sets auto_bounce False. The route-wrong gate, the fail count, the cooldown, the give-up message and the reset on a move are unasserted.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.reconnect_auto_bounce"
+  ],
+  "gap": "closed 2026-10-12 by intellex.reconnect_auto_bounce (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -689,12 +699,13 @@
   "where": "host.py:2015-2074",
   "status": "partial",
   "tested_by": [
-   "intellex.stage_selftest"
+   "intellex.stage_selftest",
+   "intellex.host_cli"
   ],
-  "gap": "Only --port --no-auto-bounce is ever used. Unasserted: --serial/--ws at startup (attach before serving, retry when down), the mutual-exclusion error (exit 2), --ssid carried into the spec, and the 'OUT OF DATE' startup line.",
+  "gap": "closed 2026-10-12 by intellex.host_cli (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
   "testable": "unattended",
   "bench_needs": "Intellex host + W1",
-  "risk": "M",
+  "risk": "L",
   "how": "IntellexHost(args=['--serial', W1 port]) attaches at start (status attached within 2 s); args=['--ws','127.0.0.2'] with nothing listening -> wantsLink true, attached false, 'will keep retrying'; both flags -> exit 2."
  },
  {
@@ -956,11 +967,12 @@
   "area": "discover",
   "behaviour": "_wifi_bounce_macos() finds the interface by route (rejecting the default route and requiring an address in the host's /24), falls back to the SSID scan, declines with a message on an adapter macOS does not count as Wi-Fi (the Realtek), and power-cycles a real Wi-Fi port.",
   "where": "discover.py:641-771",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.wifi_bounce_scoped"
+   "intellex.wifi_bounce_scoped",
+   "intellex.wifi_bounce_macos_unit"
   ],
-  "gap": "The decline on the Realtek adapter (nothing dropped, both adapters stay connected) is asserted attended; the power-cycle of a built-in Wi-Fi port, the default-route rejection and the SSID fallback are unasserted.",
+  "gap": "closed 2026-10-12 by intellex.wifi_bounce_macos_unit (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -987,11 +999,12 @@
   "area": "flash.nc",
   "behaviour": "flash.reachable(host) answers inside a 9 s budget with a per-host 20 s TTL, trying every address DNS returned, and INTELLEX_OFFLINE makes it answer False at once with the reason.",
   "where": "flash.py:50-156",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.smoke_repo_test_hooks"
+   "intellex.smoke_repo_test_hooks",
+   "intellex.reachable_unit"
   ],
-  "gap": "Only the leash is asserted; the budget outlasting DNS, the per-address attempts (a dead IPv6 not consuming the budget), the per-host keying and the TTL are not.",
+  "gap": "closed 2026-10-12 by intellex.reachable_unit (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1017,13 +1030,14 @@
   "area": "flash.nc",
   "behaviour": "NaviCore fetch_images: the app is matched anchored (NaviCore_<v>_ESP32S3.bin), the custom 16 MB bootloader and the version-matched table are both-or-neither (a half pair is refused), the listing and each file fall back to the branch's cache offline and are stored when fetched.",
   "where": "flash.py:186-203, 266-371",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.flash_rules_unit",
    "intellex.flash_pipeline_fake",
-   "intellex.flash_navicore_app"
+   "intellex.flash_navicore_app",
+   "intellex.nc_fetch_store_unit"
   ],
-  "gap": "The offline/cache paths and the pairing rule are asserted; the online store-on-download (fwcache.store called with the fetched bytes, listing stored) is not.",
+  "gap": "closed 2026-10-12 by intellex.nc_fetch_store_unit (GUI run 20261012-201807; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1211,12 +1225,13 @@
   "area": "fwcache",
   "behaviour": "The cache is one directory per (product, branch) with / and \\ in a branch flattened to __; load/load_listing read the user copy first then the bundled one; a branch miss is a miss, never another branch's image.",
   "where": "fwcache.py:65-105, 196-204",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.offline_gh_proxy",
-   "intellex.flash_rules_unit"
+   "intellex.flash_rules_unit",
+   "intellex.fwcache_branch_slash"
   ],
-  "gap": "Per-branch isolation is asserted (an uncached branch is 502); a branch with a slash (feature/x) seeded under its flattened name and read back through the host is not, nor the frozen two-location precedence.",
+  "gap": "closed 2026-10-12 by intellex.fwcache_branch_slash (GUI run 20261012-202237; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1227,9 +1242,11 @@
   "area": "fwcache",
   "behaviour": "store()/store_listing() write to a .part file and rename, never leaving a truncated image under a name that means a build; an empty payload is not stored; the manifest records what arrived and when.",
   "where": "fwcache.py:108-140, 183-193",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test checks the .part rename, the empty-payload skip or the manifest entry.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.fwcache_atomic_unit"
+  ],
+  "gap": "closed 2026-10-12 by intellex.fwcache_atomic_unit (GUI run 20261012-202237; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -1257,9 +1274,11 @@
   "area": "settings",
   "behaviour": "settings.branch() falls back to main on an unset, malformed or unreadable settings file rather than raising; branches() returns both.",
   "where": "settings.py:46-54, 82-90",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "A corrupt settings.json (or an invalid stored name written by hand) is never exercised; a regression would make the host unable to flash.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.settings_branch_fallback"
+  ],
+  "gap": "closed 2026-10-12 by intellex.settings_branch_fallback (GUI run 20261012-202237; s32 sweep 20261012-205751 74/74); fixed in Intellex 8d7b032 (wrong-shape settings fall back to main)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1406,12 +1425,13 @@
   "area": "launcher",
   "behaviour": "Connect and open POSTs the row's attach body (kind/host/role/relayId for a doorway) then opens the chosen layout: /_shell?view= for nc/wcb/split, or for 'sep' asks /_api/open-window for the Wizard (window.open fallback) and lands on /; inside the shell overlay it dismisses the overlay instead; a failed attach shows its error.",
   "where": "launcher.html:617-657",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.ui_launcher",
-   "intellex.ui_shell"
+   "intellex.ui_shell",
+   "intellex.ui_launcher_connect_error"
   ],
-  "gap": "The attach bodies, the shell navigation, the sep popup and the overlay dismissal via postMessage are asserted; a failed attach ({ok:false,error}) leaving the page on the chooser with the error in #status is not.",
+  "gap": "closed 2026-10-12 by intellex.ui_launcher_connect_error (GUI run 20261012-202237; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1438,11 +1458,12 @@
   "area": "launcher",
   "behaviour": "The maintenance lines and the attention count reflect stale tools, uncached firmware, a non-main branch and missing docs without opening the panel; each summary action drives the real control.",
   "where": "launcher.html:343-394, 868-941, 973-1000, 1093-1109",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.ui_launcher"
+   "intellex.ui_launcher",
+   "intellex.ui_launcher_tools_stale"
   ],
-  "gap": "Firmware-not-cached, docs-not-downloaded and the non-main branch lines are asserted; the stale-tool line ('config tool + Wizard update available') and its 'Update' action are not (webui-version is never fulfilled as stale).",
+  "gap": "closed 2026-10-12 by intellex.ui_launcher_tools_stale (GUI run 20261012-202237; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1641,12 +1662,14 @@
   "area": "shim",
   "behaviour": "port.close() within 60 s of a loss counts as teardown (watchLink keeps reconnecting); a deliberate Disconnect long after things were healthy sets userClosed so the page stays disconnected.",
   "where": "intellex_shim.js:48-54, 224-246, 1595-1605",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Neither branch is asserted: a user's Disconnect being honoured (no auto-reconnect 5 s later) nor the teardown exception.",
+  "status": "partial",
+  "tested_by": [
+   "intellex.shim_close_intent"
+  ],
+  "gap": "closed 2026-10-12 by intellex.shim_close_intent (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74); covered with fakes, the real-board half (NaviCore / W1) is open",
   "testable": "unattended",
   "bench_needs": "Intellex host + NaviCore",
-  "risk": "M",
+  "risk": "L",
   "how": "On NaviCore's port: after the tool connects, click its Disconnect (btn-connect), wait 8 s, expect isMonitoring false and no 'host is attached but the page is not' console line; then detach/attach the host (a loss) and expect the reconnect within 10 s."
  },
  {
@@ -1756,14 +1779,15 @@
   "area": "shim",
   "behaviour": "The NaviCore tool's Update Firmware / Full Wipe buttons are intercepted in the capture phase and run on the host with native titles, re-asserted every 3 s; they are disabled with the stale-host message when /_api/flash-status is absent and with the not-USB message on a ws link (an empty kind leaves the tool's own handling).",
   "where": "intellex_shim.js:525-607",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.nc_autoconnect",
    "intellex.ui_tools_glue",
    "intellex.wifi_nc_tool",
-   "intellex.flash_navicore_app"
+   "intellex.flash_navicore_app",
+   "intellex.shim_stale_host_buttons"
   ],
-  "gap": "Wired/enabled on USB and disabled on WiFi are asserted; the stale-host disable (flash-status answering 404) is not.",
+  "gap": "closed 2026-10-12 by intellex.shim_stale_host_buttons (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1807,12 +1831,13 @@
   "area": "shim",
   "behaviour": "The Wizard's establishConnection is wrapped to pass allowShare=false (from DOMContentLoaded), so no cross-tab hub election delays or shares the link.",
   "where": "intellex_shim.js:784-794, 1625-1641",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.ui_tools_glue",
-   "intellex.wizard_pull_w1"
+   "intellex.wizard_pull_w1",
+   "intellex.shim_wizard_no_share"
   ],
-  "gap": "The console line is asserted; that establishConnection really receives false as its 4th argument is not.",
+  "gap": "closed 2026-10-12 by intellex.shim_wizard_no_share (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1904,15 +1929,16 @@
   "area": "shim",
   "behaviour": "flashFirmware() is replaced: refuses on a stale host or a non-USB link BEFORE boardGo tears the connection down, POSTs /_api/flash-wcb {appOnly,eraseNvs}, polls flash-status feeding onLog/onProgress/onStatus, THROWS on failure so boardGo skips its reconnect and push, and on success sets the Wizard's own latestFirmwareVersion to the build written.",
   "where": "intellex_shim.js:1327-1417",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.ui_latest_fw_version",
    "intellex.ui_tools_glue",
    "intellex.flash_w2_update",
    "intellex.flash_w2_full",
-   "intellex.flash_w2_factory"
+   "intellex.flash_w2_factory",
+   "intellex.shim_wizard_flash_refusals"
   ],
-  "gap": "Success paths and the version label are asserted; unasserted: the throw on a host failure making boardGo toast 'Flash failed' and push nothing, the not-USB refusal before teardown (the Wizard over WiFi), and the stale-host refusal.",
+  "gap": "closed 2026-10-12 by intellex.shim_wizard_flash_refusals (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -1993,9 +2019,11 @@
   "area": "app",
   "behaviour": "app.py binds the port on the main thread first (no SO_REUSEADDR; a second Intellex is refused with a message box and exit 1, releasing any early attach), attaches a --serial/--ws target before serving, waits for its own /_api/status, then opens a pywebview window sized by winsize with persistent storage under the data dir, registers the open-window hook, sets the app icon, and falls back to the default browser when pywebview is missing or fails; --dev enables devtools, --inspect a CDP port (WebView2).",
   "where": "app.py:47-138, 141-387",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "app.py is never run by any test: the bind refusal, the early attach release on a failed start, --browser, the fallbacks and the storage path are all unasserted.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.app_browser_mode"
+  ],
+  "gap": "closed 2026-10-12 by intellex.app_browser_mode (GUI run 20261012-203701; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "Intellex host",
   "risk": "M",
@@ -2033,13 +2061,13 @@
   "area": "paths",
   "behaviour": "The user data dir is INTELLEX_DATA_DIR when set, else the platform's per-user dir, with a one-time NaviLink -> Intellex move that never merges; a frozen build reads a user copy only when non-empty (per subdirectory for wikis) and writes updates to the user dir; from source everything stays in src/.",
   "where": "paths.py:56-152",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.paths_logs_unit",
    "intellex.smoke_repo_test_hooks",
    "intellex.stage_selftest"
   ],
-  "gap": "INTELLEX_DATA_DIR and 'nothing written to the real dir' are asserted on the Mac; the frozen_paths and legacy_move cases skip off Windows (they drive LOCALAPPDATA), so the non-empty-user-copy rule, the per-wiki rule and the legacy move are unasserted on this bench; the macOS default path (~/Library/Application Support/Intellex) is asserted only indirectly.",
+  "gap": "closed 2026-10-12 by intellex.paths_logs_unit (GUI run 20261012-204019; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2081,11 +2109,12 @@
   "area": "certs",
   "behaviour": "certs.context() uses the platform store when populated and loads certifi's bundle when the store is empty (stock macOS Python), never disabling verification; is_cert_error finds a verification failure however deep urllib buried it.",
   "where": "certs.py:33-66",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.paths_logs_unit"
+   "intellex.paths_logs_unit",
+   "intellex.certs_context_unit"
   ],
-  "gap": "is_cert_error is asserted; context() choosing certifi on an empty store (the macOS case every HTTPS fetch depends on) is not.",
+  "gap": "closed 2026-10-12 by intellex.certs_context_unit (GUI run 20261012-204019; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2126,11 +2155,12 @@
   "area": "tools.fetch",
   "behaviour": "fetch_firmware caches NaviCore's set and the WCB sets for ESP32 and both S3 sizes for the configured branches, reporting what landed and a per-product failure without aborting the other.",
   "where": "tools/fetch_firmware.py:36-98",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.offline_con_floor"
+   "intellex.offline_con_floor",
+   "intellex.fetch_firmware_unit"
   ],
-  "gap": "Only the offline refusal through the route is asserted; the three WCB variants and partial-failure reporting are not.",
+  "gap": "closed 2026-10-12 by intellex.fetch_firmware_unit (GUI run 20261012-204019; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2141,11 +2171,12 @@
   "area": "tools.fetch",
   "behaviour": "fetch_wiki reads each wiki's page index (crawling links from Home/_Sidebar in both dialects when it cannot), skips 404 pages, caps assets at 1 MB via HEAD, refuses an asset path that escapes the directory, and swaps each wiki in separately (.new then .prev, recovering a previous half-swap), keeping what is on disk on any failure.",
   "where": "tools/fetch_wiki.py:132-307, 324-381",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.offline_con_floor"
+   "intellex.offline_con_floor",
+   "intellex.fetch_wiki_unit"
   ],
-  "gap": "Only the offline refusal is asserted; the crawl, the size cap, the escape refusal and the swap recovery are not.",
+  "gap": "closed 2026-10-12 by intellex.fetch_wiki_unit (GUI run 20261012-204019; s32 sweep 20261012-205751 74/74)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2277,9 +2308,11 @@
   "area": "host",
   "behaviour": "Bridge.attach publishes the transport, then re-takes the lock to record the spec and set _want = True; a detach landing between the two sections is undone and the reconnect loop reattaches.",
   "where": "Intellex src/host.py ~214-251",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Found 2026-10-12 while building intellex.bridge_superseded_attach; a window of microseconds, never raced.",
+  "status": "tested",
+  "tested_by": [
+   "intellex.bridge_attach_detach_window"
+  ],
+  "gap": "closed 2026-10-12 by intellex.bridge_attach_detach_window (GUI run 20261012-204019; s32 sweep 20261012-205751 74/74); fixed in Intellex 794a076 (one locked section)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
