@@ -227,8 +227,9 @@ for _key, _title in _FAKE_RESCAN:
 # The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
 # section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
 # (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
-# devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js). No board and no real
-# port, so CI runs them too.
+# devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js), the Connect button,
+# BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js). No board and no real port, so CI
+# runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -253,6 +254,11 @@ _FAKE_RESCAN_M = (
     ("maestro_fake_routing_table", "A Maestro edit rebuilds every board's routing table and a local Kyber's targets, marks the changed boards unsaved, toasts the re-push count, and the other boards' pushes send the whole ?MAESTRO table (maestro.routing_table)"),
     ("mapping_fake_rows", "A mapping card's destination list covers the quantity, mesh-reported boards and a pulled W9; the type switch hides Raw/Bidir for PWM and drops S0; the source list offers free, PWM and serial-map ports (mapping.rows)"),
     ("seq_fake_validate_if", "IF inside a ;t or ;w payload is refused on Test and Save/Update with a toast naming IF, nothing sent; IF ahead of the token is not; a push sends such a row all the same today (seq.validate_if)"),
+    ("connect_fake_modal_and_button", "Connect opens the modal (Auto-Detect, manual, Authorize, Remote via each connected board, Share); Remote arms the relay and pulls through it; the button then un-manages a relayed board and disconnects a connected one (connect.modal_and_button)"),
+    ("connect_fake_reconnect_platforms", "reconnect() reopens the same port with a DTR pulse or takes a fresh same-VID handle no other board holds, unless told not to search; on Windows it retries the close, reuses a port left open, and takes a USB connect event's port (connect.reconnect_platforms)"),
+    ("connect_fake_wait_board_ready", "waitForBoardReady keeps one listener, probes WCB_WEBTOOL_CONFIG_PULL then <funcChar>backup every 10 s while connected and read, resolves on the end marker and gives up at its timeout (connect.wait_board_ready)"),
+    ("connect_fake_send_collect_idle", "send() writes one at a time and refuses with no port; sendAndCollect returns on its sentinel or timeout; sendAndAwaitIdle returns 250 ms after the last line, or ok false at its hard cap (connect.send_collect_idle)"),
+    ("connect_fake_line_handling", "The boot banner's function identifier, delimiter, command character and version go into the board's boot characters, config, General fields and card; RC heartbeat and stick lines reach no listener (connect.line_handling)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
