@@ -14,9 +14,12 @@ platform (Intellex bd4f37d) and LOCALAPPDATA's parent for an older checkout on W
 nothing, and the staged hosts wrote ~/Library/Application Support/Intellex (run 20261005-221308).
 
 Why the leash: left alone a host PINGs every Espressif COM port (the SBUS controller resets when its port opens; W1 or
-NaviCore may be mid-test), probes 192.168.4.1 over the PC's second WiFi adapter, and waits on a GitHub probe. The env
-hooks in Intellex (INTELLEX_OFFLINE, INTELLEX_SERIAL_ALLOW, INTELLEX_DISCOVER_HOSTS; INTELLEX_DATA_DIR above) hold it to
-what the test wants; every host here starts offline, with no serial port and no discovery host unless the test names them.
+NaviCore may be mid-test), probes 192.168.4.1 over the PC's second WiFi adapter, attaches to any WiFi host it is asked
+for (every board's access point is 192.168.4.1, so that is whichever one the adapter is on - and a reattach with no host
+recorded falls back to it), and waits on a GitHub probe. The env hooks in Intellex (INTELLEX_OFFLINE,
+INTELLEX_SERIAL_ALLOW, INTELLEX_DISCOVER_HOSTS, INTELLEX_WS_ALLOW; INTELLEX_DATA_DIR above) hold it to what the test
+wants; every host here starts offline, with no serial port, no discovery host and no WiFi host unless the test names
+them.
 
 The harness itself stays standard library plus pyserial: HTTP through urllib, WebSocket through hil/ws.py. Checks that
 must import Intellex's own modules run as scripts under Intellex's venv (run_intellex_py).
@@ -250,6 +253,7 @@ class IntellexHost:
 
     allow_ports: the COM ports it may touch (INTELLEX_SERIAL_ALLOW; none by default).
     discover_hosts: the hosts discovery may probe (INTELLEX_DISCOVER_HOSTS; none by default).
+    ws_hosts: the hosts it may attach to over WiFi, or probe to re-identify (INTELLEX_WS_ALLOW; none by default).
     offline: INTELLEX_OFFLINE (on by default: no GitHub, a 2 s start).
     hide: network names (SSIDs) to take out of every line the host prints before it is kept or logged: a host attached
     over WiFi records the SSID it asks Windows for (host.py api_attach, ssid_for_host) and names both networks when the
@@ -258,9 +262,10 @@ class IntellexHost:
     --port and --no-auto-bounce."""
 
     def __init__(self, bench, stage_dir, allow_ports=(), discover_hosts=(), offline=True, env=None, args=(), hide=(),
-                 script="host.py"):
+                 script="host.py", ws_hosts=()):
         self.bench, self.stage, self.script = bench, stage_dir, script
         self.allow_ports, self.discover_hosts, self.offline = list(allow_ports), list(discover_hosts), offline
+        self.ws_hosts = list(ws_hosts)
         self.extra_env, self.args = dict(env or {}), list(args)
         self.hide = tuple(h for h in hide if h)
         self.proc = self.url = None
@@ -275,7 +280,8 @@ class IntellexHost:
         env.update(LOCALAPPDATA=os.path.join(self.stage, "appdata"), PYTHONUTF8="1",
                    INTELLEX_DATA_DIR=os.path.join(self.stage, "appdata", "Intellex"),
                    INTELLEX_SERIAL_ALLOW=",".join(self.allow_ports),
-                   INTELLEX_DISCOVER_HOSTS=",".join(self.discover_hosts))
+                   INTELLEX_DISCOVER_HOSTS=",".join(self.discover_hosts),
+                   INTELLEX_WS_ALLOW=",".join(self.ws_hosts))
         if self.offline:
             env["INTELLEX_OFFLINE"] = "1"
         env.update(self.extra_env)
@@ -405,12 +411,14 @@ def copy_logs(bench, stage_dir, test_id, hide=()):
 # ------------------------------------------------------------------ Playwright and venv scripts
 def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree", settings=None, allow_ports=None,
                       discover_hosts=(), offline=True, env=None, args=None, timeout=300.0, wiki=False,
-                      link_check=None, recover=None, seed=None, hide=(), hooks=None):
+                      link_check=None, recover=None, seed=None, hide=(), hooks=None, ws_hosts=()):
     """Run the Playwright test titled `<test_id> ...` in tests/intellex against a staged host. device: a bench device
     whose port the host is given (released from the harness first, taken back and checked after). attach: the
-    /_api/attach body, or None to leave the host unattached. wiki: seed the crafted wiki (seed_wiki). seed: seed(stage)
-    runs once the stage exists, before the host starts (seed_firmware: a firmware cache). hide: network names the host's
-    lines and logs never carry (IntellexHost hide, copy_logs). Raises AssertionError / Skip like run_wizard_test.
+    /_api/attach body, or None to leave the host unattached. ws_hosts: the WiFi hosts the host may attach to
+    (INTELLEX_WS_ALLOW; none by default) - a ws `attach` needs its host here. wiki: seed the crafted wiki (seed_wiki).
+    seed: seed(stage) runs once the stage exists, before the host starts (seed_firmware: a firmware cache). hide:
+    network names the host's lines and logs never carry (IntellexHost hide, copy_logs). Raises AssertionError / Skip
+    like run_wizard_test.
 
     hooks: {name: fn(host, body) -> reply}, bench actions the spec asks for mid-run through the bridge's /hook route
     (tests/intellex/lib/board.js hil.hook): the harness test's own thread is parked while Playwright runs, so a step
@@ -448,7 +456,7 @@ def run_intellex_test(bench, test_id, attach=None, device=None, tools="worktree"
     if device:
         bench.close_device(device)
     host = IntellexHost(bench, sd, allow_ports=allow_ports, discover_hosts=discover_hosts, offline=offline, env=env,
-                        hide=hide)
+                        hide=hide, ws_hosts=ws_hosts)
     bound = {name: (lambda body, f=f: f(host, body)) for name, f in (hooks or {}).items()}
     aborted = None
     proc = None
@@ -613,12 +621,13 @@ def judge_py(test_id, report, rc, tail):
 
 
 def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none", stage_dir=None, env=None,
-                    timeout=600.0, allow_ports=None):
+                    timeout=600.0, allow_ports=None, ws_hosts=()):
     """Run tests/intellex/py/<script> under Intellex's venv against a staged Intellex (the script puts its src/ and tools/
     first on the import path), with `args` as JSON, and judge its results file (judge_py) -> the report. device: a bench
     device whose COM port the script gets as args["port"]; the harness releases it first and takes it back after,
     checking the board answers (handed_over). The script runs leashed: offline, no discovery host, LOCALAPPDATA in the
-    stage, and INTELLEX_SERIAL_ALLOW naming that port alone (nothing without a device)."""
+    stage, INTELLEX_SERIAL_ALLOW naming that port alone (nothing without a device), and INTELLEX_WS_ALLOW naming
+    ws_hosts (no WiFi host by default)."""
     require(bench)
     args = dict(args or {})
     sd = stage_dir or stage(bench, test_id, tools=tools)
@@ -633,7 +642,8 @@ def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none"
         allow_ports = [port] if port else []
     e = {"LOCALAPPDATA": os.path.join(sd, "appdata"), "INTELLEX_DATA_DIR": os.path.join(sd, "appdata", "Intellex"),
          "INTELLEX_OFFLINE": "1",
-         "INTELLEX_SERIAL_ALLOW": ",".join(allow_ports), "INTELLEX_DISCOVER_HOSTS": ""}
+         "INTELLEX_SERIAL_ALLOW": ",".join(allow_ports), "INTELLEX_DISCOVER_HOSTS": "",
+         "INTELLEX_WS_ALLOW": ",".join(ws_hosts)}
     e.update(env or {})
     argv = [os.path.join(PY_DIR, script), "--stage", sd, "--args", json.dumps(args), "--out", out]
 

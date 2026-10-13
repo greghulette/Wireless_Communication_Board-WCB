@@ -169,7 +169,8 @@ def ws_transport_navicore(bench):
     only) and back afterwards; before IX-WP9 the test used the adapter as it was and skipped when it was elsewhere (run
     20260929-122112). The script still proves the AP is NaviCore's by a DIRECT PONG carrying the version NaviCore gives
     over USB (DX19; a WCB's AP at the same address mirrors a mesh PONG, which carries sys and id), and it never changes
-    the network itself. No COM port is touched: the harness keeps NaviCore's (tests/intellex/py/transport_ws.py)."""
+    the network itself. No COM port is touched: the harness keeps NaviCore's (tests/intellex/py/transport_ws.py). The
+    script's leash allows NaviCore's address alone (INTELLEX_WS_ALLOW, which WebSocketTransport.open checks)."""
     from suites.s45_navicore_wifi import NC_AP_IP, _on_ap
     require(bench)
     others = running_intellex()
@@ -179,7 +180,8 @@ def ws_transport_navicore(bench):
     with _on_ap(bench, problems) as (nc, _, _name):
         version = nc.ping()
         run_intellex_py(bench, "intellex.ws_transport_navicore", "transport_ws.py", timeout=120,
-                        args={"group": "navicore", "host": NC_AP_IP, "version": version, "joined": True})
+                        args={"group": "navicore", "host": NC_AP_IP, "version": version, "joined": True},
+                        ws_hosts=[NC_AP_IP])                    # NaviCore's access point alone (INTELLEX_WS_ALLOW)
     assert not problems, "; ".join(problems)
 
 

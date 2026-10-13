@@ -6,8 +6,9 @@ only, D-NC14) and goes back to its own network afterwards. On this bench the spa
 access point, so the join is a re-association under the temporary profile and the way back returns it to Windows' own.
 Off Windows (the Mac) the harness joins nothing: the spare adapter is already on NaviCore's access point and stays there
 (hil/wlan.py _prejoined), so the AP hop and the bounce skip there.
-A staged, leashed Intellex host (no COM port at all, offline, no discovery host) is then attached the way Intellex's
-chooser attaches a droid it identified: POST /_api/attach {kind: ws, host: 192.168.4.1, role: navicore}.
+A staged, leashed Intellex host (no COM port at all, offline, no discovery host, and NaviCore's address the one WiFi
+host it may attach to - INTELLEX_WS_ALLOW, ws_hosts=) is then attached the way Intellex's chooser attaches a droid it
+identified: POST /_api/attach {kind: ws, host: 192.168.4.1, role: navicore}.
 
 Gates: navicore_wifi (ticked on this bench) - the same act as s45's tests, so the same key (INTELLEX.md DX34); the link
 loss also needs intellex_reboot (a NaviCore restart), and the AP hop and the bounce are behind the attended
@@ -188,7 +189,7 @@ def _nc_over_wifi(bench, test_id, nc, cfg, args=None, hooks=None, timeout=360.0)
     try:
         run_intellex_test(bench, test_id, attach=dict(NC_WS), args=dict(base, **(args or {})),
                           link_check=boot_check(NAVICORE_BOOT_MARKERS, "NaviCore"), hide=(ssid,), hooks=hooks,
-                          timeout=timeout)
+                          timeout=timeout, ws_hosts=[NC_AP_IP])
     finally:
         _nc_quiet(bench)
     nc = NaviCore(bench.dev("navicore"))
@@ -378,7 +379,7 @@ def wifi_link_loss(bench):
         with _on_ap(bench, problems) as (nc, cfg, name):
             ssid, _ = ap_of(cfg)
             sd = stage(bench, tid, tools="none")
-            host = IntellexHost(bench, sd, hide=(ssid,))
+            host = IntellexHost(bench, sd, hide=(ssid,), ws_hosts=[NC_AP_IP])
             a = b = None
             try:
                 host.start()
@@ -490,7 +491,7 @@ def wifi_ap_hop_reidentify(bench):
             return {"status": status_view(st, hide), "seconds": seen["back"]}
         try:
             version = nc.ping()
-            run_intellex_test(bench, tid, attach=dict(NC_WS), hide=hide, timeout=960,
+            run_intellex_test(bench, tid, attach=dict(NC_WS), hide=hide, timeout=960, ws_hosts=[NC_AP_IP],
                               hooks={"hop": hop, "hop_back": hop_back},
                               args={"version": version, "host": NC_AP_IP, "w1": bench.usb_wcb_number()})
         finally:
@@ -680,7 +681,8 @@ def wifi_wizard_reconnect(bench):
                     args = {"version": version, "host": NC_AP_IP, "relay": nid, "boards": bench.wcb_numbers()}
                     try:
                         run_intellex_test(bench, tid, attach=dict(NC_WS), args=args, hide=(ssid,), timeout=900,
-                                          hooks={"nc_reboot": _reboot_hook(bench, g, name, ssid, facts)})
+                                          hooks={"nc_reboot": _reboot_hook(bench, g, name, ssid, facts)},
+                                          ws_hosts=[NC_AP_IP])
                     finally:
                         _nc_quiet(bench)
                         g.nc = NaviCore(bench.dev("navicore"))

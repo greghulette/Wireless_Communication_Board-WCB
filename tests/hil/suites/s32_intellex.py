@@ -252,13 +252,19 @@ def link_error_frame(bench):
 
 
 @test("intellex.attach_validation", "POST /_api/attach refuses bad JSON, an unknown kind and a serial target with no "
-      "port (400), refuses a port outside INTELLEX_SERIAL_ALLOW (502) while keeping the target until detach, drops an "
+      "port (400), refuses a port outside INTELLEX_SERIAL_ALLOW and a WiFi host outside INTELLEX_WS_ALLOW - the "
+      "default 192.168.4.1 included - (502, nothing contacted) while keeping the target until detach, drops an "
       "out-of-range relayId and an unknown role; open-window refuses a remote URL and has no window hook (IX-WP3)")
 def attach_validation(bench):
+    """Intellex src/host.py api_attach. The WiFi leash (INTELLEX_WS_ALLOW, Intellex 2026-10-13; transport.ws_allowed,
+    checked in Bridge.rebuild before a transport exists) is given 127.0.0.1 alone here: a host outside it is refused
+    with the variable named, before anything connects (192.0.2.1 is TEST-NET-1 and 192.168.4.1 is every board's access
+    point - the default a ws attach with no host takes). Bridge.rebuild's own fallback with no target at all is
+    Intellex's tools/smoke_test_hooks.py H5 (intellex.smoke_repo_test_hooks)."""
     require(bench)
     sd = stage(bench, "intellex.attach_validation")
     problems = []
-    with IntellexHost(bench, sd) as host:
+    with IntellexHost(bench, sd, ws_hosts=["127.0.0.1"]) as host:
         for body, want in ((b"not json", 400), ({"kind": "bogus"}, 400), ({"kind": "serial"}, 400)):
             st, _, _ = host.http("POST", "/_api/attach", body, headers={"Content-Type": "application/json"})
             if st != want:
@@ -274,6 +280,19 @@ def attach_validation(bench):
         st, stat = host.json("GET", "/_api/status")
         if stat.get("wantsLink"):
             problems.append(f"detach did not forget the target: {stat}")
+        # A ws host outside INTELLEX_WS_ALLOW: refused before any connect, the variable named, the target kept.
+        for req, want in (({"kind": "ws", "host": "192.0.2.1", "role": "navicore"}, "192.0.2.1"),
+                          ({"kind": "ws", "role": "navicore"}, "192.168.4.1")):
+            st, body = host.json("POST", "/_api/attach", req, timeout=20)
+            st2, stat = host.json("GET", "/_api/status")
+            if st != 502 or f"{want} is not in INTELLEX_WS_ALLOW" not in str(body):
+                problems.append(f"attach {req} outside the WiFi allow list: {st} {body}, expected 502 '{want} is not "
+                                f"in INTELLEX_WS_ALLOW'")
+            if not stat.get("wantsLink") or stat.get("attached") or \
+                    f"{want} is not in INTELLEX_WS_ALLOW" not in str(stat.get("lastError")):
+                problems.append(f"after attach {req} was refused by the leash: {stat}, expected the target kept, "
+                                f"unattached, with the refusal as lastError")
+            host.detach()
         # A ws target on a port nothing listens on: refused fast, and the role/relayId rules are visible in /_api/status.
         for req, role, rid in (({"kind": "ws", "host": "127.0.0.1", "role": "evil", "relayId": 25}, "", None),
                                ({"kind": "ws", "host": "127.0.0.1", "role": "relay", "relayId": 19}, "relay", 19)):
@@ -281,6 +300,8 @@ def attach_validation(bench):
             st2, stat = host.json("GET", "/_api/status")
             if st == 200:
                 problems.append(f"attach {req} succeeded on a closed port")
+            elif "INTELLEX_WS_ALLOW" in str(body):
+                problems.append(f"attach {req}: refused by the leash ({body}) although 127.0.0.1 is allowed")
             if (stat.get("role") or "") != role or (stat.get("relayId") or None) != rid:
                 problems.append(f"attach {req}: status role {stat.get('role')!r} relayId {stat.get('relayId')!r}, "
                                 f"expected {role!r} {rid!r}")
@@ -851,7 +872,7 @@ def link_drop_no_stall(bench):
     sd = stage(bench, "intellex.link_drop_no_stall", tools="none")
     samples, seen = [], {}
     try:
-        with IntellexHost(bench, sd) as host:
+        with IntellexHost(bench, sd, ws_hosts=["127.0.0.2"]) as host:          # the stand-in alone (INTELLEX_WS_ALLOW)
             host.attach({"kind": "ws", "host": "127.0.0.2", "role": "navicore"}, timeout=20)
             st, body = host.json("GET", "/_api/status", timeout=5)
             if not (isinstance(body, dict) and body.get("attached")):
@@ -925,7 +946,7 @@ def reconnect_idle_gate(bench):
     sd = stage(bench, "intellex.reconnect_idle_gate", tools="none")
     problems, facts = [], {}
     try:
-        with IntellexHost(bench, sd) as host:
+        with IntellexHost(bench, sd, ws_hosts=["127.0.0.2"]) as host:          # the stand-in alone (INTELLEX_WS_ALLOW)
             host.attach({"kind": "ws", "host": "127.0.0.2", "role": "navicore"}, timeout=20)
             st, body = host.json("GET", "/_api/status", timeout=5)
             if not (isinstance(body, dict) and body.get("attached")):
@@ -1466,7 +1487,7 @@ def host_cli(bench):
         bench.note(f"{tid}: --ws at startup not checked: nothing can listen on 127.0.0.2:80 here ({e})")
     if ep is not None:
         try:
-            with IntellexHost(bench, sd, args=["--ws", "127.0.0.2", "--ssid", "HILCLI"]) as host:
+            with IntellexHost(bench, sd, args=["--ws", "127.0.0.2", "--ssid", "HILCLI"], ws_hosts=["127.0.0.2"]) as host:
                 st, body = host.json("GET", "/_api/status")
                 lines = list(host.lines)
                 if not (body.get("attached") and body.get("kind") == "ws" and body.get("target") == "ws://127.0.0.2/ws"):
@@ -1783,7 +1804,8 @@ def app_browser_mode(bench):
     if ep is not None:
         try:
             os.remove(opened)
-            with IntellexHost(bench, sd, script="app.py", args=["--browser", "--ws", "127.0.0.2"], env=env) as app:
+            with IntellexHost(bench, sd, script="app.py", args=["--browser", "--ws", "127.0.0.2"], env=env,
+                              ws_hosts=["127.0.0.2"]) as app:
                 got = wait_urls(1)
                 st, body = app.json("GET", "/_api/status")
                 if got != [f"{app.url}/"]:
@@ -1862,7 +1884,7 @@ def signals_route(bench):
         ep = None
         bench.note(f"{tid}: the WebSocket half not checked: nothing can listen on 127.0.0.2:80 here ({e})")
     try:
-        with IntellexHost(bench, sd) as host:
+        with IntellexHost(bench, sd, ws_hosts=["127.0.0.2"]) as host:
             body = {"dataTerminalReady": False, "requestToSend": False}
             st, reply = host.json("POST", "/_api/signals", body)
             if st != 409 or reply != {"ok": False, "error": "nothing attached"}:
