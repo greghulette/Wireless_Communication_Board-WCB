@@ -1920,7 +1920,7 @@
   "tested_by": [
    "intellex.wifi_wizard_reconnect"
   ],
-  "gap": "closed 2026-10-12/13 by intellex.wifi_wizard_reconnect; written, not yet run (needs the Mac screen unlocked for the WiFi switch)",
+  "gap": "closed 2026-10-13 by intellex.wifi_wizard_reconnect (s35, opt-in intellex_reboot): PASS on its first run in full run 20261013-021405 (07:54, 29.9 s)",
   "testable": "opt-in",
   "bench_needs": "Intellex host + NaviCore AP + W1",
   "risk": "H",
