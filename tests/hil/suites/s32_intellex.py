@@ -2248,3 +2248,64 @@ def wiki_dotted_page(bench):
         if st != 200 or b"not in the downloaded copy" not in body:
             problems.append(f"a dotted name with no page: {st}, without 'not in the downloaded copy'")
     assert not problems, "; ".join(problems)
+
+
+# ------------------------------------------------------------------ the shell and the shim, re-scan low-risk rows
+@test("intellex.ui_shell_moved_out", "The shell's New window hands the Wizard to its own window before the 4 s preload: "
+      "the preload does not recreate its frame, and clicking the WCB tab brings it back (Playwright; IX re-scan "
+      "shell.new_window)")
+def ui_shell_moved_out(bench):
+    """Intellex src/shell.html $('t-win').onclick (:348-375: movedOut, made[other] = false) and ensure / preloadOthers
+    (:152-188: the preload skips a moved-out tool, an explicit ensure() clears it)."""
+    run_intellex_test(bench, "intellex.ui_shell_moved_out")
+
+
+@test("intellex.ui_shell_link_labels", "The shell's bar names the link from /_api/status every 2 s: 'WiFi <ip>', "
+      "'Relay <ip> → mesh', 'WCB <ip> → mesh', 'USB <port>', 'reconnecting…' while wanted and down, 'not attached', "
+      "and 'not attached' when the status request fails (Playwright; IX re-scan shell.link_label)")
+def ui_shell_link_labels(bench):
+    """Intellex src/shell.html labelFor and refresh (:377-396), the target strings host.py _label_for makes
+    (:1885-1898). /_api/status is fulfilled for the shell document only."""
+    run_intellex_test(bench, "intellex.ui_shell_link_labels")
+
+
+@test("intellex.ui_shell_foreign_message", "The shell ignores open-chooser and close-chooser from another origin - a "
+      "dispatched message from http://evil.example and one posted by an opaque-origin (data:) frame - and acts on the "
+      "same messages from its own origin (Playwright; IX re-scan shell.chooser_overlay)")
+def ui_shell_foreign_message(bench):
+    """Intellex src/shell.html's message listener (:439-444: ev.origin !== location.origin is dropped)."""
+    run_intellex_test(bench, "intellex.ui_shell_foreign_message")
+
+
+@test("intellex.ui_rc_tool_url_kept", "In the Wizard through Intellex, rc_config_tool_url set to a user's own URL is "
+      "left as it is, while one still on greghulette.github.io, or none, becomes '/' (Playwright; IX re-scan "
+      "shim.rc_tool_url)")
+def ui_rc_tool_url_kept(bench):
+    """Intellex src/intellex_shim.js:360-366, which runs before the Wizard's app.js reads the key."""
+    run_intellex_test(bench, "intellex.ui_rc_tool_url_kept")
+
+
+@test("intellex.ui_chip_opens_chooser", "The Wizard's chip and the config tool's transport label open the chooser: on "
+      "their own a navigation to /_launcher, inside the shell the overlay (the Wizard has no chip there), the tool's "
+      "document kept (Playwright; IX re-scan shim.transport_label_chip)")
+def ui_chip_opens_chooser(bench):
+    """Intellex src/intellex_shim.js openChooser (:1488-1497), labelEl (:1436-1455), wcbChip (:1499-1520)."""
+    run_intellex_test(bench, "intellex.ui_chip_opens_chooser")
+
+
+@test("intellex.shim_crlf_split", "Characterisation: a CRLF whose CR ends one write and whose LF starts the next goes "
+      "out as two /_link frames, the line with its CR then a bare LF (Playwright, nothing attached; IX re-scan "
+      "shim.crlf_split_across_chunks)")
+def shim_crlf_split(bench):
+    """Intellex src/intellex_shim.js:202-216 (the per-line framing: a CR at the end of the buffer is sent at once,
+    since the LF is not there yet). intellex.shim_line_framing covers a CRLF inside one chunk."""
+    run_intellex_test(bench, "intellex.shim_crlf_split")
+
+
+@test("intellex.shim_still_trying_banner", "While the host wants a link and has none the shim shows no banner for "
+      "the first 20 s, then 'Still trying to reach the droid — <n>s' with a link to the chooser, removed once the host "
+      "is attached (Playwright, /_api/status fulfilled; IX re-scan shim.watchlink_reconnect_banner)")
+def shim_still_trying_banner(bench):
+    """Intellex src/intellex_shim.js watchLink and banner (:1563-1618, QUIET_S 20 s), in the NaviCore config tool; once
+    attached, /_link is a Playwright stand-in answering ?REC and PING (tests/intellex/specs/ui_shim.spec.js)."""
+    run_intellex_test(bench, "intellex.shim_still_trying_banner")

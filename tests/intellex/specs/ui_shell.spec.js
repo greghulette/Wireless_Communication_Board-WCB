@@ -106,3 +106,107 @@ test('intellex.ui_shell the two-tool window', async ({ page, context, rec }) => 
   await popup.close();
   expect(rec.errors, 'page errors').toEqual([]);
 });
+
+// ── The 2026-10-12 re-scan's low-risk shell rows ─────────────────────────────────────────────────────────────────────
+const framesOf = (page) => page.evaluate(() => ({
+  nc: !!document.querySelector('#p-nc iframe'), wcb: !!document.querySelector('#p-wcb iframe') }));
+const pressedOf = (page) => page.evaluate(() => ['t-nc', 't-wcb', 't-split'].map((id) =>
+  document.getElementById(id).getAttribute('aria-pressed')));
+
+// IX re-scan shell.new_window (shell.html:348-375 $('t-win').onclick, :152-188 ensure / preloadOthers): a tool moved
+// out to its own window before the preload is not recreated by it, and an explicit tab click brings its frame back.
+test('intellex.ui_shell_moved_out a tool moved to its own window stays out until its tab is clicked', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1406, height: 900 });
+  await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    identify: (route) => route.fulfill({ json: { ok: false, version: null, busy: false } }),
+  });
+  await page.goto('/_shell?view=nc', { waitUntil: 'load' });
+  expect(await framesOf(page), 'before the preload').toEqual({ nc: true, wcb: false });
+  const [popup] = await Promise.all([context.waitForEvent('page', { timeout: 10_000 }), page.click('#t-win')]);
+  await expect.poll(() => popup.url(), { timeout: 10_000 }).toMatch(/\/wcb\/Wizard\/$/);
+  await page.waitForTimeout(6_000);                      // past PRELOAD_DELAY_MS (4 s)
+  expect(await framesOf(page), 'the preload recreated the Wizard handed to its own window').toEqual({ nc: true, wcb: false });
+  expect(await pressedOf(page)).toEqual(['true', 'false', 'false']);
+  await popup.close();
+  await page.click('#t-wcb');
+  await expect.poll(() => framesOf(page), { timeout: 5_000, message: 'the WCB tab did not bring the Wizard back' })
+    .toEqual({ nc: true, wcb: true });
+  expect(await pressedOf(page)).toEqual(['false', 'true', 'false']);
+  await expect.poll(() => page.frames().some((f) => pathOf(f) === '/wcb/Wizard/'), { timeout: 10_000 }).toBe(true);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan shell.link_label (shell.html:377-396 labelFor / refresh, every 2 s): what the bar says for each link the
+// host can report. /_api/status is fulfilled for the shell's own document only; the tool frames get 'nothing
+// attached', so neither tool tries to connect.
+test('intellex.ui_shell_link_labels the bar names the link: WiFi, relay, WCB doorway, USB, reconnecting, not attached', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    identify: (route) => route.fulfill({ json: { ok: false, version: null, busy: false } }),
+  });
+  const base = { lastError: '', reconnecting: false, kind: '', role: '', relayId: null };
+  let shellStatus = { attached: false, target: '', wantsLink: false };
+  let fail = false;
+  await context.route(/\/_api\/status(\?|$)/, (route, req) => {
+    if (req.frame() !== page.mainFrame()) {
+      return route.fulfill({ json: Object.assign({}, base, { attached: false, target: '', wantsLink: false }) });
+    }
+    if (fail) return route.abort('failed');
+    return route.fulfill({ json: Object.assign({}, base, shellStatus) });
+  });
+  await page.goto('/_shell?view=nc', { waitUntil: 'load' });
+  const label = () => page.evaluate(() => document.getElementById('target').textContent);
+  for (const [st, want] of [
+    [{ attached: true, target: 'ws://192.168.4.1/ws', wantsLink: true }, 'WiFi 192.168.4.1 ▾'],
+    [{ attached: true, target: 'relay 192.168.4.19 → mesh', wantsLink: true }, 'Relay 192.168.4.19 → mesh ▾'],
+    [{ attached: true, target: 'WCB 192.168.4.1 → mesh', wantsLink: true }, 'WCB 192.168.4.1 → mesh ▾'],
+    [{ attached: true, target: 'serial COM7', wantsLink: true }, 'USB COM7 ▾'],
+    [{ attached: false, target: '', wantsLink: true }, 'reconnecting… ▾'],
+    [{ attached: false, target: '', wantsLink: false }, 'not attached ▾'],
+    [{ attached: true, target: 'ws://192.168.4.1/ws', wantsLink: true }, 'WiFi 192.168.4.1 ▾'],
+  ]) {
+    shellStatus = st;
+    await expect.poll(label, { timeout: 6_000, message: `the label for ${JSON.stringify(st)}` }).toBe(want);
+  }
+  fail = true;                                           // a status request that fails reads as not attached
+  await expect.poll(label, { timeout: 6_000 }).toBe('not attached ▾');
+  fail = false;
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan shell.chooser_overlay (shell.html:439-444): the shell acts on open-chooser and close-chooser from its own
+// origin only. A message dispatched with another origin, and one posted by a frame of an opaque origin (a data: URL),
+// are ignored; the same message from this origin works.
+test('intellex.ui_shell_foreign_message a chooser message from another origin is ignored', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    identify: (route) => route.fulfill({ json: { ok: false, version: null, busy: false } }),
+  });
+  await page.goto('/_shell?view=nc', { waitUntil: 'load' });
+  const open = () => page.evaluate(() => !!document.getElementById('chooser'));
+  const send = (what, origin) => page.evaluate(([w, o]) => window.dispatchEvent(new MessageEvent('message',
+    { data: { intellex: w }, origin: o === 'self' ? location.origin : o })), [what, origin]);
+  await send('open-chooser', 'http://evil.example');
+  await page.waitForTimeout(1_000);
+  expect(await open(), 'open-chooser from http://evil.example opened the chooser').toBe(false);
+  await page.evaluate(() => {
+    const f = document.createElement('iframe');
+    f.id = 'hil-foreign';
+    f.src = 'data:text/html,<script>parent.postMessage({intellex:"open-chooser"},"*")<\/script>';
+    document.body.appendChild(f);
+  });
+  await page.waitForTimeout(1_500);
+  expect(await open(), 'open-chooser posted by an opaque-origin frame opened the chooser').toBe(false);
+  await send('open-chooser', 'self');
+  await expect.poll(open, { timeout: 5_000, message: 'the same message from this origin did nothing' }).toBe(true);
+  await send('close-chooser', 'http://evil.example');
+  await page.waitForTimeout(1_000);
+  expect(await open(), 'close-chooser from another origin closed the chooser').toBe(true);
+  await send('close-chooser', 'self');
+  await expect.poll(open, { timeout: 5_000 }).toBe(false);
+  expect(rec.errors, 'page errors').toEqual([]);
+});

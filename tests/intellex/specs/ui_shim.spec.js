@@ -449,3 +449,78 @@ test('intellex.shim_close_intent a Disconnect is honoured, a teardown after a lo
     .toBeGreaterThanOrEqual(opened1 + 2);
   expect(rec.errors, 'page errors').toEqual([]);
 });
+
+// IX re-scan shim.crlf_split_across_chunks (intellex_shim.js:202-216): a CRLF whose CR ends one write() and whose LF
+// starts the next goes out as two frames - the line with its CR, then a bare '\n' - the characterisation the shim's
+// comment calls harmless (both readers skip a blank line). Pinned as it is.
+test('intellex.shim_crlf_split a CRLF split across two writes goes out as two frames', async ({ page, rec }) => {
+  const sockets = linkFrames(page);
+  await page.goto('/', { waitUntil: 'load' });
+  await expect.poll(() => rec.intellex.some((l) => l.includes('host has no transport attached')), { timeout: 15_000 })
+    .toBe(true);
+  const MARK = 'HILCRLF-' + Date.now().toString(36);
+  await page.evaluate(async (MARK) => {
+    const enc = new TextEncoder();
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    const w = port.writable.getWriter();
+    await w.write(enc.encode(MARK + '\n'));
+    await w.write(enc.encode('abc\r'));
+    await w.write(enc.encode('\ndef\n'));
+    await w.write(enc.encode('ghi\r\njkl\r'));
+    await w.write(enc.encode('\n'));
+    await w.close();
+  }, MARK);
+  const want = [MARK + '\n', 'abc\r', '\n', 'def\n', 'ghi\r\n', 'jkl\r', '\n'];
+  await expect.poll(() => {
+    const s = sockets.find((x) => x.sent.includes(MARK + '\n'));
+    return s ? s.sent.slice(s.sent.indexOf(MARK + '\n')).length : 0;
+  }, { timeout: 5_000, message: 'the frames did not all arrive' }).toBeGreaterThanOrEqual(want.length);
+  const s = sockets.find((x) => x.sent.includes(MARK + '\n'));
+  expect(s.sent.slice(s.sent.indexOf(MARK + '\n')).map((x) => JSON.stringify(x)),
+    'a CRLF split across writes: the CR line, then a bare LF frame').toEqual(want.map((x) => JSON.stringify(x)));
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan shim.watchlink_reconnect_banner (intellex_shim.js:1563-1618 watchLink, banner, QUIET_S 20 s): while the
+// host wants a link and has none the shim stays quiet through a normal reboot's outage, then shows 'Still trying to
+// reach the droid' with a way to the chooser, and takes it down once the host is attached again. /_api/status is
+// fulfilled here; once it says attached, /_link is a stand-in that answers ?REC and PING, so the tool's connect has a
+// board to find.
+test('intellex.shim_still_trying_banner the still-trying banner after 20 s down, gone once attached', async ({ page, context, rec }) => {
+  test.setTimeout(120_000);
+  await hostGuard(context, rec);
+  const down = { attached: false, target: '', lastError: 'HIL down', reconnecting: true, wantsLink: true, kind: 'serial',
+                 role: '', relayId: null };
+  const up = { attached: true, target: 'serial COMFAKE', lastError: '', reconnecting: false, wantsLink: true,
+               kind: 'serial', role: 'navicore', relayId: null };
+  let status = down;
+  await context.route(/\/_api\/status(\?|$)/, (r) => r.fulfill({ json: status }));
+  await page.routeWebSocket(/\/_link$/, (ws) => {
+    ws.onMessage((msg) => {
+      const t = typeof msg === 'string' ? msg : Buffer.from(msg).toString('utf8');
+      if (t.startsWith('?REC')) ws.send('[REC] state=idle\n');
+      else if (t.includes('"PING"')) ws.send('{"type":"PONG","version":"v0.2.0_hilbanner"}\n');
+    });
+  });
+  const banner = () => page.evaluate(() => {
+    const b = document.getElementById('intellex-banner');
+    return b ? { text: b.textContent, link: (b.querySelector('a') || {}).getAttribute ? b.querySelector('a').getAttribute('href') : null }
+             : null;
+  });
+  const t0 = Date.now();
+  await page.goto('/', { waitUntil: 'load' });
+  await page.waitForTimeout(Math.max(0, 15_000 - (Date.now() - t0)));
+  expect(await banner(), 'a banner within 15 s of the link going down (QUIET_S is 20 s)').toBe(null);
+  await expect.poll(banner, { timeout: 15_000, message: 'no banner 30 s after the link went down' })
+    .not.toBe(null);
+  const b = await banner();
+  expect(Date.now() - t0, 'the banner came before 20 s of outage').toBeGreaterThanOrEqual(20_000);
+  expect(b.text).toContain('Still trying to reach the droid');
+  const secs = Number((/— (\d+)s\./.exec(b.text) || [])[1]);
+  expect(secs, `the seconds in '${b.text.slice(0, 60)}'`).toBeGreaterThanOrEqual(20);
+  expect(b.link, 'the way to the chooser').toBe('/_launcher');
+  status = up;
+  await expect.poll(banner, { timeout: 6_000, message: 'the banner stayed once the host was attached' }).toBe(null);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
