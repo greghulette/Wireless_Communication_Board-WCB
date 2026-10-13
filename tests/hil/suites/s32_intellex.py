@@ -2250,6 +2250,86 @@ def wiki_dotted_page(bench):
     assert not problems, "; ".join(problems)
 
 
+# ------------------------------------------------------------------ the chooser (launcher.html), re-scan low-risk rows
+@test("intellex.ui_launcher_identify_states", "The chooser's serial rows: identify answering {attached:true} is "
+      "'connected right now' and lit, and a failed or non-JSON identify leaves the bare chip label - each upgraded in "
+      "place with the selected row's panel following; FTDI, a description and a bare port labelled; macOS debug, "
+      "Bluetooth and wlan nodes skipped (Playwright; IX re-scan launcher.serial_list)")
+def ui_launcher_identify_states(bench):
+    """Intellex src/launcher.html scan (:771-866): chipLabel, worthAsking (303A only), skip, the identify .then/.catch.
+    /_api/ports and identify are fulfilled in the page (tests/intellex/specs/ui_launcher.spec.js). Found writing it
+    (GUI run 20261013-000028): the attached answer returned before the panel repaint and the .catch had none, so a
+    selected port kept '... — asking…' in the panel - fixed in Intellex d486fa9."""
+    run_intellex_test(bench, "intellex.ui_launcher_identify_states")
+
+
+@test("intellex.ui_launcher_wifi_watch", "The chooser's WiFi list with no droid: one hint from the most informative "
+      "candidate with ' — still watching…' while the 2-minute watch runs, a rescan every 4 s, and after 2 minutes a "
+      "last pass without the suffix and no more rescans (Playwright with a fake clock; IX re-scan launcher.wifi_list)")
+def ui_launcher_wifi_watch(bench):
+    """Intellex src/launcher.html scanWifi and watchForDroid (:681-769), WATCH_EVERY_MS 4 s, WATCH_FOR_MS 2 min, under
+    Playwright's page.clock. Pinned as it is today (a product call): '#scanstate' still reads 'watching…' after the
+    watch has ended, because the last pass saw a routable host that does not answer."""
+    run_intellex_test(bench, "intellex.ui_launcher_wifi_watch")
+
+
+@test("intellex.ui_launcher_theme_first_run", "The chooser on a first run follows the OS theme (prefers-color-scheme "
+      "light and dark), the mark swaps to its light build with the theme, a chosen theme is remembered over the OS, "
+      "and the layout picker is built from VIEWS with WCB the default (Playwright; IX re-scan launcher.theme_views)")
+def ui_launcher_theme_first_run(bench):
+    """Intellex src/launcher.html currentTheme / applyTheme (:521-543) and buildViews / currentView (:545-606), in a
+    fresh browser context per colour scheme."""
+    run_intellex_test(bench, "intellex.ui_launcher_theme_first_run")
+
+
+@test("intellex.ui_launcher_maintenance_buttons", "The chooser's Update tools, Download firmware and Download docs POST "
+      "their route with the button disabled meanwhile, report success, partial and failure ('updated — config tool A, "
+      "Wizard B', 'E (now: config tool A)', 'firmware cached — safe to go offline now', 'docs updated', ...) and "
+      "re-check; Rescan asks for the ports, discovery and every check again (Playwright; IX re-scan "
+      "launcher.maintenance_actions)")
+def ui_launcher_maintenance_buttons(bench):
+    """Intellex src/launcher.html $('update').onclick (:1175-1191), $('updatefw').onclick (:929-941),
+    $('updatewiki').onclick (:1128-1141) and $('rescan').onclick; the three update routes are fulfilled in the page,
+    so nothing reaches GitHub."""
+    run_intellex_test(bench, "intellex.ui_launcher_maintenance_buttons")
+
+
+def _seed_branch_cache(sd):
+    import time
+    with open(os.path.join(sd, "appdata", "Intellex", "branches_cache.json"), "w", encoding="utf-8") as f:
+        json.dump({"navicore": ["main"], "wcb": ["main", "hil-feat"], "at": time.time()}, f)
+
+
+@test("intellex.ui_launcher_branch_refresh", "The chooser's branch picker with a seeded branch-list cache that lacks the "
+      "set WCB branch: the note says it is no longer in the list, Refresh requests ?refresh=1 and puts the list's error "
+      "in the status line, a clean refresh says 'branch lists updated' and the note goes, a failed request is 'could "
+      "not ask the host' (Playwright, offline; IX re-scan launcher.branch_picker)")
+def ui_launcher_branch_refresh(bench):
+    """Intellex src/launcher.html checkBranches / fillBranchOptions / $('br-refresh').onclick (:1007-1090) against the
+    host's real /_api/branch-list offline (branchlist.py), the cache seeded into the stage's appdata and the WCB branch
+    set to hil-gone in its settings.json."""
+    run_intellex_test(bench, "intellex.ui_launcher_branch_refresh",
+                      settings={"branch": {"wcb": "hil-gone", "navicore": "main"}}, seed=_seed_branch_cache)
+
+
+@test("intellex.ui_launcher_docs_version", "With docs stored the chooser's Docs asks the host for a second window on "
+      "/wiki/ and opens a popup itself when there is no window backend, nothing when the host made one; the header "
+      "shows the build as /_api/version says it (Playwright, a crafted wiki; IX re-scan launcher.log_docs_version)")
+def ui_launcher_docs_version(bench):
+    """Intellex src/launcher.html $('opendocs').onclick (:1116-1127) and the #appver filler (:1146-1155);
+    /_api/open-window is fulfilled in the page (501 as host.py answers with no window backend, then ok)."""
+    run_intellex_test(bench, "intellex.ui_launcher_docs_version", wiki=True)
+
+
+@test("intellex.ui_launcher_no_droid", "With no serial port and no droid the chooser's status says 'No droid found. "
+      "You can still open the tool on its own...' once both lists have answered, not after the serial half alone "
+      "(Playwright; IX re-scan launcher.back_offline_reload)")
+def ui_launcher_no_droid(bench):
+    """Intellex src/launcher.html offerOfflineIfEmpty (:1214-1222), called at the end of scan() after scanWifi; the
+    discovery answer is held to show the order."""
+    run_intellex_test(bench, "intellex.ui_launcher_no_droid")
+
+
 # ------------------------------------------------------------------ the shell and the shim, re-scan low-risk rows
 @test("intellex.ui_shell_moved_out", "The shell's New window hands the Wizard to its own window before the 4 s preload: "
       "the preload does not recreate its frame, and clicking the WCB tab brings it back (Playwright; IX re-scan "

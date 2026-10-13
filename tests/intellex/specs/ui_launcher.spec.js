@@ -316,3 +316,340 @@ test('intellex.ui_launcher_tools_stale a stale tool is called out in the summary
   await expect.poll(() => text(page, '#attntext'), { timeout: 10_000 }).toBe('2 things need attention');
   expect(rec.errors, 'page errors').toEqual([]);
 });
+
+// ── The 2026-10-12 re-scan's low-risk launcher rows ──────────────────────────────────────────────────────────────────
+const cls = (page, sel) => page.evaluate((s) => document.querySelector(s).className, sel);
+
+// IX re-scan launcher.serial_list (launcher.html:771-866 scan): identify answering {attached:true} is 'connected right
+// now' and lit; an identify request that fails, or answers something that is not JSON, leaves the bare chip label; the
+// selected row's panel follows the in-place upgrade; FTDI, a description and a bare port are labelled by what they are,
+// and macOS's debug, Bluetooth and wlan nodes are skipped.
+test('intellex.ui_launcher_identify_states identify\'s other answers upgrade the serial rows in place', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const ports = [
+    { path: 'COM81', description: 'USB Serial Device (COM81)', vid: 0x303A, pid: 0x1001, serial_number: '' },
+    { path: 'COM82', description: 'USB Serial Device (COM82)', vid: 0x303A, pid: 0x1001, serial_number: '' },
+    { path: 'COM83', description: 'USB Serial Device (COM83)', vid: 0x303A, pid: 0x1001, serial_number: '' },
+    { path: 'COM84', description: 'FT232R USB UART (COM84)', vid: 0x0403, pid: 0x6001, serial_number: '' },
+    { path: 'COM85', description: 'HIL Serial Thing', vid: null, pid: null, serial_number: '' },
+    { path: 'COM86', description: '', vid: null, pid: null, serial_number: '' },
+    { path: '/dev/cu.debug-console', description: 'n/a', vid: null, pid: null, serial_number: '' },
+    { path: '/dev/cu.Bluetooth-Incoming-Port', description: 'n/a', vid: null, pid: null, serial_number: '' },
+    { path: '/dev/cu.wlan-debug', description: 'n/a', vid: null, pid: null, serial_number: '' },
+  ];
+  let release, release82;
+  const held = new Promise((r) => { release = r; });
+  const held82 = new Promise((r) => { release82 = r; });
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports } }));
+  const calls = await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    identify: async (route, req) => {
+      const port = req.postDataJSON().port;
+      if (port === 'COM81') { await held; return route.fulfill({ json: { ok: true, attached: true, version: null } }); }
+      if (port === 'COM82') { await held82; return route.abort('failed'); }
+      return route.fulfill({ status: 500, contentType: 'text/plain', body: 'HIL: not JSON' });
+    },
+  });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await expect.poll(async () => (await rows(page, 'serial')).map((r) => r.sub), { timeout: 10_000 }).toEqual([
+    'Espressif native USB — asking…', 'Espressif native USB — asking…', 'Espressif native USB', 'FTDI bridge',
+    'HIL Serial Thing', 'serial port']);
+  expect((await rows(page, 'serial')).map((r) => r.title), 'the rows (debug, Bluetooth and wlan nodes skipped)')
+    .toEqual(['COM81', 'COM82', 'COM83', 'COM84', 'COM85', 'COM86']);
+  expect(calls.filter((c) => c.name === 'identify').map((c) => c.body.port).sort(), 'identify asked of 303A only')
+    .toEqual(['COM81', 'COM82', 'COM83']);
+  await expect.poll(() => text(page, '#selTitle'), { timeout: 10_000, message: 'auto-select' }).toBe('COM81');
+  expect(await text(page, '#selSub'), 'the panel while COM81 is still being asked').toBe('Espressif native USB — asking…');
+  release();
+  await expect.poll(async () => (await rows(page, 'serial'))[0], { timeout: 10_000 })
+    .toEqual({ title: 'COM81', sub: 'connected right now', up: true, sel: true });
+  await expect.poll(() => text(page, '#selSub'), { timeout: 5_000, message: 'the panel did not follow the upgrade' })
+    .toBe('connected right now');
+  // A selected row whose identify request then fails: the row and the panel drop 'asking…' for the chip label.
+  await page.locator('#serial .row', { hasText: 'COM82' }).click();
+  expect(await text(page, '#selSub'), 'the panel while COM82 is still being asked').toBe('Espressif native USB — asking…');
+  release82();
+  await expect.poll(async () => (await rows(page, 'serial'))[1].sub, { timeout: 10_000 }).toBe('Espressif native USB');
+  await expect.poll(() => text(page, '#selSub'), { timeout: 5_000, message: 'the panel kept "asking…" after the '
+    + 'identify request failed' }).toBe('Espressif native USB');
+  expect((await rows(page, 'serial')).map((r) => r.up), 'only the attached port is lit')
+    .toEqual([true, false, false, false, false, false]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.wifi_list (launcher.html:681-769 scanWifi, watchForDroid): with nothing that is a droid, one hint
+// from the most informative candidate - reachable before routable before the first - with ' — still watching…' while
+// the 2 min watch runs; the watch rescans every 4 s and stops at 2 min, its last pass without the suffix. The page's
+// clock is Playwright's (page.clock), so 2 minutes pass in moments.
+test('intellex.ui_launcher_wifi_watch one hint while watching, and the watch ends after 2 minutes', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  let cands = [
+    cand({ host: '10.0.0.9', via: null, routable: false, reachable: false, hint: 'HIL no route' }),
+    cand({ host: '192.168.4.1', routable: true, reachable: false, hint: 'HIL routed via 192.168.4.2 but no TCP' }),
+  ];
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  const calls = await hostGuard(context, rec, { discover: (route) => route.fulfill({ json: { candidates: cands } }) });
+  const discovers = () => calls.filter((c) => c.name === 'discover').length;
+  const empty = () => page.evaluate(() => (document.querySelector('#wifi .empty') || {}).textContent || null);
+  await page.clock.install();
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await expect.poll(empty, { timeout: 10_000 }).toBe('HIL routed via 192.168.4.2 but no TCP — still watching…');
+  expect(await text(page, '#scanstate')).toBe('watching…');
+  const n0 = discovers();
+  await page.clock.runFor(4_100);
+  await expect.poll(discovers, { timeout: 5_000, message: 'the watch did not rescan after 4 s' }).toBe(n0 + 1);
+  // A reachable candidate is the more informative one, wherever it is in the list.
+  cands = [cands[1], cand({ host: '192.168.4.5', routable: true, reachable: true, hint: 'HIL something on port 80' })];
+  await page.clock.runFor(4_100);
+  await expect.poll(empty, { timeout: 5_000 }).toBe('HIL something on port 80 — still watching…');
+  // Past the 2 minutes: one more pass, then the last one without the suffix, and no more rescans.
+  await page.clock.fastForward(120_000);
+  await expect.poll(empty, { timeout: 5_000, message: 'the last pass still says it is watching' })
+    .toBe('HIL something on port 80');
+  await page.waitForTimeout(500);
+  const n1 = discovers();
+  await page.clock.runFor(30_000);
+  await page.waitForTimeout(1_000);
+  expect(discovers(), 'the watch kept rescanning after 2 minutes').toBe(n1);
+  // Pinned as it is today (a product call): the header keeps 'watching…' after the watch has ended, since the last
+  // pass still saw a routable host not answering (scanWifi sets it from what it found, not from the watch).
+  expect(await text(page, '#scanstate')).toBe('watching…');
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.theme_views (launcher.html:521-606): a first run follows the OS (prefers-color-scheme), the mark
+// swaps to its light build with the theme, the choice is remembered over the OS, and the layout picker is built from
+// VIEWS with WCB the default.
+test('intellex.ui_launcher_theme_first_run the first run follows the OS theme and the mark follows the theme', async ({ browser, rec }) => {
+  const base = process.env.INTELLEX_URL;
+  const look = (p) => p.evaluate(() => ({ theme: document.documentElement.getAttribute('data-theme'),
+    mark: new URL(document.querySelector('#top .mark').src).pathname, button: document.getElementById('theme').textContent,
+    stored: localStorage.getItem('intellex_theme') }));
+  for (const scheme of ['light', 'dark']) {
+    const ctx = await browser.newContext({ colorScheme: scheme, baseURL: base });
+    try {
+      await ctx.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+      await hostGuard(ctx, rec, { discover: (route) => route.fulfill({ json: { candidates: [] } }) });
+      const p = await ctx.newPage();
+      const errors = [];
+      p.on('pageerror', (e) => errors.push(String(e && e.message || e)));
+      await p.goto('/_launcher', { waitUntil: 'load' });
+      const other = scheme === 'light' ? 'dark' : 'light';
+      const mark = (t) => (t === 'light' ? '/_assets/intellex-mark-128-light.png' : '/_assets/intellex-mark-128.png');
+      const button = (t) => (t === 'light' ? 'Dark mode' : 'Light mode');
+      expect(await look(p), `a first run with the OS ${scheme}`).toEqual({ theme: scheme, mark: mark(scheme),
+        button: button(scheme), stored: scheme });
+      await p.click('#theme');
+      expect(await look(p), `after the toggle (OS ${scheme})`).toEqual({ theme: other, mark: mark(other),
+        button: button(other), stored: other });
+      await p.reload({ waitUntil: 'load' });
+      expect((await look(p)).theme, `the choice is remembered over the OS ${scheme}`).toBe(other);
+      if (scheme === 'light') {
+        expect(await p.evaluate(() => [...document.querySelectorAll('#openwith .pick')].map((b) => [b.dataset.view,
+          b.querySelector('b').textContent, b.getAttribute('aria-pressed')])), 'the picker, from VIEWS').toEqual([
+          ['nc', 'NaviCore', 'false'], ['wcb', 'WCB', 'true'], ['split', 'Side by side', 'false'],
+          ['sep', 'Separate windows', 'false']]);
+      }
+      expect(errors, 'page errors').toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  }
+});
+
+// IX re-scan launcher.maintenance_actions (launcher.html:929-941, :1128-1141, :1175-1191): Update tools, Download
+// firmware and Download docs POST their route with the button disabled meanwhile, say what landed - success, partial
+// and failure in the error style - and re-check; Rescan scans again and re-runs the checks.
+test('intellex.ui_launcher_maintenance_buttons Update tools, Download firmware, Download docs and Rescan report and re-check', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const replies = { 'update-webui': [], 'update-firmware': [], 'update-wiki': [] };
+  let hold = null;
+  const answer = (name) => async (route) => {
+    if (hold) await hold.promise;
+    const r = replies[name].shift() || { json: { ok: true } };
+    return r.body !== undefined ? route.fulfill({ status: r.status || 500, contentType: 'text/plain', body: r.body })
+                                : route.fulfill({ json: r.json });
+  };
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  const calls = await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    'update-webui': answer('update-webui'), 'update-firmware': answer('update-firmware'),
+    'update-wiki': answer('update-wiki'),
+  });
+  const gets = [];
+  page.on('request', (r) => { if (r.method() === 'GET') gets.push(new URL(r.url()).pathname); });
+  const count = (p) => gets.filter((g) => g === p).length;
+  const status = () => page.evaluate(() => { const s = document.getElementById('status'); return [s.textContent, s.className]; });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await page.evaluate(() => { document.getElementById('maint').open = true; });
+  await expect.poll(() => count('/_api/wiki'), { timeout: 10_000 }).toBeGreaterThan(0);
+
+  async function press(button, route, reply, recheck, busyText) {
+    replies[route].push(reply);
+    let open;
+    hold = { promise: new Promise((r) => { open = r; }) };
+    const n = calls.filter((c) => c.name === route).length;
+    const before = count(recheck);
+    await page.click('#' + button);
+    await expect.poll(() => calls.filter((c) => c.name === route).length, { timeout: 5_000,
+      message: `#${button} did not POST /_api/${route}` }).toBe(n + 1);
+    expect(await page.evaluate((b) => document.getElementById(b).disabled, button), `#${button} while it runs`)
+      .toBe(true);
+    expect((await status())[0], `#${button}'s status while it runs`).toBe(busyText);
+    open();
+    hold = null;
+    await expect.poll(() => page.evaluate((b) => document.getElementById(b).disabled, button), { timeout: 5_000 })
+      .toBe(false);
+    await expect.poll(() => count(recheck), { timeout: 5_000, message: `#${button} did not re-check ${recheck}` })
+      .toBeGreaterThan(before);
+    return status();
+  }
+  const UPD = 'downloading the latest config tool and Wizard…';
+  expect(await press('update', 'update-webui', { json: { ok: true, version: 'HILA', wcbVersion: 'HILB' } },
+    '/_api/webui-version', UPD)).toEqual(['updated — config tool HILA, Wizard HILB', 'status']);
+  expect(await press('update', 'update-webui', { json: { ok: false, error: 'HIL E', version: 'HILA' } },
+    '/_api/webui-version', UPD)).toEqual(['HIL E (now: config tool HILA)', 'status err']);
+  expect(await press('update', 'update-webui', { json: { ok: false } }, '/_api/webui-version', UPD))
+    .toEqual(['update failed', 'status err']);
+  expect(await press('update', 'update-webui', { json: { ok: true } }, '/_api/webui-version', UPD))
+    .toEqual(['updated', 'status']);
+  const broken = await press('update', 'update-webui', { body: 'HIL: not JSON' }, '/_api/webui-version', UPD);
+  expect(broken[1]).toBe('status err');
+  expect(broken[0], 'a reply that is not JSON').toMatch(/^update failed: /);
+
+  const FW = 'downloading firmware for offline use — this can take a minute…';
+  expect(await press('updatefw', 'update-firmware', { json: { ok: true } }, '/_api/firmware', FW))
+    .toEqual(['firmware cached — safe to go offline now', 'status']);
+  expect(await press('updatefw', 'update-firmware', { json: { ok: false, error: 'HIL FW' } }, '/_api/firmware', FW))
+    .toEqual(['firmware update incomplete: HIL FW', 'status err']);
+  expect(await press('updatefw', 'update-firmware', { json: { ok: false } }, '/_api/firmware', FW))
+    .toEqual(['firmware update incomplete: see the log', 'status err']);
+
+  const WIKI = 'downloading the wikis…';
+  expect(await press('updatewiki', 'update-wiki', { json: { ok: true } }, '/_api/wiki', WIKI))
+    .toEqual(['docs updated', 'status']);
+  expect(await press('updatewiki', 'update-wiki', { json: { ok: false, error: 'HIL W' } }, '/_api/wiki', WIKI))
+    .toEqual(['docs update incomplete: HIL W', 'status err']);
+  const wb = await press('updatewiki', 'update-wiki', { body: 'HIL: not JSON' }, '/_api/wiki', WIKI);
+  expect(wb[1]).toBe('status err');
+  expect(wb[0]).toMatch(/^could not download the docs: /);
+
+  // Rescan: both lists and every check again.
+  const before = Object.fromEntries(['/_api/ports', '/_api/webui-version', '/_api/firmware', '/_api/log']
+    .map((p) => [p, count(p)]));
+  const d0 = calls.filter((c) => c.name === 'discover').length;
+  await page.click('#rescan');
+  for (const p of Object.keys(before)) {
+    await expect.poll(() => count(p), { timeout: 5_000, message: `Rescan did not ask ${p} again` })
+      .toBeGreaterThan(before[p]);
+  }
+  await expect.poll(() => calls.filter((c) => c.name === 'discover').length, { timeout: 5_000 }).toBeGreaterThan(d0);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.branch_picker (launcher.html:1007-1090): the harness seeds a branch-list cache that lacks the
+// WCB branch it set (hil-gone), offline. The note calls it out; Refresh asks /_api/branch-list?refresh=1 and says the
+// list's error in the status line in the error style; a refresh that works says 'branch lists updated' and the note
+// goes; a list request that fails is 'could not ask the host'.
+test('intellex.ui_launcher_branch_refresh Refresh forces the list and says why it could not, and a vanished branch is called out', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, { discover: (route) => route.fulfill({ json: { candidates: [] } }) });
+  const lists = [];
+  page.on('request', (r) => { if (new URL(r.url()).pathname === '/_api/branch-list') lists.push(new URL(r.url()).search); });
+  const status = () => page.evaluate(() => { const s = document.getElementById('status'); return [s.textContent, s.className]; });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await page.evaluate(() => { document.getElementById('maint').open = true; });
+  const GONE = 'WCB is set to a branch that is no longer in the list — flashing it will fail. Pick another.';
+  await expect.poll(() => text(page, '#br-note'), { timeout: 10_000 }).toContain(GONE);
+  const note = await text(page, '#br-note');
+  expect(note, 'the non-main warning').toContain('Not on main: WCB → hil-gone');
+  expect(note, 'the offline reason').toContain('Branch list: offline (');
+  expect(await page.evaluate(() => [[...document.querySelectorAll('#br-wcb option')].map((o) => o.value),
+    document.getElementById('br-wcb').value]), 'the WCB dropdown').toEqual([['hil-gone', 'main', 'hil-feat', ':other:'],
+    'hil-gone']);
+  expect(lists, 'the first fill is not forced').not.toContain('?refresh=1');
+
+  await page.click('#br-refresh');
+  await expect.poll(() => lists.includes('?refresh=1'), { timeout: 5_000, message: 'Refresh did not force the list' })
+    .toBe(true);
+  await expect.poll(status, { timeout: 10_000 }).toEqual([expect.stringMatching(/^branch list: offline \(/),
+    'status err']);
+  expect(await page.evaluate(() => document.getElementById('br-refresh').disabled)).toBe(false);
+
+  // A refresh that comes back clean (fulfilled here): the status says so and the vanished-branch note goes.
+  await context.route(/\/_api\/branch-list(\?.*)?$/, (r) => r.fulfill({ json: { navicore: ['main'],
+    wcb: ['hil-gone', 'main'], cached: false, error: '', missing: [] } }));
+  await page.click('#br-refresh');
+  await expect.poll(status, { timeout: 10_000 }).toEqual(['branch lists updated', 'status']);
+  expect(await text(page, '#br-note')).not.toContain(GONE);
+  // A list request that fails outright.
+  await context.unroute(/\/_api\/branch-list(\?.*)?$/);
+  await context.route(/\/_api\/branch-list(\?.*)?$/, (r) => r.abort('failed'));
+  await page.click('#br-refresh');
+  await expect.poll(status, { timeout: 10_000 }).toEqual([expect.stringMatching(/^branch list: could not ask the host \(/),
+    'status err']);
+  await context.unroute(/\/_api\/branch-list(\?.*)?$/);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.log_docs_version (launcher.html:1116-1173): with docs stored, Docs asks the host for a second
+// window on /wiki/ and opens it itself when there is none (host.py has no window backend: a popup), and opens nothing
+// when the host made one; the header shows the build as /_api/version says it.
+test('intellex.ui_launcher_docs_version Docs opens /wiki/ in a second window and the header shows the build', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, { discover: (route) => route.fulfill({ json: { candidates: [] } }) });
+  const asked = [];
+  let backend = false;
+  await context.route(/\/_api\/open-window(\?|$)/, (route, req) => {
+    asked.push(req.postDataJSON());
+    rec.fulfilled.add(req.url());
+    return backend ? route.fulfill({ json: { ok: true } })
+                   : route.fulfill({ status: 501, json: { ok: false, error: 'no window backend' } });
+  });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  const v = await (await page.request.get('/_api/version')).json();
+  const bits = [v.commit, v.built].filter(Boolean).join(', ');
+  await expect.poll(() => text(page, '#appver'), { timeout: 10_000 }).toBe('v' + v.version + (bits ? ` (${bits})` : ''));
+  await expect.poll(() => page.evaluate(() => document.getElementById('opendocs').disabled), { timeout: 10_000,
+    message: 'Docs is disabled with the crafted wiki stored' }).toBe(false);
+  const [popup] = await Promise.all([context.waitForEvent('page', { timeout: 10_000 }), page.click('#opendocs')]);
+  await expect.poll(() => new URL(popup.url()).pathname, { timeout: 10_000 }).toMatch(/^\/wiki\/(intellex\/)?$/);
+  expect(asked, 'what Docs asked the host for').toEqual([{ url: '/wiki/', title: 'Intellex Docs' }]);
+  await popup.close();
+  backend = true;
+  const popups = [];
+  context.on('page', (p) => popups.push(p.url()));
+  await page.click('#opendocs');
+  await expect.poll(() => asked.length, { timeout: 5_000 }).toBe(2);
+  await page.waitForTimeout(1_500);
+  expect(popups, 'Docs opened a window itself although the host made one').toEqual([]);
+  expect(new URL(page.url()).pathname, 'Docs navigated the launcher').toBe('/_launcher');
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
+// IX re-scan launcher.back_offline_reload (launcher.html:1196-1232 offerOfflineIfEmpty): with no port and no droid the
+// status line points at 'Open the tool anyway' - once both lists have answered, not after the serial half alone.
+test('intellex.ui_launcher_no_droid with nothing found the chooser offers the tool without a board', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, { discover: async (route) => { await held; return route.fulfill({ json: { candidates: [] } }); } });
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await expect.poll(() => text(page, '#serial .empty'), { timeout: 10_000 }).toBe('no serial ports found');
+  await page.waitForTimeout(1_000);
+  expect(await text(page, '#status'), 'the status before the WiFi list answered').not.toContain('No droid found');
+  release();
+  await expect.poll(() => text(page, '#status'), { timeout: 10_000 }).toBe('No droid found. You can still open the tool '
+    + 'on its own — panels, saved configs and editing all work without a board.');
+  expect(await cls(page, '#status')).toBe('status');
+  expect(await text(page, '#wifi .empty')).toBe('no droid found');
+  expect(await page.evaluate(() => document.getElementById('go').disabled), 'Connect with nothing to pick').toBe(true);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
