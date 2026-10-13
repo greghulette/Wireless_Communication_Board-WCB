@@ -774,6 +774,57 @@ def rterm_relay_navicore(bench):
         time.sleep(0.5)
 
 
+@test("mesh.rterm_idle_expiry", "A remote-terminal session nobody re-arms ends by itself 30 s after its last ?RTERM,START ('[RTERM] Session stopped' and the not-re-armed line on W2's USB; W1 gets no [TERM:2] line after it); one re-armed every 10 s is still mirroring at 45 s", needs=["wcb1", "wcb2"], links=[])
+def rterm_idle_expiry(bench):
+    """Greg's call 2026-10-13 (re-scan decision: remote-terminal timeout). WCBSerial::expireIfIdle (WCB_RemoteTerm.cpp,
+    from loop()) stops a session not re-armed for RTERM_IDLE_MS (30 s): sessions used to last until ?RTERM,STOP or a
+    reboot, and ones a closed Wizard or Intellex left behind mirrored W1's console over the mesh at ~300 ms a line
+    (2026-10-12). Intellex re-arms about every 10 s and the Wizard keeps its managed boards alive the same way."""
+    w = usb_wcb(bench)
+    d2 = bench.dev(bench.usb_wcbs()[2])
+    relay = bench.usb_wcb_number()
+    problems = []
+    try:
+        # (a) left alone: ends at 30 s
+        m, m2 = w.send(f";W2,?RTERM,START,{relay}"), d2.mark()
+        w.dev.expect(r"^\[TERM:2\]\[RTERM\] Session started", timeout=5, since=m)
+        t0 = time.monotonic()
+        try:
+            d2.expect(r"^\[RTERM\] Session stopped", timeout=40, since=m2)
+            took = time.monotonic() - t0
+            if not 28.0 <= took <= 34.0:
+                problems.append(f"the idle session stopped {took:.1f} s after its start, not ~30")
+            if not any("not re-armed for 30 s" in x for x in d2.since(m2)):
+                problems.append("no 'not re-armed for 30 s' line on W2")
+        except Exception:
+            problems.append("an idle session was still running 40 s after its start")
+        m1 = w.dev.mark()
+        w.send(";W2,?VERSION")
+        time.sleep(1.5)
+        if [x for x in w.dev.since(m1) if x.startswith("[TERM:2]")]:
+            problems.append("W2 still mirrored to W1 after the session expired")
+        # (b) re-armed every 10 s: still alive at 45 s
+        m = w.send(f";W2,?RTERM,START,{relay}")
+        w.dev.expect(r"^\[TERM:2\]\[RTERM\] Session started", timeout=5, since=m)
+        m2 = d2.mark()
+        for _ in range(4):
+            time.sleep(10.0)
+            w.send(f";W2,?RTERM,START,{relay}")
+        time.sleep(5.0)
+        if any(x.startswith("[RTERM] Session stopped") for x in d2.since(m2)):
+            problems.append("a session re-armed every 10 s stopped")
+        m1 = w.dev.mark()
+        w.send(";W2,?VERSION")
+        try:
+            w.dev.expect(r"^\[TERM:2\]End of Version", timeout=5, since=m1)
+        except Exception:
+            problems.append("a session re-armed every 10 s no longer mirrored W2's ?VERSION at 45 s")
+    finally:
+        w.send(";W2,?RTERM,STOP")
+        time.sleep(0.5)
+    assert not problems, "; ".join(problems)
+
+
 @test("mesh.rterm_stop", "?RTERM,STOP ends W2's mirror at once: a ?VERSION after it runs on W2 but no [TERM:2] line reaches W1, and the stop line itself stays on W2's USB", needs=["wcb1"], links=[])
 def rterm_stop(bench):
     """WCB-WP31 row 3, the STOP half (rterm.stop_flush_and_password). WCBSerial::stopSession (WCB_RemoteTerm.cpp) flushes

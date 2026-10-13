@@ -996,7 +996,7 @@ def _drops(lines, what):
     return sum(int(m.group(1)) for x in lines for m in [re.match(rf"^\[WS\] dropped (\d+) {what}", x)] if m)
 
 
-@test("ws.drop_reports", "OPT-IN (wifi_pc): the WebSocket endpoint reports what it drops. With W1's loop held by a slow ;S3 write (S3 at 600 baud, nothing printed), one frame of 40 ;S0 lines overflows the 6-deep inbound queue: every line either runs or is counted by '[WS] dropped N inbound command(s) — queue full or oversized', and six run. With the loop held again under ?DEBUG,ON, 40 long lines typed on USB make the serial task print 'Processing input from Serial0: ...' into a full output sink: '[WS] dropped N output line(s) — client too slow'", needs=["wcb1"], links=["W1S3"], opt_in="wifi_pc")
+@test("ws.drop_reports", "OPT-IN (wifi_pc): the WebSocket endpoint reports what it drops. With W1's loop held by a slow ;S3 write (S3 at 600 baud, nothing printed), one frame of 40 ;S0 lines overflows the 6-deep inbound queue: every line either runs or is counted by '[WS] dropped N inbound command(s) — queue full or oversized', and six run. With the loop held again under ?DEBUG,ON, 40 long lines typed on USB make the serial task print 'Processing input from Serial0: ...' into a full output sink: '[WS] dropped N output line(s) — client too slow'. The client stays connected through both backlogs (sinkPump's 5 s grace)", needs=["wcb1"], links=["W1S3"], opt_in="wifi_pc")
 def ws_drop_reports(bench):
     """Coverage re-scan 2026-10-12, ws.queue_backpressure and ws.output_tee. wsHandler (httpd task) feeds each line to
     accFeed, which waits WS_ENQUEUE_WAIT_MS (50 ms) for room in the 6-deep queue and counts a refusal (cmdDrops); the
@@ -1057,7 +1057,7 @@ def ws_drop_reports(bench):
                     w.dev.send(f";S0{tag2}{k:02d}{'z' * 100}")
                 w.run(f";S0{marker('E')}", timeout=25)
                 w.run("?DEBUG,OFF")
-                drain("after the output sink overflowed", fatal=False)
+                drain("after the output sink overflowed")         # the 5 s grace keeps a live client (ws.burst_closes_live_client)
                 out = [x.rstrip() for x in w.dev.since(m)]
                 printed = sum(1 for x in out if x.startswith(f"Processing input from Serial0: ;S0{tag2}"))
                 dropped = _drops(out, r"output line\(s\) — client too slow")
