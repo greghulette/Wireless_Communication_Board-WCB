@@ -1068,3 +1068,65 @@ def w_legacy_digits(bench):
                                                          for x in lines), \
         f"W2 S3 got {watch.got(far)!r}, expected the {len(digits)} digits alone, once"
     assert not watch.got(near), f"the digits reached W1 S2: {watch.got(near)!r}"
+
+
+@test("mesh.frag_completed_session_ring", "A finished two-chunk ?MGMT,FRAG session on W2 stays finished: both chunks re-sent under its id are discarded ('[MGMT] Duplicate session <id> - discarding'), so its two ;S2 markers reach W2 S2 once each", needs=["wcb1"], links=["W2S2"])
+def frag_completed_session_ring(bench):
+    """Coverage re-scan 2026-10-12, mgmt.frag_multichunk_session. handleMgmtPacket (WCB.ino) records a session id in
+    mgmtRecentIds (the last MGMT_RECENT_COUNT = 8) before it runs the reassembled chain, and drops every later chunk of an
+    id in that ring before the session logic: a chunk retransmitted after the session completed would otherwise open a
+    new session and, with the other chunk, run the push again. The lines print under ?DEBUG,MGMT on W2's console. Every
+    chunk is one unacknowledged broadcast (module docstring), so the first push runs again under a new id when a chunk
+    was lost, and the re-sends go again until W2 logs at least one duplicate."""
+    s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems = []
+    with Console(bench, 2) as c2:
+        m = c2.send("?DEBUG,MGMT,ON")
+        c2.expect(r"^MGMT debugging enabled", timeout=4, since=m)
+        try:
+            done = None
+            for attempt in range(1, 4):
+                sid, a, b = _sid(), marker("a"), marker("b")
+                watch = Watch(s2)
+                cm = c2.mark()
+                _push(w, 2, sid, [f";S2{a}^", f";S2{b}"])
+                ok = _arrived(watch, s2, b.encode() + b"\r", 4)
+                if ok:
+                    try:                             # W2's USB line can trail the bytes its chain wrote
+                        c2.expect(rf"\[MGMT\] Session {sid} complete", timeout=2, since=cm)
+                    except AssertionError:
+                        ok = False
+                if ok:
+                    done = (sid, a, b, watch)
+                    break
+                bench.note(f"first push {attempt}/3 did not complete on W2 (a chunk lost?); again")
+                time.sleep(FRAG_STALE_S)
+            if done is None:
+                raise AssertionError("no push in 3 completed on W2")
+            sid, a, b, watch = done
+            dup = []
+            for attempt in range(1, 4):
+                cm = c2.mark()
+                _push(w, 2, sid, [f";S2{a}^", f";S2{b}"])
+                time.sleep(1.5)
+                log = c2.lines(cm)
+                dup = [x for x in log if re.search(rf"\[MGMT\] Duplicate session {sid} . discarding", x)]
+                if _has_line(log, rf"New session {sid}\b") or _has_line(log, rf"Session {sid} complete"):
+                    problems.append(f"re-sent chunks of the finished session {sid} opened it again: "
+                                    f"{[x for x in log if sid in x]}")
+                    break
+                if dup:
+                    break
+                bench.note(f"re-send {attempt}/3: W2 logged no duplicate line (both chunks lost?); again")
+            if not dup and not problems:
+                problems.append(f"W2 never logged '[MGMT] Duplicate session {sid}' for 3 re-sends of its chunks")
+            time.sleep(1.0)
+            got = watch.got(s2)
+            for x in (a, b):
+                if got.count(x.encode() + b"\r") != 1:
+                    problems.append(f"marker {x} reached W2 S2 {got.count(x.encode() + bytes([13]))} times, not once")
+        finally:
+            c2.send("?DEBUG,MGMT,OFF")
+            time.sleep(0.3)
+    assert not problems, "; ".join(problems)

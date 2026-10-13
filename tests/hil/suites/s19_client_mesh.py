@@ -1067,3 +1067,96 @@ def softserial_tx_during_nvs_write(bench):
     assert saved == 20, f"W1 confirmed {saved} of the 20 label saves"
     assert not queue_full, f"W1's mesh-to-port queue overflowed - the pacing, not a TX fault: {queue_full}"
     assert exact == 40 and not errs, f"S4 lines {exact}/40 exact, RXERR {len(errs)} ({errs[:3]})"
+
+
+# ============================================================ coverage re-scan 2026-10-12 (wcb-mesh)
+@test("client_mesh.auth_mismatch_frag_ignored", "A 400-character unicast from a client with the wrong mesh password - sent as type-5 MGMT fragments - is dropped by W1's fragment handler: no '[MGMT] New session' or chunk line and nothing on W1 S2, while the same unicast from a client with the right password opens a client-unicast session and runs once (~30 s)", needs=["wcb1", "probe1"])
+def auth_mismatch_frag_ignored(bench):
+    """Coverage re-scan 2026-10-12, rx.password_gate (the MGMT push arm). WCB_Client fragments a unicast over 187
+    characters into FRAG_UNICAST (type 5) packets carrying its password (WCB_Client::_processFragJob), and
+    handleMgmtPacket (WCB.ino) compares that field with strncmp before the session logic, so a wrong-password sender
+    gets no session, no chunk and no execution; client_mesh.auth_mismatch_silent covers the ETM command gate. Needs no
+    password change on any WCB: the probe joins with a wrong one, as map.probe_mesh_raw_chunk_bounds does. The right-
+    password arm is the control that the fragments go out and are taken. The reply-fragment arm (types 9/14/16/10) needs
+    a probe verb that emits a 230-byte frag. The passwords are never printed."""
+    s12 = link(bench, 1, "S2")
+    w = usb_wcb(bench)
+    params = mesh_params(bench)
+    wrong = params["password"][:-1] + ("X" if params["password"][-1:] != "X" else "Y")
+    out = {}
+    try:
+        if not _has(w.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled"):
+            raise AssertionError("?DEBUG,MGMT,ON did not confirm")
+        for label, key, override, forget in (("right password", "frag", {}, True),
+                                             ("wrong password", "auth", dict(password=wrong), False)):
+            body = padded("PG", 397)
+            with probe_in_mesh(bench, "probe1", MESH_IDS[key], forget=forget, **override) as probe:
+                time.sleep(2.0)
+                m, pm, wm = s12.mark(), probe.dev.mark(), w.dev.mark()
+                queued = probe.mesh_send(1, f";S2{body}", ensured=True)
+                try:
+                    s12.expect(body.encode() + b"\r", timeout=4, since=m)
+                except AssertionError:
+                    pass
+                time.sleep(1.5)
+                out[label] = (queued, _has(probe.dev.since(pm), "fragmenting"), s12.received(m).count(body.encode()),
+                              [x.rstrip() for x in w.dev.since(wm) if x.startswith("[MGMT]")])
+    finally:
+        w.run("?DEBUG,MGMT,OFF")
+    bad = []
+    queued, fragmented, runs, mgmt = out["right password"]
+    if not (queued and fragmented):
+        bad.append(f"control: the probe did not fragment the 400-character unicast (queued {queued}, fragmenting {fragmented})")
+    if runs != 1 or not any(re.search(r"New session [0-9A-F]{4} . expecting \d+ chunk\(s\) \(client unicast\)", x) for x in mgmt):
+        bad.append(f"control: the right-password unicast ran {runs} times, MGMT lines {mgmt[:3]}")
+    queued, fragmented, runs, mgmt = out["wrong password"]
+    if not (queued and fragmented):
+        bad.append(f"the wrong-password probe did not send fragments (queued {queued}, fragmenting {fragmented})")
+    if runs or mgmt:
+        bad.append(f"W1 took fragments with the wrong password: ran {runs} times, MGMT lines {mgmt[:3]}")
+    assert not bad, "; ".join(bad)
+
+
+@test("client_mesh.fragmented_unicast_stays_local", "A client's 400-character unicast to W1 (type-5 fragments) that holds a plain-text token keeps its unicast origin: the text goes out of W1's own broadcast port S2 with the chain's ;S2 line, once each, but never to the mesh - no '[ETM] Sent seq' for it on W1 and nothing on W2's broadcast port S3", needs=["wcb1", "probe1"], links=["W1S2", "W2S3"])
+def fragmented_unicast_stays_local(bench):
+    """Coverage re-scan 2026-10-12, client.fragmented_unicast_stays_local. handleMgmtPacket (WCB.ino) gives a
+    FRAG_UNICAST (type 5) session unicastOrigin and enqueues the reassembled chain with mesh origin
+    (parseCommandsAndEnqueue(..., 1, ...)), so sendESPNowMessage's loop-prevention gate drops every target-0 copy:
+    a plain-text token goes to the local broadcast ports only (processBroadcastCommand), as a short client unicast's
+    would. A type-3 (Wizard relay) session is the one that may re-broadcast. Without the origin, the text would reach
+    W2's broadcast port S3 and W1 would log '[ETM] Sent seq N: <text>'. client_mesh.fragmented_unicast_limits covers
+    run-once and the session lines. The text is inert lowercase (it reaches every broadcast port it is sent to)."""
+    s12, far = link(bench, 1, "S2"), link(bench, 2, "S3")
+    require_tokens(bench, 1, "?BCAST,OUT,S2,ON")
+    require_tokens(bench, 2, "?BCAST,OUT,S3,ON")
+    w = usb_wcb(bench)
+    text = f"hilfu{nonce().lower()}"
+    body = padded("FU", 400 - len(text) - 4)
+    payload = f"{text}^;S2{body}"
+    assert len(payload) == 400
+    try:
+        w.run("?DEBUG,ETM,ON")
+        w.run("?DEBUG,MGMT,ON")
+        with _client(bench, "probe1", "frag") as (probe, cid, _):
+            watch, wm, pm = Watch(s12, far), w.dev.mark(), probe.dev.mark()
+            queued = probe.mesh_send(1, payload, ensured=True)
+            try:
+                watch.expect(s12, body.encode() + b"\r", timeout=5)
+            except AssertionError:
+                pass
+            time.sleep(2.0)
+            fragmented = _has(probe.dev.since(pm), "fragmenting")
+            lines = [x.rstrip() for x in w.dev.since(wm)]
+            near, got_far = watch.got(s12), watch.got(far)
+    finally:
+        w.run("?DEBUG,MGMT,OFF")
+        w.run("?DEBUG,ETM,OFF")
+    assert queued and fragmented, f"the probe did not fragment the unicast (queued {queued}, fragmenting {fragmented})"
+    assert any(re.search(r"New session [0-9A-F]{4} . expecting \d+ chunk\(s\) \(client unicast\)", x) for x in lines), \
+        f"W1 logged no client-unicast session: {[x for x in lines if x.startswith('[MGMT]')][:3]}"
+    assert near.count(body.encode() + b"\r") == 1, f"the chain's ;S2 line reached W1 S2 {near.count(body.encode())} times"
+    assert near.count(text.encode() + b"\r") == 1, \
+        f"the plain-text token reached W1's broadcast port S2 {near.count(text.encode())} times, not once"
+    sent = [x for x in lines if x.startswith("[ETM] Sent seq") and text in x]
+    assert not sent, f"W1 sent the text from a client unicast to the mesh: {sent}"
+    assert text.encode() not in got_far, f"the text reached W2's broadcast port S3: {got_far!r}"
