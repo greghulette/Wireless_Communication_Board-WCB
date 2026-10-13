@@ -9756,7 +9756,7 @@ function toggleTerminal() {
   syncMainPadding();
   // On open, scroll every pane to the bottom so the most recent output is visible.
   if (drawer.classList.contains('open')) {
-    drawer.querySelectorAll('.term-output').forEach(el => {
+    drawer.querySelectorAll('.terminal-pane-output').forEach(el => {
       el.scrollTop = el.scrollHeight;
     });
   }

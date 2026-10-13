@@ -82,3 +82,224 @@ test('wizard.seq_fake_buttons_counts a sequence row\'s TEST and SAVE/UPDATE are 
     .map((b) => b.disabled))).toEqual([false, false]);
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.var_fake_temporary_rows a temporary variable row SETs with ;V,name,value and never enters the config; its REMOVE clears it on the board with ?VAR,CLEAR,<name> (through the relay for a managed board) and leaves the config and baseline alone; one never set sends nothing', async ({ page }) => {
+  // appendTempVariableRow, updateTempVariable, clearVariableRow (app.js:5131-5221). The ;V set alone is
+  // wizard.editors_fake_seq_var's. Row var.temporary_rows.
+  await setup(page);
+  await pullFake(page, 1, board(['VAR,SET,lights,3']));
+  await holdVerifyPulls(page);
+  const stores = () => page.evaluate(() => JSON.stringify([boardConfigs[1].variables, boardBaselines[1].variables]));
+  const before = await stores();
+  await page.evaluate(() => { __fake.log.length = 0; addTemporaryVariableRow(1); });
+  const row = '#b1-var-tbody tr[data-var-type="temporary"]';
+  await edit(page, `${row} .var-name-input`, 'tmp1');
+  await edit(page, `${row} .var-value-input`, '5');
+  await page.evaluate((row) => document.querySelector(`${row} [title="Save/Update Variable"]`).click(), row);
+  await expect.poll(() => sentOn(page, 1)).toEqual([';V,tmp1,5']);
+  expect(await page.evaluate((row) => document.querySelector(`${row} [title="Remove Variable"]`).textContent, row)).toBe('REMOVE');
+  const m = await toastMark(page);
+  await page.evaluate((row) => document.querySelector(`${row} [title="Remove Variable"]`).click(), row);
+  await expect.poll(() => sentOn(page, 1)).toEqual([';V,tmp1,5', '?VAR,CLEAR,tmp1']);
+  expect(await page.evaluate((row) => document.querySelector(row), row), 'the row is gone').toBe(null);
+  expect(await toastsSince(page, m)).toContain('Variable "tmp1" cleared on WCB 1');
+  expect(await stores(), 'config and baseline untouched').toBe(before);
+  expect((await push(page, 1, { skipReboot: true })).outcome.reason).toBe('no changes to push');
+
+  // A temporary row that was never set: REMOVE only drops it.
+  await page.evaluate(() => { __fake.log.length = 0; addTemporaryVariableRow(1); });
+  await page.evaluate((row) => document.querySelector(`${row} [title="Remove Variable"]`).click(), row);
+  expect(await sentOn(page, 1)).toEqual([]);
+  expect(await page.evaluate((row) => document.querySelector(row), row)).toBe(null);
+
+  // Through a relay: the clear is a one-chunk FRAG to the board.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  await page.evaluate(() => { __fake.log.length = 0; appendTempVariableRow(2, 'livev', 9, true); });
+  expect(await page.evaluate(() => document.querySelector('#b2-var-tbody tr.var-row-live [title="Remove Variable"]').textContent))
+    .toBe('CLEAR');
+  await page.evaluate(() => document.querySelector('#b2-var-tbody tr.var-row-live [title="Remove Variable"]').click());
+  await expect.poll(async () => (await sentOn(page, 1)).map(frag)).toEqual(['?MGMT,FRAG,2,SID,0,1,?VAR,CLEAR,livev']);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.var_fake_refresh_list Refresh on a USB board sends ?VAR,LIST, reads the board\'s lines to the "used" footer, puts a changed value into the existing row and into the config and baseline (so a push has nothing to send), keeps a value being edited, and adds a persistent variable not in the config read-only and a volatile one as a temporary row', async ({ page }) => {
+  // refreshVariablesFromBoard, collectVarList (direct), parseVarList, renderLiveVariables (app.js:5351-5480). The relay
+  // path is wizard.editors_fake_seq_var's. Row var.refresh_list.
+  await setup(page);
+  await pullFake(page, 1, board(['VAR,SET,lights,3', 'VAR,SET,speed,1']));
+  await holdVerifyPulls(page);
+  // The board answers ?VAR,LIST on its stream, as the firmware prints it.
+  await page.evaluate(() => {
+    const c = boardConnections[1];
+    const send = c.send;
+    window.__varList = ['Variables:', '  lights = 7  [persistent]', '  speed = 4  [persistent]', '  extra = 2  [persistent]',
+                        '  tmpx = -4  [volatile]', '4/100 used', '  late = 1  [persistent]'];
+    c.send = async (s) => {
+      await send(s);
+      if (/^\?VAR,LIST/.test(s)) setTimeout(() => window.__varList.forEach((l) => c._handleLine(l)), 50);
+    };
+    __fake.log.length = 0;
+  });
+  // The user is mid-edit on speed: that input keeps what they typed.
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll('#b1-var-tbody tr')].find((r) => r.querySelector('.var-name-input')?.value === 'speed');
+    const v = row.querySelector('.var-value-input');
+    v.value = '6';
+    v.focus();
+  });
+  const m = await toastMark(page);
+  await page.evaluate(() => refreshVariablesFromBoard(1));
+  expect(await sentOn(page, 1)).toEqual(['?VAR,LIST']);
+  const rows = await page.evaluate(() => [...document.querySelectorAll('#b1-var-tbody tr')].map((r) => ({
+    name: r.querySelector('.var-name-input')?.value ?? r.cells[0].textContent.trim(),
+    value: r.querySelector('.var-value-input')?.value ?? r.cells[1].textContent.trim(),
+    live: r.classList.contains('var-row-live'), temp: r.dataset.varType === 'temporary', note: r.cells[3].textContent.trim(),
+  })));
+  expect(rows.map(({ name, value, live, temp }) => ({ name, value, live, temp }))).toEqual([
+    { name: 'lights', value: '7', live: false, temp: false },
+    { name: 'speed', value: '6', live: false, temp: false },
+    { name: 'extra', value: '2', live: true, temp: false },
+    { name: 'tmpx', value: '-4', live: true, temp: true },
+  ]);
+  expect(rows[2].note).toBe('on board — not in config');
+  expect(await page.evaluate(() => [boardConfigs[1].variables, boardBaselines[1].variables].map((vs) => vs.map((v) => `${v.name}=${v.value}`))))
+    .toEqual([['lights=7', 'speed=4'], ['lights=7', 'speed=4']]);
+  expect(await toastsSince(page, m)).toContain('WCB 1: 4 variable(s) on board — 3 persistent, 1 temporary');
+  // Pushed: lights is the board's value now (no ?VAR,SET,lights); speed carries the user's typed 6.
+  await page.evaluate(() => document.activeElement.blur());
+  expect((await push(page, 1, { skipReboot: true })).sent).toEqual(['1:?VAR,SET,speed,6']);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.term_fake_drawer the Terminal button opens the drawer, pads the page above it and scrolls every pane to its newest line; dragging its edge resizes it between 120 px and 80% of the window; Clear All empties every pane; Close closes it and drops the padding', async ({ page }) => {
+  // toggleTerminal, syncMainPadding, initTerminalResize (app.js:9687-9760), clearAllTerminals (9902-9904). The scroll
+  // on open looked for '.term-output', a class no pane has, so a pane filled while the drawer was shut opened at its
+  // oldest line: fixed 2026-10-13 ('.terminal-pane-output'). Row term.drawer.
+  await setup(page);
+  await pullFake(page, 1, board());
+  await pullFake(page, 2, board([], { wcb: 2 }));
+  await page.evaluate(() => { for (let i = 0; i < 200; i++) { termLog(1, `line ${i}`); termLog(2, `other ${i}`); } });
+  const st = () => page.evaluate(() => {
+    const d = document.getElementById('terminal-drawer');
+    const outs = [...document.querySelectorAll('[id^="term-pane-output-"]')];
+    return { open: d.classList.contains('open'), height: d.offsetHeight, pad: document.querySelector('.main').style.paddingBottom,
+             atBottom: outs.map((o) => o.scrollHeight > o.clientHeight && o.scrollTop + o.clientHeight >= o.scrollHeight - 2),
+             lines: outs.map((o) => o.childElementCount) };
+  });
+  await page.locator('#btn-terminal').click();
+  let s = await st();
+  expect(s).toMatchObject({ open: true, pad: `${s.height + 24}px`, atBottom: [true, true] });
+  expect(s.lines.every((k) => k >= 200)).toBe(true);
+
+  const drag = async (dy) => {
+    const b = await page.locator('#terminal-resize-handle').boundingBox();
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2 + dy, { steps: 6 });
+    await page.mouse.up();
+  };
+  const vh = await page.evaluate(() => window.innerHeight);
+  await drag(-2000);
+  s = await st();
+  expect(s.height, 'capped at 80% of the window').toBe(Math.round(vh * 0.8));
+  expect(s.pad).toBe(`${s.height + 24}px`);
+  await drag(+2000);
+  expect((await st()).height, 'floored at 120 px').toBe(120);
+
+  await page.locator('#terminal-drawer button', { hasText: 'Clear All' }).click();
+  expect((await st()).lines).toEqual([0, 0]);
+  await page.locator('#terminal-drawer button', { hasText: 'Close' }).click();
+  expect(await st()).toMatchObject({ open: false, pad: '' });
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.term_fake_panes each managed board gets a pane whose visibility chip says how it is reached - "WCB 1 (USB)", "WCB 2 (via WCB 1)" - and whose input is disabled ("Board disconnected") while the board is not reachable; a board that moves slot takes its pane\'s output with it and the old pane goes', async ({ page }) => {
+  // ensureTerminalPane, updatePaneVisibilityChip, updateTerminalPaneDot (app.js:9862-9945), migrateTerminalPane
+  // (9965-9975). Visibility and the debug reset are wizard.app_fake_terminal's. Row term.panes.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  const chip = (n) => page.evaluate((n) => document.getElementById(`term-vis-label-${n}`)?.textContent ?? null, n);
+  expect([await chip(1), await chip(2)]).toEqual(['WCB 1 (USB)', 'WCB 2 (via WCB 1)']);
+  const input = (n) => page.evaluate((n) => {
+    const i = document.getElementById(`term-pane-input-${n}`);
+    return [i.disabled, i.placeholder, document.getElementById(`term-pane-header-${n}`).classList.contains('disconnected')];
+  }, n);
+  expect(await input(2)).toEqual([false, 'Send to WCB 2…', false]);
+  await page.evaluate(() => updateTerminalPaneDot(2, false));
+  expect(await input(2)).toEqual([true, 'Board disconnected', true]);
+  await page.evaluate(() => updateTerminalPaneDot(2, true));
+  expect(await input(2)).toEqual([false, 'Send to WCB 2…', false]);
+  // Un-managed, then connected over USB: the same pane, its chip now reading USB.
+  await page.evaluate(() => { clearRemoteConnected(2); __fake.conn(2, { backup: '' }); updateConnectionUI(2, true); });
+  expect(await chip(2)).toBe('WCB 2 (USB)');
+  expect(await page.evaluate(() => document.querySelectorAll('#term-pane-2').length)).toBe(1);
+
+  // A board landing in slot 4 that is WCB 6: its output moves to pane 6, pane 4 and its chip go.
+  await page.evaluate(() => { ensureTerminalPane(4); termLog(4, 'hil-before-the-move'); });
+  await pullFake(page, 4, board([], { wcb: 6, wcbq: 6 }));
+  expect(await page.evaluate(() => [!!document.getElementById('term-pane-4'), !!document.getElementById('term-vis-chip-4'),
+                                    document.getElementById('term-pane-output-6').textContent.includes('hil-before-the-move')]))
+    .toEqual([false, false, true]);
+  expect(await chip(6)).toBe('WCB 6 (USB)');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.term_fake_send_history Enter sends a terminal line and keeps it in that board\'s history (a repeat of the last entry once); ArrowUp walks back through it and stops at the oldest, ArrowDown walks forward to an empty line; each board has its own', async ({ page }) => {
+  // onTerminalKeydown, sendTerminalCommandTo's history (app.js:10060-10120). The sends themselves are
+  // wizard.app_fake_terminal's and wizard.relay_terminal's. Row term.send_history.
+  await setup(page);
+  await pullFake(page, 1, board());
+  await pullFake(page, 2, board([], { wcb: 2 }));
+  await page.locator('#btn-terminal').click();
+  await page.evaluate(() => { __fake.log.length = 0; });
+  const in1 = page.locator('#term-pane-input-1');
+  for (const cmd of ['?WCB', '?VERSION', '?VERSION', '?ETM,LIST']) {
+    await in1.fill(cmd);
+    await in1.press('Enter');
+  }
+  expect(await sentOn(page, 1)).toEqual(['?WCB', '?VERSION', '?VERSION', '?ETM,LIST']);
+  expect(await page.evaluate(() => boardCmdHistory[1])).toEqual(['?WCB', '?VERSION', '?ETM,LIST']);
+  expect(await in1.inputValue(), 'cleared after a send').toBe('');
+  const walk = [];
+  for (const k of ['ArrowUp', 'ArrowUp', 'ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown']) {
+    await in1.press(k);
+    walk.push(await in1.inputValue());
+  }
+  expect(walk).toEqual(['?ETM,LIST', '?VERSION', '?WCB', '?WCB', '?VERSION', '?ETM,LIST', '', '']);
+  // WCB2's history is its own: empty, so the arrows leave its input alone.
+  const in2 = page.locator('#term-pane-input-2');
+  await in2.fill('typed');
+  await in2.press('ArrowUp');
+  expect(await in2.inputValue()).toBe('typed');
+  await in2.press('Enter');
+  await in1.press('ArrowUp');
+  expect(await in1.inputValue()).toBe('?ETM,LIST');
+  expect(await page.evaluate(() => boardCmdHistory[2])).toEqual(['typed']);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.term_fake_log_routing a line for a board with a connection, a relay or a pane opened by hand goes to that board\'s pane (made if need be); one for a board only discovered on the mesh gets no pane and lands in the first pane; with no pane at all it is dropped', async ({ page }) => {
+  // termLog (app.js:10010-10050). Row term.log_routing.
+  await setup(page);
+  const panes = () => page.evaluate(() => [...document.querySelectorAll('#terminal-panes .terminal-pane')].map((p) => +p.id.slice(10)));
+  await page.evaluate(() => termLog(0, 'hil-nowhere'));
+  expect(await panes(), 'no pane yet: dropped, nothing made').toEqual([]);
+  await pullFake(page, 1, board());
+  expect(await panes()).toEqual([1]);
+  await page.evaluate(() => { addDiscoveredBoards([7]); termLog(7, 'hil-from-a-discovered-board'); });
+  expect(await panes(), 'no pane for a board only heard on the mesh').toEqual([1]);
+  expect(await page.evaluate(() => document.getElementById('term-pane-output-1').textContent)).toContain('hil-from-a-discovered-board');
+  // Managed through a relay: its own pane.
+  await page.evaluate(() => { addDiscoveredBoards([8]); remoteRelayForBoard[8] = 1; termLog(8, 'hil-relayed'); });
+  expect(await panes()).toEqual([1, 8]);
+  // A connection object (even one not open yet): its own pane.
+  await page.evaluate(() => { boardConnections[9] = new BoardConnection(9); termLog(9, 'hil-conn'); });
+  expect(await panes()).toEqual([1, 8, 9]);
+  // A pane opened by hand (the relay card's Terminal button) takes that board's lines.
+  await page.evaluate(() => { ensureTerminalPane(12); termLog(12, 'hil-by-hand'); });
+  expect(await page.evaluate(() => [8, 9, 12].map((n) => document.getElementById(`term-pane-output-${n}`).textContent)))
+    .toEqual(['hil-relayed', 'hil-conn', 'hil-by-hand']);
+  expect(await page.evaluate(() => document.getElementById('term-pane-output-1').textContent)).not.toContain('hil-relayed');
+  expect(page.wizErrors).toEqual([]);
+});

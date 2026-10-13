@@ -320,6 +320,12 @@ _FAKE_RESCAN_L = (
     ("mapping_fake_ghost_rows", "A port another board drives as PWM output is a locked ghost row, naming the source once it is loaded (mapping.ghost_rows)"),
     ("seq_fake_shared_indicator", "A sequence key other boards hold shows 'also on Wx', refreshed on typing, saving, removing and loading (seq.shared_indicator)"),
     ("seq_fake_buttons_counts", "TEST and SAVE need a connected or relayed board; the key and value counters follow the typing (seq.buttons_counts)"),
+    ("var_fake_temporary_rows", "A temporary variable's REMOVE sends ?VAR,CLEAR (through a relay too) and leaves the config alone; an unset one sends nothing (var.temporary_rows)"),
+    ("var_fake_refresh_list", "Refresh on a USB board reads ?VAR,LIST into the rows, the config and the baseline, keeps a value being edited, adds the board-only ones (var.refresh_list)"),
+    ("term_fake_drawer", "The terminal drawer opens with the page padded and panes at their newest line, resizes between 120 px and 80%, Clear All empties every pane (term.drawer)"),
+    ("term_fake_panes", "A pane's chip says USB or via WCB n, its input is disabled while unreachable, and a board moving slot takes its output along (term.panes)"),
+    ("term_fake_send_history", "Terminal lines go into the board's own history, a repeat once; the arrows walk it (term.send_history)"),
+    ("term_fake_log_routing", "A line goes to its board's pane when the board is connected, relayed or opened by hand; a merely discovered board's lands in the first pane (term.log_routing)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
