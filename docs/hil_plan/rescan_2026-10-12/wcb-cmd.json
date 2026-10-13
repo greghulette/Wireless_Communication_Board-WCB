@@ -2226,12 +2226,12 @@
   "area": "serial",
   "behaviour": "A long ;S3 line at a low baud holds W1's loop for the line's transmit time; every character of the line leaves S3.",
   "where": "WCB.ino ;S write path, soft serial S3-S5 TX",
-  "status": "untested",
+  "status": "partial",
   "tested_by": [],
-  "gap": "Seen 2026-10-13 building etm.status_lines_dropped_reported: the hold ran ~2.7 s shorter than the line length predicts at both 1200 and 600 baud - only ~740 characters' worth. No probe was on W1 S3, so whether the line is cut on input or on output is unknown.",
+  "gap": "Checked 2026-10-13 00:55 with probe1's tap on W1 S3 (there IS one: probe1 header S2): 500-2000 character ;S3 lines at 9600 arrived whole (n+1 bytes, CR included). The shorter hold is most likely the soft port's TX buffer taking the line's tail after the loop moves on, not a cut line. Unchecked: integrity at 600/1200 baud (needs the probe channel re-bound with the port's baud).",
   "testable": "unattended",
   "bench_needs": "probe tap on a soft port (W2 S3/S4 or W3 S3)",
-  "risk": "M",
+  "risk": "L",
   "how": "Send a 2000-character ;S<n> line at 1200 baud to a soft port with a probe tap; compare bytes received with the line, and the hold time with len*10/baud."
  }
 ]
