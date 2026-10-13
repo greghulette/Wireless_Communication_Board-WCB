@@ -560,7 +560,7 @@ def nc_fetch_store(ctx):
     data = {app: blob("app-online", 256), part: blob("part-online", 96), boot: blob("boot-online", 128),
             other: blob("rc-online", 64)}
     problems = []
-    for branch, key in (("hil-store", "hil-store"), ("feature/hil-store", "feature__hil-store")):
+    for branch, key in (("hil-store", "hil-store"), ("feature/hil-store", "feature%2Fhil-store")):   # fwcache._key percent-encodes since 2026-10-13
         base = f"https://raw.githubusercontent.com/{flash.GITHUB_OWNER}/{flash.GITHUB_REPO}/{branch}/firmware/"
         listing = json.dumps([{"name": n, "type": "file", "size": len(b), "download_url": base + n}
                               for n, b in data.items()]).encode()
