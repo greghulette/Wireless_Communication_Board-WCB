@@ -2063,3 +2063,188 @@ def log_tail_cap(bench):
             problems.append(f"an unreadable log: {st}, tail {str(info.get('tail'))[:60]!r}, expected '(could not read "
                             f"the log: ...)'")
     assert not problems, "; ".join(problems)
+
+
+@test("intellex.branch_list_cached", "GET /_api/branch-list offline serves a seeded branches_cache.json (cached, its "
+      "names, the set branch and main put in, 'missing' for a set branch it lacks, the offline reason); online with "
+      "GitHub stood in for, gh-pages is dropped, the first call of a run fetches inside the TTL, later ones do not "
+      "until it expires or ?refresh=1, and a total failure does not end the once-per-run fetch (IX re-scan "
+      "host.api.branch_list)")
+def branch_list_cached(bench):
+    """Intellex src/host.py api_branch_list (:598-615) and src/branchlist.py branches (:95-160). Offline on a staged host
+    with appdata/Intellex/branches_cache.json seeded and the WCB branch set to one the cache does not list. The cache
+    here holds gh-pages, which a fetched list never does (branches() drops it before writing the cache, since its first
+    commit): offline it is served as cached - pinned, a product call. The online half in the venv
+    (tests/intellex/py/host_units.py group branch_list), branchlist._fetch and flash.reachable answered there."""
+    import time
+    require(bench)
+    tid = "intellex.branch_list_cached"
+    sd = stage(bench, tid, tools="none", settings={"branch": {"wcb": "hil-other", "navicore": "main"}})
+    with open(os.path.join(sd, "appdata", "Intellex", "branches_cache.json"), "w", encoding="utf-8") as f:
+        json.dump({"navicore": ["main", "hil-nc"], "wcb": ["main", "gh-pages", "hil-feat"], "at": time.time()}, f)
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, bl = host.json("GET", "/_api/branch-list", timeout=30)
+        want = {"navicore": ["main", "hil-nc"], "wcb": ["hil-other", "main", "gh-pages", "hil-feat"], "cached": True,
+                "missing": ["wcb"]}
+        got = {k: bl.get(k) for k in want} if isinstance(bl, dict) else bl
+        if st != 200 or got != want:
+            problems.append(f"offline with a seeded cache: {st} {got}, expected {want}")
+        if not str((bl or {}).get("error", "")).startswith("offline ("):
+            problems.append(f"offline the error says {str((bl or {}).get('error'))[:80]!r}, not why ('offline (...)')")
+        st, bl2 = host.json("GET", "/_api/branch-list?refresh=1", timeout=30)
+        if st != 200 or {k: bl2.get(k) for k in want} != want:
+            problems.append(f"?refresh=1 offline: {st} {bl2}, expected the cached lists again")
+    try:
+        run_intellex_py(bench, tid, "host_units.py", args={"group": "branch_list"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"online, GitHub stood in for (host_units.py branch_list): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.firmware_summary_newest", "GET /_api/firmware reports the configured branch's cache per product: the "
+      "count of .bin files and as newest an app image, never its _part, _boot or bootloader companions; another branch's "
+      "files are not counted, and moving the branch moves the summary (a seeded cache; IX re-scan "
+      "host.api.firmware_summary)")
+def firmware_summary_newest(bench):
+    """Intellex src/host.py api_firmware (:636-638) and src/fwcache.py summary (:143-168). The cache is seeded where a
+    non-frozen host keeps it (seed_firmware); a leftover .part from an interrupted store and the listing are not
+    images."""
+    require(bench)
+    tid = "intellex.firmware_summary_newest"
+    sd = stage(bench, tid, tools="none")
+    t = "6.2.1_120000ROCT2026_hilsum"
+    wcb = {f"WCB_{t}_{k}.bin": b"x" * 64 for k in ("ESP32", "ESP32_part", "ESP32_boot", "ESP32S3", "ESP32S3_part",
+                                                     "ESP32S3_boot_8MB", "ESP32S3_boot_16MB")}
+    d = seed_firmware(sd, "wcb", "main", wcb)
+    with open(os.path.join(d, f"WCB_{t}_ESP32.bin.part"), "wb") as f:
+        f.write(b"partial")
+    nc = {f"NaviCore_{t}_ESP32S3.bin": b"n" * 64, f"NaviCore_{t}_ESP32S3_part.bin": b"p" * 64,
+          "WCB_S3_custom_bootloader_16MB_wdt3s.bin": b"b" * 64}
+    seed_firmware(sd, "navicore", "main", nc)
+    seed_firmware(sd, "wcb", "hil-sum", {"WCB_9.9.9_zzz_ESP32S3.bin": b"z" * 64})
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, fw = host.json("GET", "/_api/firmware")
+        want = {"wcb": {"count": 7, "newest": f"WCB_{t}_ESP32S3.bin", "branch": "main"},
+                "navicore": {"count": 3, "newest": f"NaviCore_{t}_ESP32S3.bin", "branch": "main"}}
+        if st != 200 or fw != want:
+            problems.append(f"/_api/firmware on main: {st} {fw}, expected {want}")
+        st, _ = host.json("POST", "/_api/branch", {"product": "wcb", "branch": "hil-sum"})
+        st, fw = host.json("GET", "/_api/firmware")
+        if (fw or {}).get("wcb") != {"count": 1, "newest": "WCB_9.9.9_zzz_ESP32S3.bin", "branch": "hil-sum"}:
+            problems.append(f"with WCB on hil-sum: {fw}, expected that branch's one image")
+        host.json("POST", "/_api/branch", {"product": "wcb", "branch": "hil-nothing"})
+        st, fw = host.json("GET", "/_api/firmware")
+        if (fw or {}).get("wcb") != {"count": 0, "newest": "", "branch": "hil-nothing"}:
+            problems.append(f"with WCB on a branch with no cache: {fw}, expected count 0")
+        host.json("POST", "/_api/branch", {"product": "wcb", "branch": "main"})
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.wiki_inventory", "GET /_api/wiki lists each wiki with its title, its pages without the _Sidebar, _Footer "
+      "and _Header furniture, the count of those and have; a product with no wiki is have false, count 0 (a crafted "
+      "wiki; IX re-scan host.api.wiki_inventory)")
+def wiki_inventory(bench):
+    """Intellex src/host.py api_wiki (:828-830) and src/wikidocs.py available (:57-70), FURNITURE (:47). The crafted
+    wiki (tests/intellex/fixtures/wiki) has a _Sidebar; a _Footer and a _Header are added in the stage."""
+    require(bench)
+    sd = stage(bench, "intellex.wiki_inventory", tools="none")
+    root = seed_wiki(sd)
+    for name in ("_Footer", "_Header"):
+        with open(os.path.join(root, "wcb", name + ".md"), "w", encoding="utf-8") as f:
+            f.write(f"HIL {name}\n")
+    on_disk = sorted(os.path.splitext(n)[0] for n in os.listdir(os.path.join(root, "wcb")) if n.endswith(".md"))
+    pages = [p for p in on_disk if p not in ("_Sidebar", "_Footer", "_Header")]
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, body = host.json("GET", "/_api/wiki")
+        wikis = {w.get("product"): w for w in (body or {}).get("wikis", [])}
+        if st != 200 or sorted(wikis) != ["intellex", "navicore", "wcb"]:
+            problems.append(f"/_api/wiki: {st}, products {sorted(wikis)}")
+        w = wikis.get("wcb", {})
+        if w.get("pages") != pages or w.get("count") != len(pages) or w.get("have") is not True or \
+                w.get("title") != "WCB":
+            problems.append(f"wcb: {w}, expected title WCB, pages {pages} (of {on_disk}), count {len(pages)}, have")
+        if any(f in (w.get("pages") or []) for f in ("_Sidebar", "_Footer", "_Header")):
+            problems.append(f"furniture listed as pages: {w.get('pages')}")
+        n = wikis.get("navicore", {})
+        if n.get("have") is not False or n.get("count") != 0 or n.get("pages") != []:
+            problems.append(f"navicore (no wiki seeded): {n}, expected have false, count 0")
+        i = wikis.get("intellex", {})
+        if i.get("count") != 2 or i.get("have") is not True:
+            problems.append(f"intellex: {i}, expected its two pages")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.wiki_missing_text", "The docs with nothing downloaded: /wiki/ and a wiki's page say 'No offline docs "
+      "yet' and how to get them (Download docs in the launcher); with one wiki stored, /wiki/ goes to it and a missing "
+      "product says 'Not downloaded' naming it (IX re-scan wiki.nothing_downloaded)")
+def wiki_missing_text(bench):
+    """Intellex src/host.py _wiki_missing (:735-747), wiki_index (:750-755) and wiki_page (:785-786): a page of a
+    product whose wiki is not on disk. Stages with no wiki, then with only the crafted WCB one."""
+    require(bench)
+    problems = []
+    sd = stage(bench, "intellex.wiki_missing_text", tools="none")
+    with IntellexHost(bench, sd) as host:
+        for path in ("/wiki/", "/wiki/wcb/", "/wiki/navicore/Home"):
+            st, hdr, body = host.http("GET", path)
+            html = body.decode("utf-8", "replace")
+            if st != 200 or "No offline docs yet" not in html or "Download docs" not in html or \
+                    "Not downloaded" in html:
+                problems.append(f"no wiki at all, GET {path}: {st}, 'No offline docs yet' {'No offline docs yet' in html}"
+                                f", 'Download docs' {'Download docs' in html}")
+    sd2 = stage(bench, "intellex.wiki_missing_text_one", tools="none")
+    root = seed_wiki(sd2)
+    shutil.rmtree(os.path.join(root, "intellex"))
+    with IntellexHost(bench, sd2) as host:
+        st, hdr, _ = host.http("GET", "/wiki/")
+        if st != 302 or not _hdr(hdr, "location").endswith("/wiki/wcb/"):
+            problems.append(f"with only the WCB wiki, GET /wiki/: {st} -> {_hdr(hdr, 'location')!r}, expected a 302 "
+                            f"to /wiki/wcb/")
+        for path, product in (("/wiki/navicore/", "navicore"), ("/wiki/intellex/Home", "intellex")):
+            st, hdr, body = host.http("GET", path)
+            html = body.decode("utf-8", "replace")
+            if st != 200 or "Not downloaded" not in html or f"<b>{product}</b> wiki is not on disk" not in html or \
+                    "No offline docs yet" in html:
+                problems.append(f"with only the WCB wiki, GET {path}: {st}, 'Not downloaded' {'Not downloaded' in html}"
+                                f", names {product}: {f'<b>{product}</b>' in html}")
+            if 'href="/wiki/wcb/"' not in html:
+                problems.append(f"GET {path}: the page does not offer the WCB wiki's tab")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.wiki_dotted_page", "A wiki page whose name looks like it has an extension (version3.2_build) is served "
+      "as a rendered page because it exists, not as a missing asset; a real image beside it is still an asset and a "
+      "dotted name with no page says the page is not there (a crafted wiki; IX re-scan wiki.page_named_with_dot)")
+def wiki_dotted_page(bench):
+    """Intellex src/host.py wiki_page (:758-792): render_page first, by what is on disk (wikidocs._page_file), then a
+    file under the wiki, then the 'not in the downloaded copy' page. The page is written into the stage's crafted
+    WCB wiki, with a link to it from a page."""
+    require(bench)
+    sd = stage(bench, "intellex.wiki_dotted_page", tools="none")
+    root = seed_wiki(sd)
+    with open(os.path.join(root, "wcb", "version3.2_build.md"), "w", encoding="utf-8") as f:
+        f.write("# Version 3.2 build\n\nHILDOTTED page body.\n")
+    with open(os.path.join(root, "wcb", "Links-To-Dotted.md"), "w", encoding="utf-8") as f:
+        f.write("# Links\n\n[[version3.2_build]]\n")
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, hdr, body = host.http("GET", "/wiki/wcb/version3.2_build")
+        html = body.decode("utf-8", "replace")
+        if st != 200 or not _hdr(hdr, "content-type").startswith("text/html") or "HILDOTTED" not in html or \
+                "<title>Version 3.2 build \u00b7 Intellex Docs</title>" not in html:
+            problems.append(f"GET /wiki/wcb/version3.2_build: {st} {_hdr(hdr, 'content-type')!r}, rendered "
+                            f"{'HILDOTTED' in html}")
+        if _hdr(hdr, "content-security-policy").startswith("sandbox"):
+            problems.append("the dotted page was served with the asset CSP")
+        st, hdr, body = host.http("GET", "/wiki/wcb/Links-To-Dotted")
+        if 'href="/wiki/wcb/version3.2_build"' not in body.decode("utf-8", "replace"):
+            problems.append("a [[version3.2_build]] link does not point at /wiki/wcb/version3.2_build")
+        st, hdr, _ = host.http("GET", "/wiki/wcb/Images/pic.png")
+        if st != 200 or not _hdr(hdr, "content-security-policy").startswith("sandbox"):
+            problems.append(f"the image beside it: {st}, CSP {_hdr(hdr, 'content-security-policy')[:40]!r}")
+        st, _, body = host.http("GET", "/wiki/wcb/version9.9_none")
+        if st != 200 or b"not in the downloaded copy" not in body:
+            problems.append(f"a dotted name with no page: {st}, without 'not in the downloaded copy'")
+    assert not problems, "; ".join(problems)

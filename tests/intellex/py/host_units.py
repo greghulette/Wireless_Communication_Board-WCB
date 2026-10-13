@@ -1121,5 +1121,100 @@ def tool_base(ctx):
 
 
 
+# ------------------------------------------------------------------ group "branch_list" (half of intellex.branch_list_cached)
+@case("branchlist online, GitHub stood in for: gh-pages is dropped from what GitHub lists and from the cache written; "
+      "the first call of a run fetches even inside the TTL, later ones serve the cache until it expires or ?refresh=1; "
+      "a set branch GitHub no longer lists is 'missing' and kept first; a total failure says why for each repo and "
+      "does not end the once-per-run fetch; a partial one keeps the other product's cached list", group="branch_list")
+def branch_list_online(ctx):
+    import branchlist
+    import flash
+    import settings
+    nc_repo, wcb_repo = branchlist.REPOS["navicore"][1], branchlist.REPOS["wcb"][1]
+    lists = {nc_repo: ["main", "gh-pages", "hil-nc"], wcb_repo: ["main", "gh-pages", "WIFI"]}
+    calls, fail = [], set()
+
+    def fetch(owner, repo, timeout=8.0):
+        calls.append(repo)
+        if repo in fail:
+            raise OSError("HIL: GitHub said no")
+        return list(lists[repo])
+    cache = branchlist._cache_file()
+
+    def seed(at, nc, wcb):
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"navicore": nc, "wcb": wcb, "at": at}), encoding="utf-8")
+    real = branchlist._fetch, flash.reachable, branchlist._fetched_this_run
+    branchlist._fetch, flash.reachable = fetch, (lambda *a, **k: True)
+    problems = []
+    try:
+        settings.set_branch("wcb", "main")
+        settings.set_branch("navicore", "main")
+        seed(time.time(), ["main", "old-nc"], ["main", "old-wcb"])          # inside its TTL, from an earlier run
+        branchlist._fetched_this_run = False
+        r = branchlist.branches()
+        if sorted(calls) != sorted([nc_repo, wcb_repo]) or r.get("cached") is not False:
+            problems.append(f"the first call of a run inside the TTL fetched {calls}, cached {r.get('cached')}: it must "
+                            f"fetch once per run")
+        if r.get("wcb") != ["main", "WIFI"] or r.get("navicore") != ["main", "hil-nc"] or r.get("error") != "":
+            problems.append(f"the fetched lists: wcb {r.get('wcb')}, navicore {r.get('navicore')}, error "
+                            f"{r.get('error')!r} - gh-pages must be dropped")
+        written = json.loads(cache.read_text(encoding="utf-8"))
+        if "gh-pages" in json.dumps(written) or written.get("wcb") != ["main", "WIFI"]:
+            problems.append(f"the cache written: {written}")
+        del calls[:]
+        r = branchlist.branches()
+        if calls or r.get("cached") is not True or r.get("wcb") != ["main", "WIFI"]:
+            problems.append(f"a second call inside the TTL fetched {calls}, cached {r.get('cached')}")
+        code, body = _server().req("GET", "/_api/branch-list?refresh=1")
+        if code != 200 or sorted(calls) != sorted([nc_repo, wcb_repo]) or body.get("cached") is not False:
+            problems.append(f"GET /_api/branch-list?refresh=1 fetched {calls}, answered {code} cached "
+                            f"{body.get('cached')}")
+        del calls[:]
+        code, body = _server().req("GET", "/_api/branch-list")
+        if calls:
+            problems.append(f"GET /_api/branch-list (no refresh, inside the TTL) fetched {calls}")
+        seed(time.time() - branchlist._TTL_S - 60, ["main", "hil-nc"], ["main", "WIFI"])
+        r = branchlist.branches()
+        if sorted(calls) != sorted([nc_repo, wcb_repo]):
+            problems.append(f"past the TTL nothing was fetched ({calls})")
+        settings.set_branch("wcb", "hil-gone")
+        r = branchlist.branches(force=True)
+        if r.get("missing") != ["wcb"] or r.get("wcb") != ["hil-gone", "main", "WIFI"]:
+            problems.append(f"a set branch GitHub no longer lists: missing {r.get('missing')}, wcb {r.get('wcb')}, "
+                            f"expected ['wcb'] and it kept first")
+        settings.set_branch("wcb", "main")
+        # A total failure: both repos named, the cache served, and the next call tries again.
+        seed(time.time(), ["main", "c-nc"], ["main", "c-wcb"])
+        branchlist._fetched_this_run = False
+        fail.update({nc_repo, wcb_repo})
+        del calls[:]
+        r = branchlist.branches()
+        err = r.get("error", "")
+        if r.get("cached") is not True or r.get("wcb") != ["main", "c-wcb"] or nc_repo not in err or wcb_repo not in err:
+            problems.append(f"both fetches failing: cached {r.get('cached')}, wcb {r.get('wcb')}, error {err!r}")
+        n = len(calls)
+        branchlist.branches()
+        if len(calls) == n:
+            problems.append("after a total failure the next call did not fetch again: it pinned the stale list for the "
+                            "run")
+        # A partial failure: NaviCore answers, the WCB list is kept from the cache.
+        fail.discard(nc_repo)
+        r = branchlist.branches(force=True)
+        if r.get("navicore") != ["main", "hil-nc"] or r.get("wcb") != ["main", "c-wcb"] or r.get("cached") is not False \
+                or wcb_repo not in r.get("error", "") or nc_repo in r.get("error", ""):
+            problems.append(f"only the WCB fetch failing: navicore {r.get('navicore')}, wcb {r.get('wcb')}, cached "
+                            f"{r.get('cached')}, error {r.get('error')!r}")
+    finally:
+        branchlist._fetch, flash.reachable, branchlist._fetched_this_run = real
+        settings.set_branch("wcb", "main")
+        settings.set_branch("navicore", "main")
+        try:
+            cache.unlink()
+        except OSError:
+            pass
+    check(not problems, "; ".join(problems))
+
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())
