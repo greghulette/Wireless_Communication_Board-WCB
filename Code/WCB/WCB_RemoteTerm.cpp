@@ -142,10 +142,15 @@ void WCBSerial::_sendPacket(const char *data, uint8_t len) {
 // ════════════════════════════════════════════════════════════════
 
 void WCBSerial::startSession(uint8_t relayWCB) {
-  _lineLen  = 0;
-  memset(_lineBuf, 0, sizeof(_lineBuf));
-  _relayWCB = relayWCB;
   _armedMs  = millis();
+  // A re-arm of the session already running to this relay (the Wizard's and Intellex's keep-alives send one every
+  // ~10-12 s) only restarts the idle clock: clearing the line buffer here cut a line half-mirrored at that moment.
+  // It still announces below, as it always has - the harness and the Wizard wait for that line.
+  if (_relayWCB != relayWCB) {
+    _lineLen  = 0;
+    memset(_lineBuf, 0, sizeof(_lineBuf));
+  }
+  _relayWCB = relayWCB;
   // Announce over USB (forwarding is now active so the relay sees it too)
   HardwareSerial::printf("[RTERM] Session started → relay WCB%d\n", relayWCB);
 }
