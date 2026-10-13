@@ -145,8 +145,16 @@ void WCBSerial::startSession(uint8_t relayWCB) {
   _lineLen  = 0;
   memset(_lineBuf, 0, sizeof(_lineBuf));
   _relayWCB = relayWCB;
+  _armedMs  = millis();
   // Announce over USB (forwarding is now active so the relay sees it too)
   HardwareSerial::printf("[RTERM] Session started → relay WCB%d\n", relayWCB);
+}
+
+void WCBSerial::expireIfIdle() {
+  if (!_relayWCB || (uint32_t)(millis() - _armedMs) < RTERM_IDLE_MS) return;
+  stopSession();
+  HardwareSerial::printf("[RTERM] (not re-armed for %lu s - the page that opened it is gone)\n",
+                         (unsigned long)(RTERM_IDLE_MS / 1000));
 }
 
 void WCBSerial::stopSession() {

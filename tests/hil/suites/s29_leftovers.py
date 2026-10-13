@@ -228,18 +228,15 @@ def help_data_bearing_exempt(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("help.top_level_spellings", "'??' and '? ?' print the top-level command reference, as ?, ?HELP and ?help do; the mixed-case ?Help is not a help spelling and answers 'Unknown command: Help' (characterisation)", needs=["wcb1"], links=[])
+@test("help.top_level_spellings", "'??', '? ?' and the mixed-case ?Help print the top-level command reference, as ?, ?HELP and ?help do", needs=["wcb1"], links=[])
 def help_top_level_spellings(bench):
     """Coverage re-scan 2026-10-12, help.top_level_forms. processLocalCommand (WCB.ino) gives the reference for an empty
-    message, '?', 'HELP' or 'help' exactly - so '??' (the message '?') is one, and '? ?' is the trailing-'?' shortcut on
-    '? ' (trimmed to '?', no topic, so the reference: the line 'Unknown command' itself suggests it). 'Help' matches
-    neither spelling and no verb, so it reaches the legacy table's 'Unknown command'. wcb.help_forms covers ?, ?HELP
-    and ?help."""
+    message, '?', or HELP in any letter case (Greg's call 2026-10-13: ?Help answered 'Unknown command' while every
+    other verb took any case) - so '??' (the message '?') is one, and '? ?' is the trailing-'?' shortcut on '? '
+    (trimmed to '?', no topic, so the reference). wcb.help_forms covers ?, ?HELP and ?help."""
     w = usb_wcb(bench)
-    bad = [cmd for cmd in ("??", "? ?") if not _has(w.run(cmd, timeout=8), HELP_HEAD)]
-    out = [x.rstrip() for x in w.run("?Help", timeout=8)]
+    bad = [cmd for cmd in ("??", "? ?", "?Help", "?hElP") if not _has(w.run(cmd, timeout=8), HELP_HEAD)]
     assert not bad, f"no command reference for {bad}"
-    assert "Unknown command: Help" in out and not _has(out, HELP_HEAD), f"?Help printed {out[:3]}"
 
 
 HELP_TOPICS = (('DEBUG', 'Usage: ?DEBUG,<command>[,value]'),
@@ -293,21 +290,26 @@ def help_topic_pages(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("misc.reboot_mixed_case_unknown", "?reboot and ?REBOOT are the only spellings: a mixed-case ?Reboot answers 'Unknown command: Reboot' and W1 does not queue a restart or reboot within 6 s (characterisation)", needs=["wcb1"], links=[])
-def reboot_mixed_case_unknown(bench):
-    """Coverage re-scan 2026-10-12, reboot.deferred. The legacy table (processLocalCommand, WCB.ino) matches 'reboot'
-    and 'REBOOT' exactly, and no new-format branch takes REBOOT, unlike the verbs matched through rootUpper. Whether
-    ?Reboot should be accepted is a product call; this pins what the firmware does. etm.reboot_* and friends cover the
-    deferred restart itself."""
+@test("misc.legacy_verbs_any_case", "?Version, ?Config and ?Backup answer as their upper- and lower-case spellings do, and a mixed-case ?Reboot restarts W1 (1 reboot)", needs=["wcb1"], links=[])
+def legacy_verbs_any_case(bench):
+    """Coverage re-scan 2026-10-12, reboot.deferred. The legacy table (processLocalCommand, WCB.ino) matched reboot,
+    config, backup and version only as all-lower or all-upper, so ?Reboot answered 'Unknown command: Reboot' while the
+    verbs matched through rootUpper took any case. Greg's call 2026-10-13: any case. etm.reboot_* cover the deferred
+    restart itself."""
     w = usb_wcb(bench)
+    problems = []
+    if not _has(w.run("?Version"), "Software Version:"):
+        problems.append("?Version printed no 'Software Version:' line")
+    if _has(w.run("?Config", timeout=8), "Unknown command"):
+        problems.append("?Config answered 'Unknown command'")
+    if not _has(w.run("?Backup", timeout=15), "*** WCB Configuration Backup"):
+        problems.append("?Backup printed no backup header")
     m = w.send("?Reboot")
-    time.sleep(6.0)
-    out = [x.rstrip() for x in w.dev.since(m)]
-    rebooted = w.rebooted_since(m) or any(x.startswith(("Reboot queued", "Rebooting now")) for x in out)
-    if rebooted:
-        w.wait_boot(m, timeout=30)
-    assert not rebooted, "?Reboot queued a restart"
-    assert "Unknown command: Reboot" in out, f"?Reboot printed {out[:3]}"
+    try:
+        w.wait_boot(m, timeout=40)
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"?Reboot did not restart W1: {e}")
+    assert not problems, "; ".join(problems)
 
 
 @test("persist.baud_label_validation", "?BAUD and ?LABEL refusals: no rate, an unknown rate, a port outside 1-5, a soft port above 115200; the soft-port warning above 57600, where the rate still applies (put back at once); ?LABEL without text, an unknown form, a bad CLEAR target, and a port outside 1-5, which ?LABEL and the old ?SLCS spelling now name (F7); ?LABEL,CLEAR,ALL clears all five, put back from the baseline", needs=["wcb1"], links=[])

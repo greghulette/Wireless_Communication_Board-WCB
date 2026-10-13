@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_130649ROCT2026                                  *****////
+///*****                                          Version 6.2.1_130938ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_130649ROCT2026";
+String SoftwareVersion = "6.2.1_130938ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -6254,7 +6254,7 @@ static bool isLegacySerialSetting(const String &m) {
 void processLocalCommand(const String &message) {
 
     // ---- Help: bare ? or HELP ----
-  if (message.isEmpty() || message.equals("?") || message.equals("HELP") || message.equals("help")) {
+  if (message.isEmpty() || message.equals("?") || message.equalsIgnoreCase("HELP")) {
         printCommandHelp("");
         return;
     }
@@ -7269,13 +7269,13 @@ void processLocalCommand(const String &message) {
         storeCommand(message);
     } else if (message.startsWith("ce") || message.startsWith("CE")) {
         eraseSingleCommand(message);
-    } else if (message == "reboot" || message == "REBOOT") {
+    } else if (message.equalsIgnoreCase("reboot")) {   // any letter case, like the other verbs (re-scan 2026-10-12)
         reboot();
-    } else if (message == "config" || message == "CONFIG") {
+    } else if (message.equalsIgnoreCase("config")) {
         printConfigInfo();
-    } else if (message == "backup" || message == "BACKUP") {
+    } else if (message.equalsIgnoreCase("backup")) {
         printBackupConfig();
-    } else if (message == "version" || message == "VERSION") {
+    } else if (message.equalsIgnoreCase("version")) {
         Serial.printf("Software Version: %s\n", SoftwareVersion.c_str());
         Serial.println("End of Version");
     } else if (message.length() == 2 && (message.charAt(0) == 'd' || message.charAt(0) == 'D')) {
@@ -8092,7 +8092,12 @@ void processSerialMessage(const String &message) {
         return;
     }
 
-    // Extract serial port number
+    // Extract serial port number. It must be a digit: toInt() read a letter (;SX,text) as 0, so the text went to USB
+    // with no error (coverage re-scan 2026-10-12, serial.nondigit_port_usb).
+    if (!isdigit((unsigned char)message.charAt(1))) {
+        Serial.println("Invalid serial port number. Must be between 0 and 5 (0=USB).");
+        return;
+    }
     int target = message.substring(1, 2).toInt();  // Extract Serial port (0-5, where 0=USB)
     if (target < 0 || target > 5) {  // ← CHANGED: was "target < 1"
         Serial.println("Invalid serial port number. Must be between 0 and 5 (0=USB).");  // ← UPDATED MESSAGE
@@ -10077,6 +10082,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
 
 void loop() {
   rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
+  WCBDebugSerial.expireIfIdle();   // end a remote-terminal session nobody re-armed for 30 s
   wcbEspNowReportDrops();   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
   reportEtmQueueRefusals(); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
   drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)

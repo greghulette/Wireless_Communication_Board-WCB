@@ -46,6 +46,13 @@ struct WsCmd {
 static QueueHandle_t  wsQueue   = nullptr;
 static httpd_handle_t wsServer  = nullptr;
 static int            wsFds[WS_MAX_CLIENTS] = { -1, -1 };
+// When each client's sends started failing (0 = its last send went through). A failed send closes the session only
+// once failures have lasted WS_FAIL_GRACE_MS: closing at the first one (the #113 guard against a dead peer holding
+// lwIP buffers) also ended healthy clients whenever a burst of output stalled the link for one 2 s send timeout -
+// a live client was dropped four times out of four as a 10-16 KB backlog flushed (HIL ws.burst_closes_live_client,
+// 2026-10-13). A dead peer still goes after the grace: a couple more 2 s timeouts, not a session held for good.
+static uint32_t       wsFailSince[WS_MAX_CLIENTS] = { 0, 0 };
+static const uint32_t WS_FAIL_GRACE_MS = 5000;
 
 // ---- Output sink ----------------------------------------------------------
 static char     sinkBuf[WS_SINK_BUF];
@@ -80,12 +87,13 @@ static void sinkAdd(int fd) {
   // leaves mid-line — without this reset it survives the disconnect and eats the
   // first whole line the NEXT client is sent.
   if (!wcbWsSinkLive()) { sinkLen = 0; sinkDropping = false; }
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] < 0) { wsFds[i] = fd; return; }
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] < 0) { wsFds[i] = fd; wsFailSince[i] = 0; return; }
   wsFds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
+  wsFailSince[0] = 0;
 }
 
 static void sinkDrop(int fd) {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] == fd) wsFds[i] = -1;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] == fd) { wsFds[i] = -1; wsFailSince[i] = 0; }
 }
 
 // Longest prefix of b[0..n) that does not end part-way through a UTF-8 sequence.
@@ -145,8 +153,17 @@ static bool sinkPump() {
       // whole TCP send buffer, ~5.7 KB) for as long as TCP retries a peer that has gone, and two or three such
       // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113, run
       // 20261007-140804: 4.8 KB free, largest block 980 B, nothing connected). wsClose resets it.
-      httpd_sess_trigger_close(wsServer, wsFds[i]);
-      wsFds[i] = -1;
+      // ...but only once the failures have lasted WS_FAIL_GRACE_MS (see wsFailSince): this frame is lost to that
+      // client either way.
+      const uint32_t now = millis();
+      if (!wsFailSince[i]) wsFailSince[i] = now ? now : 1;
+      if ((uint32_t)(now - wsFailSince[i]) >= WS_FAIL_GRACE_MS) {
+        httpd_sess_trigger_close(wsServer, wsFds[i]);
+        wsFds[i] = -1;
+        wsFailSince[i] = 0;
+      }
+    } else {
+      wsFailSince[i] = 0;
     }
   }
 
@@ -328,8 +345,8 @@ static void wsClose(httpd_handle_t /*hd*/, int sockfd) {
 // The AP sees a station leave (WIFI_EVENT_AP_STADISCONNECTED) long before TCP gives up on its sockets. When the
 // last station has gone, every session from the AP's own subnet is dead: close them at once rather than wait for a
 // send to fail on each (each failed send also stalls loop() for the send timeout). With stations still there a
-// dead session closes at its first failed send instead (sinkPump). The flag is set on the Arduino event task and
-// read on loop().
+// dead session closes once its sends have failed for WS_FAIL_GRACE_MS instead (sinkPump). The flag is set on the Arduino event task and
+// read on loop(). (A failed send closes only after WS_FAIL_GRACE_MS since 2026-10-13.)
 static volatile bool apStationLeft = false;
 
 static void onApStationLeft(arduino_event_id_t, arduino_event_info_t) { apStationLeft = true; }
@@ -353,6 +370,7 @@ static void closeSessionsOfLeftStations() {
     if (ip[0] == ap[0] && ip[1] == ap[1] && ip[2] == ap[2]) {   // the AP's /24: a client that came through it
       httpd_sess_trigger_close(wsServer, wsFds[i]);
       wsFds[i] = -1;
+      wsFailSince[i] = 0;
     }
   }
 }

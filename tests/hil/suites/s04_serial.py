@@ -437,18 +437,18 @@ def payload_trimmed(bench):
     assert got == f"{t}\r{t2}\r".encode(), f"S1 got {got!r}"
 
 
-@test("serial.nondigit_port_usb", ";SX,<t> (a letter where the port digit goes) prints <t> on USB and nothing else: toInt reads the port as 0, the USB console (characterisation)", needs=NEEDS)
-def nondigit_port_usb(bench):
-    """Coverage re-scan 2026-10-12, serialcmd.port_range. processSerialMessage (WCB.ino) takes the port from
-    message.substring(1, 2).toInt(), which is 0 for a letter, and 0 is the USB console: no range error. serial.bad_port
-    covers ;S7."""
+@test("serial.nondigit_port_refused", ";SX,<t> (a letter where the port digit goes) is refused with the port-range message and writes nothing: not to USB, not to S1", needs=NEEDS)
+def nondigit_port_refused(bench):
+    """Coverage re-scan 2026-10-12, serialcmd.port_range. processSerialMessage (WCB.ino) took the port from
+    message.substring(1, 2).toInt(), which is 0 for a letter, so ;SX,<t> printed <t> on the USB console with no error.
+    Greg's call 2026-10-13: refuse it. serial.bad_port covers ;S7."""
     probe, ch = wire(bench, 1, "S1")
     w = usb_wcb(bench)
     t = marker()
     m = probe.dev.mark()
     out = _out(w, f";SX,{t}")
-    assert t in out, f";SX,{t} did not print {t} on USB: {out[-3:]}"
-    assert not [x for x in out if "Invalid" in x], f";SX printed {[x for x in out if 'Invalid' in x]}"
+    assert "Invalid serial port number. Must be between 0 and 5 (0=USB)." in out, f";SX,{t} printed {out[-3:]}"
+    assert not [x for x in out if x.strip() == t], f";SX,{t} still printed {t} on USB"
     assert t.encode() not in probe.received(ch, m), ";SX wrote to S1"
 
 

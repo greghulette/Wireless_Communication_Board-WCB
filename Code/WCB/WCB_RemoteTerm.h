@@ -79,8 +79,15 @@ public:
   bool    sessionActive() const { return _relayWCB != 0; }
   uint8_t getRelayWCB()   const { return _relayWCB; }
 
+  // A session not re-armed (?RTERM,START to the same relay) for RTERM_IDLE_MS ends by itself: called from loop().
+  // Without it a session outlived the page that opened it - a closed Wizard or Intellex left the board mirroring
+  // every console line over the mesh until a reboot (HIL 2026-10-12: W1's console at ~300 ms a line).
+  void    expireIfIdle();
+  static constexpr uint32_t RTERM_IDLE_MS = 30000;
+
 private:
-  uint8_t _relayWCB = 0;
+  uint8_t  _relayWCB = 0;
+  uint32_t _armedMs  = 0;   // millis() of the last ?RTERM,START
 
   // Line buffer — flushes on '\n' or when full
   static constexpr size_t LINEBUF_SIZE = RTERM_TEXT_SIZE;
