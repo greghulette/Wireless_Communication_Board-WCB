@@ -6051,7 +6051,7 @@ class BoardConnection {
       // A mirrored board can itself be a relay answering someone else's pull: its [MGMT:CONFIG/CFGPART] lines
       // arrive here inside [TERM:n], and get the same summary as the relay's own.
       const termText = _summariseMgmtConfigLine(termMatch[2]);
-      if (!_suppressTerminalLine(termText))
+      if (!_suppressTerminalLine(termText) && !_rtermKeepAliveEcho(slot, termText))
         termLog(slot, termText, 'out');
     } else {
       const displayed = _summariseMgmtConfigLine(line);   // config text (and its passwords) never reaches the pane
@@ -6719,6 +6719,7 @@ function clearRemoteBoardsForRelay(relayN) {
 
 function clearRemoteConnected(n) {
   const relayN = remoteRelayForBoard[n];
+  _rtermKeepAliveStop(n);              // no more re-arms for a board that is no longer managed
   // Best-effort: tell the target board to stop forwarding terminal output
   if (relayN) stopRemoteTermSession(relayN, n);
   delete remoteRelayForBoard[n];
@@ -6762,15 +6763,80 @@ async function startRemoteTermSession(relayN, targetN) {
   const relayConn = boardConnections[relayN];
   if (!relayConn?.isConnected()) return;
   try {
-    const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
-    const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
-    const relayFc    = _relayFuncChar(relayN);
-    const targetFc   = _liveFuncChar(targetN);
-    const rtermStartCmd = `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
-    await sendMgmtReliable(relayConn, rtermStartCmd, null, 3, 250);   // 3× for reliable arming — see note above
+    await sendMgmtReliable(relayConn, _rtermStartCmd(relayN, targetN), null, 3, 250);   // 3× for reliable arming — see note above
     termLog(relayN, `[Remote] WCB${targetN} remote terminal started`, 'sys');
+    _rtermKeepAliveArm(relayN, targetN);   // the next re-arm, RTERM_KEEPALIVE_MS after this one
   } catch (_) {}
+}
+
+// ?RTERM,START,<relay> for targetN as the relay forwards it: a one-chunk MGMT FRAG with a fresh session id.
+function _rtermStartCmd(relayN, targetN) {
+  const sessionId  = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const wcbNum     = boardConfigs[targetN]?.wcbNumber || targetN;
+  const relayWcb   = boardConfigs[relayN]?.wcbNumber  || relayN;   // firmware forwards to this WCB NUMBER, not the slot
+  const relayFc    = _relayFuncChar(relayN);
+  const targetFc   = _liveFuncChar(targetN);
+  return `${relayFc}MGMT,FRAG,${wcbNum},${sessionId},0,1,${targetFc}RTERM,START,${relayWcb}`;
+}
+
+// ─── Remote-terminal keep-alive ───────────────────────────────────
+// The firmware ends a remote-terminal session nobody re-armed for 30 s (WCBSerial::expireIfIdle, RTERM_IDLE_MS), so a
+// page that went away without ?RTERM,STOP no longer leaves its boards mirroring every line over the mesh. While a board
+// stays managed through a relay, the page re-sends its ?RTERM,START,<relay> RTERM_KEEPALIVE_MS after the last one any
+// path sent (setRemoteConnected, a pull that landed, an ETM came-ONLINE edge, relayRouteAll, the post-OTA replay - all
+// through startRemoteTermSession, which re-schedules it): two chances inside the 30 s, and a session that did lapse is
+// started again by the next one. One copy, not the arming's three: a one-chunk FRAG reaches the target as an ETM
+// unicast, so every copy runs (and re-announces), and a board must see no more than 6 starts in any minute (the HIL
+// bound, s35_intellex_wifi.py RATE_BOUND) - 12 s apart is at most 6. Quiet: no relay-pane line, and the target's own
+// "[RTERM] Session started" echo of a keep-alive is kept out of its pane (_rtermKeepAliveEcho). While the relay is
+// mid-push or either board is in an OTA the re-arm waits, checking every second: a line on the relay's USB then could
+// pass for a command's acknowledgement, or cut into the OTA stream. It stops when the board is un-managed
+// (clearRemoteConnected) and when its relay is no longer connected.
+const RTERM_KEEPALIVE_MS      = 12000;
+const RTERM_KEEPALIVE_WAIT_MS = 1000;
+const _rtermKeepAlive = {};   // target slot -> { relay, timer, sentAt }
+
+function _rtermKeepAliveArm(relayN, targetN) {
+  const prev = _rtermKeepAlive[targetN];
+  if (prev?.timer) clearTimeout(prev.timer);
+  delete _rtermKeepAlive[targetN];
+  if (remoteRelayForBoard[targetN] !== relayN) return;   // only a board this relay manages is kept alive
+  const k = { relay: relayN, timer: null, sentAt: prev?.sentAt ?? 0 };
+  k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_MS);
+  _rtermKeepAlive[targetN] = k;
+}
+
+function _rtermKeepAliveStop(targetN) {
+  const k = _rtermKeepAlive[targetN];
+  if (k?.timer) clearTimeout(k.timer);
+  delete _rtermKeepAlive[targetN];
+}
+
+async function _rtermKeepAliveTick(targetN, k) {
+  if (_rtermKeepAlive[targetN] !== k) return;            // re-armed or stopped meanwhile
+  k.timer = null;
+  const relayN    = k.relay;
+  const relayConn = boardConnections[relayN];
+  if (remoteRelayForBoard[targetN] !== relayN || !relayConn?.isConnected()) { delete _rtermKeepAlive[targetN]; return; }
+  if (_pushingBoards.has(relayN) || _otaInProgress.has(relayN) || _otaInProgress.has(targetN)) {
+    k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_WAIT_MS);
+    return;
+  }
+  try {
+    k.sentAt = Date.now();
+    await relayConn.send(_rtermStartCmd(relayN, targetN) + '\r');
+  } catch (_) {}
+  if (_rtermKeepAlive[targetN] === k) k.timer = setTimeout(() => _rtermKeepAliveTick(targetN, k), RTERM_KEEPALIVE_MS);
+}
+
+// True for the "[RTERM] Session started" line a keep-alive just made board `slot` print (within 5 s of the send), once
+// per send: the line is left out of the pane. Any other start's announcement (the arming, a re-arm after a reboot) shows.
+function _rtermKeepAliveEcho(slot, text) {
+  const k = _rtermKeepAlive[slot];
+  if (_termVerbose || !k?.sentAt || !/^\[RTERM\] Session started\b/.test(text)) return false;
+  const mine = Date.now() - k.sentAt < 5000;
+  k.sentAt = 0;
+  return mine;
 }
 
 // Stops the remote terminal session on board targetN.

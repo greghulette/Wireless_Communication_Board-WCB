@@ -326,6 +326,7 @@ _FAKE_RESCAN_L = (
     ("term_fake_panes", "A pane's chip says USB or via WCB n, its input is disabled while unreachable, and a board moving slot takes its output along (term.panes)"),
     ("term_fake_send_history", "Terminal lines go into the board's own history, a repeat once; the arrows walk it (term.send_history)"),
     ("term_fake_log_routing", "A line goes to its board's pane when the board is connected, relayed or opened by hand; a merely discovered board's lands in the first pane (term.log_routing)"),
+    ("term_fake_remote_keepalive", "A board managed through a relay has its remote terminal re-armed with one ?RTERM,START 12 s after the last start (the firmware's 30 s idle timeout), at most 6 a minute, its echo kept out of the pane; none for an unmanaged board; held back by a push on the relay; stopped by un-managing or losing the relay (remote.unmanage, connect.disconnect)"),
     ("pull_fake_wcbq_renders_floor", "A pulled WCB quantity above 1 renders that many sections; 1 changes nothing (pull.wcbq_renders_floor)"),
     ("pull_fake_success_state", "A pull's button, config, baseline, badge, toast and version request; an overlapping pull is dropped; only a manual pull says not connected (pull.success_state)"),
     ("pull_fake_remote_delegation", "Pull on a relayed board goes through the relay; a slot recorded as its own relay is refused; Retry pulls again (pull.remote_delegation)"),

@@ -303,3 +303,96 @@ test('wizard.term_fake_log_routing a line for a board with a connection, a relay
   expect(await page.evaluate(() => document.getElementById('term-pane-output-1').textContent)).not.toContain('hil-relayed');
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.term_fake_remote_keepalive while a board stays managed through a relay its remote terminal is re-armed - one ?RTERM,START,<relay> 12 s after the last start, so the firmware\'s 30 s idle timeout never ends it and no minute holds more than 6 - and its echo of a re-arm stays out of its pane; a board the relay does not manage gets none; a push on the relay holds a re-arm back, and un-managing the board or losing the relay stops them', async ({ page }) => {
+  // startRemoteTermSession, _rtermKeepAliveArm / _rtermKeepAliveTick / _rtermKeepAliveEcho, clearRemoteConnected (app.js).
+  // The firmware now ends a remote-terminal session not re-armed for 30 s (WCB 3b9e2dd, WCBSerial::expireIfIdle); the
+  // Wizard armed a session once and never again. Every one-chunk FRAG copy runs on the board as its own ETM unicast,
+  // so each send below is a start the board runs; s35_intellex_wifi.py bounds those at 6 a minute (RATE_BOUND). Time is
+  // Playwright's fake clock. New 2026-10-13, for RESCAN_2026-10-12.md section 3's "remote-terminal sessions have no
+  // timeout"; its stop is part of rows remote.unmanage and connect.disconnect.
+  await page.clock.install();
+  await setup(page);
+  await page.evaluate(() => {
+    __fake.conn(1, { backup: '' });     // the relay, on USB
+    addDiscoveredBoards([2, 3]);
+    setRemoteConnected(2, 1);           // WCB2 managed through WCB1; WCB3 only seen on the mesh
+    window.__starts = (n) => __fake.log.filter((e) => e.slot === 1 && e.op === 'send' && e.s.includes(`MGMT,FRAG,${n},`) &&
+                                                    e.s.endsWith('?RTERM,START,1')).map((e) => ({ at: e.at, sid: e.s.split(',')[3] }));
+    window.__echo = () => boardConnections[1]._handleLine('[TERM:2][RTERM] Session started → relay WCB1');
+    window.__echoes = () => (document.getElementById('term-pane-output-2').textContent.match(/\[RTERM\] Session started/g) || []).length;
+  });
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
+  await page.clock.runFor(2000);        // the arming: three copies of one start, 250 ms apart
+  const arming = await page.evaluate(() => __starts(2));
+  expect(arming.length).toBe(3);
+  expect(new Set(arming.map((x) => x.sid)).size).toBe(1);
+  // The arming's own announcement shows in WCB2's pane.
+  await page.evaluate(() => __echo());
+  expect(await page.evaluate(() => __echoes())).toBe(1);
+  // A start sent for WCB3, which the relay does not manage (a pull through the relay arms one): no keep-alive follows.
+  await page.evaluate(() => { startRemoteTermSession(1, 3); });   // not awaited: its 250 ms gaps run on the paused clock
+  await page.clock.runFor(1000);
+  const wcb3 = (await page.evaluate(() => __starts(3))).length;
+  expect(wcb3).toBe(3);
+
+  // Two minutes: a single copy every 12 s after the arming's last one, each a fresh session.
+  await page.clock.runFor(120_000);
+  const all = await page.evaluate(() => __starts(2));
+  const kept = all.slice(3);
+  expect(kept.length).toBe(10);
+  expect(new Set(kept.map((x) => x.sid)).size, 'one copy each').toBe(10);
+  const gaps = [kept[0].at - arming[2].at, ...kept.slice(1).map((x, i) => x.at - kept[i].at)];
+  for (const g of gaps) expect(g).toBe(12_000);
+  // At most 6 in any 60 s window once the arming is past (the s35 bound): a window opening at each re-arm.
+  for (const x of kept) expect(kept.filter((y) => y.at >= x.at && y.at <= x.at + 60_000).length).toBeLessThanOrEqual(6);
+  expect((await page.evaluate(() => __starts(3))).length, 'WCB3: nothing after its one arming').toBe(wcb3);
+  // The board's announcement of a re-arm is kept out of its pane - once per re-arm; any other still shows.
+  await page.evaluate(() => __echo());
+  expect(await page.evaluate(() => __echoes())).toBe(1);
+  await page.evaluate(() => __echo());
+  expect(await page.evaluate(() => __echoes())).toBe(2);
+  // Nothing in the relay's pane for a re-arm (the arming says "remote terminal started" once).
+  expect(await page.evaluate(() => (document.getElementById('term-pane-output-1').textContent.match(/WCB2 remote terminal started/g) || []).length)).toBe(1);
+
+  // A push on the relay: the next re-arm waits until it is over (checked every second), then the 12 s run on from it.
+  const last = kept.at(-1).at;
+  await page.evaluate(() => _pushingBoards.add(1));
+  await page.clock.runFor(last + 15_000 - (await page.evaluate(() => Date.now())));
+  expect((await page.evaluate(() => __starts(2))).length, 'held back during the push').toBe(13);
+  await page.evaluate(() => _pushingBoards.delete(1));
+  await page.clock.runFor(1_000);
+  const after = (await page.evaluate(() => __starts(2))).slice(13);
+  expect(after.length).toBe(1);
+  expect(after[0].at - last).toBeGreaterThanOrEqual(15_000);
+  expect(after[0].at - last).toBeLessThanOrEqual(16_000);
+  // A start from another path (a pull that landed re-arms the terminal) puts the next re-arm 12 s after it.
+  await page.clock.runFor(5_000);
+  await page.evaluate(() => { startRemoteTermSession(1, 2); });
+  await page.clock.runFor(1_000);
+  const pulled = (await page.evaluate(() => __starts(2))).slice(14);
+  expect(pulled.length).toBe(3);
+  await page.clock.runFor(12_000);
+  const next = (await page.evaluate(() => __starts(2))).slice(17);
+  expect(next.length).toBe(1);
+  expect(next[0].at - pulled[2].at).toBe(12_000);
+
+  // Un-managed: RTERM,STOP, and no re-arm after it.
+  await page.evaluate(() => clearRemoteConnected(2));
+  await page.clock.runFor(1_000);
+  expect(await page.evaluate(() => __fake.sent(1).filter((s) => s.includes('MGMT,FRAG,2,') && s.endsWith('RTERM,STOP')).length)).toBe(1);
+  const stopped = (await page.evaluate(() => __starts(2))).length;
+  await page.clock.runFor(60_000);
+  expect((await page.evaluate(() => __starts(2))).length, 'none once un-managed').toBe(stopped);
+
+  // Managed again, then the relay's port is gone: the re-arms stop.
+  await page.evaluate(() => setRemoteConnected(2, 1));
+  await page.clock.runFor(1_000);
+  const rearmed = (await page.evaluate(() => __starts(2))).length;
+  expect(rearmed).toBe(stopped + 3);
+  await page.evaluate(() => { boardConnections[1]._connected = false; });
+  await page.clock.runFor(60_000);
+  expect((await page.evaluate(() => __starts(2))).length, 'none with the relay gone').toBe(rearmed);
+  expect(await page.evaluate(() => Object.keys(_rtermKeepAlive))).toEqual([]);
+  expect(page.wizErrors).toEqual([]);
+});
