@@ -756,9 +756,10 @@
   "status": "partial",
   "tested_by": [
    "misc.led_query_invalid",
-   "nvs.erase_led_and_tails"
+   "nvs.erase_led_and_tails",
+   "misc.led_pin_refusals"
   ],
-  "gap": "The boot-apply and erase halves are attended opt-in (nvs_erase); a non-numeric pin ('?LED,PIN,abc' reads 0) is accepted and saved (noted as a defect in s18, never sent); the LED actually lighting on the new pin cannot be seen (no LED sensing: known WCB-WP59 boot.hw_specific_inits); the LED,PIN chain token on HW 3.x needs an S3 board.",
+  "gap": "the refusals and the boot-time ignore of a refused saved pin added in 99b14e8/fc1407d; run 20261012-212755. Still attended: a visibly moved LED",
   "testable": "attended",
   "bench_needs": "none",
   "risk": "M",

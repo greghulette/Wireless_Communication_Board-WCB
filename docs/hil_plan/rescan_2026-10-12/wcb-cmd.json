@@ -68,9 +68,11 @@
   "area": "help",
   "behaviour": "The DEBUG help page lists ON/OFF, MAESTRO/KYBER, PWM, ETM and the test knobs but not the RAW, MGMT and HCR ON/OFF forms the parser accepts (the top-level page lists ?DEBUG,RAW).",
   "where": "WCB_Help.cpp:16-66 vs WCB.ino:6312-6345",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Doc/parser mismatch: no test asserts the DEBUG page names every accepted sub-command.",
+  "status": "tested",
+  "tested_by": [
+   "help.corrected_pages"
+  ],
+  "gap": "closed 2026-10-12: fixed in 99b14e8 (the DEBUG page lists HCR, MGMT, RAW); run 20261012-211320",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -512,9 +514,11 @@
   "area": "timer",
   "behaviour": "A ';'-first or un-prefixed line is treated as a timer chain whenever ';T' or ';t' appears ANYWHERE in it (isTimerCommand), so a plain text line such as 'set;temp' takes the timer engine: it still runs (one 0-delay group) but REPLACES a running timer chain and prints 'replaced mid-run'.",
   "where": "command_timer.cpp:73-76; WCB.ino:2770",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Unasserted: an unrelated text line containing ';t' silently kills a running show.",
+  "status": "tested",
+  "tested_by": [
+   "serial.timer_payload_semicolon_t"
+  ],
+  "gap": "closed 2026-10-12: fixed in 99b14e8/fc1407d (a timer token starts a delimited token: ;T or ;t, then a digit or a minus); failed on the old image (run 20261012-190845), passes on the new (-211320, -212755)",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "M",
@@ -1686,9 +1690,11 @@
   "area": "led",
   "behaviour": "?LED,PIN,abc (or an empty value) parses to GPIO 0 and is SAVED and applied: a typo moves the status LED to GPIO0 and persists.",
   "where": "WCB.ino:7182-7183",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Probable defect (misc.led_query_invalid's docstring warns against it); nothing asserts a refusal.",
+  "status": "tested",
+  "tested_by": [
+   "misc.led_pin_refusals"
+  ],
+  "gap": "closed 2026-10-12: fixed in 99b14e8/fc1407d (?LED,PIN needs a number and refuses per chip the pins that lock a board out; ?LED lists them); run 20261012-212755",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "M",
