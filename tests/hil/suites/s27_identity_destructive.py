@@ -569,7 +569,7 @@ def reset_legacy(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("led.pin_moves_camera", "(should) OPT-IN (camera): the bench camera sees W3's status LED follow ?LED,PIN: lit (idle blue) on its own GPIO48; ?LED,PIN,38 blanks the GPIO48 pixel it leaves, which stays dark through the reboot after, which prints 'LED pin override from NVS: GPIO38'; ?LED,PIN,48 lights it again and the reboot after keeps it lit ('LED pin override from NVS: GPIO48'); GPIO48 is put back and seen lit in a finally (2 W3 reboots)", needs=["wcb3"], links=[], opt_in="camera")
+@test("led.pin_moves_camera", "OPT-IN (camera): the bench camera sees W3's status LED follow ?LED,PIN: lit (idle blue) on its own GPIO48; ?LED,PIN,38 blanks the GPIO48 pixel it leaves, which stays dark through the reboot after, which prints 'LED pin override from NVS: GPIO38'; ?LED,PIN,48 lights it again and the reboot after keeps it lit ('LED pin override from NVS: GPIO48'); GPIO48 is put back and seen lit in a finally (2 W3 reboots)", needs=["wcb3"], links=[], opt_in="camera")
 def led_pin_moves_camera(bench):
     """Coverage re-scan 2026-10-12, led.set_pin_persist / led.pin, the half that needs eyes. The ?LED handler (WCB.ino)
     saves the pin (saveStatusLEDPin, led_config), sets STATUS_LED_PIN and re-runs initStatusLEDWithRetry on the new pin,
