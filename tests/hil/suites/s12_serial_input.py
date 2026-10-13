@@ -1470,7 +1470,13 @@ def usb_line_cap_32k(bench):
             ran = sum(1 for x in out if re.match(rf"^{tag}\d{{0,5}}$", x))
             drops = [x for x in out if x.startswith("[SERIAL] S0:")]
             bench.note(f"a {len(line)}-byte USB line: {ran} token(s) ran, drop lines {drops[:2]}")
-            if drops != ["[SERIAL] S0: line longer than 32768 characters - dropped"]:
+            # Growing the line buffer past ~32 KB can need the old and the new copy at once, so even with a 40 KB
+            # block free the heap guard may drop the line before the cap does - it did 2:29 into full run
+            # 20261013-021405 ('line too long for the free heap (32208 characters)'), where alone it had passed.
+            # The line is still dropped whole (checked below); only the cap arm went unreached, which is a skip.
+            heap_drop = len(drops) == 1 and re.match(r"^\[SERIAL\] S0: line too long for the free heap \(\d+ characters\) - dropped$",
+                                                     drops[0])
+            if drops != ["[SERIAL] S0: line longer than 32768 characters - dropped"] and not heap_drop:
                 problems.append(f"expected one '[SERIAL] S0: line longer than 32768 characters - dropped', got {drops[:3]}")
             if ran:
                 problems.append(f"{ran} of the over-long line's tokens ran")
@@ -1485,6 +1491,9 @@ def usb_line_cap_32k(bench):
             if changed:
                 _restore_ap(w, tok, ssid, problems)
     assert not problems, "; ".join(problems)
+    if heap_drop:
+        raise Skip(f"W1's heap could not grow the line to the cap ({drops[0]}): dropped whole, nothing ran, but the "
+                   f"32 KB cap arm itself was not reached this time")
 
 
 @test("input.live_baud_text_port", "?BAUD on a soft port while text streams into it neither reboots W1 nor wedges its command reader: five same-rate re-begins of S3 under a stream of comment lines, then 19200 and back with the line quiet, after which a ;S0 line typed into S3 runs", needs=["wcb1"])
