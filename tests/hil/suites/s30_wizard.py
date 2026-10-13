@@ -332,6 +332,13 @@ _FAKE_RESCAN_L = (
     ("push_fake_progress_and_history", "A push shows 'Pushing... k/n', hides the bar after, gives the button back, releases the mesh hold and clears the controller history (push.progress_and_history)"),
     ("rpush_fake_guards", "A relayed push is refused with its reason when the relay is down, the board has no config, or no relay is set (rpush.guards)"),
     ("pushall_fake_exclusions", "Push All with nothing connected says 'No boards connected' and sends nothing (pushall.exclusions)"),
+    ("remote_fake_manage_ui", "Managing through a relay enables Pull/Push/Identify/Stats, dims Factory Reset and Update FW with a tooltip; un-managing puts it back (remote.manage_ui)"),
+    ("remote_fake_manage_one", "A relay card's 'Manage via relay' arms and pulls one board, never one on USB (remote.manage_one)"),
+    ("remote_fake_relay_only_refusals", "Update FW, Factory Reset and OTA-over-USB are refused on a relayed board with a toast (remote.relay_only_refusals)"),
+    ("rpull_fake_badges", "A remote pull shows Retrying, then Pull Failed with Retry after its last attempt; Retry and a pull that lands show Remote (rpull.badges)"),
+    ("flash_fake_erase_no_reconnect", "An erase whose board never comes back says so, pushes and probes nothing, and gives the Push button back (flash.erase_path)"),
+    ("flasher_fake_windows_baud", "The flasher loads at 460800 (ROM 115200), at 115200 on Windows (flasher.windows_baud)"),
+    ("ota_fake_entry_guards", "The OTA button takes the relay path for a relayed board and USB otherwise; each refuses an unreachable board (ota.entry_guards)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):

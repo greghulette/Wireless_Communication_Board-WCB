@@ -195,3 +195,196 @@ test('wizard.pushall_fake_exclusions Push All with no board connected says "No b
   expect(await page.evaluate(() => __fake.log.filter((e) => e.op === 'send' || e.op === 'await').length)).toBe(0);
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.remote_fake_manage_ui a board managed through a relay gets Pull, Push, Identify, Network Test and Stats enabled (with relay tooltips), Factory Reset and Update FW dimmed but clickable with a tooltip saying why, the Remote badge and a Disconnect button; un-managed, all of it goes back', async ({ page }) => {
+  // setRemoteConnected (app.js:6591-6657), clearRemoteConnected (6665-6699). Their flash-mode radio handling finds no
+  // radios (the card has no b<n>-mode inputs any more), so there is nothing of it to assert. The RTERM,START x3, the
+  // badge and the panes are wizard.app_fake_relay_card's and wizard.app_fake_etm_listener's. Row remote.manage_ui.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  const ui = () => page.evaluate(() => {
+    const q = (id) => document.getElementById(`b2-${id}`);
+    const b = (id) => ({ enabled: !q(id).disabled, opacity: q(id).style.opacity, cursor: q(id).style.cursor, title: q(id).title });
+    return { label: q('status-badge').textContent, connect: [q('btn-connect').textContent, q('btn-connect').classList.contains('btn-danger')],
+             pull: b('btn-pull'), go: !q('btn-go').disabled, identify: !q('btn-identify').disabled,
+             etm: b('btn-etm-char'), stats: b('btn-stats'), erase: b('btn-erase'), update: b('btn-update-fw') };
+  });
+  const s = await ui();
+  expect(s.label).toBe('📡 Remote');
+  expect(s.connect).toEqual(['Disconnect', true]);
+  expect([s.pull.enabled, s.go, s.identify]).toEqual([true, true, true]);
+  expect(s.etm).toEqual({ enabled: true, opacity: '', cursor: '', title: 'Run ETM characterization via wireless relay (~15 seconds)' });
+  expect(s.stats).toEqual({ enabled: true, opacity: '', cursor: '', title: 'View ESP-NOW stats via wireless relay' });
+  expect(s.erase).toEqual({ enabled: true, opacity: '0.45', cursor: 'not-allowed', title: 'Connect via USB to factory reset — not available over wireless relay' });
+  expect(s.update).toMatchObject({ opacity: '0.45', cursor: 'not-allowed', title: 'Connect via USB to update firmware — not available over wireless relay' });
+
+  await page.evaluate(() => clearRemoteConnected(2));
+  const c = await ui();
+  expect([c.label, c.connect]).toEqual(['Not Connected', ['Connect', false]]);
+  expect([c.pull.enabled, c.go, c.identify, c.etm.enabled, c.stats.enabled, c.erase.enabled]).toEqual([false, false, false, false, false, false]);
+  expect(c.erase).toMatchObject({ opacity: '', cursor: '', title: 'Erase all settings and reboot — optionally re-flash firmware' });
+  expect(c.update).toMatchObject({ opacity: '', cursor: '', title: 'A newer firmware version is available' });
+  expect([c.etm.title, c.stats.title]).toEqual(['', '']);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.remote_fake_manage_one a MgmtRelay card\'s "Manage via relay" arms that one board and pulls it through the relay (the card then says managed); it never takes over a board that is on USB itself', async ({ page }) => {
+  // relayManageOne (app.js:545-552) from renderRelayCard's button. Manage all (pull=false) is
+  // wizard.app_fake_relay_card's. Row remote.manage_one.
+  await setup(page);
+  await pullFake(page, 1, board(['RELAY,1'], { wcb: 19, wcbq: 3 }), { replies: { '?WDP,DUMP': RELAY_DUMP } });
+  await page.evaluate(() => { __fake.meshOn(); return meshAutoDiscoverTick(); });
+  const card = page.locator('#relay-card-19');
+  const manage = (n) => card.locator('.cs-row', { hasText: `WCB ${n} (` }).locator('button', { hasText: 'Manage via relay' });
+  await page.evaluate(() => { __fake.log.length = 0; });
+  await manage(2).click();
+  await expect.poll(() => pulls(page, 19)).toEqual(['?MGMT,PULL,2,P']);
+  expect(await page.evaluate(() => remoteRelayForBoard[2])).toBe(19);
+  expect(await card.locator('.cs-row', { hasText: 'WCB 2 (' }).textContent()).toContain('managed');
+
+  // WCB3 comes up on its own USB port: its button does nothing.
+  await pullFake(page, 3, board([], { wcb: 3, wcbq: 3 }));
+  await page.evaluate(() => { __fake.log.length = 0; });
+  await manage(3).click();
+  await page.waitForTimeout(400);
+  expect(await pulls(page, 19)).toEqual([]);
+  expect(await page.evaluate(() => [remoteRelayForBoard[3] ?? null, boardConnections[3].isConnected()])).toEqual([null, true]);
+  expect(await badge(page, 3), 'still the USB board it was').toBe('● Connected');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.remote_fake_relay_only_refusals on a board managed through a relay, Update FW, Factory Reset and OTA-over-USB are refused with a toast saying to connect over USB, and nothing is flashed, opened or sent', async ({ page }) => {
+  // boardUpdateFW (app.js:1711-1717), boardFactoryReset (10334-10345), boardOtaSerial's guard (1786-1789).
+  // Row remote.relay_only_refusals.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  await page.evaluate(() => {
+    window.__goCalls = 0;
+    const real = boardGo;
+    window.boardGo = (...a) => { window.__goCalls++; return real(...a); };
+    __fake.log.length = 0;
+  });
+  for (const [what, call, toast] of [
+    ['Update FW', () => document.getElementById('b2-btn-update-fw').click(), '🔌 Connect via USB to update firmware — not available over wireless relay'],
+    ['Factory Reset', () => document.getElementById('b2-btn-erase').click(), '🔌 Connect via USB to factory reset — not available over wireless relay'],
+    ['OTA over USB', () => boardOtaSerial(2), 'OTA-over-serial needs a direct USB connection'],
+  ]) {
+    const m = await toastMark(page);
+    await page.evaluate(`(${call.toString()})()`);
+    expect.soft(await toastsSince(page, m), what).toBe(toast);
+  }
+  expect(await page.evaluate(() => [window.__goCalls, document.getElementById('factory-reset-modal').classList.contains('open'),
+                                    _factoryResetSlot, _otaInProgress.size])).toEqual([0, false, null, 0]);
+  expect(await sentOn(page, 1)).toEqual([]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.rpull_fake_badges a remote pull shows Retrying while it retries and, when every attempt has failed, Pull Failed with the Retry button; Retry hides it again and a pull that lands shows Remote', async ({ page }) => {
+  // _pullAttemptFailed (app.js:9016-9040), updateBoardStatusBadge's Retry button (3650-3654), boardRetryPull.
+  // Row rpull.badges.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  await page.evaluate(() => { __fake.log.length = 0; });
+  const retry = () => shown(page, 'b2-btn-retry');
+  const nomem = () => page.evaluate(() => boardConnections[1]._handleLine('[MGMT:CFGERR,2]NOMEM,need 2990 free 2400 largest 1800'));
+  await page.evaluate(() => { remoteBoardPull(1, 2); });
+  for (let k = 1; k <= 3; k++) {
+    await expect.poll(() => pulls(page, 1).then((p) => p.length), { timeout: 8_000 }).toBe(k);
+    await nomem();
+    if (k < 3) expect([await badge(page, 2), await retry()], `attempt ${k} failed`).toEqual(['↻ Retrying…', false]);
+  }
+  expect([await badge(page, 2), await retry()]).toEqual(['✕ Pull Failed', true]);
+  await page.locator('#b2-btn-retry').click();
+  expect([await badge(page, 2), await retry()]).toEqual(['📡 Remote', false]);
+  await expect.poll(() => pulls(page, 1).then((p) => p.length)).toBe(4);
+  const P = require('../../../Wizard/parser.js');
+  const c = chain(board(['LABEL,S1,Back'], { wcb: 2 }));
+  await page.evaluate((l) => boardConnections[1]._handleLine(l),
+                      `[MGMT:CONFIG,2][VER:${FW}]${c}^?CHK${P.crc32(c).toString(16).toUpperCase().padStart(8, '0')}`);
+  await expect.poll(() => page.evaluate(() => boardConfigs[2].serialPorts[0].label)).toBe('Back');
+  expect([await badge(page, 2), await retry()]).toEqual(['📡 Remote', false]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.flash_fake_erase_no_reconnect the setup wizard\'s erase whose board never comes back says so - "did not come back", reconnect and push by hand - pushes nothing and probes nothing, and gives the card\'s Push button back', async ({ page }) => {
+  // boardGo's erase path, its failed reconnect (app.js:8085-8102). The rest of the path is wizard.flash_fake_erase_path's.
+  // Row flash.erase_path (its remaining branch).
+  await setup(page);
+  await pullFake(page, 1, board(['LABEL,S1,Keep']));
+  await page.evaluate(() => {
+    const c = boardConnections[1];
+    updateConnectionUI(1, true);
+    c.reconnect = async (...a) => { __fake.log.push({ slot: 1, op: 'reconnect', s: JSON.stringify(a), at: Date.now() }); c._connected = false; return false; };
+    _wizardOpen = true;
+    __fake.log.length = 0;
+  });
+  const m = await toastMark(page);
+  await page.evaluate(() => boardGo(1, { mode: 'erase' }));
+  const log = await page.evaluate(() => __fake.log.filter((e) => e.slot === 1).map((e) => [e.op, e.s]));
+  expect(log).toEqual([['send', '?ERASE,NVS'], ['close', ''], ['reconnect', '[10,1500]']]);
+  expect(await toastsSince(page, m)).toContain('WCB 1 did not come back — reconnect manually');
+  expect(await page.evaluate(() => document.getElementById('term-pane-output-1').textContent))
+    .toContain('Could not auto-reconnect — reconnect manually, then push config');
+  expect(await page.evaluate(() => [document.getElementById('b1-btn-go').textContent, document.getElementById('b1-btn-go').disabled,
+                                    _pushingBoards.has(1), boardFlashMode[1], !!boardBaselines[1]]))
+    .toEqual(['Push Config', false, false, 'configure', true]);
+  await page.evaluate(() => { _wizardOpen = false; });
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.flasher_fake_windows_baud the flasher talks to the ROM at 115200 and loads at 460800 - except on Windows, where it stays at 115200 throughout', async ({ page }) => {
+  // flashFirmware's ESPLoader options (flasher.js:351-363), _isWindows (app.js:12-18). Row flasher.windows_baud.
+  const FAKE_ESPTOOL = fs.readFileSync(path.join(__dirname, '..', 'lib', 'fake_esptool_rescan.mjs'), 'utf8');
+  const NAME = (k) => `WCB_9.9.9_010101RJAN2030_${k}.bin`;
+  const FILES = ['ESP32', 'ESP32_part', 'ESP32_boot'];
+  await page.route('**/vendor/esptool-js/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: FAKE_ESPTOOL }));
+  await page.route('https://api.github.com/**', (route) => route.fulfill({ status: 200, contentType: 'application/json',
+    body: JSON.stringify(FILES.map((k) => ({ type: 'file', name: NAME(k), download_url: `https://fake.invalid/${NAME(k)}` }))) }));
+  await page.route('https://fake.invalid/**', (route) => route.fulfill({ status: 200, contentType: 'application/octet-stream',
+    body: Buffer.alloc(32, 0x5A) }));
+  const loader = () => page.evaluate(async () => {
+    globalThis.__wcbEsp = { chip: 'ESP32-D0WD-V3', flash: {}, calls: [] };
+    try { await flashFirmware({ fake: true }, 1, { onProgress() {}, onLog() {}, onStatus() {}, appOnly: false }); } catch (_) {}
+    return [_isWindows, globalThis.__wcbEsp.calls.filter((c) => c.op === 'loader').map((c) => [c.baudrate, c.romBaudrate])];
+  });
+  await setup(page);
+  expect(await loader()).toEqual([false, [[460800, 115200]]]);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgentData', { configurable: true, get: () => ({ platform: 'Windows' }) });
+  });
+  await setup(page);
+  expect(await loader()).toEqual([true, [[115200, 115200]]]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.ota_fake_entry_guards the OTA button takes the wireless path for a board managed through a relay and the USB path for one on USB; the USB path refuses a board that is not connected, and the wireless path a relay that is not', async ({ page }) => {
+  // boardOta (app.js:1738-1741), boardOtaSerial's guards (1786-1789), boardOtaRelay's (2039-2042). The transfers are
+  // wizard.ota_fake_serial_stream's and wizard.ota_fake_relay's. Row ota.entry_guards.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  await pullFake(page, 3, board([], { wcb: 3, wcbq: 3 }));
+  await page.evaluate(() => {
+    window.__ota = [];
+    window.boardOtaRelay = async (n) => { window.__ota.push(['relay', n]); };
+    window.boardOtaSerial = async (n) => { window.__ota.push(['serial', n]); };
+  });
+  await page.locator('#b2-btn-ota-serial').click();
+  await page.locator('#b3-btn-ota-serial').click();
+  expect(await page.evaluate(() => window.__ota)).toEqual([['relay', 2], ['serial', 3]]);
+
+  // The real guards: a USB board not connected; a relay not connected.
+  await setup(page);
+  await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })) });
+  await pullFake(page, 3, board([], { wcb: 3, wcbq: 3 }));
+  await page.evaluate(() => { boardConnections[3]._connected = false; __fake.log.length = 0; });
+  let m = await toastMark(page);
+  await page.evaluate(() => boardOta(3));
+  expect(await toastsSince(page, m)).toBe('Connect the board via USB first');
+  await page.evaluate(() => { boardConnections[1]._connected = false; });
+  m = await toastMark(page);
+  await page.evaluate(() => boardOta(2));
+  expect(await toastsSince(page, m)).toBe('Relay WCB 1 not connected');
+  expect(await page.evaluate(() => [__fake.log.filter((e) => e.op === 'send' || e.op === 'await').length, _otaInProgress.size]))
+    .toEqual([0, 0]);
+  expect(page.wizErrors).toEqual([]);
+});
