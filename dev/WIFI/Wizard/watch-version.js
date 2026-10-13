@@ -35,13 +35,17 @@ function stampVersion() {
   try { src = fs.readFileSync(APP_JS, 'utf8'); } catch { return; }
 
   const version = formatVersion();
-  const next = src.replace(
-    /const UI_VERSION = '[^']*';/,
-    `const UI_VERSION = '${version}';`
-  );
-
-  if (next === src) {
+  const pattern = /const UI_VERSION = '[^']*';/;
+  if (!pattern.test(src)) {
     console.log(`[watch-version] No UI_VERSION pattern found in app.js`);
+    return;
+  }
+  const next = src.replace(pattern, `const UI_VERSION = '${version}';`);
+
+  // A second change within the same minute stamps the same value: nothing to write (this used to be reported as
+  // "No UI_VERSION pattern found").
+  if (next === src) {
+    console.log(`[watch-version] UI_VERSION already ${version}`);
     return;
   }
 

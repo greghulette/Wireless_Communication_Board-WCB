@@ -1097,7 +1097,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .etm-detail.visible { display: block; }
 
 /* ─── Toast Notifications ────────────────────────────────────── */
-.toast-container { position: fixed; top: 72px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+/* Above every overlay (modals 500, the splash 600): the setup wizard reports its validation errors as toasts while its
+   modal is open, and the stale firmware-branch warning is raised while the splash is up. Under an overlay a toast was
+   dimmed and its Copy/Dismiss buttons took no clicks. */
+.toast-container { position: fixed; top: 72px; right: 16px; z-index: 700; display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 10px 16px;
@@ -1109,7 +1112,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .toast.success { border-color: var(--green2); }
 .toast.error   { border-color: var(--red2); }
 .toast.info    { border-color: var(--accent2); }
-.toast-msg     { flex: 1; }
+/* min-width 0 and anywhere-wrapping: a message with a long unbroken run (the stale-branch warning's
+   localStorage.removeItem('wcb_fw_branch')) otherwise kept its full width and pushed Copy and Dismiss out of the
+   toast, off the right edge of the window. */
+.toast-msg     { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .toast-btn {
   flex-shrink: 0; background: none; border: none; cursor: pointer;
   color: var(--text3); padding: 2px 4px; border-radius: 4px;

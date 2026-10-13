@@ -733,7 +733,13 @@ function initDeviceCombobox() {
     else if (e.key === 'Enter')   { if (_devActive >= 0) { e.preventDefault(); _devCommit(_devOpts[_devActive].textContent); } else _devHide(); }
     else if (e.key === 'Escape')  { _devHide(); }
   });
-  document.addEventListener('focusout', (e) => { if (e.target === _devInput) setTimeout(_devHide, 150); });
+  // Hide a beat after the input loses focus - unless another label input has taken the popup meanwhile: moving straight
+  // from one label to the next opened the next one's list, and this timer, left from the first, then closed it.
+  document.addEventListener('focusout', (e) => {
+    if (e.target !== _devInput) return;
+    const left = _devInput;
+    setTimeout(() => { if (_devInput === left) _devHide(); }, 150);
+  });
   // A fixed popup can't track the input while the PAGE scrolls, so close it —
   // but NOT when the scroll is the list's own internal scroll (capture phase
   // catches both; the list stays put since it's position:fixed).
@@ -3428,6 +3434,10 @@ function populateUIFromConfig(n, config) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
+  // The local-Kyber board's "Will target" panel lists every board's Maestros, so a board loaded after it refreshes it
+  // too: it was filled only when the Kyber board itself was loaded, and left out every board pulled later.
+  const kyberBoard = findKyberLocalBoard();
+  if (kyberBoard !== null && kyberBoard !== n) populateKyberTargetsFromConfig(kyberBoard, boardConfigs[kyberBoard]);
   updateRemoteSectionsUI(n);
   // Sequences
   const tbody = document.getElementById(`b${n}-seq-tbody`);
@@ -9752,7 +9762,7 @@ function toggleTerminal() {
   syncMainPadding();
   // On open, scroll every pane to the bottom so the most recent output is visible.
   if (drawer.classList.contains('open')) {
-    drawer.querySelectorAll('.term-output').forEach(el => {
+    drawer.querySelectorAll('.terminal-pane-output').forEach(el => {
       el.scrollTop = el.scrollHeight;
     });
   }
