@@ -44,6 +44,9 @@ class _Tee:
     def flush(self):
         self.real.flush()
 
+    def reconfigure(self, **_k):        # host.main() asks for line buffering; the real stream keeps its own
+        pass
+
     def since(self, k):
         return "".join(self.text[k:])
 
@@ -211,6 +214,17 @@ class _Server:
 
     def status(self):
         return self.req("GET", "/_api/status")[1]
+
+    def http(self, method, path, body=None, timeout=20):
+        """(status, {header: value} with lower-case names, body bytes). body: a dict sent as JSON, or raw bytes."""
+        data = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method,
+                                   headers={"Content-Type": "application/json"} if data is not None else {})
+        try:
+            with urllib.request.urlopen(r, timeout=timeout) as resp:
+                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, e.read()
 
 
 def _server():
@@ -533,6 +547,137 @@ def identify_on_reattach(ctx):
                                    f"(_identify_attached_serial returns at once for a spec with a role)")
         check(st.get("role") == "wcb" and st.get("relayId") == 1,
               f"after a second reattach the role is {st.get('role')!r} relayId {st.get('relayId')!r}, not wcb 1")
+    finally:
+        s.req("POST", "/_api/detach", {})
+
+
+# ------------------------------------------------------------------ group "window"
+class _ParkAfterPublish:
+    """The bridge's lock, but a thread inside Bridge.attach() that reaches for it again once its transport is published
+    - attach() between the locked section that publishes and the one that records the target - is parked until go is
+    set, once. Everything else passes straight through to the real RLock, the parked thread too once released."""
+
+    def __init__(self, real, published):
+        self.real, self.published = real, published
+        self.parked, self.go = threading.Event(), threading.Event()
+        self.armed = True
+        self.local = threading.local()
+
+    def acquire(self, *a, **k):
+        if self.armed and getattr(self.local, "attaching", False) and self.published():
+            self.armed = False
+            self.parked.set()
+            self.go.wait(15)
+        return self.real.acquire(*a, **k)
+
+    def release(self):
+        return self.real.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def _window_race(b, attach_call, detach_call, transport):
+    """Run attach_call() on its own thread with b._lock parked in attach() after its publish (b.attach wrapped to mark
+    the thread inside it); land detach_call() at the park or, when attach() never reaches for the lock after
+    publishing, once attach_call() has returned -> (parked, what attach_call raised or None, whether it returned)."""
+    park = _ParkAfterPublish(b._lock, lambda: transport() is not None and b._transport is transport())
+    real_attach = b.attach
+
+    def attach(*a, **k):
+        park.local.attaching = True
+        try:
+            return real_attach(*a, **k)
+        finally:
+            park.local.attaching = False
+    b._lock, b.attach = park, attach
+    out = {}
+
+    def run():
+        try:
+            attach_call()
+            out["error"] = None
+        except Exception as e:          # noqa: BLE001 - what it raised is the result
+            out["error"] = e
+    th = threading.Thread(target=run, daemon=True)
+    try:
+        th.start()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not park.parked.is_set() and th.is_alive():
+            time.sleep(0.01)
+        detach_call()
+        park.go.set()
+        th.join(15)
+    finally:
+        park.go.set()
+        b._lock = park.real
+        del b.attach                    # the instance attribute: the class's attach() again
+    return park.parked.is_set(), out.get("error"), not th.is_alive()
+
+
+@case("a detach that lands after attach() has published its transport but before it records the target is not "
+      "undone: nothing is attached or wanted afterwards, and what was opened is closed", group="window")
+def window_bridge(ctx):
+    host = _host()
+    Gate = _gate_class()
+    b = host.Bridge()
+    g = Gate("A", block=False)
+    parked, err, done = _window_race(b, lambda: b.attach(g, "A", dict(SPEC_A)), b.detach, lambda: g)
+    check(done, "attach() never returned")
+    ctx.note(f"bridge_attach_detach_window: attach parked after its publish: {parked}; it returned "
+             f"{type(err).__name__ + ': ' + str(err) if err else 'normally'}")
+    check(g.opened == 1 and g.closes >= 1 and not g.is_open, f"A was opened {g.opened}, closed {g.closes}: the "
+                                                             f"detach must close what the attach published")
+    check(b._transport is None and not b.attached, "A is still attached after the detach")
+    check(not b.wants_link and b._spec is None and not b._want,
+          f"the detach was undone: want={b._want} spec={b._spec} - attach() recorded its target after the detach had "
+          f"cleared it (host.py Bridge.attach, the second locked section), so the reconnect loop reattaches a link the "
+          f"user stopped")
+
+
+@case("through the HTTP routes, with the reconnect loop running: a POST /_api/detach landing in that window leaves the "
+      "host detached, and the loop does not reattach in the next 4 s", group="window")
+def window_http(ctx):
+    s = _server()
+    host = _host()
+    b = host.bridge
+    Gate = _gate_class()
+    made = []
+
+    def make(spec, on_data, on_lost):
+        g = Gate(f"T{len(made)}", block=False, on_data=on_data, on_lost=on_lost)
+        made.append(g)
+        return g
+    s.make = make
+    spec = {"kind": "ws", "host": "127.0.0.1", "role": "navicore"}
+    first = {}
+
+    def attach():
+        first["reply"] = s.req("POST", "/_api/attach", dict(spec))
+
+    def detach():
+        first["detach"] = s.req("POST", "/_api/detach", {})
+    try:
+        parked, err, done = _window_race(b, attach, detach, lambda: made[0] if made else None)
+        check(done and err is None, f"the attach request did not come back: {err}")
+        ctx.note(f"bridge_attach_detach_window: over HTTP the attach parked after its publish: {parked}; it answered "
+                 f"{first.get('reply')}; the detach {first.get('detach')}")
+        t0 = time.monotonic()
+        seen = []
+        while time.monotonic() - t0 < 4.0:
+            st = s.status()
+            seen.append((st.get("attached"), st.get("wantsLink")))
+            time.sleep(0.25)
+        check(len(made) == 1, f"the reconnect loop built {len(made) - 1} more transport(s) after the detach: the "
+                              f"detach was undone and the link the user stopped was reattached")
+        check(all(a is False and w is False for a, w in seen),
+              f"/_api/status after the detach: (attached, wantsLink) went {sorted(set(seen))}, expected only "
+              f"(False, False)")
+        check(made[0].closes >= 1 and not made[0].is_open, "the published transport was never closed")
     finally:
         s.req("POST", "/_api/detach", {})
 

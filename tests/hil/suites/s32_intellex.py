@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -1151,3 +1152,246 @@ def shim_native_flash(bench):
     nothing is flashed (tests/intellex/specs/ui_shim.spec.js). intellex.flash_navicore_app runs the Update path on the
     bench."""
     run_intellex_test(bench, "intellex.shim_native_flash")
+
+
+# ------------------------------------------------------------------ the IX re-scan's medium-risk rows (2026-10-12)
+def _own_addresses():
+    """This computer's own IPv4 addresses other than loopback, link-local and the droids' 192.168.4.0/24 (where NaviCore's
+    access point lives: a connect to the PC's own address there would not leave the PC, but the test has no need to go
+    near that network) -> sorted list. From the routing table's pick for a TEST-NET address (a UDP connect sends
+    nothing) and the interface list (ifconfig / ipconfig)."""
+    found = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))
+            found.add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=20).stdout
+            found.update(re.findall(r"IPv4[^:\r\n]*:\s*(\d+\.\d+\.\d+\.\d+)", out))
+        else:
+            out = subprocess.run(["ifconfig", "-a"], capture_output=True, text=True, timeout=20).stdout
+            found.update(re.findall(r"\binet (?:addr:)?(\d+\.\d+\.\d+\.\d+)", out))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return sorted(a for a in found if not a.startswith(("127.", "0.", "169.254.", "192.168.4.")))
+
+
+@test("intellex.loopback_only", "The host listens on 127.0.0.1 alone: a TCP connect to each of this computer's own "
+      "non-loopback addresses on the host's port is refused, while 127.0.0.1 answers /_api/status (IX re-scan "
+      "host.serve.loopback_only)")
+def loopback_only(bench):
+    """Intellex src/host.py BIND_HOST (:118-121) and web.run_app(host=BIND_HOST) (:2069): the control API and /_link are
+    an unauthenticated command channel to the droid, so nothing off this computer may reach them. The droids' own
+    192.168.4.0/24 is left out of the addresses tried (_own_addresses)."""
+    require(bench)
+    addrs = _own_addresses()
+    if not addrs:
+        raise Skip("this computer has no IPv4 address but loopback to try")
+    sd = stage(bench, "intellex.loopback_only", tools="none")
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        st, body = host.json("GET", "/_api/status")
+        if st != 200 or not isinstance(body, dict) or "attached" not in body:
+            problems.append(f"127.0.0.1:{host.port} /_api/status: {st} {body}")
+        for a in addrs:
+            try:
+                with socket.create_connection((a, host.port), timeout=3):
+                    problems.append(f"{a}:{host.port} accepted a connection: the host listens beyond loopback")
+            except ConnectionRefusedError:
+                pass
+            except OSError as e:
+                problems.append(f"{a}:{host.port}: {type(e).__name__} {e}, not a refusal")
+    bench.note(f"intellex.loopback_only: refused on {len(addrs)} non-loopback address(es)")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.attach_ws_ssid", "A ws attach records the network the OS names for the host, the body's ssid only when "
+      "the OS cannot say (macOS), stripped, and no ssid at all for a blank or non-string one (in-process, "
+      "discover.ssid_for_host stood in for; IX re-scan host.api.attach_ws_ssid)")
+def attach_ws_ssid(bench):
+    """tests/intellex/py/host_units.py group ws_ssid: Intellex src/host.py api_attach (:1269-1285) on its real build_app()
+    in the venv process, the transport a fake. /_api/status does not show the ssid; the bounce and the move check use
+    it (reconnect_loop, _reidentify_if_moved), so the case reads the bridge's spec."""
+    run_intellex_py(bench, "intellex.attach_ws_ssid", "host_units.py", args={"group": "ws_ssid"})
+
+
+@test("intellex.identify_route", "POST /_api/identify: no port (or not a string) is 400; the port the host holds "
+      "answers {attached:true} without opening it; any other port is probed - a direct PONG, a busy port, a silent "
+      "one, one outside INTELLEX_SERIAL_ALLOW never opened (in-process, a fake pyserial; IX re-scan host.api.identify)")
+def identify_route(bench):
+    """tests/intellex/py/host_units.py group identify_route: Intellex src/host.py api_identify (:1309-1333) on its real
+    build_app() in the venv process. The row's bench half - the PONG of NaviCore's own port through the route - is
+    played by a fake pyserial Serial answering the PING as NaviCore does, so no COM port is opened."""
+    run_intellex_py(bench, "intellex.identify_route", "host_units.py", args={"group": "identify_route"})
+
+
+# A stand-in for Intellex's tools/fetch_webui.py, fetch_firmware.py and fetch_wiki.py in a stage: it records its argv,
+# edits or writes the files tools/hil_stub.json names for it (paths relative to the stage), prints a line and exits
+# with the code asked for. The host runs it exactly as it runs the real fetcher (host.py api_update_*).
+_FETCH_STUB = r'''import json, os, re, sys
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    stage = os.path.dirname(here)
+    name = os.path.splitext(os.path.basename(__file__))[0]
+    with open(os.path.join(here, "hil_stub_calls.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"tool": name, "argv": sys.argv[1:]}) + "\n")
+    with open(os.path.join(here, "hil_stub.json"), encoding="utf-8") as f:
+        ctl = json.load(f).get(name, {})
+    for rel, (pattern, repl) in ctl.get("edit", {}).items():
+        p = os.path.join(stage, rel)
+        with open(p, encoding="utf-8") as f:
+            text = f.read()
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(re.sub(pattern, repl, text, count=1))
+    for rel, content in ctl.get("write", {}).items():
+        p = os.path.join(stage, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+    print(ctl.get("print", "HIL stub " + name))
+    return ctl.get("rc", 0)
+
+
+if __name__ == "__main__":         # imported (src/wikidocs.py tries fetch_wiki for its TITLES), it does nothing
+    sys.exit(main())
+'''
+_DTG_RX = r'(id="footer-dtg"[^>]*>)[^<]+'
+_UIVER_RX = r"""(\bUI_VERSION\s*=\s*['"])[^'"]+"""
+
+
+@test("intellex.update_routes", "POST /_api/update-webui, -firmware and -wiki run their fetcher and report it: a bad "
+      "?tool= is 400 and runs nothing; ?tool= reaches the fetcher (all by default); success carries the new versions and "
+      "the fetcher's log; a failed tool update is 502 with what landed; firmware and docs report ok false with the "
+      "error and what is cached; a frozen build re-invokes itself (stub fetchers; IX re-scan host.api.update_subprocesses)")
+def update_routes(bench):
+    """Intellex src/host.py api_update_webui (:912-965), api_update_firmware (:636-669), api_update_wiki (:828-854). The
+    stage's tools/fetch_webui.py, fetch_firmware.py and fetch_wiki.py are replaced by _FETCH_STUB, which edits or writes
+    stage files as a real fetch would (the bundled Wizard's UI_VERSION, the config tool's footer-dtg, a cached image, a
+    wiki page) - so nothing reaches GitHub. The frozen re-invocation (--run-fetch-*) and app.py's handling of it are
+    tests/intellex/py/host_units.py group update_frozen, run on the same stage. Pinned as it is today: a failed
+    firmware or docs update still answers 200 (ok false), only the tool update answers 502."""
+    require(bench)
+    tid = "intellex.update_routes"
+    sd = stage(bench, tid)
+    tools = os.path.join(sd, "tools")
+    for name in ("fetch_webui", "fetch_firmware", "fetch_wiki"):
+        with open(os.path.join(tools, name + ".py"), "w", encoding="utf-8") as f:
+            f.write(_FETCH_STUB)
+    calls_file = os.path.join(tools, "hil_stub_calls.jsonl")
+
+    def control(**ctl):
+        with open(os.path.join(tools, "hil_stub.json"), "w", encoding="utf-8") as f:
+            json.dump(ctl, f)
+        if os.path.exists(calls_file):
+            os.remove(calls_file)
+
+    def calls():
+        try:
+            with open(calls_file, encoding="utf-8") as f:
+                return [json.loads(x) for x in f if x.strip()]
+        except OSError:
+            return []
+    index = os.path.join("src", "webui", "index.html")
+    app_js = os.path.join("src", "webui_wcb", "Wizard", "app.js")
+    with open(os.path.join(sd, index), encoding="utf-8", errors="replace") as f:
+        m = re.search(r'id="footer-dtg"[^>]*>([^<]+)<', f.read())
+    dtg0 = m.group(1).strip() if m else ""
+    problems = []
+    with IntellexHost(bench, sd) as host:
+        control()
+        st, body = host.json("POST", "/_api/update-webui?tool=bogus", {}, timeout=60)
+        if st != 400 or body != {"ok": False, "error": "tool must be navicore|wcb|all"} or calls():
+            problems.append(f"update-webui?tool=bogus: {st} {body}, fetcher ran {calls()}")
+
+        control(fetch_webui={"rc": 0, "print": "HIL stub: Wizard updated",
+                             "edit": {app_js: [_UIVER_RX, r"\g<1>HILWIZ-1"]}})
+        st, body = host.json("POST", "/_api/update-webui?tool=wcb", {}, timeout=120)
+        if st != 200 or body.get("ok") is not True or body.get("wcbVersion") != "HILWIZ-1" \
+                or body.get("version") != dtg0 or "HIL stub: Wizard updated" not in body.get("log", ""):
+            problems.append(f"update-webui?tool=wcb succeeding: {st} {body}, expected ok, wcbVersion HILWIZ-1, version "
+                            f"{dtg0!r} and the fetcher's line in the log")
+        if [c["argv"] for c in calls()] != [["--tool", "wcb"]]:
+            problems.append(f"update-webui?tool=wcb ran the fetcher with {calls()}")
+
+        control(fetch_webui={"rc": 0})
+        host.json("POST", "/_api/update-webui", {}, timeout=120)
+        if [c["argv"] for c in calls()] != [["--tool", "all"]]:
+            problems.append(f"update-webui with no ?tool= ran the fetcher with {calls()}, expected --tool all")
+
+        control(fetch_webui={"rc": 1, "print": "HIL stub: the Wizard fetch failed (rate limited)",
+                             "edit": {index: [_DTG_RX, r"\g<1>HILNC-2"]}})
+        st, body = host.json("POST", "/_api/update-webui?tool=all", {}, timeout=120)
+        if st != 502 or body.get("ok") is not False or "the Wizard fetch failed" not in body.get("error", "") \
+                or body.get("version") != "HILNC-2" or body.get("wcbVersion") != "HILWIZ-1":
+            problems.append(f"update-webui failing after the config tool landed: {st} {body}, expected 502 with the "
+                            f"fetcher's words, version HILNC-2 (what landed) and wcbVersion HILWIZ-1")
+        st, ver = host.json("GET", "/_api/webui-version", timeout=30)
+        if (ver or {}).get("bundled") != "HILNC-2" or ((ver or {}).get("wcb") or {}).get("bundled") != "HILWIZ-1":
+            problems.append(f"/_api/webui-version after the updates: bundled {(ver or {}).get('bundled')!r}, Wizard "
+                            f"{((ver or {}).get('wcb') or {}).get('bundled')!r}")
+
+        img = "NaviCore_9.9.9_010000RJAN2026_hilstub_ESP32S3.bin"
+        control(fetch_firmware={"rc": 0, "print": "HIL stub: NaviCore cached",
+                                "write": {os.path.join("src", "firmware", "navicore", "main", img): "x" * 64}})
+        st, body = host.json("POST", "/_api/update-firmware", {}, timeout=120)
+        nc = ((body or {}).get("cached") or {}).get("navicore") or {}
+        if st != 200 or body.get("ok") is not True or nc.get("count") != 1 or nc.get("newest") != img \
+                or "HIL stub: NaviCore cached" not in body.get("log", ""):
+            problems.append(f"update-firmware succeeding: {st} {body}")
+        if [c["argv"] for c in calls()] != [[]]:
+            problems.append(f"update-firmware ran the fetcher with {calls()}")
+        control(fetch_firmware={"rc": 1, "print": "WCB ESP32  FAILED: HIL stub rate limit"})
+        st, body = host.json("POST", "/_api/update-firmware", {}, timeout=120)
+        nc = ((body or {}).get("cached") or {}).get("navicore") or {}
+        if st != 200 or body.get("ok") is not False or "HIL stub rate limit" not in body.get("error", "") \
+                or nc.get("count") != 1:
+            problems.append(f"update-firmware failing for WCB: {st} {body}, expected 200 ok false with the fetcher's "
+                            f"words and the NaviCore set still reported cached")
+
+        control(fetch_wiki={"rc": 0, "print": "[wcb] 1 page(s), 0 asset(s)",
+                            "write": {os.path.join("src", "wiki", "wcb", "Home.md"): "# HIL stub page\n"}})
+        st, body = host.json("POST", "/_api/update-wiki", {}, timeout=120)
+        have = {w.get("product"): w.get("have") for w in (body or {}).get("wikis") or []}
+        if st != 200 or body.get("ok") is not True or have.get("wcb") is not True or "[wcb] 1 page(s)" not in \
+                body.get("log", ""):
+            problems.append(f"update-wiki succeeding: {st} {body}")
+        if [c["argv"] for c in calls()] != [["--wiki", "all"]]:
+            problems.append(f"update-wiki ran the fetcher with {calls()}")
+        control(fetch_wiki={"rc": 1, "print": "github.com is not reachable - the bundled docs are unchanged."})
+        st, body = host.json("POST", "/_api/update-wiki", {}, timeout=120)
+        if st != 200 or body.get("ok") is not False or "not reachable" not in body.get("error", ""):
+            problems.append(f"update-wiki failing: {st} {body}")
+    try:
+        run_intellex_py(bench, tid, "host_units.py", args={"group": "update_frozen"}, stage_dir=sd)
+    except AssertionError as e:
+        problems.append(f"frozen (host_units.py): {e}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.gh_proxy_online", "Online, the GitHub proxy's routes answer from GitHub (X-Intellex-Source github) with "
+      "download_url pointed back at the host, store the listing as GitHub sent it and each image on the way past, "
+      "answer 502 to a reply that is not a listing without replacing the stored one, and serve the stored copy offline "
+      "(in-process, GitHub stood in for; IX re-scan host.api.gh_proxy_online)")
+def gh_proxy_online(bench):
+    """tests/intellex/py/ghproxy_units.py group online: Intellex src/ghproxy.py contents/raw (:88-147) through host.py
+    api_gh_contents/api_gh_raw on its real build_app() in the venv process, flash.reachable and flash._get stood in for
+    so nothing reaches GitHub; the cache is the stage's src/firmware."""
+    run_intellex_py(bench, "intellex.gh_proxy_online", "ghproxy_units.py", args={"group": "online"})
+
+
+@test("intellex.bridge_attach_detach_window", "A detach that lands while an attach is between publishing its transport "
+      "and recording its target is not undone: the bridge stays detached and unwanted, what was published is closed, "
+      "and the reconnect loop does not reattach (in-process fakes; IX re-scan host.bridge.attach_detach_window)")
+def bridge_attach_detach_window(bench):
+    """tests/intellex/py/bridge_units.py group window: Intellex src/host.py Bridge.attach (:214-251). Found 2026-10-12
+    while building intellex.bridge_superseded_attach: attach() published the transport under the lock, let it go, and
+    took it again to record the target and set _want - so a detach landing between the two cleared the target, then
+    had it written back, and the reconnect loop reattached the link the user stopped. The bridge's lock is wrapped to
+    park the attaching thread at exactly that point; once one locked section does both, there is no such point and the
+    detach lands after the attach. Fixed on Intellex main."""
+    run_intellex_py(bench, "intellex.bridge_attach_detach_window", "bridge_units.py", args={"group": "window"})
