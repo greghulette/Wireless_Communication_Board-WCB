@@ -120,11 +120,12 @@
   "area": "var",
   "behaviour": "A persistent set or clear NVS refuses prints '[VAR] ERROR: NVS write failed (see ?NVS)', prints no '[persistent]' ACK, puts RAM back to what the next boot loads (a created variable removed, an edited one restored) and a refused ?VAR,CLEAR keeps the variable; a reboot holds exactly what was acknowledged.",
   "where": "WCB_Variables.cpp:89-108, :184-194, :217-228",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "seq.nvs_full_consistency"
+   "seq.nvs_full_consistency",
+   "var.nvs_open_failure"
   ],
-  "gap": "the edit of an existing persistent variable on the full store added 2026-10-12: refused, old value back in RAM and after the reboot (run 20261012-135536). The could-not-open-NVS line stays unasserted (needs a fault knob). Remaining: the [VAR] ERROR: could not open NVS line (:99), which needs a fault knob.",
+  "gap": "closed 2026-10-13 by var.nvs_open_failure with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "L",
@@ -449,13 +450,14 @@
   "area": "seqstore",
   "behaviour": "On the NVS fallback (stored_cmds namespace) a save that fails leaves no phantom (the value is taken back out when the list cannot grow), a clear removes the value before the list rewrite, a clear whose list rewrite fails says the name is still listed empty (SEQ_E_LIST), and nvsClear re-stamps seq_mig_done so the legacy migration never re-imports.",
   "where": "WCB_SeqStore.cpp:474-542",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "seq.nvs_full_consistency",
    "seq.clear_all_empty_hash",
-   "seq.store_moves_from_nvs"
+   "seq.store_moves_from_nvs",
+   "seq.nvs_clear_list_rewrite_fails"
   ],
-  "gap": "The SEQ_E_LIST clear outcome ('Removed the value of <k>, but NVS could not update the sequence list') is not asserted: seq.nvs_full_consistency expects the clear on the full store to say 'Deleted'.",
+  "gap": "closed 2026-10-13 by seq.nvs_clear_list_rewrite_fails with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "opt-in",
   "bench_needs": "none",
   "risk": "M",
@@ -466,10 +468,12 @@
   "area": "seqstore",
   "behaviour": "A damaged record (no comma, empty or over-long key, no final newline) is skipped and counted by every walk, ?NVS says 'damaged lines skipped', a rewrite drops it, and an append after a file not ending in a newline starts a new line first.",
   "where": "WCB_SeqStore.cpp:77-157, :237-264, :311-323, :945-947",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No command can write a damaged line (LittleFS commits at close, a failed write leaves the file as it was).",
-  "testable": "blocked",
+  "status": "tested",
+  "tested_by": [
+   "seq.damaged_lines_skipped"
+  ],
+  "gap": "closed 2026-10-13 by seq.damaged_lines_skipped with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
   "how": "A RAM-only ?DEBUG knob that appends a raw damaged line to /seqs (as PULLFAULT does for config lines); then ?NVS must say 'damaged lines skipped', ?SEQ,NAMES must hide it, and a save must drop it."
@@ -741,14 +745,15 @@
   "area": "storage",
   "behaviour": "At boot loadHWversion reads hw_version (0 when unset: 'SET YOUR HARDWARE VERSION BEFORE PROCEEDING!!', 'No LED was setup', every port on GPIO5), ignores a version saved for the other chip with '[HW] Saved HW version N is for the other chip - ignored', and applies the pin map; the banner prints 'HW Version: x.y'.",
   "where": "WCB_Storage.cpp:135-186; wcb_pin_map.cpp:9-115; WCB.ino:9638, :9666-9680, :9707",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "nvs.erase_defaults_restore",
    "boot.banner_w1",
    "boot.banner_w2",
-   "ident.hw_setter"
+   "ident.hw_setter",
+   "ident.hw_other_chip_ignored_at_boot"
   ],
-  "gap": "The other-chip-ignored boot line cannot be reached (the setter refuses it) except from older firmware's NVS; the pin maps for 2.1, 2.3, 3.1 and 3.2 have never run (known: WCB-WP59 pinmap.unverified_revisions); printHWversion's duplicated 31 branch (:177-180) is cosmetic.",
+  "gap": "closed 2026-10-13 by ident.hw_other_chip_ignored_at_boot with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "attended",
   "bench_needs": "none",
   "risk": "H",
@@ -1340,10 +1345,12 @@
   "area": "boot",
   "behaviour": "A saved baud of 0 (older firmware) is repaired to 9600 at boot with 'Serial<n> had an invalid baud of 0 in NVS — falling back to 9600.' so HardwareSerial never blocks in auto-detect.",
   "where": "WCB.ino:9722-9735",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "?BAUD refuses 0, so only a raw-NVS write produces the state.",
-  "testable": "blocked",
+  "status": "tested",
+  "tested_by": [
+   "boot.baud_zero_repaired"
+  ],
+  "gap": "closed 2026-10-13 by boot.baud_zero_repaired with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
   "how": "A raw-NVS knob (?DEBUG,NVSPUT,serial_baud,Serial3,0) then a reboot: expect the repair line, S3 at 9600 and the boot under 7 s."
@@ -1771,13 +1778,14 @@
   "area": "wifi",
   "behaviour": "In JOIN mode the boot prints 'will join \"<ssid>\" on channel n'; each attempt scans the mesh channel alone for the SSID (never a band sweep) and WiFi.begin's with its BSSID, auto-reconnect off; 'still looking (attempt 1)' and every 12th; retries every 5 s for ever; 'joined ... after N attempt(s) — ws://.../ws' once an address is held; a lost association prints 'lost ... retrying every 5 s' and rejoins by itself; an AP that leaves the radio off the mesh channel is disconnected and the join settles for good; an association with no address for 20 s starts over.",
   "where": "WCB_WiFi.cpp:208-363",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wifi.join_w2_ap",
    "wifi.join_lost_and_rejoin",
-   "wifi.join_absent_ssid_keeps_mesh"
+   "wifi.join_absent_ssid_keeps_mesh",
+   "wifi.join_fault_arms"
   ],
-  "gap": "Not asserted: the off-mesh AP guard ('joined ... but its AP is on channel x, not y — that is OFF-MESH. Disconnecting.' then no retry), the 'associated ... but no address after 20 s — starting over' arm, and the boot line 'JOIN mode selected but no SSID is set' (unreachable through the setter).",
+  "gap": "closed 2026-10-13 by wifi.join_fault_arms with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "opt-in",
   "bench_needs": "W2",
   "risk": "M",
@@ -1788,10 +1796,12 @@
   "area": "wifi",
   "behaviour": "Every 30 s while an interface is up the radio channel is compared with the mesh channel and a mismatch is reported ('WARNING: radio is on channel x but the mesh is on y').",
   "where": "WCB_WiFi.cpp:351-362, :87-92",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Nothing on the bench moves the radio off the channel while WiFi is up.",
-  "testable": "blocked",
+  "status": "tested",
+  "tested_by": [
+   "wifi.channel_drift_warned"
+  ],
+  "gap": "closed 2026-10-13 by wifi.channel_drift_warned with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
   "how": "Only reachable with a fault knob (esp_wifi_set_channel from a ?DEBUG verb) or an AP that hops channels."

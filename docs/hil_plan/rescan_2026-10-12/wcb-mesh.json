@@ -615,16 +615,17 @@
   "area": "rx",
   "behaviour": "A received ;T chain (ETM, plain, multi-chunk FRAG or fragmented client unicast) is handed to loop() through the 8-slot pending-timer queue with its origin stated; a long chain rides a heap buffer; a full queue or a failed allocation is counted and loop() prints '[TIMER] N received timer chain(s) not run: ...'.",
   "where": "Code/WCB/WCB.ino:450-549,3682-3688,5755-5759,6002-6005",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "client_mesh.timer_chain_keeps_mesh_origin",
    "client_mesh.timer_chain_queue_accounted",
    "mesh.timer_chain",
    "mesh.timer_chain_two_chunks",
    "mesh.timer_chain_long",
-   "etm.off_fleet_normal_path"
+   "etm.off_fleet_normal_path",
+   "mesh.timer_chain_no_memory"
   ],
-  "gap": "'no memory for the chain' is unreachable without a heap fault knob; the rest is asserted.",
+  "gap": "closed 2026-10-13 by mesh.timer_chain_no_memory with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
@@ -920,10 +921,12 @@
   "area": "mgmt",
   "behaviour": "A SEQ or SEQVAL request the target cannot serve because the sequence store would not read is left unanswered with an ungated 'Could not read ..' line and the dedup cleared, so the requester's retry is served.",
   "where": "Code/WCB/WCB.ino:4816-4822,4871-4876",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Needs the store to fail a read (a low heap at mount); no knob exists.",
-  "testable": "blocked",
+  "status": "tested",
+  "tested_by": [
+   "inv.seq_store_unreadable_retry_served"
+  ],
+  "gap": "closed 2026-10-13 by inv.seq_store_unreadable_retry_served with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
   "how": "A RAM-only fault knob (?DEBUG,SEQFAULT) that makes seqStoreGet / buildSequenceNamesString fail once; then ?MGMT,SEQ,2 twice: the first draws the line and no reply, the second is answered."
@@ -1326,13 +1329,14 @@
   "area": "ident",
   "behaviour": "?HW,n (legacy ?HW<n>) accepts only 1/21/23/24/31/32 of this chip family ('Saved HW Ver: x.y to NVS. Reboot to take effect!'), refuses other values and the other family with the stored and running version unchanged, updates the running value for the chain at once and applies the pin map at boot; a stored other-family value is ignored at load.",
   "where": "Code/WCB/WCB.ino:7165-7169,7801-7804; Code/WCB/WCB_Storage.cpp:81-150",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "ident.hw_setter",
-   "ident.hw_other_chip_refused"
+   "ident.hw_other_chip_refused",
+   "ident.hw_other_chip_ignored_at_boot"
   ],
-  "gap": "The load-time ignore of a stored other-family version ('[HW] Saved HW version n is for the other chip - ignored') is only reachable from older firmware.",
-  "testable": "blocked",
+  "gap": "closed 2026-10-13 by ident.hw_other_chip_ignored_at_boot with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
   "how": "A host test of loadHWversion with a Preferences shim holding 32 on a classic build."

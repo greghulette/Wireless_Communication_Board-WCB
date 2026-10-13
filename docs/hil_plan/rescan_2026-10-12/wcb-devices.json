@@ -747,9 +747,10 @@
   "tested_by": [
    "route.live_election_autojoin_off",
    "navicore.maestro_inventory",
-   "wdp.autojoin_off_ignores_probe"
+   "wdp.autojoin_off_ignores_probe",
+   "wdp.client_maestros_not_configured"
   ],
-  "gap": "The auto-join-off and controller gates are asserted; the baud-0 / off-table skip and the temporary-peer exclusion are known blocked (probe feature).",
+  "gap": "closed 2026-10-13 by wdp.client_maestros_not_configured with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825); still open: the baud-0 / off-table skip needs an advert from a non-client; open",
   "testable": "unattended",
   "bench_needs": "probe (mesh client)",
   "risk": "M",
@@ -2773,11 +2774,12 @@
   "area": "pwm",
   "behaviour": "Remote PWM configuration is sent as soon as ESP-NOW is initialised (no 5 s uptime gate); if it is not running the board says the config was NOT sent.",
   "where": "Code/WCB/WCB_PWM.cpp:73-77",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "pwm.remote_config_right_after_boot"
+   "pwm.remote_config_right_after_boot",
+   "pwm.remote_send_refused_espnow_down"
   ],
-  "gap": "The 'ESP-NOW is not running' refusal branch is unreachable after setup() and never asserted.",
+  "gap": "closed 2026-10-13 by pwm.remote_send_refused_espnow_down with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2876,13 +2878,14 @@
   "area": "wdp",
   "behaviour": "Device auto-config from an advert runs only with auto-join on, for a non-temporary active WCB peer or the pinned controller; the controller's Maestros are proxied, other clients' adverts configure nothing; a temporary peer never yields persisted config.",
   "where": "Code/WCB/WCB_WDP.cpp:694-711",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "route.live_election_autojoin_off",
    "navicore.maestro_inventory",
-   "wdp.autojoin_off_ignores_probe"
+   "wdp.autojoin_off_ignores_probe",
+   "wdp.client_maestros_not_configured"
   ],
-  "gap": "The temporary-peer exclusion (a probe advertising TEMPORARY with a MAESTRO_CFG TLV) is known blocked; a non-controller client advertising devices is not exercised.",
+  "gap": "closed 2026-10-13 by wdp.client_maestros_not_configured with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "unattended",
   "bench_needs": "probe (mesh client)",
   "risk": "M",

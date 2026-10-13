@@ -593,11 +593,12 @@
   "area": "timer",
   "behaviour": "A received chain the 8-slot queue cannot take, or that no heap can hold, is counted and loop() prints '[TIMER] N received timer chain(s) not run: 8 already waiting' / '...no memory for the chain'.",
   "where": "WCB.ino:494-507, :531-551",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "client_mesh.timer_chain_queue_accounted"
+   "client_mesh.timer_chain_queue_accounted",
+   "mesh.timer_chain_no_memory"
   ],
-  "gap": "The 'no memory' arm needs a heap fault knob (WP59 pattern); only the 'already waiting' arm is driven.",
+  "gap": "closed 2026-10-13 by mesh.timer_chain_no_memory with a ?DEBUG,FAULT knob or the probe's MESH MAESTRO (WCB 0339b33/e49e5fd, run 20261013-105825)",
   "testable": "unattended",
   "bench_needs": "probe tap",
   "risk": "L",
