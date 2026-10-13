@@ -1214,8 +1214,11 @@ def dfp_device_verb(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("dfp.rx_frames", "Probe plays DFPlayer frames: finish fires ONFIN (PLAY and FOLDER forms), error runs ONERR, online, STOP cancels ONFIN, no checksum check", needs=["wcb1"], links=["W2S5", "W2S3"])
+@test("dfp.rx_frames", "Probe plays DFPlayer frames: finish fires ONFIN (PLAY and FOLDER forms), error runs ONERR, online, STOP and RESET each cancel a pending ONFIN, no checksum check", needs=["wcb1"], links=["W2S5", "W2S3"])
 def dfp_rx_frames(bench):
+    """DfPlayerCodec::poll (WcbCmd WcbDfPlayer.cpp) decodes the 10-byte frames; STOP and RESET clear the pending ONFIN key
+    (DfPlayerCodec::handle), so the finish frame after either recalls nothing. Coverage re-scan 2026-10-12, dfp.rx_frames:
+    the RESET arm (;D,RESET sends the 0x0C frame)."""
     s5, s3 = link(bench, 2, "S5"), link(bench, 2, "S3")
     _no_recall_keys(bench)
     w = usb_wcb(bench)
@@ -1243,6 +1246,8 @@ def dfp_rx_frames(bench):
             finish(True, "FOLDER finish")
             problems += _steps(s5, w.send, [(";D,PLAY,5,HILK", _dfp(0x03, 5)), (";D,STOP", _dfp(0x16))])
             finish(False, "finish after STOP")
+            problems += _steps(s5, w.send, [(";D,PLAY,5,HILK", _dfp(0x03, 5)), (";D,RESET", _dfp(0x0C))])
+            finish(False, "finish after RESET")
             problems += _steps(s5, w.send, [(";D,PLAY,5,HILK", _dfp(0x03, 5))])
             time.sleep(0.15)
             # Junk, then a USB-storage finish (0x3C) with a zero checksum: the codec never checks it.
@@ -1276,6 +1281,33 @@ def dfp_partial_frame_resync(bench):
             time.sleep(0.5)
     assert not prep, prep
     assert _has(lines, "[DFP] Track 5 finished") and ok.encode() + b"\r" in got3, f"the finish frame was swallowed: {lines} / S3 {got3!r}"
+
+
+@test("dfp.partial_frame_stale_timeout", "A DFPlayer frame cut off after a valid header (7E FF 06) and silent for 0.5 s is abandoned, so the whole finish frame after it is decoded and ONFIN recalls", needs=["wcb1"], links=["W2S5", "W2S3"])
+def dfp_partial_frame_stale_timeout(bench):
+    """Coverage re-scan 2026-10-12, dfp.rx_partial_resync. DfPlayerCodec::poll (WcbCmd WcbDfPlayer.cpp) drops a partial
+    frame older than 200 ms before it takes the next byte. dfp.partial_frame_resync covers the other rule, a byte that
+    breaks the 7E FF 06 header re-anchoring the buffer; that rule cannot catch this case, because 7E FF 06 is a valid
+    header and the next frame's 7E arrives as byte 4. Without the timeout the buffer fills to ten bytes with
+    7E FF 06 7E FF 06 3D 00 00 05, fails the 0xEF tail check, and the rest of the finish frame is skipped while it hunts
+    for a 7E: the ONFIN recall is lost."""
+    s5, s3 = link(bench, 2, "S5"), link(bench, 2, "S3")
+    _no_recall_keys(bench)
+    w = usb_wcb(bench)
+    ok, err = f"hilok{nonce().lower()}", f"hilerr{nonce().lower()}"
+    with _w2_audio(bench, "DFP", "S5", "S5") as c2, _recall_keys(c2, "DFP", ok, err):
+        try:
+            prep = _steps(s5, w.send, [(";D,PLAY,5,HILK", _dfp(0x03, 5))])
+            time.sleep(0.15)
+            s5.send(bytes.fromhex("7EFF06"))
+            time.sleep(0.5)
+            lines, got3 = _inject(c2, s5, s3, DFP_FINISH_5)
+        finally:
+            w.send(";D,STOP")
+            time.sleep(0.5)
+    assert not prep, prep
+    assert _has(lines, "[DFP] Track 5 finished") and ok.encode() + b"\r" in got3, \
+        f"the finish frame after a stale partial was swallowed: {lines} / S3 {got3!r}"
 
 
 @test("dfp.config_rejects", "?DFP validation on W2 (baud, volume, port, the STATUS parse trap, format, occupied port, host, ONERR length); nothing changes", needs=["wcb1"], links=[])

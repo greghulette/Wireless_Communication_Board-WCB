@@ -2033,3 +2033,80 @@ def baud_on_pwm_ports_skipped(bench):
                 _clear_local_mapping(w, "S3")
             s3.pwm_stop()
     assert not problems, "; ".join(problems)
+
+
+@test("pwm.out_port_device_refused", "A port an HCR, MP3 Trigger, DFPlayer, WLED or local Maestro holds refuses PWM: ?MAP,PWM,OUT,S4 prints 'Cannot use PWM on Serial4 - reserved for HCR/MP3/WLED/Maestro/DFP' and declares nothing, and ?MAP,PWM,S3,S4 skips that output ('Skipping output Serial4', 'No valid outputs specified'); no ?MAP,PWM token is saved and W1 does not reboot (WDP off)", needs=["wcb1"], links=[])
+def out_port_device_refused(bench):
+    """Coverage re-scan 2026-10-12, pwm.out_port_declare. canUsePWMOnPort (WCB_PWM.cpp) refuses a port a serial device
+    or a local Maestro holds, after the Kyber term, and every PWM path comes through it: addPWMOutputPort for ?MAP,PWM,OUT
+    and addPWMMapping's local outputs, which then print the skip line and, with no output left, 'No valid outputs
+    specified' with the slot untouched - before the save and the deferred reboot. Only the Kyber-reserved S1 and the
+    serial-map refusal were asserted. The skip line still says '- reserved for Kyber' whatever the owner (only its prefix
+    is matched here). WDP is off on W1 meanwhile, so no board learns a route to the throwaway devices (s15's rules) and
+    no client a Maestro 5 (s22's); each device's release resets S4 to 9600 with broadcasts on and no label, which is
+    the baseline this needs, and S4's label goes back at the end."""
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    require_tokens(bench, 1, "?BAUD,S4,9600", "?BCAST,OUT,S4,ON", "?BCAST,IN,S4,ON")
+    refusal = "❌ Cannot use PWM on Serial4 - reserved for HCR/MP3/WLED/Maestro/DFP"
+    bad = []
+    with config_guard(bench, 1) as before:
+        if "?WDP,OFF" in before[1]:
+            raise Skip("W1's WDP is already off")
+        busy = [t for t in before[1] if re.search(r"(?:\b|W1)S[34]\b", t)
+                and not t.upper().startswith(("?BAUD,", "?BCAST,", "?LABEL,", "?SEQ,"))]
+        if busy:
+            raise Skip(f"W1 S3 or S4 is in use ({len(busy)} config lines)")
+        if [t for t in before[1] if t.upper().startswith(("?HCR,", "?MP3,", "?DFP,"))
+                and not re.match(r"^\?(HCR|MP3|DFP),REMOTE,W\d+$", t, re.I)]:
+            raise Skip("W1 already hosts an HCR, MP3 Trigger or DFPlayer")
+        if any(re.match(r"^\?MAESTRO,M5:", t, re.I) for t in before[1]):
+            raise Skip("W1 already has a Maestro 5")
+        wid = next((i for i in range(1, 10) if not any(t.upper().startswith(f"?WLED,{i}:") for t in before[1])), None)
+        if wid is None:
+            raise Skip("W1 has a WLED on every id 1-9")
+        releases = {k: token(before[1], f"?{k},REMOTE,") or f"?{k},CLEAR" for k in ("HCR", "MP3", "DFP")}
+        owners = (("an HCR", ["?HCR,POLL,OFF", "?HCR,PORT,S4:9600"], "[HCR] Configured on S4 at 9600 baud", releases["HCR"]),
+                  ("an MP3 Trigger", ["?MP3,S4:9600:V20"], "[MP3] Configured: S4 at 9600 baud", releases["MP3"]),
+                  ("a DFPlayer", ["?DFP,S4"], "[DFP] Configured: S4 at 9600 baud", releases["DFP"]),
+                  ("a WLED", [f"?WLED,{wid}:W1S4:9600"], f"[WLED] WLED {wid}: local S4 at 9600 baud (slot", f"?WLED,CLEAR,{wid}"),
+                  ("a local Maestro", ["?MAESTRO,M5:W1S4:9600"], "✓ Maestro 5: Local S4 at 9600 baud (slot",
+                   "?MAESTRO,CLEAR,M5:W1S4"))
+        if not _has(w.run("?WDP,OFF"), "[WDP] disabled"):
+            raise AssertionError("?WDP,OFF did not confirm")
+        undo = []
+        wm = w.dev.mark()
+        try:
+            for owner, setup, confirm, release in owners:
+                out = [x.rstrip() for cmd in setup for x in w.run(cmd)]
+                undo.append(release)
+                if not _has(out, confirm):
+                    raise AssertionError(f"setup for {owner}: {setup} printed {out}")
+                out = [x.rstrip() for x in w.run("?MAP,PWM,OUT,S4")]
+                if refusal not in out or _has(out, "configured as PWM output port"):
+                    bad.append(f"with {owner} on S4, ?MAP,PWM,OUT,S4 printed {out}")
+                out = [x.rstrip() for x in w.run("?MAP,PWM,S3,S4")]
+                miss = [n for n in (refusal, "⚠️  Skipping output Serial4 - ", "No valid outputs specified")
+                        if not _has(out, n)]
+                if miss or _has(out, "rebooting"):
+                    bad.append(f"with {owner} on S4, ?MAP,PWM,S3,S4 printed {out}")
+                pwm = [t for t in snapshot(bench, 1) if t.upper().startswith("?MAP,PWM")]
+                if pwm:
+                    bad.append(f"with {owner} on S4 the chain gained {pwm}")
+                w.run(undo.pop())
+            time.sleep(5.0)                         # a deferred PWM reboot fires 4 s after the last command
+            if w.rebooted_since(wm) or _has(w.dev.since(wm), "Rebooting now"):
+                bad.append("W1 rebooted after a refused PWM command")
+        finally:
+            for cmd in reversed(undo):
+                w.run(cmd)
+            if any(t.upper().startswith("?MAP,PWM") for t in snapshot(bench, 1)):
+                rm = w.dev.mark()                   # a refusal that let PWM through: take it out again
+                w.send("?MAP,PWM,CLEAR,ALL")
+                try:
+                    _pwm_reboot(w, rm)
+                except AssertionError:
+                    pass
+            w.run(token(before[1], "?LABEL,S4,") or "?LABEL,CLEAR,S4")
+            w.run("?WDP,ON")
+    assert not bad, "; ".join(bad)
