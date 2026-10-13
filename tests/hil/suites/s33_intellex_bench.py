@@ -20,7 +20,7 @@ import json
 import time
 
 from hil.intellex import (NAVICORE_BOOT_MARKERS, WCB_BOOT_MARKERS, IntellexHost, LinkTap, attached_host, copy_logs,
-                          line_spans, require, run_intellex_py, running_intellex, stage, window)
+                          handed_over, line_spans, require, run_intellex_py, running_intellex, stage, window)
 from hil.navicore import NaviCore
 from hil.nc_guard import nc_guard
 from hil.runner import Skip, test
@@ -30,6 +30,7 @@ from suites.common import link, marker, usb_wcb
 from suites.s99_etm import _peers_online
 
 UTF8 = "é€😀"                                  # a 2-, a 3- and a 4-byte UTF-8 character
+IDENTIFY_DOORWAY_S = 2.0          # under SERIAL_PONG_WAIT_S + SERIAL_IDENTIFY_S (3.1 s): a NaviCore asked the PING alone
 PING = '{"type":"PING"}\n'
 WCB_PROBE = {"probe": "?VERSION\r", "reply": "Software Version:"}
 NC_PROBE = {"probe": PING, "reply": '"type":"PONG"'}
@@ -413,7 +414,9 @@ def bridge_release_w1(bench):
 
 
 @test("intellex.bridge_failed_attach_w1", "While the harness holds W1's port an Intellex attach is refused (502) and "
-      "keeps its target, detach forgets it, and once the port is released the host does not take it (IX-WP6)",
+      "keeps its target, lastError reads 'reconnect failed: cannot open ...' with that line printed once, detach "
+      "forgets it, and once the port is released the host does not take it (IX-WP6; IX re-scan "
+      "host.reconnect.retry_loop)",
       needs=["wcb1"])
 def bridge_failed_attach_w1(bench):
     """Intellex src/host.py:1136-1204 records the target before trying (set_target), so a refused attach is retried
@@ -438,8 +441,18 @@ def bridge_failed_attach_w1(bench):
         if not s.get("wantsLink") or s.get("attached"):
             problems.append(f"after the refusal: wantsLink {s.get('wantsLink')}, attached {s.get('attached')}")
         time.sleep(3.0)                                 # three reconnect attempts, each refused
-        if host.json("GET", "/_api/status")[1].get("attached"):
+        s = host.json("GET", "/_api/status")[1]
+        if s.get("attached"):
             problems.append("the host attached a port the harness holds")
+        # IX re-scan host.reconnect.retry_loop: lastError says why the reattach fails, and the host prints that reason
+        # once however many times the loop meets it (reconnect_loop's failed_why).
+        if not str(s.get("lastError", "")).startswith("reconnect failed: cannot open"):
+            problems.append(f"while the loop is refused lastError reads {str(s.get('lastError'))[:80]!r}, not "
+                            f"'reconnect failed: cannot open ...'")
+        n = sum(1 for x in host.lines if x.startswith("reconnect failed:"))
+        if n != 1:
+            problems.append(f"the host printed 'reconnect failed:' {n} times over ~3 refused reattaches with one "
+                            f"reason, expected once")
         w.version()                                     # W1 still answers the harness
         host.detach()
         if host.json("GET", "/_api/status")[1].get("wantsLink"):
@@ -503,3 +516,197 @@ def bridge_reboot_w1(bench):
     if w2:
         bench.note(f"intellex.bridge_reboot_w1: W2 heard {len(_boot_edges(w2.dev, m2, bench.usb_wcb_number()))} of W1's "
                    f"boot announces")
+
+
+# ============================================================================================ the 2026-10-12 re-scan's
+# low-risk rows, their real-board halves: W1's and NaviCore's own ports through the harness's handover
+@test("intellex.ports_real_rows", "A host allowed W1's port (and NaviCore's) lists exactly those in /_api/ports with "
+      "the shape the chooser reads: path, a description, vid and pid as integers - 0x1A86 for W1's CH9102 bridge, "
+      "0x303A for NaviCore's native USB - and the serial number; no port is opened (IX re-scan host.api.ports)",
+      needs=["wcb1"])
+def ports_real_rows(bench):
+    """Intellex src/host.py api_ports (:404-410) and transport.py list_serial_ports (:100-120), filtered by
+    INTELLEX_SERIAL_ALLOW. Listing reads the OS's device list; the harness keeps both ports open throughout."""
+    require(bench)
+    w1 = bench.cfg["devices"]["wcb1"]["port"]
+    want = {w1: 0x1A86}
+    if bench.has("navicore"):
+        want[bench.cfg["devices"]["navicore"]["port"]] = 0x303A
+    sd = stage(bench, "intellex.ports_real_rows", tools="none")
+    problems = []
+    with IntellexHost(bench, sd, allow_ports=list(want)) as host:
+        st, body = host.json("GET", "/_api/ports")
+        rows = (body or {}).get("ports") if isinstance(body, dict) else None
+        if st != 200 or not isinstance(rows, list):
+            raise AssertionError(f"/_api/ports: {st} {str(body)[:200]}")
+        paths = sorted(r.get("path") for r in rows)
+        if paths != sorted(want):
+            problems.append(f"/_api/ports listed {paths}, expected exactly the allowed {sorted(want)}")
+        for r in rows:
+            if r.get("path") not in want:
+                continue
+            shape = {k: type(r.get(k)).__name__ for k in ("path", "description", "vid", "pid", "serial_number")}
+            if shape != {"path": "str", "description": "str", "vid": "int", "pid": "int", "serial_number": "str"}:
+                problems.append(f"{r.get('path')}: field types {shape}")
+            if r.get("vid") != want[r.get("path")]:
+                problems.append(f"{r.get('path')}: vid {r.get('vid')!r}, expected {want[r.get('path')]:#06x}")
+            bench.note(f"intellex.ports_real_rows: {r.get('path')} vid {r.get('vid'):#06x} pid {r.get('pid'):#06x} "
+                       f"{r.get('description')!r}" if isinstance(r.get("vid"), int) and isinstance(r.get("pid"), int)
+                       else f"intellex.ports_real_rows: {r}")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.attach_role_w1", "Attached to W1's own COM port, the host asks it what it is before the attach answers: "
+      "the reply and /_api/status say role wcb with W1's WCB number as relayId (from its ?WDP,DUMP self row), the host "
+      "named it a WCB, and W1 was never reset (IX re-scan host.api.attach_serial_identify_role)", needs=["wcb1"])
+def attach_role_w1(bench):
+    """Intellex src/host.py _identify_attached_serial (:1161-1236) and api_attach (:1239-1311) on real hardware: the
+    PING, then ?RELAY,WIFI and ?WDP,DUMP (W1 answers no direct PONG), read through a bridge tap; discover.classify takes
+    the WDP self row's number. The questions and answers cannot be watched from a /_link client: the attach closes every
+    page socket before it opens the port (Bridge.attach -> _drop), and the identify is over before it answers. The
+    relayId can only have come from W1's self row. The witness that W1 did not reset is W2's console (_boot_edges)."""
+    w2 = _w2(bench)
+    m2 = w2.dev.mark() if w2 else None
+    n = bench.usb_wcb_number()
+    problems = []
+    with attached_host(bench, "intellex.attach_role_w1", "wcb1", attach=False) as host:
+        port = bench.cfg["devices"]["wcb1"]["port"]
+        t0 = time.monotonic()
+        reply = host.attach({"kind": "serial", "port": port}, timeout=20)
+        took = time.monotonic() - t0
+        st = host.json("GET", "/_api/status")[1]
+        if reply.get("role") != "wcb" or reply.get("target") != f"serial {port}":
+            problems.append(f"the attach answered {reply}, expected role wcb on serial {port}")
+        got = {k: st.get(k) for k in ("attached", "kind", "role", "relayId")}
+        if got != {"attached": True, "kind": "serial", "role": "wcb", "relayId": n}:
+            problems.append(f"/_api/status after the attach: {got}, expected role wcb, relayId {n}")
+        said = [x for x in host.lines if x.startswith(f"{port} is ")]
+        if not said or "a WCB" not in said[-1]:
+            problems.append(f"the host's identify line: {said[-1:] or 'none'}, expected '{port} is ..., a WCB'")
+        bench.note(f"intellex.attach_role_w1: the attach with its identify took {took:.2f} s")
+    if w2:
+        time.sleep(2.0)
+        edges = _boot_edges(w2.dev, m2, n)
+        if edges:
+            problems.append(f"W2 heard W1 boot {len(edges)} time(s) during the attach")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.identify_navicore_port", "On NaviCore's own COM port: POST /_api/identify with no port is 400; a host "
+      "allowed the port but not attached probes it - without restarting NaviCore - and answers its PONG version (busy "
+      "false); attached, the host's identify asked the PING alone (the attach well under the 3 s the doorway questions "
+      "take), /_api/status says role navicore with no relayId, a PING through the link gets a PONG and no 'Unknown "
+      "command', and identify of that port answers {attached:true} without probing; NaviCore never restarted (IX "
+      "re-scan host.api.identify, host.api.attach_serial_identify_role)", needs=["navicore"])
+def identify_navicore_port(bench):
+    """Intellex src/host.py api_identify (:1314-1338) and discover.identify_serial (:143-238: DTR/RTS deasserted before
+    the open, a direct PONG only), then _identify_attached_serial (:1161-1236: the PING alone first). The version is
+    compared with NaviCore's PONG over USB just before the handover; NaviCore's uptime must keep counting and W1 must
+    not hear it boot. Skips while NaviCore's recorder holds anything (D33). Found writing it (GUI run 20261013-001422):
+    on macOS identify_serial's 'both lines low before open' restarted NaviCore at every probe - every chooser scan -
+    fixed in Intellex (discover.identify_serial now opens as SerialTransport does)."""
+    nc = NaviCore(bench.dev("navicore"))
+    why = nc.restart_blocker()
+    if why:
+        raise Skip(why)
+    version = nc.ping()
+    nid = nc.wcb_status()["self"]
+    up0, t0 = nc.mesh_stats()["upMs"], time.monotonic()
+    w1 = WCB(bench.dev("wcb1")) if bench.has("wcb1") else None
+    m1 = w1.dev.mark() if w1 else None
+    port = bench.cfg["devices"]["navicore"]["port"]
+    problems = []
+    with attached_host(bench, "intellex.identify_navicore_port", "navicore", attach=False) as host:
+        st, body = host.json("POST", "/_api/identify", {})
+        if st != 400:
+            problems.append(f"identify with no port: {st} {body}, expected 400")
+        st, body = host.json("POST", "/_api/identify", {"port": port}, timeout=20)
+        if st != 200 or body != {"ok": True, "version": version, "busy": False}:
+            problems.append(f"identify of NaviCore's port, unattached: {st} {body}, expected ok with the PONG's "
+                            f"version {version!r}")
+        t_att = time.monotonic()
+        reply = host.attach({"kind": "serial", "port": port}, timeout=20)
+        took = time.monotonic() - t_att
+        if reply.get("role") != "navicore":
+            problems.append(f"the attach answered {reply}, expected role navicore")
+        st = host.json("GET", "/_api/status")[1]
+        got = {k: st.get(k) for k in ("attached", "kind", "role", "relayId")}
+        if got != {"attached": True, "kind": "serial", "role": "navicore", "relayId": None}:
+            problems.append(f"/_api/status after the attach: {got}, expected role navicore, no relayId")
+        # The PING alone: classify stops on the direct PONG. Had the doorway's questions followed, NaviCore would have
+        # answered 'Unknown command' to each and the identify would have waited out SERIAL_PONG_WAIT_S (0.6 s) and
+        # then SERIAL_IDENTIFY_S (2.5 s) for a self row that never comes - an attach of over 3 s. (No /_link client
+        # can watch it: the attach closes every page socket before it opens the port.)
+        if took >= IDENTIFY_DOORWAY_S:
+            problems.append(f"the attach took {took:.2f} s: NaviCore was asked the doorway's questions after its "
+                            f"direct PONG (a PING alone answers well under {IDENTIFY_DOORWAY_S:g} s)")
+        tap = LinkTap(host.port, name="rawLink")
+        try:
+            time.sleep(0.5)
+            mark = len(tap.snapshot())
+            tap.send(PING)
+            tap.wait_for(b'"type":"PONG"', 5, start=mark)
+            if b"Unknown command" in tap.snapshot():
+                problems.append("an 'Unknown command' line came through the link after the attach")
+        except AssertionError as e:
+            problems.append(f"a PING through the attached link: {e}")
+        finally:
+            tap.close()
+        st, body = host.json("POST", "/_api/identify", {"port": port})
+        if st != 200 or body != {"ok": True, "attached": True, "version": None}:
+            problems.append(f"identify of the port the host holds: {st} {body}, expected {{ok, attached, version null}}")
+        bench.note(f"intellex.identify_navicore_port: the attach with its identify took {took:.2f} s")
+    nc = NaviCore(bench.dev("navicore"))
+    up1, gone = nc.mesh_stats()["upMs"], (time.monotonic() - t0) * 1000
+    if up1 < up0 + gone - 3000:
+        problems.append(f"NaviCore's uptime went from {up0} to {up1} ms across {gone:.0f} ms: it restarted")
+    if w1:
+        edges = _boot_edges(w1.dev, m1, nid)
+        if edges:
+            problems.append(f"W1 heard WCB{nid} boot {len(edges)} time(s)")
+    assert not problems, "; ".join(problems)
+
+
+@test("intellex.host_cli_serial_w1", "host.py --serial <W1's port>: the target is attached and identified before the "
+      "host serves - its first /_api/status is attached, role wcb with W1's number, and the 'attached' and identify "
+      "lines come before 'serving' - and W1 was never reset (IX re-scan host.main.cli)", needs=["wcb1"])
+def host_cli_serial_w1(bench):
+    """Intellex src/host.py main() (:2020-2080): set_target, then attach and _identify_attached_serial before
+    web.run_app. intellex.host_cli covers the refusals and --ws without a board; this is the row's W1 half, the port
+    released to the host by the harness and taken back after (handed_over)."""
+    require(bench)
+    others = running_intellex()
+    if others:
+        raise Skip(f"another Intellex is running (PID {others[0][0]}) - close it first")
+    w2 = _w2(bench)
+    m2 = w2.dev.mark() if w2 else None
+    n = bench.usb_wcb_number()
+    tid = "intellex.host_cli_serial_w1"
+    sd = stage(bench, tid, tools="none")
+    problems = []
+    with handed_over(bench, "wcb1") as port:
+        host = IntellexHost(bench, sd, allow_ports=[port], args=["--serial", port])
+        try:
+            host.start()
+            st, body = host.json("GET", "/_api/status")
+            got = {k: body.get(k) for k in ("attached", "kind", "role", "relayId", "target")}
+            want = {"attached": True, "kind": "serial", "role": "wcb", "relayId": n, "target": f"serial {port}"}
+            if got != want:
+                problems.append(f"the first /_api/status: {got}, expected {want}")
+            lines = list(host.lines)
+            at = next((i for i, x in enumerate(lines) if x == f"attached  serial {port}"), None)
+            said = next((i for i, x in enumerate(lines) if x.startswith(f"{port} is ") and "a WCB" in x), None)
+            serving = next((i for i, x in enumerate(lines) if x.startswith("serving")), None)
+            if None in (at, said, serving) or not at < said < serving:
+                problems.append(f"startup lines: 'attached' at {at}, '{port} is ..., a WCB' at {said}, 'serving' at "
+                                f"{serving}; expected all three in that order")
+        finally:
+            host.stop()
+            copy_logs(bench, sd, tid)
+    if w2:
+        time.sleep(2.0)
+        edges = _boot_edges(w2.dev, m2, n)
+        if edges:
+            problems.append(f"W2 heard W1 boot {len(edges)} time(s)")
+    assert not problems, "; ".join(problems)
+

@@ -381,3 +381,16 @@ def nc_save_unchanged(bench):
             _on_navicore(bench, "intellex.nc_save_unchanged")
         finally:
             g.nc = NaviCore(bench.dev("navicore"))      # the guard restores through the port as it is now
+
+
+@test("intellex.nc_close_intent", "On NaviCore's own COM port through Intellex, the config tool's Disconnect on a healthy "
+      "link is honoured - nothing reconnects in 8 s - while after a loss (the host detached and attached again) the "
+      "tool's own teardown is not taken for intent: the shim reconnects the page within 10 s of the attach and the tool "
+      "is back on NaviCore; NaviCore never restarted (IX re-scan shim.close_intent, the real-board half)",
+      needs=["navicore"])
+def nc_close_intent(bench):
+    """Intellex src/intellex_shim.js IntellexPort.close (:224-246: userClosed only past LOSS_GRACE_MS of a loss),
+    watchLink (:1595-1605) and the config tool's own Disconnect, handleLinkLost and tryAutoReconnect, on NaviCore's real
+    port (intellex.shim_close_intent plays it with a stand-in). The detach closes every page socket, the harness's
+    rawLink with them, so the boot check covers the run up to the loss; NaviCore's uptime covers all of it."""
+    _on_navicore(bench, "intellex.nc_close_intent", timeout=300)

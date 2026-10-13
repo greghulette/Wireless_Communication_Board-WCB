@@ -211,3 +211,60 @@ test('intellex.nc_via_usb_doorway the config tool reached through W1 over USB en
   expect([first.viaWcbActive, second.viaWcbActive], `(should) the tool reached through W1 over USB is in Via WCB after ` +
     `every connect - cold: ${say(first)}; reload: ${say(second)} (INTELLEX.md finding 4)`).toEqual([true, true]);
 });
+
+// IX re-scan shim.close_intent, the real-board half (intellex_shim.js IntellexPort.close :224-246, LOSS_GRACE_MS
+// :48-54, watchLink :1595-1605): on NaviCore's own port, the user's Disconnect on a healthy link is honoured - nothing
+// reconnects in 8 s, the host still attached - while a loss (the host detached and attached again from Node, which
+// closes every page's socket) is followed by the tool's own teardown, which the shim does not take for intent: it
+// reconnects the page within 10 s of the attach and the tool is back on NaviCore.
+test('intellex.nc_close_intent on NaviCore\'s port a Disconnect is honoured and a loss is recovered', async ({ page, context, rec }) => {
+  test.setTimeout(240_000);
+  page.setDefaultTimeout(15_000);
+  const a = await args();
+  await B.boardGuard(context, rec);
+  const link = B.watchLink(page);
+  const reconnecting = () => rec.intellex.filter((l) => l.includes('host is attached but the page is not')).length;
+  const connectBtn = () => page.locator('#btn-connect').textContent();
+  /* global isMonitoring */
+  const monitoring = () => page.evaluate(() => (typeof isMonitoring === 'undefined' ? null : isMonitoring));
+  const hostPost = async (path, body) => {
+    const r = await fetch(process.env.INTELLEX_URL + path, { method: 'POST', body: JSON.stringify(body || {}),
+      headers: { 'Content-Type': 'application/json' } });
+    return { status: r.status, json: await r.json().catch(() => null) };
+  };
+  await page.goto('/', { waitUntil: 'load' });
+  let s = await B.ncHandshake(page);
+  expect(s.status).toBe('Connected ✓');
+  expect(await connectBtn()).toBe('Disconnect');
+
+  // ── the user's Disconnect on a healthy link ───────────────────────────────────────────────────────────────────────
+  const lines0 = reconnecting();
+  const sockets0 = link.sockets;
+  await page.click('#btn-connect');
+  await expect.poll(connectBtn, { timeout: 10_000 }).toBe('Connect');
+  await page.waitForTimeout(8_000);                          // four of watchLink's 2 s ticks, past its 5 s backoff
+  expect(await monitoring(), 'isMonitoring after Disconnect').toBe(false);
+  expect(reconnecting(), 'the shim reconnected after the user\'s Disconnect').toBe(lines0);
+  expect(link.sockets, '/_link sockets opened after the Disconnect').toBe(sockets0);
+  expect((await B.hostGet('/_api/status')).json.attached, 'the host stays attached to NaviCore').toBe(true);
+
+  // ── a loss: the host lets the port go and takes it again ───────────────────────────────────────────────────────────
+  await page.reload({ waitUntil: 'load' });
+  s = await B.ncHandshake(page);
+  expect(s.status, 'reconnected after the reload').toBe('Connected ✓');
+  const lines1 = reconnecting();
+  expect((await hostPost('/_api/detach', {})).status).toBe(200);
+  await page.waitForTimeout(1_500);
+  const att = await hostPost('/_api/attach', { kind: 'serial', port: a.com });
+  expect(att.status, `the host's attach again: ${JSON.stringify(att.json)}`).toBe(200);
+  const tAttach = Date.now();
+  await expect.poll(reconnecting, { timeout: 10_000, message: 'the shim did not get the page back within 10 s of the '
+    + 'attach: the tool\'s teardown after the loss was taken for a Disconnect' }).toBeGreaterThan(lines1);
+  s = await B.ncHandshake(page, { timeout: 45_000 });
+  expect(s.status, 'back on NaviCore after the loss').toBe('Connected ✓');
+  expect(s.fw, 'the PONG\'s version after the loss').toBe(a.version);
+  await B.hil.note(`intellex.nc_close_intent: the page reconnected ${Math.round((Date.now() - tAttach) / 100) / 10} s `
+    + 'after the host attached again');
+  expect(B.unaskedWrites(link), 'JSON the tool sent on its own that is not a read').toEqual([]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
