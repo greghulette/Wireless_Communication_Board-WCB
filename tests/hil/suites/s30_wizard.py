@@ -224,6 +224,21 @@ for _key, _title in _FAKE_RESCAN:
     test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan)
 
 
+# The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
+# section (specs/general_rescan_fake.spec.js). No board and no real port, so CI runs them too.
+_FAKE_RESCAN_M = (
+    ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
+    ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
+    ("general_fake_etm_toggle_checksum", "ETM Enabled off pushes ?ETM,OFF alone and on ?ETM,ON alone, a board pulled with ETM off keeps its details; Packet Checksum is never pushed OFF and a board with it off is put back ON (general.etm_toggle_checksum)"),
+    ("general_fake_etm_fields", "The ETM numbers: the message count clamps to 10-200, an emptied field falls back to the firmware default, and every board's config and push follow (general.etm_fields)"),
+    ("general_fake_mismatch_modal", "The keep/use modal: none for a factory-default board or with the setup wizard open; Use takes the NaviCore controller and id and marks the other boards unsaved; after a file load it names 'loaded file' (general.mismatch_modal)"),
+)
+for _key, _title in _FAKE_RESCAN_M:
+    def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan_m)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their

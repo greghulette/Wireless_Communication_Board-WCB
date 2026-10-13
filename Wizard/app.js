@@ -1293,6 +1293,9 @@ function onWCBQuantityChange() {
       populateWCBDropdown(numSel, Math.max(qty, cur), cur, true);
     }
   }
+  // Every board's next push carries the quantity (boardGo reads g-wcbq), so it is pending like any other General edit:
+  // without this a quantity change left Push All green.
+  _notifyGeneralChanged();
 }
 
 function onGeneralPasswordChange() {
@@ -6787,6 +6790,9 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     deriveControllerFromBoards();   // re-derive 'navicore' | 'kyber' | 'none'
     refreshControllerUI();          // chip state + g-navicore-detail + g-navicore-id
     refreshAllNavicoreStatus();     // per-board section visibility + status text
+    // The handlers above re-derived the baseline before the NaviCore fields were applied, so it still held the old
+    // controller and the next pull of newBoard opened this modal again. Re-derive it now that every field is in.
+    updateGeneralBaseline();
     // Amber Push Config on every board except newBoard — their boards still have
     // the old values and need a push. newBoard is already in sync (its board has
     // the new values and its baseline was set from the same pulled config).
@@ -9223,15 +9229,16 @@ function syncGeneralFromConfig(config) {
 
   const etmEl = document.getElementById('g-etm-enabled');
   if (etmEl) etmEl.checked = config.etm.enabled;
-  if (config.etm.enabled) {
-    set('g-etm-timeout', config.etm.timeoutMs);
-    set('g-etm-hb',      config.etm.heartbeatSec);
-    set('g-etm-miss',    config.etm.missedHeartbeats);
-    set('g-etm-boot',    config.etm.bootHeartbeatSec);
-    set('g-etm-count',   config.etm.messageCount);
-    set('g-etm-delay',   config.etm.messageDelayMs);
-    if (appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
-  }
+  // The details whether ETM is on or off: the board keeps them either way (its backup lists them), and every ETM input
+  // runs onGeneralETMChange, which reads all six back - left at the page's defaults for a board pulled with ETM off,
+  // the first ETM edit pushed those over the board's own values.
+  set('g-etm-timeout', config.etm.timeoutMs);
+  set('g-etm-hb',      config.etm.heartbeatSec);
+  set('g-etm-miss',    config.etm.missedHeartbeats);
+  set('g-etm-boot',    config.etm.bootHeartbeatSec);
+  set('g-etm-count',   config.etm.messageCount);
+  set('g-etm-delay',   config.etm.messageDelayMs);
+  if (config.etm.enabled && appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   const chksmEl = document.getElementById('g-etm-chksm');
   if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
 
