@@ -61,9 +61,18 @@ const test = base.test.extend({
     await browser.close();
   }, { scope: 'worker' }],
 
-  context: async ({ ncBrowser, serial }, use, testInfo) => {
+  ncMotion: [false, { option: true }],
+
+  context: async ({ ncBrowser, serial, ncMotion }, use, testInfo) => {
     testInfo.skip(!navicoreRoot(), 'the NaviCore repo is not beside this one (clone it, or set NAVICORE_REPO)');
-    const context = await ncBrowser.newContext({ baseURL: NC_ORIGIN, viewport: { width: 1400, height: 900 } });
+    // Reduced motion unless a spec asks for motion (test.use({ ncMotion: true })): the config tool's motion layer
+    // (NaviCore 84fb178, docs/CONFIG_TOOL.md §3) animates overlays, the Config window, the terminal drawer and the
+    // sidebar on timers, which the specs' fake clock never runs - an overlay then stays '.open' through its close,
+    // a tab is 'not stable' while the Config window unfolds, and a drawer is measured mid-spring. Under
+    // prefers-reduced-motion the layer is off and every open and close is instant, as the specs were written for;
+    // nctool.motion_layer covers the motion itself on a real clock.
+    const context = await ncBrowser.newContext({ baseURL: NC_ORIGIN, viewport: { width: 1400, height: 900 },
+                                                 reducedMotion: ncMotion ? 'no-preference' : 'reduce' });
     context.ncBlocked = [];
     await context.route((url) => url.hostname !== '127.0.0.1', (route) => {
       context.ncBlocked.push(route.request().url());

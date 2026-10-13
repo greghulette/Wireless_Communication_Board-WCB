@@ -134,3 +134,46 @@ test.describe('the cosmetics', () => {
     T.expectNoPageErrors(page);
   });
 });
+
+test.describe('the motion layer', () => {
+  test.use({ emuOptions: { config: BENCH }, ncMotion: true });   // motion allowed, real clock
+
+  test('nctool.motion_layer with motion allowed: the Config window opens with .nc-drop and closes through .nc-closing (still .open for the ~280 ms out-animation, then neither); reopening inside that window cancels the close; a mode change sets --nc-mode-color on the page; the sidebar folds to .collapsed after its animation and back', async ({ page }) => {
+    // NaviCore 84fb178 (docs/CONFIG_TOOL.md §3, Motion layer): ncShow / ncHide, NC_CLOSE_MS 280, ncModeChanged,
+    // ncFoldSidebar. Every other nctool spec runs with reduced motion (lib/navicore/fixtures.js), where all of this
+    // is instant; this one checks the motion itself.
+    await T.openTool(page, { clock: false });
+    expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), 'motion allowed').toBe(false);
+    const cfg = page.locator('#hwsetup-modal');
+    await page.locator('#btn-hwsetup').click();
+    await expect(cfg).toHaveClass(/(^|\s)open(\s|$)/);
+    await expect(cfg).toHaveClass(/nc-drop/);
+    await page.evaluate(() => closeHwSetup());
+    expect(await cfg.evaluate((e) => [e.classList.contains('open'), e.classList.contains('nc-closing')]),
+      'still .open, marked .nc-closing, during the out-animation').toEqual([true, true]);
+    await expect(cfg).not.toHaveClass(/(^|\s)open(\s|$)/, { timeout: 2000 });
+    await expect(cfg).not.toHaveClass(/nc-closing/);
+    // Reopened inside the close window: ncShow cancels the pending close, so it is still open after the timer.
+    await page.locator('#btn-hwsetup').click();
+    await expect(cfg).toHaveClass(/(^|\s)open(\s|$)/);
+    await page.evaluate(() => closeHwSetup());
+    await page.locator('#btn-hwsetup').click({ force: true });
+    await page.waitForTimeout(600);
+    expect(await cfg.evaluate((e) => [e.classList.contains('open'), e.classList.contains('nc-closing')]),
+      'reopened during the close: open, not closing').toEqual([true, false]);
+    await page.evaluate(() => closeHwSetup());
+    await expect(cfg).not.toHaveClass(/(^|\s)open(\s|$)/, { timeout: 2000 });
+    // The mode colour.
+    for (const m of [3, 1]) {
+      await page.evaluate((x) => setEditingMode(x), m);
+      expect(await page.evaluate(() => document.body.style.getPropertyValue('--nc-mode-color'))).toBe(`var(--mode${m})`);
+    }
+    // The sidebar folds to exactly .collapsed after its animation, and back.
+    await page.locator('#sidebar-toggle').click();
+    await expect(page.locator('#sidebar-panel')).toHaveClass(/collapsed/, { timeout: 3000 });
+    await expect(page.locator('body')).toHaveClass(/sidebar-collapsed/, { timeout: 3000 });
+    await page.locator('#sidebar-toggle').click();
+    await expect(page.locator('#sidebar-panel')).not.toHaveClass(/collapsed/, { timeout: 3000 });
+    T.expectNoPageErrors(page);
+  });
+});

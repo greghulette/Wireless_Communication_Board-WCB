@@ -153,6 +153,7 @@ _L1 = (
     ("share_param_autoconnect", "Opened with ?share=1 while another tab holds the WCB, the tool joins that port as a follower by itself: no picker, no click, the handshake through the owner, the config loaded"),
     ("share_param_no_leader", "?share=1 with no tab holding a port and no port granted ends with the notice to click Connect and pick the tethered WCB; nothing is sent"),
     ("cosmetic_toggles", "The theme button flips and is remembered, the SBUS / PWM unit prints the live values and labels either way and is remembered, the sidebar collapses, expands and resizes by its handle within 180-520 px, the terminal resizes by its handle, the Config window reopens on its last tab"),
+    ("motion_layer", "With motion allowed (every other tool spec runs with reduced motion), the Config window opens with .nc-drop and closes through .nc-closing, a reopen inside the close window cancels it, a mode change sets --nc-mode-color, and the sidebar folds to .collapsed and back"),
 )
 for _key, _title in _L1:
     def _l1(bench, _id=f"nctool.{_key}"):
