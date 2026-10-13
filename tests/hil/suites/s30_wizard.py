@@ -311,7 +311,7 @@ _FAKE_RESCAN_L = (
     ("identity_fake_sw_version", "After a pull the version is asked with <fc>version to 'End of Version' and shown; a boot banner's line sets it too (identity.sw_version)"),
     ("identity_fake_identify", "Identify sends <fc>IDENTIFY to a USB board and a one-chunk FRAG through a relay, with a toast; refused when not reachable (identity.identify)"),
     ("serial_fake_claim_ui", "Each claim locks its serial row with its note; a serial map and Maestro REMOTE's S1 are soft claims, left editable (serial.claim_ui)"),
-    ("serial_fake_label_combobox", "A port label offers the device names as you type; arrows and Enter pick one into the config, Escape closes, a locked label opens nothing (serial.label_combobox)"),
+    ("serial_fake_label_combobox", "A port label offers the device names as you type; arrows and Enter pick one into the config, the next label keeps its own list open, Escape closes, a locked label opens nothing (serial.label_combobox)"),
     ("kyber_fake_marc_port", "Moving the Marcduino port sets the new port to 9600 with broadcasts on, no ?KYBER line; the picker leaves out the Kyber port (kyber.marc_port)"),
     ("kyber_fake_targets_info", "The Kyber Targets panel lists every board's Maestros, a board pulled later included, or says none are configured (kyber.targets_info)"),
     ("kyber_fake_repush_warning", "A Maestro edit on another board reminds to re-push the Kyber board, once per 30 s (kyber.repush_warning)"),

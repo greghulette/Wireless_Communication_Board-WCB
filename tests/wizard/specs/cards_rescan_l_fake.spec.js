@@ -234,9 +234,10 @@ test('wizard.serial_fake_claim_ui each claim locks its serial row with a note sa
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.serial_fake_label_combobox a port label offers the known device names as you type (case-insensitive, by substring); ArrowDown and Enter pick one, which goes into the config like a typed label and is pushed; Escape closes it; a locked (claimed) label never opens it', async ({ page }) => {
-  // initDeviceCombobox, _devRender, _devSetActive, _devCommit, _devHide (app.js:693-787); device-labels.js.
-  // Row serial.label_combobox.
+test('wizard.serial_fake_label_combobox a port label offers the known device names as you type (case-insensitive, by substring); ArrowDown and Enter pick one, which goes into the config like a typed label and is pushed; the next label clicked keeps its own list open; Escape closes it; a locked (claimed) label never opens it', async ({ page }) => {
+  // initDeviceCombobox, _devRender, _devSetActive, _devCommit, _devHide (app.js:693-792); device-labels.js. Moving
+  // straight from one label to the next opened the next one's list and 150 ms later closed it (the first one's blur
+  // timer): fixed 2026-10-13. Row serial.label_combobox.
   await setup(page);
   await pullFake(page, 1, board(['BAUD,S3,57600', 'MAESTRO,M2:W1S3:57600']));
   await holdVerifyPulls(page);
@@ -260,9 +261,12 @@ test('wizard.serial_fake_label_combobox a port label offers the known device nam
   expect(await shown(page, 'b1-unsaved-badge'), 'a change, as a typed label is').toBe(true);
   expect(await sent(page, 1)).toEqual(['1:?LABEL,S1,Maestro']);
 
-  // Escape closes it, the typed text stays.
+  // Straight on to the next label: its list opens and stays open (the first label's blur timer no longer closes it).
   const s2 = page.locator('#b1-s2-label');
   await s2.click();
+  await page.waitForTimeout(400);
+  expect(await pop()).toEqual({ open: true, items: names });
+  // Escape closes it, the typed text stays.
   await s2.pressSequentially('dro');
   expect((await pop()).open).toBe(true);
   await s2.press('Escape');
