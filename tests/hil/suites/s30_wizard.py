@@ -227,7 +227,8 @@ for _key, _title in _FAKE_RESCAN:
 # The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
 # section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
 # (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
-# devices (specs/audio_rescan_fake.spec.js). No board and no real port, so CI runs them too.
+# devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js). No board and no real
+# port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -247,6 +248,11 @@ _FAKE_RESCAN_M = (
     ("audio_fake_port_dropdowns", "Device port pickers offer only free ports and their own, every picker follows a device taking or freeing a port, and an HCR on S3-S5 is clamped to 57600 in its picker, config and serial row (audio.port_dropdowns)"),
     ("audio_fake_clamps", "MP3 volume 0-64, DFPlayer volume 0-30, HCR poll 0 or 3-3600 (shown in the field), on edit and again at push time (audio.clamps)"),
     ("audio_fake_route_host", "The Remote host picker lists 1 to the quantity without this board, never selects this board, keeps a pulled host; boards above the quantity are not offered today (audio.route_host_dropdown)"),
+    ("wled_fake_rows", "A new WLED row takes the lowest id no local or remote WLED uses, its port picker offers only free ports, Remove renumbers; S3-S5 cap 57600 for a row built there but 9600 once a port is picked, pinned for a product call (wled.rows)"),
+    ("maestro_fake_rows", "A new Maestro row is id 1 at 115200; its port picker hides ports HCR, WLED, a local Kyber or another row hold but keeps S1 under REMOTE; S3-S5 cap at 57600; Remove renumbers and the last one out leaves remote (maestro.rows)"),
+    ("maestro_fake_routing_table", "A Maestro edit rebuilds every board's routing table and a local Kyber's targets, marks the changed boards unsaved, toasts the re-push count, and the other boards' pushes send the whole ?MAESTRO table (maestro.routing_table)"),
+    ("mapping_fake_rows", "A mapping card's destination list covers the quantity, mesh-reported boards and a pulled W9; the type switch hides Raw/Bidir for PWM and drops S0; the source list offers free, PWM and serial-map ports (mapping.rows)"),
+    ("seq_fake_validate_if", "IF inside a ;t or ;w payload is refused on Test and Save/Update with a toast naming IF, nothing sent; IF ahead of the token is not; a push sends such a row all the same today (seq.validate_if)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
