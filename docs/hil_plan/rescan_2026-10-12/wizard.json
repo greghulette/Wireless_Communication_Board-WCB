@@ -4,11 +4,12 @@
   "area": "init",
   "behaviour": "Page init runs each step isolated (a throw in one does not skip the rest), shows the splash, stamps the UI_VERSION footer.",
   "where": "Wizard/app.js:142-164",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.smoke"
+   "wizard.smoke",
+   "wizard.init_fake_boot_steps"
   ],
-  "gap": "smoke only asserts the page loads with no page errors; splash open, footer text and step isolation unasserted.",
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_boot_steps (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -19,9 +20,12 @@
   "area": "init",
   "behaviour": "Without navigator.serial the WebSerial warning banner is shown.",
   "where": "Wizard/app.js:309-313",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted anywhere.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.init_fake_boot_steps",
+   "wizard.init_fake_browser_warning"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_boot_steps, wizard.init_fake_browser_warning (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -32,9 +36,13 @@
   "area": "init",
   "behaviour": "Theme toggle and Simple/Advanced mode persist in localStorage and restore on load; Advanced reveals .advanced-only sections and the ETM detail only when ETM is enabled.",
   "where": "Wizard/app.js:329-402",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No spec touches setMode/toggleTheme (every spec runs in Simple mode with the General ETM/char fields hidden).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.init_fake_boot_steps",
+   "wizard.init_fake_browser_warning",
+   "wizard.init_fake_theme_mode_prefs"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_boot_steps, wizard.init_fake_browser_warning, wizard.init_fake_theme_mode_prefs (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -45,11 +53,15 @@
   "area": "init",
   "behaviour": "Splash: Setup Wizard opens the guided setup; Config Tool closes the splash.",
   "where": "Wizard/app.js:316-327",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.smoke"
+   "wizard.smoke",
+   "wizard.init_fake_boot_steps",
+   "wizard.init_fake_browser_warning",
+   "wizard.init_fake_theme_mode_prefs",
+   "wizard.init_fake_splash_choice"
   ],
-  "gap": "Every spec clicks splashGoConfig (openWizard helper) but never asserts it; splashGoWizard untested.",
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_boot_steps, wizard.init_fake_browser_warning, wizard.init_fake_theme_mode_prefs, wizard.init_fake_splash_choice (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -60,11 +72,15 @@
   "area": "init",
   "behaviour": "A leftover wcb_fw_branch localStorage override raises a persistent warning toast; a /dev/<branch>/Wizard preview URL stays silent.",
   "where": "Wizard/app.js:348-359",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_fw_check"
+   "wizard.app_fake_fw_check",
+   "wizard.init_fake_browser_warning",
+   "wizard.init_fake_theme_mode_prefs",
+   "wizard.init_fake_splash_choice",
+   "wizard.init_fake_stale_branch_warning"
   ],
-  "gap": "Override toast asserted; the preview-URL silence and the persistent (duration 0) nature of the toast are not.",
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_browser_warning, wizard.init_fake_theme_mode_prefs, wizard.init_fake_splash_choice, wizard.init_fake_stale_branch_warning (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -215,11 +231,14 @@
   "area": "general",
   "behaviour": "On a pull or file load the global controller is derived from the boards: any specialPeer board means navicore (with its id), else a local/remote Kyber means kyber, else none.",
   "where": "Wizard/app.js:1554-1563, 9198-9212",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_controller"
+   "wizard.app_fake_controller",
+   "wizard.init_fake_splash_choice",
+   "wizard.init_fake_stale_branch_warning",
+   "wizard.general_fake_derive_controller"
   ],
-  "gap": "Only the kyber derivation is asserted; a pulled CONTROLLER,ON,15 board deriving navicore with id 15, and none, are not.",
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_splash_choice, wizard.init_fake_stale_branch_warning, wizard.general_fake_derive_controller (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -248,12 +267,16 @@
   "area": "general",
   "behaviour": "Any General edit sets generalSettingsDirty and turns Push All amber; a first pull or file load does not (mirrored); Push All clears it.",
   "where": "Wizard/app.js:1215-1237, 3532-3539, 9439-9441",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_pull_leaves_nothing_pending",
-   "wizard.push_fake_all_staged"
+   "wizard.push_fake_all_staged",
+   "wizard.init_fake_splash_choice",
+   "wizard.init_fake_stale_branch_warning",
+   "wizard.general_fake_derive_controller",
+   "wizard.general_fake_dirty_flag"
   ],
-  "gap": "The pull and the clear are asserted; a user edit setting the flag and the amber class is not.",
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_splash_choice, wizard.init_fake_stale_branch_warning, wizard.general_fake_derive_controller, wizard.general_fake_dirty_flag (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -264,9 +287,14 @@
   "area": "general",
   "behaviour": "A pulled PEERSLIVE value shows the \"mesh: N live peers\" badge next to the quantity; absent, the badge hides.",
   "where": "Wizard/app.js:9154-9164; Wizard/parser.js:532-537",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.init_fake_stale_branch_warning",
+   "wizard.general_fake_derive_controller",
+   "wizard.general_fake_dirty_flag",
+   "wizard.general_fake_peerslive_badge"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.init_fake_stale_branch_warning, wizard.general_fake_derive_controller, wizard.general_fake_dirty_flag, wizard.general_fake_peerslive_badge (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -295,9 +323,11 @@
   "area": "grid",
   "behaviour": "The WCB jump nav shows one button per rendered board (alias in the caption), scrolls to its section, and highlights the section most in view.",
   "where": "Wizard/app.js:410-476, 2218-2241",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.grid_fake_jump_nav"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_jump_nav (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -308,12 +338,14 @@
   "area": "grid",
   "behaviour": "A new section keeps a config that already exists for the slot, renders it, applies Advanced mode and reflects a live connection.",
   "where": "Wizard/app.js:652-691",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.pull_fake_usb_guards",
-   "wizard.app_fake_mesh_tick"
+   "wizard.app_fake_mesh_tick",
+   "wizard.grid_fake_jump_nav",
+   "wizard.grid_fake_add_section"
   ],
-  "gap": "Config preservation on migration is implied by (d); rendering an existing disconnected config and the connected-state reflection are not asserted.",
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_jump_nav, wizard.grid_fake_add_section (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -324,12 +356,15 @@
   "area": "grid",
   "behaviour": "A slot flipped to WCB_Client hides the WCB body, shows the client pane and alias (24 chars), keeps the WCB config, is never pushed and exports as ?CLIENT.",
   "where": "Wizard/app.js:2243-2282; Wizard/parser.js:502-507, 1754-1758",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_identity",
-   "wizard.app_fake_system_file"
+   "wizard.app_fake_system_file",
+   "wizard.grid_fake_jump_nav",
+   "wizard.grid_fake_add_section",
+   "wizard.grid_fake_slot_type"
   ],
-  "gap": "Specs set cfg.type directly; the radio handler onSlotTypeChange, onClientAliasChange and the flip-back restoring the WCB card are not driven.",
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_jump_nav, wizard.grid_fake_add_section, wizard.grid_fake_slot_type (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -356,12 +391,16 @@
   "area": "identity",
   "behaviour": "The alias is cut at 24 and ^ , ; ? CR LF and the live delimiter become _; the header suffix and nav caption follow it; the push sends ?ALIAS / ?ALIAS,CLEAR.",
   "where": "Wizard/app.js:2186-2241; Wizard/parser.js:1328-1337",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_identity",
-   "wizard.push_fake_card_edits"
+   "wizard.push_fake_card_edits",
+   "wizard.grid_fake_jump_nav",
+   "wizard.grid_fake_add_section",
+   "wizard.grid_fake_slot_type",
+   "wizard.identity_fake_alias"
   ],
-  "gap": "Cleaning and the push are asserted; replacing a non-default live delimiter and the header/nav text are not.",
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_jump_nav, wizard.grid_fake_add_section, wizard.grid_fake_slot_type, wizard.identity_fake_alias (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -405,11 +444,15 @@
   "area": "identity",
   "behaviour": "The firmware version comes from the boot banner sniff or ?version after a pull, and shows up to date / update / dev / mismatch against GitHub.",
   "where": "Wizard/app.js:249-307, 5913-5917, 7583-7597",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_fw_check"
+   "wizard.app_fake_fw_check",
+   "wizard.grid_fake_add_section",
+   "wizard.grid_fake_slot_type",
+   "wizard.identity_fake_alias",
+   "wizard.identity_fake_sw_version"
   ],
-  "gap": "Display states are asserted; fetchBoardVersion (?version, \"End of Version\" sentinel) and the boot-banner sniff setting fwVersion are not.",
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_add_section, wizard.grid_fake_slot_type, wizard.identity_fake_alias, wizard.identity_fake_sw_version (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -420,9 +463,14 @@
   "area": "identity",
   "behaviour": "Identify sends ?IDENTIFY directly, or wrapped in a one-chunk MGMT FRAG through the relay, with a toast.",
   "where": "Wizard/app.js:10200-10232",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted (the bench camera could see the blink but no spec sends it).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.grid_fake_slot_type",
+   "wizard.identity_fake_alias",
+   "wizard.identity_fake_sw_version",
+   "wizard.identity_fake_identify"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.grid_fake_slot_type, wizard.identity_fake_alias, wizard.identity_fake_sw_version, wizard.identity_fake_identify (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -466,11 +514,15 @@
   "area": "serial",
   "behaviour": "Each claim type locks or frees the row's controls with its note (Kyber, Marcduino, Maestro, PWM, MP3, HCR, DFP, WLED, kyber-reserved soft, serial-map soft with destinations).",
   "where": "Wizard/app.js:828-923",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_serial_claims"
+   "wizard.app_fake_serial_claims",
+   "wizard.identity_fake_alias",
+   "wizard.identity_fake_sw_version",
+   "wizard.identity_fake_identify",
+   "wizard.serial_fake_claim_ui"
   ],
-  "gap": "Only the MP3 claim's unchecked boxes are asserted; the note texts, lock states and the two soft claims are not.",
+  "gap": "closed 2026-10-12/13 by wizard.identity_fake_alias, wizard.identity_fake_sw_version, wizard.identity_fake_identify, wizard.serial_fake_claim_ui (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -481,9 +533,14 @@
   "area": "serial",
   "behaviour": "Port label inputs get a type-to-filter device-name popup (device-labels.js) with arrow/Enter/Escape; a pick fires the same change path as typing.",
   "where": "Wizard/app.js:693-787; Wizard/device-labels.js",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.identity_fake_sw_version",
+   "wizard.identity_fake_identify",
+   "wizard.serial_fake_claim_ui",
+   "wizard.serial_fake_label_combobox"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.identity_fake_sw_version, wizard.identity_fake_identify, wizard.serial_fake_claim_ui, wizard.serial_fake_label_combobox (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -573,11 +630,14 @@
   "area": "kyber",
   "behaviour": "Moving the Marcduino port relabels (no ?KYBER line), sets 9600 and broadcasts on, and the dropdown excludes the Kyber port.",
   "where": "Wizard/app.js:1150-1213",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.push_fake_card_edits"
+   "wizard.push_fake_card_edits",
+   "wizard.serial_fake_claim_ui",
+   "wizard.serial_fake_label_combobox",
+   "wizard.kyber_fake_marc_port"
   ],
-  "gap": "The relabel is asserted; the 9600/broadcast-on write for the new port and the dropdown exclusion are not.",
+  "gap": "closed 2026-10-12/13 by wizard.serial_fake_claim_ui, wizard.serial_fake_label_combobox, wizard.kyber_fake_marc_port (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -603,9 +663,13 @@
   "area": "kyber",
   "behaviour": "The Kyber Targets panel lists every board's Maestros (id, WCB, port, baud) or says none are configured.",
   "where": "Wizard/app.js:10088-10105",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.serial_fake_label_combobox",
+   "wizard.kyber_fake_marc_port",
+   "wizard.kyber_fake_targets_info"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.serial_fake_label_combobox, wizard.kyber_fake_marc_port, wizard.kyber_fake_targets_info (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -632,9 +696,14 @@
   "area": "kyber",
   "behaviour": "A Maestro edit on another board reminds the user to re-push the Kyber-local board (once per 30 s).",
   "where": "Wizard/app.js:10068-10078, 3772-3776",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.serial_fake_label_combobox",
+   "wizard.kyber_fake_marc_port",
+   "wizard.kyber_fake_targets_info",
+   "wizard.kyber_fake_repush_warning"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.serial_fake_label_combobox, wizard.kyber_fake_marc_port, wizard.kyber_fake_targets_info, wizard.kyber_fake_repush_warning (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -753,9 +822,14 @@
   "area": "audio",
   "behaviour": "The HCR Status button shows only when HCR is enabled on the board and is enabled only when the board is reachable.",
   "where": "Wizard/app.js:13082-13091",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted (the modal is; the button is not).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.kyber_fake_marc_port",
+   "wizard.kyber_fake_targets_info",
+   "wizard.kyber_fake_repush_warning",
+   "wizard.audio_fake_hcr_status_button"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.kyber_fake_marc_port, wizard.kyber_fake_targets_info, wizard.kyber_fake_repush_warning, wizard.audio_fake_hcr_status_button (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -798,11 +872,16 @@
   "area": "wled",
   "behaviour": "A WLED hosted on another board shows as a read-only dim row with a lock, is never pushed, and is offered as a live-control target.",
   "where": "Wizard/app.js:3087-3102, 3212-3227",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.parser[devices.test.js: WLED]"
+   "wizard.parser[devices.test.js: WLED]",
+   "wizard.kyber_fake_marc_port",
+   "wizard.kyber_fake_targets_info",
+   "wizard.kyber_fake_repush_warning",
+   "wizard.audio_fake_hcr_status_button",
+   "wizard.wled_fake_remote_rows"
   ],
-  "gap": "The parser side (never pushed) is asserted; the read-only row and the target list including remote ids are not.",
+  "gap": "closed 2026-10-12/13 by wizard.kyber_fake_marc_port, wizard.kyber_fake_targets_info, wizard.kyber_fake_repush_warning, wizard.audio_fake_hcr_status_button (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -974,9 +1053,15 @@
   "area": "mapping",
   "behaviour": "Ports a remote board drives as PWM outputs show as locked ghost rows naming the source once that board is loaded.",
   "where": "Wizard/app.js:4494-4587",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.kyber_fake_targets_info",
+   "wizard.kyber_fake_repush_warning",
+   "wizard.audio_fake_hcr_status_button",
+   "wizard.wled_fake_remote_rows",
+   "wizard.mapping_fake_ghost_rows"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.kyber_fake_targets_info, wizard.kyber_fake_repush_warning, wizard.audio_fake_hcr_status_button, wizard.wled_fake_remote_rows (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1064,9 +1149,11 @@
   "area": "seq",
   "behaviour": "A key that also exists on other boards shows an \"also on Wx\" hint, refreshed on key edits and loads.",
   "where": "Wizard/app.js:4833-4878",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.seq_fake_shared_indicator"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.seq_fake_shared_indicator (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1077,9 +1164,12 @@
   "area": "seq",
   "behaviour": "TEST/SAVE are enabled only for a connected or relayed board; key/value character counts track the inputs.",
   "where": "Wizard/app.js:4691-4713, 4819-4831",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.seq_fake_shared_indicator",
+   "wizard.seq_fake_buttons_counts"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.seq_fake_shared_indicator, wizard.seq_fake_buttons_counts (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1121,11 +1211,14 @@
   "area": "var",
   "behaviour": "A temporary row sets ;V,name,value (never config); CLEAR/REMOVE on it sends VAR,CLEAR.",
   "where": "Wizard/app.js:5092-5170",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.editors_fake_seq_var"
+   "wizard.editors_fake_seq_var",
+   "wizard.seq_fake_shared_indicator",
+   "wizard.seq_fake_buttons_counts",
+   "wizard.var_fake_temporary_rows"
   ],
-  "gap": "The ;V set is asserted; clearVariableRow (the row's CLEAR) is not.",
+  "gap": "closed 2026-10-12/13 by wizard.seq_fake_shared_indicator, wizard.seq_fake_buttons_counts, wizard.var_fake_temporary_rows (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1136,12 +1229,16 @@
   "area": "var",
   "behaviour": "Refresh sends ?VAR,LIST (direct, or via relay reading [TERM:n] lines), parses the firmware's lines, refreshes editable rows and their baseline, and adds read-only/temporary rows.",
   "where": "Wizard/app.js:5307-5432",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.editors_fake_seq_var",
-   "wizard.seq_var_editors"
+   "wizard.seq_var_editors",
+   "wizard.seq_fake_shared_indicator",
+   "wizard.seq_fake_buttons_counts",
+   "wizard.var_fake_temporary_rows",
+   "wizard.var_fake_refresh_list"
   ],
-  "gap": "The relay path and the parser are asserted; the direct collect, refreshing an existing editable row's value and baseline, and the \"not in config\" read-only row are only partly covered.",
+  "gap": "closed 2026-10-12/13 by wizard.seq_fake_shared_indicator, wizard.seq_fake_buttons_counts, wizard.var_fake_temporary_rows, wizard.var_fake_refresh_list (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1402,9 +1499,14 @@
   "area": "hub",
   "behaviour": "Open in Config Tool hands over ?share=1 when this tab leads, promotes a direct board to shared first (unless another tab leads), or opens the plain URL with a hint.",
   "where": "Wizard/app.js:13280-13339",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.wdp_fake_client_cards",
+   "wizard.rc_fake_discovery",
+   "wizard.rc_fake_tool_url",
+   "wizard.hub_fake_rc_open_tool"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.wdp_fake_client_cards, wizard.rc_fake_discovery, wizard.rc_fake_tool_url, wizard.hub_fake_rc_open_tool (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1478,11 +1580,12 @@
   "area": "pull",
   "behaviour": "A pulled WCB quantity above 1 renders that many board sections.",
   "where": "Wizard/app.js:7487",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_system_file"
+   "wizard.app_fake_system_file",
+   "wizard.pull_fake_wcbq_renders_floor"
   ],
-  "gap": "Sections for WCB 1..2 appear in the system-file test as a side effect; no assertion ties the section count to the pulled quantity.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_wcbq_renders_floor (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1509,12 +1612,14 @@
   "area": "pull",
   "behaviour": "A successful pull stores config and baseline, renders the card, shows Connected and a toast, fetches the version, restores the Pull button, and drops overlapping pulls on the same slot.",
   "where": "Wizard/app.js:7367-7392, 7550-7578",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.pull",
-   "wizard.push_fake_noop"
+   "wizard.push_fake_noop",
+   "wizard.pull_fake_wcbq_renders_floor",
+   "wizard.pull_fake_success_state"
   ],
-  "gap": "Config/baseline/render are asserted everywhere; the in-flight guard dropping a second pull and the manual-only \"Board not connected\" toast are not.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_wcbq_renders_floor, wizard.pull_fake_success_state (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1525,11 +1630,14 @@
   "area": "pull",
   "behaviour": "Pull on a relayed board delegates to remoteBoardPull; a slot that is its own relay is refused; Retry resets the badge and pulls again.",
   "where": "Wizard/app.js:7370-7371, 9129-9142",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_etm_listener"
+   "wizard.app_fake_etm_listener",
+   "wizard.pull_fake_wcbq_renders_floor",
+   "wizard.pull_fake_success_state",
+   "wizard.pull_fake_remote_delegation"
   ],
-  "gap": "Delegation is implied by the ETM listener pulls; the relay===n refusal and boardRetryPull are not asserted.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_wcbq_renders_floor, wizard.pull_fake_success_state, wizard.pull_fake_remote_delegation (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1699,11 +1807,15 @@
   "area": "push",
   "behaviour": "The push shows a settings progress bar, clears the controller role history, releases the mesh-poll hold on every exit, and restores the button.",
   "where": "Wizard/app.js:8201-8205, 8217-8219, 8337-8343, 10189-10197",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_mesh_tick"
+   "wizard.app_fake_mesh_tick",
+   "wizard.pull_fake_wcbq_renders_floor",
+   "wizard.pull_fake_success_state",
+   "wizard.pull_fake_remote_delegation",
+   "wizard.push_fake_progress_and_history"
   ],
-  "gap": "The mesh-poll hold is asserted; the progress text/bar, the history reset and the button restore are not.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_wcbq_renders_floor, wizard.pull_fake_success_state, wizard.pull_fake_remote_delegation, wizard.push_fake_progress_and_history (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1729,11 +1841,16 @@
   "area": "rpush",
   "behaviour": "A remote push refuses with a reason when the board has no relay, the relay is disconnected, or it has no config.",
   "where": "Wizard/app.js:8509-8529",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_etm_listener"
+   "wizard.app_fake_etm_listener",
+   "wizard.pull_fake_wcbq_renders_floor",
+   "wizard.pull_fake_success_state",
+   "wizard.pull_fake_remote_delegation",
+   "wizard.push_fake_progress_and_history",
+   "wizard.rpush_fake_guards"
   ],
-  "gap": "None of the three refusals is asserted directly.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_wcbq_renders_floor, wizard.pull_fake_success_state, wizard.pull_fake_remote_delegation, wizard.push_fake_progress_and_history (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1840,13 +1957,17 @@
   "area": "pushall",
   "behaviour": "Push All never pushes a MgmtRelay card or a client slot, and says so when no board is connected.",
   "where": "Wizard/app.js:9350-9362",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_relay_card",
    "wizard.app_fake_identity",
-   "wizard.push_fake_all_staged"
+   "wizard.push_fake_all_staged",
+   "wizard.pull_fake_remote_delegation",
+   "wizard.push_fake_progress_and_history",
+   "wizard.rpush_fake_guards",
+   "wizard.pushall_fake_exclusions"
   ],
-  "gap": "Relay and client exclusion are asserted; the \"No boards connected\" toast is not.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_remote_delegation, wizard.push_fake_progress_and_history, wizard.rpush_fake_guards, wizard.pushall_fake_exclusions (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1857,12 +1978,17 @@
   "area": "remote",
   "behaviour": "Managing a board through a relay enables Pull/Push/Identify/Stats, dims Factory Reset and Update FW with a tooltip, disables the flash radios, shows Remote, opens both panes and starts the terminal session 3x.",
   "where": "Wizard/app.js:6526-6587",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_relay_card",
-   "wizard.app_fake_etm_listener"
+   "wizard.app_fake_etm_listener",
+   "wizard.pull_fake_remote_delegation",
+   "wizard.push_fake_progress_and_history",
+   "wizard.rpush_fake_guards",
+   "wizard.pushall_fake_exclusions",
+   "wizard.remote_fake_manage_ui"
   ],
-  "gap": "The RTERM,START x3, the badge and panes are asserted; the button enable/dim states and tooltips are not.",
+  "gap": "closed 2026-10-12/13 by wizard.pull_fake_remote_delegation, wizard.push_fake_progress_and_history, wizard.rpush_fake_guards, wizard.pushall_fake_exclusions (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1919,11 +2045,15 @@
   "area": "remote",
   "behaviour": "Manage via relay on one board arms it and pulls it, never overriding a board that is on USB.",
   "where": "Wizard/app.js:545-552",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_relay_card"
+   "wizard.app_fake_relay_card",
+   "wizard.rpush_fake_guards",
+   "wizard.pushall_fake_exclusions",
+   "wizard.remote_fake_manage_ui",
+   "wizard.remote_fake_manage_one"
   ],
-  "gap": "Only the pull=false form (from Manage all) runs; the single button (pull=true) and the USB-override guard are not asserted.",
+  "gap": "closed 2026-10-12/13 by wizard.rpush_fake_guards, wizard.pushall_fake_exclusions, wizard.remote_fake_manage_ui, wizard.remote_fake_manage_one (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -1934,9 +2064,15 @@
   "area": "remote",
   "behaviour": "Update FW, Factory Reset and OTA-over-USB are refused on a relayed board with a toast.",
   "where": "Wizard/app.js:1679-1685, 1754-1756, 10237-10241",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.rpush_fake_guards",
+   "wizard.pushall_fake_exclusions",
+   "wizard.remote_fake_manage_ui",
+   "wizard.remote_fake_manage_one",
+   "wizard.remote_fake_relay_only_refusals"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.rpush_fake_guards, wizard.pushall_fake_exclusions, wizard.remote_fake_manage_ui, wizard.remote_fake_manage_one (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2018,12 +2154,17 @@
   "area": "rpull",
   "behaviour": "A pull shows Retrying while it retries, Pull Failed with a Retry button when it gives up, and Remote again on success.",
   "where": "Wizard/app.js:3605-3607, 8943, 8951, 9089",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.remote_pull_fake_timer",
-   "wizard.app_fake_etm_listener"
+   "wizard.app_fake_etm_listener",
+   "wizard.pushall_fake_exclusions",
+   "wizard.remote_fake_manage_ui",
+   "wizard.remote_fake_manage_one",
+   "wizard.remote_fake_relay_only_refusals",
+   "wizard.rpull_fake_badges"
   ],
-  "gap": "Retrying and Remote are asserted; the Retry button appearing on failure is not.",
+  "gap": "closed 2026-10-12/13 by wizard.pushall_fake_exclusions, wizard.remote_fake_manage_ui, wizard.remote_fake_manage_one, wizard.remote_fake_relay_only_refusals (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2049,11 +2190,12 @@
   "area": "flash",
   "behaviour": "After a flash the Wizard closes and reconnects the port, re-shares it if borrowed, then: Update pulls (or pushes in the wizard); Flash/Factory wait for the firmware and full-push the pre-flash config with General restored (or only pull when push was unchecked); a failed reconnect toasts.",
   "where": "Wizard/app.js:7796-7911",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.flash_fake_post_success"
+   "wizard.flash_fake_post_success",
+   "wizard.flash_fake_failure_recovery"
   ],
-  "gap": "closed 2026-10-12 by wizard.flash_fake_post_success (WCB 7b37f32, GUI run 20261012-193704); still open: the failed-flash branch (\"already on the target firmware, push anyway\") is not driven",
+  "gap": "closed 2026-10-12/13 by wizard.flash_fake_post_success, wizard.flash_fake_failure_recovery (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2079,11 +2221,12 @@
   "area": "flash",
   "behaviour": "Erase (wizard \"already installed\") sends ?ERASE,NVS, waits 4 s, closes and reconnects, waits for the firmware and full-pushes the pre-erase config; Factory Reset modal's Erase NVS Only does the same but only pulls.",
   "where": "Wizard/app.js:7991-8086, 10266-10310",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.flash_fake_erase_path"
+   "wizard.flash_fake_erase_path",
+   "wizard.flash_fake_erase_no_reconnect"
   ],
-  "gap": "closed 2026-10-12 by wizard.flash_fake_erase_path (WCB 7b37f32, GUI run 20261012-193704); still open: the erase path's failed reconnect is not driven",
+  "gap": "closed 2026-10-12/13 by wizard.flash_fake_erase_path, wizard.flash_fake_erase_no_reconnect (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2202,9 +2345,15 @@
   "area": "flasher",
   "behaviour": "The loader runs at 115200 on Windows and 460800 elsewhere, with romBaudrate 115200.",
   "where": "Wizard/flasher.js:351-363",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted (the fake records the loader options).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_fake_manage_one",
+   "wizard.remote_fake_relay_only_refusals",
+   "wizard.rpull_fake_badges",
+   "wizard.flash_fake_erase_no_reconnect",
+   "wizard.flasher_fake_windows_baud"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.remote_fake_manage_one, wizard.remote_fake_relay_only_refusals, wizard.rpull_fake_badges, wizard.flash_fake_erase_no_reconnect (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2230,12 +2379,13 @@
   "area": "ota",
   "behaviour": "OTA over USB reads the chip family, fetches the matching image, streams 1 KB base64 chunks following the board's ACK/NAK cursor (resync, backoff, 60-stall cap, session-loss detection), verifies with END, then reconnects (direct) or waits on the shared port and pulls; on error it sends ABORT and restores 115200.",
   "where": "Wizard/app.js:1754-1802, 1867-1990",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_ota_baud_fallback",
-   "wizard.ota_fake_serial_stream"
+   "wizard.ota_fake_serial_stream",
+   "wizard.flash_fake_factory_modal"
   ],
-  "gap": "closed 2026-10-12 by wizard.ota_fake_serial_stream (WCB f66859a..30fb190; 114/114 no-board standalone); still open: the 60-stall cap is not driven (its back-off alone takes ~33 s)",
+  "gap": "closed 2026-10-12/13 by wizard.flash_fake_factory_modal, wizard.ota_fake_serial_stream (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "M",
@@ -2277,9 +2427,15 @@
   "area": "ota",
   "behaviour": "The OTA button routes to the relay or USB path; the USB path refuses a relayed or disconnected board.",
   "where": "Wizard/app.js:1706-1709, 1754-1757",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.remote_fake_relay_only_refusals",
+   "wizard.rpull_fake_badges",
+   "wizard.flash_fake_erase_no_reconnect",
+   "wizard.flasher_fake_windows_baud",
+   "wizard.ota_fake_entry_guards"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.remote_fake_relay_only_refusals, wizard.rpull_fake_badges, wizard.flash_fake_erase_no_reconnect, wizard.flasher_fake_windows_baud (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2354,9 +2510,13 @@
   "area": "term",
   "behaviour": "The terminal drawer opens/closes, scrolls panes to the bottom on open, resizes by drag (120 px to 80%), pads the page, and Clear All empties every pane.",
   "where": "Wizard/app.js:9590-9662, 9902-9904",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.var_fake_temporary_rows",
+   "wizard.var_fake_refresh_list",
+   "wizard.term_fake_drawer"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.var_fake_temporary_rows, wizard.var_fake_refresh_list, wizard.term_fake_drawer (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2367,11 +2527,14 @@
   "area": "term",
   "behaviour": "A pane per managed board with dot/input state, debug flags reset on disconnect, a visibility chip whose label says USB or via WCB n, and panes migrate when a board changes slot.",
   "where": "Wizard/app.js:9786-9900",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_terminal"
+   "wizard.app_fake_terminal",
+   "wizard.var_fake_refresh_list",
+   "wizard.term_fake_drawer",
+   "wizard.term_fake_panes"
   ],
-  "gap": "Visibility and the debug reset are asserted; the chip label, the disabled input when disconnected and migrateTerminalPane are not.",
+  "gap": "closed 2026-10-12/13 by wizard.var_fake_refresh_list, wizard.term_fake_drawer, wizard.term_fake_panes (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2412,13 +2575,16 @@
   "area": "term",
   "behaviour": "Enter or Send sends the line directly or as a one-chunk FRAG, echoes it, and ArrowUp/Down recall per-board history without duplicates.",
   "where": "Wizard/app.js:9976-10057",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_terminal",
    "wizard.terminal_wire",
-   "wizard.relay_terminal"
+   "wizard.relay_terminal",
+   "wizard.term_fake_drawer",
+   "wizard.term_fake_panes",
+   "wizard.term_fake_send_history"
   ],
-  "gap": "Sending both ways is asserted; the arrow-key history is not.",
+  "gap": "closed 2026-10-12/13 by wizard.term_fake_drawer, wizard.term_fake_panes, wizard.term_fake_send_history (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2444,9 +2610,14 @@
   "area": "term",
   "behaviour": "termLog writes only to panes of boards that are connected, relayed or opened by hand; a merely discovered board never sprouts a pane and its lines fall to the first pane.",
   "where": "Wizard/app.js:9953-9973",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.term_fake_drawer",
+   "wizard.term_fake_panes",
+   "wizard.term_fake_send_history",
+   "wizard.term_fake_log_routing"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.term_fake_drawer, wizard.term_fake_panes, wizard.term_fake_send_history, wizard.term_fake_log_routing (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2457,12 +2628,13 @@
   "area": "stats",
   "behaviour": "Network Test and ESP-NOW Stats run ?ETM,CHAR / ?STATS directly or ?MGMT,ETM,CHAR / ?MGMT,STATS,<n> through the relay with their sentinels, keep pull replies out, hold the mesh poll, and show only the last ETM summary block.",
   "where": "Wizard/app.js:12964-12990, 13093-13230",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.remote_pull_fake_display",
-   "wizard.app_fake_mesh_tick"
+   "wizard.app_fake_mesh_tick",
+   "wizard.stats_fake_modal"
   ],
-  "gap": "Both capture paths with pull-reply exclusion and the busy hold are asserted; the ETM summary extraction (last banner), the relay timeout returning partial text, the Refresh button and the error text are not.",
+  "gap": "closed 2026-10-12/13 by wizard.stats_fake_modal (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2503,11 +2675,13 @@
   "area": "wdp",
   "behaviour": "The mesh table shows each node's kind, platform, firmware, capabilities, Maestros, devices (quiet ones marked), PWM edges, peer state with Forget, age and liveness; the toolbar shows auto-join, live peers, Poll and Clear learned; WDP off is said as such.",
   "where": "Wizard/app.js:13503-13641",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_wdp_panel"
+   "wizard.app_fake_wdp_panel",
+   "wizard.stats_fake_modal",
+   "wizard.wdp_fake_render"
   ],
-  "gap": "Row count, quiet device, PWM edge, learned labels and the disabled message are asserted; the empty-mesh message, the self-row tag, capability labels and the peers count are not.",
+  "gap": "closed 2026-10-12/13 by wizard.stats_fake_modal, wizard.wdp_fake_render (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2534,9 +2708,13 @@
   "area": "wdp",
   "behaviour": "Refresh with no board connected says so; a failed dump shows the error.",
   "where": "Wizard/app.js:13655-13673",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.stats_fake_modal",
+   "wizard.wdp_fake_render",
+   "wizard.wdp_fake_refresh_no_board"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.stats_fake_modal, wizard.wdp_fake_render, wizard.wdp_fake_refresh_no_board (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2563,11 +2741,14 @@
   "area": "wdp",
   "behaviour": "A client's card shows status with age, type (Controller for navicore/sab aliases), firmware and advertised capabilities, seeds the alias, and an rc-capable client feeds the RC panel.",
   "where": "Wizard/app.js:13743-13798",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_mesh_tick"
+   "wizard.app_fake_mesh_tick",
+   "wizard.wdp_fake_render",
+   "wizard.wdp_fake_refresh_no_board",
+   "wizard.wdp_fake_client_cards"
   ],
-  "gap": "Online/Offline and the alias seed are asserted; the capability chips, the Controller kind, the age text and the RC panel feed are not.",
+  "gap": "closed 2026-10-12/13 by wizard.wdp_fake_render, wizard.wdp_fake_refresh_no_board, wizard.wdp_fake_client_cards (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2578,9 +2759,14 @@
   "area": "rc",
   "behaviour": "rc_hb/rc_trig/rc_mode JSON lines on any board create RC cards (model, mode, fw, uptime, last trigger) that expire after 12 s; WDP-only RCs show as \"telemetry off\" and expire after 40 s.",
   "where": "Wizard/app.js:13257-13268, 13341-13438",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.wdp_fake_render",
+   "wizard.wdp_fake_refresh_no_board",
+   "wizard.wdp_fake_client_cards",
+   "wizard.rc_fake_discovery"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.wdp_fake_render, wizard.wdp_fake_refresh_no_board, wizard.wdp_fake_client_cards, wizard.rc_fake_discovery (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2591,9 +2777,14 @@
   "area": "rc",
   "behaviour": "The RC panel's Open link uses the saved config-tool URL; \"edit Config Tool URL\" prompts and stores it (default removes the key).",
   "where": "Wizard/app.js:13270-13274, 13897-13916",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.wdp_fake_refresh_no_board",
+   "wizard.wdp_fake_client_cards",
+   "wizard.rc_fake_discovery",
+   "wizard.rc_fake_tool_url"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.wdp_fake_refresh_no_board, wizard.wdp_fake_client_cards, wizard.rc_fake_discovery, wizard.rc_fake_tool_url (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2604,11 +2795,12 @@
   "area": "wiz",
   "behaviour": "Opening the setup wizard resets state with a random password and MAC octets, builds the step list from the control-system and Maestro choices, and closing clears watchers and detect jobs.",
   "where": "Wizard/app.js:10439-10490",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_setup_wizard"
+   "wizard.app_fake_setup_wizard",
+   "wizard.wiz_fake_open_steps"
   ],
-  "gap": "buildWizardSteps is exercised from a hand-set state; the random generators, the step list for navicore/other, and closeWizard's cleanup are not asserted.",
+  "gap": "closed 2026-10-12/13 by wizard.wiz_fake_open_steps (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2634,12 +2826,14 @@
   "area": "wiz",
   "behaviour": "Validation: a control system must be chosen; network password 8+, hex octets, a character plan from the defaults; identity ids 1-99, unique, not the controller's id, a HW version per WCB; Maestro rows unique by board+port and off the Kyber ports.",
   "where": "Wizard/app.js:11889-11980",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.app_fake_setup_wizard",
-   "wizard.push_fake_delimiter"
+   "wizard.push_fake_delimiter",
+   "wizard.wiz_fake_open_steps",
+   "wizard.wiz_fake_validate_steps"
   ],
-  "gap": "Identity and the Kyber-port clashes and the network characters are asserted; the password length, hex octets, id range, duplicate board+port and the missing control system are not.",
+  "gap": "closed 2026-10-12/13 by wizard.wiz_fake_open_steps, wizard.wiz_fake_validate_steps (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2665,11 +2859,13 @@
   "area": "wiz",
   "behaviour": "Each step renders its controls: identity tabs with WCB/Client fields and the HW-3.2 USB note, serial rows with claimed ports locked, Kyber ports S1/S2 with the Marcduino list excluding the Kyber port, Maestro rows excluding Kyber ports and client boards, ETM fields, the review summary, firmware choice and the connect rows.",
   "where": "Wizard/app.js:10665-11504",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.app_fake_setup_wizard"
+   "wizard.app_fake_setup_wizard",
+   "wizard.wiz_fake_validate_steps",
+   "wizard.wiz_fake_step_html"
   ],
-  "gap": "Only the identity and maestro-config steps are rendered; the others are not.",
+  "gap": "closed 2026-10-12/13 by wizard.wiz_fake_validate_steps, wizard.wiz_fake_step_html (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2711,11 +2907,12 @@
   "area": "wiz",
   "behaviour": "Once a wizard board is connected and pulled, the watcher restores the wizard config, full-pushes it, waits for the reconnect, verifies with up to three pulls, reports Done / Not pushed / Push incomplete / No reconnect / Unverified, advances to the next WCB slot and auto-closes 2.5 s after all succeed (or shows Close).",
   "where": "Wizard/app.js:12813-12955",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "wizard.wiz_fake_watch_push_verify"
+   "wizard.wiz_fake_watch_push_verify",
+   "wizard.wiz_fake_watch_timeout"
   ],
-  "gap": "closed 2026-10-12 by wizard.wiz_fake_watch_push_verify (WCB 7b37f32, GUI run 20261012-193704); still open: the watcher's 90 s \"Timed out\" outcome is not driven",
+  "gap": "closed 2026-10-12/13 by wizard.wiz_fake_watch_push_verify, wizard.wiz_fake_watch_timeout (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2726,9 +2923,12 @@
   "area": "wiz",
   "behaviour": "Flash and push progress is mirrored into the wizard's connect row while it is on screen.",
   "where": "Wizard/app.js:10166-10197",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.wiz_fake_watch_timeout",
+   "wizard.wiz_fake_status_mirror"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.wiz_fake_watch_timeout, wizard.wiz_fake_status_mirror (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2769,9 +2969,11 @@
   "area": "version",
   "behaviour": "watch-version.js (dev tool) stamps UI_VERSION in app.js on every Wizard file change; the page shows UI_VERSION in its footer.",
   "where": "Wizard/watch-version.js; Wizard/app.js:127, 156-157",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "A developer tool, not run by any test; the footer text is not asserted either (see init.boot_steps).",
+  "status": "tested",
+  "tested_by": [
+   "wizard.parser[watch_version.test.js]"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.parser[watch_version.test.js] (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2799,13 +3001,14 @@
   "area": "parser",
   "behaviour": "Identity/network tokens: HW, WCB (not WCBQ), WCBQ, WCBCH clamped to 1-11, PEERSLIVE, CONTROLLER/SPECIAL with id, ALIAS/CLEAR, EPASS with commas, MAC, LED,PIN, RELAY, BCAST OUT S0, DELIM/FUNCCHAR/CMDCHAR one char (comma allowed).",
   "where": "Wizard/parser.js:482-645",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "wizard.parser[parser.test.js]",
    "wizard.parser[roundtrip.test.js: W-2, W-3]",
-   "wizard.parser[model.test.js]"
+   "wizard.parser[model.test.js]",
+   "wizard.parser[tokens_misc.test.js]"
   ],
-  "gap": "Most are asserted; WCBCH clamping, PEERSLIVE, broadcastToS0, the SPECIAL alias and ALIAS with a comma are not.",
+  "gap": "closed 2026-10-12/13 by wizard.parser[tokens_misc.test.js] (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
@@ -2897,9 +3100,14 @@
   "area": "toast",
   "behaviour": "Toasts carry copy and dismiss buttons, errors stay at least 12 s, duration 0 is persistent, and the message is HTML-escaped.",
   "where": "Wizard/app.js:10313-10347",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Specs read toast text through the fake hook; the buttons, durations and escaping are not asserted.",
+  "status": "tested",
+  "tested_by": [
+   "wizard.general_fake_derive_controller",
+   "wizard.general_fake_dirty_flag",
+   "wizard.general_fake_peerslive_badge",
+   "wizard.toast_fake_ui"
+  ],
+  "gap": "closed 2026-10-12/13 by wizard.general_fake_derive_controller, wizard.general_fake_dirty_flag, wizard.general_fake_peerslive_badge, wizard.toast_fake_ui (no-board sweep 170/170)",
   "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
