@@ -164,7 +164,12 @@ if (document.readyState === 'loading') {
 }
 
 // ─── Firmware Version (fetched from GitHub) ───────────────────────
+// Why the last check could not reach GitHub's listing (an error ghExplain() in
+// flasher.js can read), or null. The check at load stays silent; the manual
+// "check for updates" button explains it.
+let _fwCheckFailure = null;
 async function fetchLatestFirmwareVersion() {
+  _fwCheckFailure = null;
   try {
     // Read the latest published bin from the SAME branch the flasher pulls from
     // (getFirmwareBranch from flasher.js — derived from the URL: a
@@ -175,10 +180,16 @@ async function fetchLatestFirmwareVersion() {
     const owner  = (typeof GITHUB_OWNER    === 'string') ? GITHUB_OWNER    : 'greghulette';
     const repo   = (typeof GITHUB_REPO     === 'string') ? GITHUB_REPO     : 'Wireless_Communication_Board-WCB';
     const path   = (typeof GITHUB_BIN_PATH === 'string') ? GITHUB_BIN_PATH : 'Code/bin';
-    const r = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`
-    );
-    if (!r.ok) return;
+    const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
+    let r;
+    try {
+      r = (typeof ghFetch === 'function') ? await ghFetch(url, 'the firmware list') : await fetch(url);
+    } catch (e) { _fwCheckFailure = e; return false; }
+    if (!r.ok) {
+      _fwCheckFailure = (typeof ghHttpError === 'function')
+        ? await ghHttpError(r, `GitHub API: HTTP ${r.status}`) : new Error(`GitHub API: HTTP ${r.status}`);
+      return false;
+    }
     const files = await r.json();
     const appFile = files.find(f => f.type === 'file' && f.name.endsWith('_ESP32.bin'));
     if (!appFile) return;
@@ -219,7 +230,15 @@ async function boardCheckFwUpdate(n) {
   try {
     const ok = await fetchLatestFirmwareVersion();
     if (ok && latestFirmwareVersion) showToast(`Latest firmware on GitHub: ${latestFirmwareVersion}`, 'success', 3500);
-    else showToast('Could not reach GitHub (offline or rate-limited) — try again shortly', 'warning', 3500);
+    else {
+      // Say WHY when it is GitHub's doing (down, throttled, out of reach) — see
+      // ghExplain in flasher.js; the technical detail goes to the terminal.
+      const fail = _fwCheckFailure;
+      const why = (fail && typeof ghExplain === 'function') ? await ghExplain(fail) : null;
+      if (fail) termLog(n, `Firmware check failed: ${fail.message}`, 'sys');
+      if (why) showToast(why, 'warning', 15000);
+      else showToast('Could not reach GitHub (offline or rate-limited) — try again shortly', 'warning', 3500);
+    }
   } finally {
     if (btn) btn.textContent = '↻';
     // Keep the buttons disabled for the full cooldown (belt-and-suspenders with the

@@ -736,6 +736,41 @@ def flash_esptool5_output(bench):
                     timeout=300)
 
 
+@test("intellex.gh_explain_unit", "Why a GitHub firmware download failed, as the host words it (src/ghstatus.py): offline "
+      "mode said and nothing asked; no internet when neither GitHub nor githubstatus.com answers; the spent hourly rate "
+      "limit with its reset time; GitHub reporting Git Operations / API Requests / Pages down (and only those); a 5xx, "
+      "timeout or no connection while all is well; a 404 left alone; the status page asked once a minute within ~4 s; "
+      "flash._get keeps the cause and does not wait out a spent limit (local stand-ins, no GitHub)")
+def gh_explain_unit(bench):
+    """tests/intellex/py/ghstatus_units.py group rules: Intellex src/ghstatus.py explain/failure/status_trouble and
+    src/flash.py _get, against a local HTTP server standing in for GitHub and githubstatus.com."""
+    run_intellex_py(bench, "intellex.gh_explain_unit", "ghstatus_units.py", args={"group": "rules"})
+
+
+@test("intellex.gh_explain_callers_unit", "With nothing cached, both native flashers raise GitHub's explanation plus "
+      "'no saved copy' with the HTTP code in the flash log only, a 404 keeps its message, a cached set asks nothing; the "
+      "host's /_api/gh routes answer 502 with `message` (the detail) and `explain` (the sentence), a GitHub 404 as a 404 "
+      "without one, a refusal explaining itself (in-process host, GitHub stood in for)")
+def gh_explain_callers_unit(bench):
+    """tests/intellex/py/ghstatus_units.py group callers: Intellex src/flash.py / src/wcb_flash.py fetch_images
+    (list_firmware, download -> flash.explained) and src/ghproxy.py contents/raw through host.py's real build_app()."""
+    run_intellex_py(bench, "intellex.gh_explain_callers_unit", "ghstatus_units.py", args={"group": "callers"})
+
+
+@test("intellex.ui_gh_explain_navicore", "The config tool under Intellex shows the host's explanation for a firmware "
+      "download it could not serve - the Latest check's status line and fetchFirmwareImages' error (both OTA buttons) - "
+      "asking the host once and githubstatus.com never (Playwright, offline host, no cache)")
+def ui_gh_explain_navicore(bench):
+    run_intellex_test(bench, "intellex.ui_gh_explain_navicore")
+
+
+@test("intellex.ui_gh_explain_wizard", "The Wizard under Intellex shows the host's explanation for a firmware download "
+      "it could not serve (getBinaryData: both OTA paths), the 502 in its log only, never asking githubstatus.com "
+      "(Playwright, offline host, no cache)")
+def ui_gh_explain_wizard(bench):
+    run_intellex_test(bench, "intellex.ui_gh_explain_wizard")
+
+
 @test("intellex.ghget_retry_unit", "flash._get against a local HTTP server: 429, 403 and 503 are retried after the "
       "Retry-After wait, a 404 is final at once, a refused connection fails fast (IX-WP3)")
 def ghget_retry_unit(bench):

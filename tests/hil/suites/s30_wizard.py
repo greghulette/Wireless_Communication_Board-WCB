@@ -360,6 +360,19 @@ for _key, _title in _FAKE_RESCAN_L:
     test(f"wizard.{_key}", f"{_title} (no board: fake boards and ports in the page)")(_fake_rescan_l)
 
 
+# A firmware download GitHub cannot serve says whose problem it is (2026-10-13, Greg: "inform people the reason they
+# can't push the firmware is because of a GitHub issue"). Spec: specs/gh_explain_fake.spec.js; the same explainer is in
+# NaviCore's config_tool/flasher.js (nctool.fw_gh_explain*) and, on the host side, Intellex's src/ghstatus.py.
+_GH_EXPLAIN = (
+    ("flasher_fake_gh_explain", "A firmware download GitHub cannot serve says why in one sentence - no internet (offline, or neither GitHub nor githubstatus.com answering), the spent hourly rate limit with its reset time, GitHub reporting Git Operations / API Requests / Pages down, a GitHub error while all is well - the HTTP code in the log only; a 404 and a missing file keep their message; a working download never asks the status page, asked at most once a minute"),
+    ("flasher_fake_gh_explain_shown", "The explanation is what the user sees: OTA over USB toasts 'OTA failed: <why>' with the code in the terminal, a flash stops with it as its error, the firmware check button toasts it; a check that works asks nothing"),
+)
+for _key, _title in _GH_EXPLAIN:
+    def _gh_explain(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: GitHub and its status page stood in for in the page)")(_gh_explain)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their
