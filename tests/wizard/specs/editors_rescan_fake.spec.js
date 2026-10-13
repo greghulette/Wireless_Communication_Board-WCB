@@ -7,7 +7,7 @@
 // (lib/rescan.js holdVerifyPulls).
 const { test, expect } = require('../lib/fixtures');
 const { board, pullFake, push, edit } = require('../lib/fake');
-const { setup, holdVerifyPulls, toastMark, toastsSince, options, shown, sent } = require('../lib/rescan');
+const { setup, holdVerifyPulls, toastMark, toastsSince, sent } = require('../lib/rescan');
 
 const rowIds = (page, tbody) => page.evaluate((tbody) => [...document.querySelectorAll(`#${tbody} tr`)].map((r) => r.id), tbody);
 const rowNumbers = (page, tbody) => page.evaluate((tbody) => [...document.querySelectorAll(`#${tbody} tr`)].map((r) => r.cells[0].textContent), tbody);

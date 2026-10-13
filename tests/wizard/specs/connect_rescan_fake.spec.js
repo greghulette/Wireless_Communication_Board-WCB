@@ -7,15 +7,15 @@
 // BoardConnection on a fake port. Runs standalone, in CI, and under the harness by id (s30_wizard.py).
 const { test, expect } = require('../lib/fixtures');
 const { openWizard } = require('../lib/wizard');
-const { board, chain, install, pullFake, relayFake } = require('../lib/fake');
+const { board, install, pullFake } = require('../lib/fake');
 const { setup, toastMark, toastsSince, fakeSerial } = require('../lib/rescan');
 
 const VID = { CH: { vid: 0x1a86, pid: 0x55d4 }, CP: { vid: 0x10c4, pid: 0xea60 } };
 const ops = (page, id) => page.evaluate((id) => __serial.of(id), id);
 
 test('wizard.connect_fake_modal_and_button Connect on a card opens the modal - Auto-Detect, Select Port Manually, Authorize, "Remote via WCB n" for each connected board, Share port - and Remote arms the relay and pulls through it; the same button then un-manages the relayed board, and disconnects a connected one', async ({ page }) => {
-  // boardConnect (app.js:6841-6845), openConnectModal (6440-6480), modalRemoteConnect (6566-6574), modalManualSelect /
-  // modalAuthorize / _modalDoConnect (6511-6564), clearRemoteConnected (6650-6683), boardDisconnect (6853-6877). The
+  // boardConnect (app.js:6856-6860), openConnectModal (6455-6495), modalRemoteConnect (6581-6589), modalManualSelect /
+  // modalAuthorize / _modalDoConnect (6526-6579), clearRemoteConnected (6665-6698), boardDisconnect (6868-6892). The
   // card's "Remote via WCB n" label (setRemoteConnected writes b<n>-conn-label) has no element in index.html; the status
   // badge is what shows it. Row connect.modal_and_button.
   await setup(page);
@@ -173,7 +173,7 @@ test('wizard.connect_fake_reconnect_platforms reconnect() reopens the same port 
 });
 
 test('wizard.connect_fake_wait_board_ready waitForBoardReady keeps one listener, probes with WCB_WEBTOOL_CONFIG_PULL and then <funcChar>backup every 10 s while the board is connected and read, resolves true on the backup\'s end marker, and gives up with false at its timeout', async ({ page }) => {
-  // waitForBoardReady (app.js:7343-7411). Row connect.wait_board_ready.
+  // waitForBoardReady (app.js:7358-7426). Row connect.wait_board_ready.
   await setup(page);
   await pullFake(page, 1, board(['FUNCCHAR,!'], { wcbq: 2 }), { lfi: '!' });
   await pullFake(page, 2, board([], { wcb: 2 }));

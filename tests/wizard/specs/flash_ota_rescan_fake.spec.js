@@ -13,7 +13,7 @@ const { EPASS, board, chain, install, pullFake, push, relayFake } = require('../
 const { setup, holdVerifyPulls, toastMark, toastsSince, sent } = require('../lib/rescan');
 
 test('wizard.push_fake_post_flash_general the push that follows a flash or erase puts the General fields back as they were before it - password, MAC octets, quantity, characters - and sends those, once; the next push reads General as it is', async ({ page }) => {
-  // boardGo's restore (app.js:8165-8168), captureGeneralDOMSnapshot / restoreGeneralDOMSnapshot (9305-9338).
+  // boardGo's restore (app.js:8165-8168), captureGeneralDOMSnapshot / restoreGeneralDOMSnapshot (9313-9346).
   // Row push.post_flash_general_restore.
   await setup(page);
   await pullFake(page, 1, board());
@@ -112,7 +112,7 @@ test('wizard.flash_fake_failure_recovery a flash that failed reopens the same po
 });
 
 test('wizard.flash_fake_factory_modal Factory Reset opens its modal for a board on USB - refused for a relayed board and for one not connected - and Erase NVS + Load Fresh Firmware runs boardGo in factory mode with the push-config box as ticked; Cancel runs nothing', async ({ page }) => {
-  // boardFactoryReset, closeFactoryResetModal, doFactoryResetWithFw (app.js:10322-10349). Erase NVS Only is
+  // boardFactoryReset, closeFactoryResetModal, doFactoryResetWithFw (app.js:10334-10361). Erase NVS Only is
   // wizard.flash_fake_erase_path's. Row flash.factory_modal.
   await setup(page);
   await pullFake(page, 1, board());

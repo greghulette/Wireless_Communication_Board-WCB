@@ -59,7 +59,7 @@ test('wizard.general_fake_wcbq_change WCB Quantity: More... lists 1-20, a pick s
 
 test('wizard.general_fake_password_mac_channel the password, MAC octets and mesh channel, edited in General, are written into every board\'s config and the General baseline, mark General pending (Push All amber), and every board\'s push then carries them', async ({ page }) => {
   // onGeneralPasswordChange, onGeneralMacChange, onMeshChannelChange (app.js:1305-1334) and _notifyGeneralChanged
-  // (1232-1237), read back by boardGo (8165-8179). Row general.password_mac_channel.
+  // (1232-1237), read back by boardGo (8191-8205). Row general.password_mac_channel.
   await setup(page);
   await pullFake(page, 1, board());
   await pullFake(page, 2, board([], { wcb: 2 }));
@@ -98,7 +98,7 @@ test('wizard.general_fake_etm_toggle_checksum ETM Enabled, unchecked in General,
   // (parser.js:1645-1659) sends ETM,ON/OFF on a change, the detail lines only when ETM is on and they differ from the
   // board's, and ETM,CHKSM,ON whenever the board's checksum is not on - never OFF. A board pulled with ETM off left the
   // General detail inputs at the page's defaults (missed heartbeats 3, not the firmware's 5), and the first ETM edit
-  // pushed them over the board's: fixed 2026-10-12, syncGeneralFromConfig (9243-9253) shows the details either way and
+  // pushed them over the board's: fixed 2026-10-12, syncGeneralFromConfig (9269-9279) shows the details either way and
   // index.html's default is 5. Row general.etm_toggle_checksum.
   await setup(page);
   await pullFake(page, 1, board());
@@ -179,8 +179,8 @@ const conflictRows = (page) => page.$$eval('#general-conflict-body tbody tr td:f
 const modalOpen = (page) => page.evaluate(() => document.getElementById('general-conflict-modal').classList.contains('open'));
 
 test('wizard.general_fake_mismatch_modal a later pull whose General differs opens the keep/use modal - but not for a factory-default board (MAC 00:00) or while the setup wizard is open; Use takes the NaviCore controller and id too and marks every other board unsaved; after a file load the modal names "loaded file"', async ({ page }) => {
-  // boardPull's General check (app.js:7515-7528), isDefaultNetworkSettings (1671-1674), showGeneralMismatchModal's
-  // Use (6753-6816), loadSystemFileContent's 'file' baseline (9522-9535). Use re-derived the General baseline before
+  // boardPull's General check (app.js:7541-7554), isDefaultNetworkSettings (1671-1674), showGeneralMismatchModal's
+  // Use (6779-6842), loadSystemFileContent's 'file' baseline (9556-9569). Use re-derived the General baseline before
   // it applied the NaviCore fields, so the board whose values were taken opened the modal again on its next pull:
   // fixed 2026-10-12 (updateGeneralBaseline after them). Row general.mismatch_modal.
   await setup(page);

@@ -6,7 +6,7 @@
 // held back where a spec pushes more than once (lib/rescan.js holdVerifyPulls).
 const { test, expect } = require('../lib/fixtures');
 const { board, pullFake, push, edit } = require('../lib/fake');
-const { setup, holdVerifyPulls, toastMark, toastsSince, options, shown, sent } = require('../lib/rescan');
+const { setup, holdVerifyPulls, shown, sent } = require('../lib/rescan');
 
 const label = (page, n, p) => page.evaluate(({ n, p }) => [boardConfigs[n].serialPorts[p - 1].label,
   document.getElementById(`b${n}-s${p}-label`).value], { n, p });
@@ -137,7 +137,7 @@ test('wizard.navicore_fake_remote_radio under the NaviCore controller only the N
 });
 
 test('wizard.navicore_fake_reconcile_maestros a board that gains a Maestro under NaviCore goes remote, and one that loses its last Maestro leaves remote - under NaviCore or Kyber', async ({ page }) => {
-  // reconcileRemoteWithMaestros (app.js:2459-2468), run by onMaestroChange (3796-3815) and removeMaestroRow (3886-3896).
+  // reconcileRemoteWithMaestros (app.js:2459-2468), run by onMaestroChange (3807-3826) and removeMaestroRow (3897-3907).
   // Row navicore.reconcile_maestros.
   await setup(page);
   await pullFake(page, 1, board());

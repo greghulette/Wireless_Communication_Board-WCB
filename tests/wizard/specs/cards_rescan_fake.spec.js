@@ -8,7 +8,7 @@
 // Nothing here is a real credential: every SSID and passphrase is a dummy.
 const { test, expect } = require('../lib/fixtures');
 const { board, pullFake, push, edit } = require('../lib/fake');
-const { setup, holdVerifyPulls, pull, toastMark, toastsSince, options, shown, sent } = require('../lib/rescan');
+const { setup, holdVerifyPulls, toastMark, toastsSince, shown, sent } = require('../lib/rescan');
 const sections = (page) => page.evaluate(() => [...document.querySelectorAll('#boards-container [id^="section-board-"]')]
   .map((el) => +el.id.replace('section-board-', '')));
 
@@ -69,8 +69,8 @@ test('wizard.identity_fake_hw_version a board pulled with HW 0 (unset) pushes no
 });
 
 test('wizard.serial_fake_baud_options the serial table offers S1-S2 every baud and S3-S5 up to 57600, plus the baud a port is configured for marked (!) - a board pulled with S4 at 115200 shows it, and pushed untouched sends nothing; labels are cut at 30', async ({ page }) => {
-  // renderSerialTable (app.js:802-830), populateUIFromConfig's serial rows (3364-3374), syncSerialUIToConfig
-  // (3299-3319). A pulled baud the table was not built with matched no option, so the select showed blank (the push
+  // renderSerialTable (app.js:802-830), populateUIFromConfig's serial rows (3375-3385), syncSerialUIToConfig
+  // (3310-3330). A pulled baud the table was not built with matched no option, so the select showed blank (the push
   // still fell back to the config's value): fixed 2026-10-12, populateUIFromConfig rebuilds a port's options for its
   // baud (_serialBaudOptions, 790-800). Row serial.table_baud_options.
   await setup(page);

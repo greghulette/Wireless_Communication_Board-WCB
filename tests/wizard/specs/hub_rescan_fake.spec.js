@@ -333,7 +333,7 @@ test('wizard.hub_fake_flash_borrow a flash on the shared port this tab leads bor
 });
 
 test('wizard.pull_fake_slot_migration a board pulled in one slot that reports another number moves there, its terminal output with it and the old pane gone; if that slot is already connected it stays where it landed, with a warning, and the other slot is left alone', async ({ page }) => {
-  // boardPull's slot migration (app.js:7575-7617), migrateTerminalPane (9974-9985). The move itself and the duplicate
+  // boardPull's slot migration (app.js:7575-7617), migrateTerminalPane (9986-9997). The move itself and the duplicate
   // warning are wizard.pull_fake_usb_guards'. Row pull.slot_migration.
   await setup(page);
   await page.evaluate(() => { ensureTerminalPane(1); termLog(1, 'HIL-MARKER before the pull', 'sys'); });
