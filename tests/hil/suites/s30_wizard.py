@@ -228,8 +228,8 @@ for _key, _title in _FAKE_RESCAN:
 # section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
 # (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
 # devices (specs/audio_rescan_fake.spec.js), the row editors (specs/editors_rescan_fake.spec.js), the Connect button,
-# BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js). No board and no real port, so CI
-# runs them too.
+# BoardConnection's reconnect and I/O primitives (specs/connect_rescan_fake.spec.js), the shared-port hub and the
+# wrong-slot pull (specs/hub_rescan_fake.spec.js). No board and no real port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -259,6 +259,11 @@ _FAKE_RESCAN_M = (
     ("connect_fake_wait_board_ready", "waitForBoardReady keeps one listener, probes WCB_WEBTOOL_CONFIG_PULL then <funcChar>backup every 10 s while connected and read, resolves on the end marker and gives up at its timeout (connect.wait_board_ready)"),
     ("connect_fake_send_collect_idle", "send() writes one at a time and refuses with no port; sendAndCollect returns on its sentinel or timeout; sendAndAwaitIdle returns 250 ms after the last line, or ok false at its hard cap (connect.send_collect_idle)"),
     ("connect_fake_line_handling", "The boot banner's function identifier, delimiter, command character and version go into the board's boot characters, config, General fields and card; RC heartbeat and stick lines reach no listener (connect.line_handling)"),
+    ("hub_fake_protocol", "serial-hub.js: the tab with a port leads, a second tab follows (sends reach the port, bytes reach it) and takes over when the leader closes; an ambiguous match, a port that will not open or goes dead release the lock; releasePortKeepOpen keeps it open (hub.protocol)"),
+    ("hub_fake_shared_connection", "A shared BoardConnection follows the hub's port state on its card, splits the hub's bytes into lines and sends through it; becomeDirect takes the borrowed port, becomeShared hands it to a new hub without reopening it and remembers the slot (hub.shared_connection)"),
+    ("hub_fake_share_rebuild", "Share port tears down any shared connection, a shared relay's boards and card, and the old hub, then rebuilds it; a share no tab opens is torn down with a warning, off the hub and forgotten as the shared slot (hub.share_rebuild)"),
+    ("hub_fake_flash_borrow", "A flash on the shared port this tab leads borrows it open (releasePortKeepOpen, becomeDirect), flashes direct and re-shares after the reconnect; no re-share when the board did not return or another board took the slot (hub.flash_borrow)"),
+    ("pull_fake_slot_migration", "A board pulled in the wrong slot moves to its number with its terminal output, the old pane gone; if that slot is connected it stays where it landed with a warning and the other slot is untouched (pull.slot_migration)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):

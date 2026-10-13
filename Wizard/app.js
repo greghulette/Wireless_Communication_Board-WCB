@@ -6423,18 +6423,33 @@ async function modalSharedConnect() {
       // silently goes nowhere, and _hasSharedPort() still counts this slot as the shared one and
       // refuses a later direct connect. Tear it down and leave the slot genuinely unconnected.
       showToast(`WCB ${n}: shared — no tab has opened the port yet`, 'warning', 6000);
-      try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
-      delete boardConnections[n];
-      updateConnectionUI(n, false);
+      await _dropFailedShare(n);
     }
   } catch (e) {
     showToast(`Share failed: ${e.message}`, 'error');
-    try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
-    delete boardConnections[n];
-    updateConnectionUI(n, false);
+    await _dropFailedShare(n);
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+// Take down a slot whose share never opened (or failed). Off the hub it joined: disconnect() alone left the
+// connection's listeners on that hub, so a later 'state' from it redrew the card as connected for a connection that
+// no longer existed. And no longer remembered as the shared slot (wcbSharedSlot), as boardDisconnect does.
+async function _dropFailedShare(n) {
+  const c = boardConnections[n];
+  try {
+    if (c?._shared) {
+      const hub = c._hub;
+      c.leaveShared();
+      if (hub && _sharedHub === hub) _sharedHub = null;
+    } else {
+      await c?.disconnect?.();
+    }
+  } catch (_) {}
+  try { if (localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
+  delete boardConnections[n];
+  updateConnectionUI(n, false);
 }
 
 function openConnectModal(n) {
