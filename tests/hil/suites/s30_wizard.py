@@ -300,6 +300,9 @@ _FAKE_RESCAN_L = (
     ("init_fake_theme_mode_prefs", "Advanced shows every advanced-only part and the ETM details only with ETM on; the mode and the light/dark theme survive a reload (init.theme_mode_prefs)"),
     ("init_fake_splash_choice", "The splash's Setup Wizard opens the guided setup on its welcome step; Config Tool only closes the splash (init.splash_choice)"),
     ("init_fake_stale_branch_warning", "A leftover wcb_fw_branch override warns until dismissed, above the splash; a /dev/<branch>/Wizard preview says nothing (init.stale_branch_warning)"),
+    ("general_fake_derive_controller", "A pull or file load derives the Controller: CONTROLLER,ON,15 is NaviCore with id 15, neither is None, NaviCore wins over Kyber (general.derive_controller)"),
+    ("general_fake_dirty_flag", "Typing in General marks it dirty and turns Push All amber; a pull or file load does not; Push All clears it (general.dirty_flag)"),
+    ("general_fake_peerslive_badge", "A pulled PEERSLIVE shows 'mesh: N live peers' (singular for one); none hides the badge (general.peerslive_badge)"),
     ("toast_fake_ui", "Toasts escape their text, carry Copy and Dismiss, sit above an open modal; errors stay 12 s at least, duration 0 until dismissed (toast.ui)"),
 )
 for _key, _title in _FAKE_RESCAN_L:

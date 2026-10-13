@@ -211,6 +211,88 @@ test('wizard.init_fake_stale_branch_warning a leftover wcb_fw_branch override ra
   expect(page.wizErrors).toEqual([]);
 });
 
+test('wizard.general_fake_derive_controller the Controller follows the boards on a pull or a file load: a board pulled with CONTROLLER,ON,15 makes it NaviCore with id 15 (detail shown), one with neither NaviCore nor Kyber leaves None; from a file, a NaviCore board wins over a Kyber one', async ({ page }) => {
+  // deriveControllerFromBoards (app.js:1586-1595), syncGeneralFromConfig's controller block (9289-9304),
+  // refreshControllerUI (1548-1557), loadSystemFileContent (9551-9610). The Kyber derivation is
+  // wizard.app_fake_controller's. Row general.derive_controller.
+  const state = () => page.evaluate(() => ({
+    controller: systemConfig.general.controller, id: systemConfig.general.specialPeerId,
+    chip: document.querySelector('#g-controller-seg .ctrl-opt.selected')?.dataset.controller ?? null,
+    idField: document.getElementById('g-navicore-id').value,
+    detail: document.getElementById('g-navicore-detail').style.display !== 'none',
+  }));
+  await setup(page);
+  await pullFake(page, 1, board(['CONTROLLER,ON,15']));
+  expect(await state()).toEqual({ controller: 'navicore', id: 15, chip: 'navicore', idField: '15', detail: true });
+  expect(await page.evaluate(() => [boardConfigs[1].specialPeer, boardConfigs[1].specialPeerId])).toEqual([true, 15]);
+
+  await setup(page);
+  await pullFake(page, 1, board(['CONTROLLER,OFF']));
+  expect(await state()).toEqual({ controller: 'none', id: 20, chip: 'none', idField: '20', detail: false });
+
+  // A file: WCB1 with a local Kyber, WCB2 with the controller on id 12 - NaviCore, with WCB2's id.
+  await page.evaluate(() => loadSystemFileContent(['[GENERAL]', '?WCBQ,2^?WCBCH,1',
+    '[WCB1]', '?WCB,1^?WCBQ,2^?BAUD,S2,115200^?KYBER,LOCAL,S2',
+    '[WCB2]', '?WCB,2^?WCBQ,2^?CONTROLLER,ON,12'].join('\n')));
+  expect(await state()).toEqual({ controller: 'navicore', id: 12, chip: 'navicore', idField: '12', detail: true });
+  // ...and the same boards without it: Kyber.
+  await page.evaluate(() => loadSystemFileContent(['[GENERAL]', '?WCBQ,2^?WCBCH,1',
+    '[WCB1]', '?WCB,1^?WCBQ,2^?BAUD,S2,115200^?KYBER,LOCAL,S2', '[WCB2]', '?WCB,2^?WCBQ,2'].join('\n')));
+  expect(await state()).toMatchObject({ controller: 'kyber', chip: 'kyber', detail: false });
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.general_fake_dirty_flag typing in a General field sets the General dirty flag, turns Push All amber and says changes are pending; a pull or a file load showing a board\'s own values sets nothing; Push All clears the flag and turns the button green', async ({ page }) => {
+  // _notifyGeneralChanged and _mirrorGeneral (app.js:1227-1241), updatePushAllButton (3578-3585), boardGoAll's end
+  // (9530-9534). Row general.dirty_flag.
+  await setup(page);
+  await pullFake(page, 1, board());
+  await holdVerifyPulls(page);
+  expect(await page.evaluate(() => generalSettingsDirty)).toBe(false);
+  expect(await pushAllPending(page), 'a pull leaves Push All green').toEqual([false, true]);
+
+  const m = await toastMark(page);
+  await page.locator('#g-password').fill('dummy_typed_mesh_pw');
+  expect(await page.evaluate(() => generalSettingsDirty)).toBe(true);
+  expect(await pushAllPending(page)).toEqual([true, false]);
+  expect(await toastsSince(page, m)).toContain('Changes pending — push to all boards to apply');
+
+  await page.evaluate(() => boardGoAll());
+  expect(await page.evaluate(() => generalSettingsDirty)).toBe(false);
+  expect(await pushAllPending(page)).toEqual([false, true]);
+
+  // A file load mirrors its General values the same quiet way.
+  await page.evaluate(() => loadSystemFileContent(['[GENERAL]', '?WCBQ,2^?WCBCH,3^?EPASS,dummy_file_mesh_pw', '[WCB1]', '?WCB,1'].join('\n')));
+  expect(await page.evaluate(() => [generalSettingsDirty, document.getElementById('g-meshch').value])).toEqual([false, '3']);
+  expect(await pushAllPending(page)).toEqual([false, true]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.general_fake_peerslive_badge a pulled PEERSLIVE value shows "mesh: N live peers" (one peer in the singular) beside the quantity; a board or file that carries none hides the badge', async ({ page }) => {
+  // syncGeneralFromConfig's badge (app.js:9238-9249), parser PEERSLIVE (parser.js:532-537). Row general.peerslive_badge.
+  const badge = () => page.evaluate(() => {
+    const el = document.getElementById('g-peerslive');
+    return [el.style.display !== 'none', el.textContent];
+  });
+  await setup(page);
+  expect((await badge())[0], 'nothing pulled yet').toBe(false);
+  await pullFake(page, 1, board(['PEERSLIVE,3']));
+  expect(await badge()).toEqual([true, 'mesh: 3 live peers']);
+  // A file carries no PEERSLIVE: the badge goes.
+  await page.evaluate(() => loadSystemFileContent(['[GENERAL]', '?WCBQ,2^?WCBCH,1', '[WCB1]', '?WCB,1'].join('\n')));
+  expect((await badge())[0]).toBe(false);
+
+  await setup(page);
+  await pullFake(page, 1, board(['PEERSLIVE,1']));
+  expect(await badge()).toEqual([true, 'mesh: 1 live peer']);
+
+  await setup(page);
+  await pullFake(page, 1, without(board(), 'PEERSLIVE'));
+  expect(await page.evaluate(() => boardConfigs[1].livePeerCount ?? null)).toBe(null);
+  expect((await badge())[0], 'firmware that sends no PEERSLIVE').toBe(false);
+  expect(page.wizErrors).toEqual([]);
+});
+
 test('wizard.toast_fake_ui a toast shows its message as text (markup escaped), with Copy and Dismiss buttons; an info toast goes after its duration, an error stays at least 12 s whatever it asks for, a duration of 0 stays until dismissed, and a toast is drawn above an open modal', async ({ page }) => {
   // showToast (app.js:10410-10443), styles.css .toast-container (drawn above the modals since 2026-10-13). Row toast.ui.
   await page.clock.install();
