@@ -787,21 +787,25 @@ function _devCommit(val) {
 function _devHide() { if (_devPop) _devPop.style.display = 'none'; _devActive = -1; }
 
 // ─── Serial Table ─────────────────────────────────────────────────
+// A serial port's baud options. Software serial (S3-S5) is unreliable above 57600, so the picker discourages it — but
+// the FIRMWARE accepts the whole table on any port (WCB_Storage.cpp:155). Always include the value this port is
+// actually configured for, marked (!), otherwise the select matches no option and renders blank (syncSerialUIToConfig
+// then falls back to the config's value, but the card showed nothing). renderSerialTable builds the table with the
+// config the slot held then, and populateUIFromConfig rebuilds a port's options for a pulled or loaded baud.
+function _serialBaudOptions(p, curBaud) {
+  const maxBaud = p >= 3 ? 57600 : Infinity;
+  return BAUD_RATES.filter(b => b <= maxBaud || b === curBaud).map(b =>
+    `<option value="${b}" ${b === (curBaud || 9600) ? 'selected' : ''}>${b.toLocaleString()}${b > maxBaud ? ' (!)' : ''}</option>`
+  ).join('');
+}
+
 function renderSerialTable(n) {
   const tbody = document.getElementById(`b${n}-serial-tbody`);
   if (!tbody) return;
   tbody.innerHTML = '';
 
   for (let p = 1; p <= 5; p++) {
-    // Software serial (S3-S5) is unreliable above 57600, so the picker discourages it — but the
-    // FIRMWARE accepts the whole table on any port (WCB_Storage.cpp:155). Always include the value
-    // this port is actually configured for, otherwise the select matches no option, renders blank,
-    // and syncSerialUIToConfig reads that blank back as 9600 and pushes it to the board.
-    const maxBaud = p >= 3 ? 57600 : Infinity;
-    const curBaud = boardConfigs[n]?.serialPorts?.[p - 1]?.baud;
-    const baudOptions = BAUD_RATES.filter(b => b <= maxBaud || b === curBaud).map(b =>
-      `<option value="${b}" ${b === (curBaud || 9600) ? 'selected' : ''}>${b.toLocaleString()}${b > maxBaud ? ' (!)' : ''}</option>`
-    ).join('');
+    const baudOptions = _serialBaudOptions(p, boardConfigs[n]?.serialPorts?.[p - 1]?.baud);
 
     const row = document.createElement('tr');
     row.id = `b${n}-serial-row-${p}`;
@@ -1293,6 +1297,9 @@ function onWCBQuantityChange() {
       populateWCBDropdown(numSel, Math.max(qty, cur), cur, true);
     }
   }
+  // Every board's next push carries the quantity (boardGo reads g-wcbq), so it is pending like any other General edit:
+  // without this a quantity change left Push All green.
+  _notifyGeneralChanged();
 }
 
 function onGeneralPasswordChange() {
@@ -1317,6 +1324,11 @@ function onMeshChannelChange() {
   const ch = parseInt(document.getElementById('g-meshch').value) || 1;
   systemConfig.general.meshChannel = ch;
   for (const n in boardConfigs) boardConfigs[n].meshChannel = ch;
+  // An open WiFi note names the mesh channel: re-render it, or it kept the old number until the mode changed.
+  for (const n in boardConfigs) {
+    const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+    if (mode) updateWifiVisibility(n, mode);
+  }
   updateGeneralBaseline();
   _notifyGeneralChanged();
 }
@@ -2456,6 +2468,17 @@ function reconcileRemoteWithMaestros(n) {
 }
 
 // ─── Audio devices (MP3 Trigger / HCR Vocalizer / DFPlayer) ────────
+// A device enabled, disabled or switched Local/Remote takes or frees a port: re-filter every device picker on the board,
+// as the port-change handlers do. Each mode handler refreshed only its own, so enabling the MP3 on S3 left the HCR
+// (and DFPlayer) picker offering S3, and picking it there put two devices on one UART.
+function _refreshDevicePortPickers(n) {
+  updateMP3PortDropdown(n);
+  updateDFPPortDropdown(n);
+  updateHCRPortDropdown(n);
+  refreshAllWLEDPortDropdowns(n);
+  refreshAllMaestroPortDropdowns(n);
+}
+
 // Each device has an Enable checkbox (b<n>-<dev>-enable) that shows/hides its
 // settings block, plus a Local/Remote sub-radio (name b<n>-<dev>). The effective
 // "mode" is: not enabled -> 'none'; else the sub-radio value (default 'local').
@@ -2522,7 +2545,7 @@ function onMP3Change(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateMP3PortDropdown(n);
+  _refreshDevicePortPickers(n);   // the MP3 took or freed a port: every picker, not just its own
   onBoardFieldChange(n);
 }
 
@@ -2697,7 +2720,7 @@ function onDFPChange(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateDFPPortDropdown(n);
+  _refreshDevicePortPickers(n);   // the DFPlayer took or freed a port: every picker, not just its own
   onBoardFieldChange(n);
 }
 
@@ -2911,7 +2934,7 @@ function onHCRChange(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateHCRPortDropdown(n);
+  _refreshDevicePortPickers(n);   // the HCR took or freed a port: every picker, not just its own
   updateHCRStatusBtn(n);
   onBoardFieldChange(n);
 }
@@ -3352,6 +3375,9 @@ function populateUIFromConfig(n, config) {
   for (let p = 1; p <= 5; p++) {
     const sp = config.serialPorts[p - 1];
     const el = (id) => document.getElementById(`b${n}-s${p}-${id}`);
+    if (el('baud') && ![...el('baud').options].some(o => +o.value === sp.baud)) {
+      el('baud').innerHTML = _serialBaudOptions(p, sp.baud);   // a baud the table was not built with (marked (!))
+    }
     if (el('baud'))  el('baud').value   = sp.baud;
     if (el('bcin'))  el('bcin').checked = sp.broadcastIn;
     if (el('bcout')) el('bcout').checked = sp.broadcastOut;
@@ -6397,18 +6423,33 @@ async function modalSharedConnect() {
       // silently goes nowhere, and _hasSharedPort() still counts this slot as the shared one and
       // refuses a later direct connect. Tear it down and leave the slot genuinely unconnected.
       showToast(`WCB ${n}: shared — no tab has opened the port yet`, 'warning', 6000);
-      try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
-      delete boardConnections[n];
-      updateConnectionUI(n, false);
+      await _dropFailedShare(n);
     }
   } catch (e) {
     showToast(`Share failed: ${e.message}`, 'error');
-    try { await boardConnections[n]?.disconnect?.(); } catch (_) {}
-    delete boardConnections[n];
-    updateConnectionUI(n, false);
+    await _dropFailedShare(n);
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+// Take down a slot whose share never opened (or failed). Off the hub it joined: disconnect() alone left the
+// connection's listeners on that hub, so a later 'state' from it redrew the card as connected for a connection that
+// no longer existed. And no longer remembered as the shared slot (wcbSharedSlot), as boardDisconnect does.
+async function _dropFailedShare(n) {
+  const c = boardConnections[n];
+  try {
+    if (c?._shared) {
+      const hub = c._hub;
+      c.leaveShared();
+      if (hub && _sharedHub === hub) _sharedHub = null;
+    } else {
+      await c?.disconnect?.();
+    }
+  } catch (_) {}
+  try { if (localStorage.getItem('wcbSharedSlot') === String(n)) localStorage.removeItem('wcbSharedSlot'); } catch (_) {}
+  delete boardConnections[n];
+  updateConnectionUI(n, false);
 }
 
 function openConnectModal(n) {
@@ -6787,6 +6828,9 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     deriveControllerFromBoards();   // re-derive 'navicore' | 'kyber' | 'none'
     refreshControllerUI();          // chip state + g-navicore-detail + g-navicore-id
     refreshAllNavicoreStatus();     // per-board section visibility + status text
+    // The handlers above re-derived the baseline before the NaviCore fields were applied, so it still held the old
+    // controller and the next pull of newBoard opened this modal again. Re-derive it now that every field is in.
+    updateGeneralBaseline();
     // Amber Push Config on every board except newBoard — their boards still have
     // the old values and need a push. newBoard is already in sync (its board has
     // the new values and its baseline was set from the same pulled config).
@@ -9223,15 +9267,16 @@ function syncGeneralFromConfig(config) {
 
   const etmEl = document.getElementById('g-etm-enabled');
   if (etmEl) etmEl.checked = config.etm.enabled;
-  if (config.etm.enabled) {
-    set('g-etm-timeout', config.etm.timeoutMs);
-    set('g-etm-hb',      config.etm.heartbeatSec);
-    set('g-etm-miss',    config.etm.missedHeartbeats);
-    set('g-etm-boot',    config.etm.bootHeartbeatSec);
-    set('g-etm-count',   config.etm.messageCount);
-    set('g-etm-delay',   config.etm.messageDelayMs);
-    if (appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
-  }
+  // The details whether ETM is on or off: the board keeps them either way (its backup lists them), and every ETM input
+  // runs onGeneralETMChange, which reads all six back - left at the page's defaults for a board pulled with ETM off,
+  // the first ETM edit pushed those over the board's own values.
+  set('g-etm-timeout', config.etm.timeoutMs);
+  set('g-etm-hb',      config.etm.heartbeatSec);
+  set('g-etm-miss',    config.etm.missedHeartbeats);
+  set('g-etm-boot',    config.etm.bootHeartbeatSec);
+  set('g-etm-count',   config.etm.messageCount);
+  set('g-etm-delay',   config.etm.messageDelayMs);
+  if (config.etm.enabled && appMode === 'advanced') document.getElementById('etm-detail').classList.add('visible');
   const chksmEl = document.getElementById('g-etm-chksm');
   if (chksmEl) chksmEl.checked = config.etm.checksumEnabled ?? true;
 
