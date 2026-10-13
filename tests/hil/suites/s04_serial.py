@@ -2,6 +2,7 @@
 
 Timer deltas use the probe's own clock for both markers, so USB latency cancels out.
 """
+import re
 import time
 
 from hil.runner import test
@@ -273,4 +274,60 @@ def timer_stop_in_chain(bench):
                     problems.append(f"{b} arrived after {how}")
         finally:
             w.run("?SEQ,CLEAR,HILSTOP")
+    assert not problems, "; ".join(problems)
+
+
+@test("serial.timer_stop_group_and_forms", "?STOP as the first command of a timer group (;S1a^;T500^?STOP^;S1b) prints the stop line and b never goes out; a lowercase ?stop typed as a whole line stops a running chain; ?STOP,x is 'Unknown command: STOP,x' and the running chain carries on to its last write", needs=NEEDS)
+def timer_stop_group_and_forms(bench):
+    """Coverage re-scan 2026-10-12, timer.stop_forms. processCommandGroups (command_timer.cpp) checks each group's
+    first command with checkForTimerStopRequest before it waits out the group's delay or enqueues anything, so a ?STOP
+    group stops the chain as soon as it is the current group and the commands after ?STOP in it never run; without
+    that check the group would be enqueued whole and ;S1b would go out after the ?STOP. A whole typed line is caught by
+    processSerialCommandHelper with the same equalsIgnoreCase, and processLocalCommand's STOP root takes only a bare
+    STOP, so ?STOP,x falls through to the legacy table's 'Unknown command'."""
+    probe, ch = wire(bench, 1, "S1")
+    w = usb_wcb(bench)
+    stop = r"Timer sequence manually stopped"
+    problems = []
+    # (a) ?STOP leading a timer group
+    a, b = marker("a"), marker("b")
+    m, wm = probe.dev.mark(), w.dev.mark()
+    w.send(f";S1{a}^;T500^?STOP^;S1{b}")
+    probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+    try:
+        w.dev.expect(stop, timeout=3, since=wm)
+    except AssertionError:
+        problems.append("a ?STOP leading a timer group printed no stop line")
+    time.sleep(2.0)
+    if b.encode() in probe.received(ch, m):
+        problems.append(f"{b}, after ?STOP in the same group, went out")
+    # (b) a lowercase whole line
+    a, b = marker("a"), marker("b")
+    m = probe.dev.mark()
+    w.send(f";S1{a}^;T2500^;S1{b}")
+    probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+    wm = w.send("?stop")
+    try:
+        w.dev.expect(stop, timeout=2, since=wm)
+    except AssertionError:
+        problems.append("'?stop' printed no stop line")
+    time.sleep(3.0)
+    if b.encode() in probe.received(ch, m):
+        problems.append(f"{b} went out after '?stop'")
+    # (c) ?STOP with an argument is not a stop
+    a, b = marker("a"), marker("b")
+    m = probe.dev.mark()
+    w.send(f";S1{a}^;T1500^;S1{b}")
+    probe.expect_bytes(ch, a.encode(), timeout=2, since=m)
+    wm = w.send("?STOP,x")
+    try:
+        w.dev.expect(r"^Unknown command: STOP,x", timeout=2, since=wm)
+    except AssertionError:
+        problems.append(f"?STOP,x did not print 'Unknown command: STOP,x': {w.dev.since(wm)[-3:]}")
+    try:
+        probe.expect_bytes(ch, b.encode(), timeout=3, since=m)
+    except Exception:
+        problems.append(f"{b} never went out: ?STOP,x stopped the chain")
+    if any(re.search(stop, x) for x in w.dev.since(wm)):
+        problems.append("?STOP,x printed the stop line")
     assert not problems, "; ".join(problems)

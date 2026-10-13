@@ -987,6 +987,45 @@ def serial_mapped_input_refused(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("pwm.serial_map_on_pwm_input_refused", "With a PWM mapping S3 -> S4 live, a serial mapping reading S3 - text (?MAP,SERIAL,S3,S5) and raw (S3R) - is refused with 'Cannot create mapping: Port is used for PWM input', ?MAP,SERIAL,LIST stays empty and the chain gains no ?MAP,SERIAL line (2 reboots)", needs=["wcb1"], links=["W1S3", "W1S4"])
+def serial_map_on_pwm_input_refused(bench):
+    """Coverage re-scan 2026-10-12, map.input_conflicts. addSerialMonitorMapping (WCB_Storage.cpp) checks
+    isSerialPortUsedForPWMInput (WCB_PWM.cpp: an active pwmMappings slot with that input port) first among its port-owner
+    checks; pwm.out_port_lines_and_guards covers the PWM-output line and map.input_device_port_refused the HCR / MP3 /
+    DFPlayer one. The mapping is the one pwm.passthrough_local uses, with W1 S3 held at 0 by the probe so the input
+    never floats; it is checked after the boot that applies it, as a user meets it."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _no_pwm(bench, 1)
+    problems = []
+    with config_guard(bench, 1) as before:
+        if any(t.upper().startswith("?MAP,SERIAL,") for t in before[1]):
+            raise Skip("W1 already has a serial mapping")
+        try:
+            s3.pwm_out(0)
+            m = w.send("?MAP,PWM,S3,S4")
+            _pwm_reboot(w, m)
+            if not _has(w.run("?MAP,PWM,LIST"), "Input: Serial3 -> Outputs: S4"):
+                raise AssertionError("setup: ?MAP,PWM,LIST does not show the S3 -> S4 mapping after the reboot")
+            for line in ("?MAP,SERIAL,S3,S5", "?MAP,SERIAL,S3R,S5"):
+                out = [x.rstrip() for x in w.run(line)]
+                if "Cannot create mapping: Port is used for PWM input" not in out:
+                    problems.append(f"{line} printed {out}")
+                if _has(out, "Serial mapping set"):
+                    problems.append(f"{line} was accepted")
+                    w.run("?MAP,SERIAL,CLEAR,S3")
+            if not _has(w.run("?MAP,SERIAL,LIST"), "No serial mappings configured"):
+                problems.append("?MAP,SERIAL,LIST is not empty")
+            if any(t.upper().startswith("?MAP,SERIAL") for t in snapshot(bench, 1)):
+                problems.append("the chain holds a ?MAP,SERIAL line")
+        finally:
+            s3.pwm_out(0)
+            s4.pwm_stop()
+            _clear_local_mapping(w, "S3")
+            s3.pwm_stop()
+    assert not problems, "; ".join(problems)
+
+
 @test("pwm.wdp_autoconfig_and_selfheal", "WDP PWMTARGET auto-configures a remote output W2 lacks, and CLEAR,ALL leaves W2 without it (explicit clear or self-heal; several reboots)", needs=["wcb1"], links=["W1S3"])
 def wdp_autoconfig_and_selfheal(bench):
     s3 = link(bench, 1, "S3")

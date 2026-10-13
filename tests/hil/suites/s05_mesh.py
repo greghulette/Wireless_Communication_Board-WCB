@@ -957,6 +957,43 @@ def alias_ambiguous_wcb(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("mesh.self_numeric_local", ";W<own number>,<cmd>, ;w<own number>,<cmd> and the no-comma ;W<own number><cmd> run the command on W1 itself, once each, and send nothing: no '[ETM] Sent seq' carries it and no 'not a reachable target' line", needs=["wcb1"], links=[])
+def self_numeric_local(bench):
+    """Coverage re-scan 2026-10-12, wroute.self_numeric_local. processWCBMessage (WCB.ino) parses the target - the
+    whole digit run before a comma, or exactly one digit with no comma - and when it is WCB_Number enqueues the payload
+    locally (enqueueCommand) and returns before the ESP-NOW send; mesh.alias_ambiguous_wcb covers the own-ALIAS form.
+    A send would go through sendESPNowMessage, which under ?DEBUG,ETM,ON prints '[ETM] Sent seq <n>: <payload>'
+    (W1 is not its own peer, so a regression that tried would print 'WCB <n> is not a reachable target' instead).
+    Not WCB.run(): the payload is re-queued behind run()'s own echo."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    forms = [f";W{me},;S0{{}}", f";w{me},;S0{{}}"] + ([f";W{me};S0{{}}"] if me < 10 else [])
+    problems = []
+    w.debug("ETM", True)
+    try:
+        for form in forms:
+            t = marker()
+            line = form.format(t)
+            m = w.send(line)
+            try:
+                w.dev.expect(rf"^{t}(?![0-9A-F])", timeout=3, since=m)
+            except AssertionError:
+                problems.append(f"{line!r} did not run on W1: {quiet_lines(w.dev, m)[-3:]}")
+            time.sleep(1.0)
+            out = [x.rstrip() for x in w.dev.since(m)]
+            runs = sum(1 for x in out if re.match(rf"^{t}(?![0-9A-F])", x))
+            if runs > 1:
+                problems.append(f"{line!r} ran {runs} times")
+            sent = [x for x in out if x.startswith("[ETM] Sent seq") and t in x]
+            if sent:
+                problems.append(f"{line!r} went out over ESP-NOW: {sent[0]!r}")
+            if any("is not a reachable target" in x for x in out):
+                problems.append(f"{line!r} was treated as a remote target")
+    finally:
+        w.debug("ETM", False)
+    assert not problems, "; ".join(problems)
+
+
 @test("mesh.alias_ambiguous_client", "A temporary client advertising W2's alias as its device type makes ;W<alias> ambiguous on W1: refused, nothing reaches W2 S2; once the client has left and been forgotten, the alias reaches W2 again", needs=["wcb1", "probe1"])
 def alias_ambiguous_client(bench):
     """WCB-WP54. wdpResolveAlias (WCB_WDP.cpp) counts every valid neighbor whose alias matches, WCBs and clients alike,

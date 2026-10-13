@@ -662,6 +662,59 @@ def raw_remote_s0_refused(bench):
             _clear(w, "S2")
 
 
+@test("map.input_device_port_refused", "A serial mapping is refused on a port an MP3 Trigger, then a DFPlayer, owns - text (?MAP,SERIAL,S5,S4) and raw (S5R) - with 'Cannot create mapping: Port is used by an HCR, MP3 Trigger or DFPlayer'; ?MAP,SERIAL,LIST stays empty and the chain gains no ?MAP,SERIAL line (W1, WDP off; no reboot)", needs=["wcb1"], links=[])
+def input_device_port_refused(bench):
+    """Coverage re-scan 2026-10-12, map.input_conflicts. addSerialMonitorMapping (WCB_Storage.cpp) refuses an input port
+    isSerialPortUsedForHCR / ForMP3 / ForDFP claims (tracker #99), after its PWM-input and PWM-output checks; the HCR term
+    is devices.serial_mapped_port_refused, the PWM-output line pwm.out_port_lines_and_guards and the PWM-input line
+    pwm.serial_map_on_pwm_input_refused. The devices sit on W1's S5 for a moment, with W1's WDP off so no board learns a
+    route to them (as pwm.p_guard_device_ports does); each kind's baseline route is re-sent, or the kind cleared, and
+    S5's baud, broadcast flags and label are put back from the baseline."""
+    from suites.s14_pwm import _no_pwm, _require_free_ports
+    from suites.s22_maestro_kyber import _wdp_off
+    w = usb_wcb(bench)
+    _no_mappings(w)
+    _no_pwm(bench, 1)
+    _require_free_ports(bench, 1, "S5")
+    hosted = [t for t in bench.config_tokens(1) if t.upper().startswith(("?HCR,", "?MP3,", "?DFP,"))
+              and not re.match(r"^\?(HCR|MP3|DFP),REMOTE,W\d+$", t, re.I)]
+    if hosted:
+        raise Skip(f"W1 already hosts a device: {hosted}")
+    refusal = "Cannot create mapping: Port is used by an HCR, MP3 Trigger or DFPlayer"
+    problems = []
+    with config_guard(bench, 1) as before:
+        s5_tokens = [t for t in before[1] if re.match(r"^\?(BAUD,S5,|BCAST,(IN|OUT),S5,|LABEL,S5,)", t, re.I)]
+        with _wdp_off(w, before[1]):
+            try:
+                for kind, cmd, want in (("MP3", "?MP3,S5:9600:V64", "[MP3] Configured: S5 at 9600 baud"),
+                                        ("DFP", "?DFP,S5:9600:V0", "[DFP] Configured: S5 at 9600 baud")):
+                    out = w.run(cmd)
+                    if not _has(out, want):
+                        raise AssertionError(f"setup: {cmd} printed {out}")
+                    for line in ("?MAP,SERIAL,S5,S4", "?MAP,SERIAL,S5R,S4"):
+                        out = [x.rstrip() for x in w.run(line)]
+                        if refusal not in out:
+                            problems.append(f"{line} with the {kind} on S5 printed {out}")
+                        if _has(out, "Serial mapping set"):
+                            problems.append(f"{line} with the {kind} on S5 was accepted")
+                            _clear(w, "S5")
+                    if not _has(_list(w), "No serial mappings configured"):
+                        problems.append(f"with the {kind} on S5, ?MAP,SERIAL,LIST is not empty: {_list(w)}")
+                    if any(t.upper().startswith("?MAP,SERIAL") for t in snapshot(bench, 1)):
+                        problems.append(f"with the {kind} on S5 the chain holds a ?MAP,SERIAL line")
+                    route = token(before[1], f"?{kind},REMOTE,")
+                    w.run(route if route else f"?{kind},CLEAR")
+            finally:
+                for kind in ("DFP", "MP3"):
+                    route = token(before[1], f"?{kind},REMOTE,")
+                    w.run(route if route else f"?{kind},CLEAR")
+                if not token(before[1], "?LABEL,S5,"):
+                    w.run("?LABEL,CLEAR,S5")
+                for t in s5_tokens:
+                    w.run(t)
+    assert not problems, "; ".join(problems)
+
+
 @test("map.unreachable_board", "A destination on a non-peer board fails visibly: raw under ?DEBUG,ON, text as an ungated ETM line", needs=["wcb1"])
 def unreachable_board(bench):
     """The destination is absent_wcbs' first number, 3 on a bench of W1 and W2: no board answers to it, and it is a peer

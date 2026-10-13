@@ -166,6 +166,68 @@ def help_corrected_pages(bench):
     assert not problems, "; ".join(problems)
 
 
+HELP_HEAD = "Wireless Communication Board (WCB) - Command Reference"
+
+
+@test("help.data_bearing_exempt", "The trailing-'?' help shortcut spares the data-bearing verbs: ?SEQ,SAVE and ?Seq,Save with a value ending in '?' store it, '?' included, and ?SEQ,GET reads it back; ?CMDCHAR,? and ?Cmdchar,? reach the setter and are refused as the function identifier; ?FuncChar,? reaches its setter; while ?DELIM?, ?Delim? and ?SEQ? still print their help pages and change nothing", needs=["wcb1"], links=[])
+def help_data_bearing_exempt(bench):
+    """Coverage re-scan 2026-10-12, help.data_bearing_exempt. processLocalCommand (WCB.ino) turns any '?' command that
+    ends in '?' into printCommandHelp, except when the verb head, upper-cased, starts MGMT, / SEQ, / FUNCCHAR, /
+    CMDCHAR, / DELIM, / WIFI, (tracker #95: any letter case). The MGMT and WIFI arms are mesh.frag_trailing_q(_mixed_case)
+    and wifi.passphrase_trailing_q, ?DELIM,? is chars.delim_collision_refused; this covers SEQ in both cases, CMDCHAR
+    reaching prefixCharOk, a mixed-case FUNCCHAR, and the bare '?DELIM?' / '?SEQ?' forms, which have no comma and so
+    are still help. ?CMDCHAR,? is sent with dev.send: if the refusal ever regressed the command character would be '?',
+    which ?CMDCHAR,; undoes (the function identifier is tested first, handleSingleCommand). ?FuncChar,? sets the
+    identifier it already has."""
+    w = usb_wcb(bench)
+    me = bench.usb_wcb_number()
+    problems = []
+    refusal = ("'?' is already the function identifier — the entire '?' command family would stop working. "
+               "Pick a different command character.")
+    with config_guard(bench, 1) as before:
+        if token(before[1], "?CMDCHAR,") != "?CMDCHAR,;" or any(t.upper().startswith(("?DELIM,", "?FUNCCHAR,"))
+                                                               for t in before[1]):
+            raise Skip("W1's prefix characters are not the defaults ^ ? ;")
+        keys = []
+        try:
+            for verb in ("?SEQ,SAVE", "?Seq,Save"):
+                key, value = marker("Q"), marker("v") + "?"
+                keys.append(key)
+                out = [x.rstrip() for x in w.run(f"{verb},{key},{value}")]
+                if f"Stored: Key='{key}', Value='{value}'" not in out:
+                    problems.append(f"{verb},<key>,<value ending in '?'> printed {out[:4]}"
+                                    + (" (the help page)" if _has(out, HELP_HEAD) else ""))
+                got = [x.rstrip() for x in w.run(f"?SEQ,GET,{key}")]
+                if f"[MGMT:SEQVAL,{me}]{key},OK,{value}" not in got:
+                    problems.append(f"after {verb} ?SEQ,GET read back {got}, not the value with its '?'")
+            for line in ("?CMDCHAR,?", "?Cmdchar,?"):
+                m = w.dev.mark()
+                w.dev.send(line)
+                time.sleep(0.6)
+                out = [x.rstrip() for x in w.dev.since(m)]
+                if refusal not in out:
+                    problems.append(f"{line} printed {out[:4]}" + (" (the help page)" if _has(out, HELP_HEAD) else ""))
+                if _has(out, "Command character updated to"):
+                    problems.append(f"{line} changed the command character")
+                    w.dev.send("?CMDCHAR,;")
+                    time.sleep(0.5)
+            out = [x.rstrip() for x in w.run("?FuncChar,?")]
+            if "Local function identifier updated to '?'" not in out:
+                problems.append(f"?FuncChar,? printed {out[:4]}" + (" (the help page)" if _has(out, HELP_HEAD) else ""))
+            for line, want in (("?DELIM?", "  Sets the command delimiter character used to chain multiple"),
+                               ("?Delim?", "  Sets the command delimiter character used to chain multiple"),
+                               ("?SEQ?", "Usage: ?SEQ,<command>[,key[,value]]")):
+                out = [x.rstrip() for x in w.run(line, timeout=8)]
+                if want not in out:
+                    problems.append(f"{line} did not print its help page: {out[:4]}")
+                if _has(out, "Delimiter updated") or _has(out, "Invalid format"):
+                    problems.append(f"{line} reached the setter: {out[:4]}")
+        finally:
+            for k in keys:
+                w.run(f"?SEQ,CLEAR,{k}")
+    assert not problems, "; ".join(problems)
+
+
 @test("persist.baud_label_validation", "?BAUD and ?LABEL refusals: no rate, an unknown rate, a port outside 1-5, a soft port above 115200; the soft-port warning above 57600, where the rate still applies (put back at once); ?LABEL without text, an unknown form, a bad CLEAR target, and a port outside 1-5, which ?LABEL and the old ?SLCS spelling now name (F7); ?LABEL,CLEAR,ALL clears all five, put back from the baseline", needs=["wcb1"], links=[])
 def baud_label_validation(bench):
     """The ?BAUD and ?LABEL handlers (WCB.ino), updateBaudRate and saveSerialLabelToPreferences (WCB_Storage.cpp).

@@ -25,8 +25,8 @@ import re
 import time
 
 from hil.runner import Skip, test
-from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, require_tokens, snapshot, token,
-                           usb_wcb)
+from suites.common import (Console, Watch, absent_wcbs, config_guard, link, marker, prime, require_tokens, snapshot,
+                           token, usb_wcb)
 from suites.s14_pwm import _no_pwm, _pwm_reboot
 from suites.s22_maestro_kyber import _kyber_list, _require_kyber_broadcast_remote, _restore_remote, _wdp_off
 from suites.s99_etm import _peers_online
@@ -563,6 +563,70 @@ def reset_legacy(bench):
                 watch.expect(s3, t.encode(), timeout=2)
             except AssertionError:
                 problems.append("a broadcast did not reach S3 after the reset")
+        finally:
+            for f in flags:
+                w.run(f)
+    assert not problems, "; ".join(problems)
+
+
+@test("bcast.reset_survives_reboot", "?BCAST,RESET with S0 echo on and S3 shut both ways prints the Created lines and 'Done. Broadcast output re-enabled and input blocking cleared on S1-S5 (device ports included), S0 echo off.'; at once and again after a W1 reboot the chain holds every port ON/ON and S0 OFF, a typed broadcast reaches S3 and is not echoed on USB, and a line typed into S3 is broadcast, not blocked; the baseline flags are replayed (1 reboot)", needs=["wcb1"])
+def bcast_reset_survives_reboot(bench):
+    """Coverage re-scan 2026-10-12, bcastcmd.reset. resetBroadcastSettingsNamespace (WCB_Storage.cpp) clears bdcst_set,
+    writes S1-S5 back as true, then sets the RAM flags - every port's output on and input unblocked, broadcastToS0
+    false - and persists BOTH namespaces (saveBroadcastSettingsToPreferences, saveBroadcastBlockSettings), which is
+    what lets the reset outlive a reboot; bcast.reset_legacy checks the legacy spelling's lines and one port without a
+    reboot, input.bcast_reset_persists the ?config reload. A broadcast typed on USB is echoed back on USB only while
+    broadcastToS0 is on (processBroadcastCommand, WCB.ino). RESET opens every port, W1's included (Greg, 2026-09-21),
+    until the baseline ?BCAST tokens go back; nothing on W1's ports answers a broadcast."""
+    s3 = link(bench, 1, "S3")
+    w = usb_wcb(bench)
+    require_tokens(bench, 1, "?BCAST,OUT,S3,ON", "?BCAST,IN,S3,ON", "?BCAST,OUT,S0,OFF")
+    done = ("Done. Broadcast output re-enabled and input blocking cleared on S1-S5 (device ports included), "
+            "S0 echo off.")
+    problems = []
+
+    def check(when):
+        toks = snapshot(bench, 1)
+        problems.extend(f"{when}: the chain lacks {t}" for p in range(1, 6)
+                        for t in (f"?BCAST,OUT,S{p},ON", f"?BCAST,IN,S{p},ON") if t not in toks)
+        if "?BCAST,OUT,S0,OFF" not in toks:
+            problems.append(f"{when}: the chain does not hold ?BCAST,OUT,S0,OFF")
+        t = marker()
+        watch = Watch(s3)
+        m = w.send(t)
+        try:
+            watch.expect(s3, t.encode(), timeout=2)
+        except AssertionError:
+            problems.append(f"{when}: a typed broadcast did not reach S3")
+        time.sleep(0.5)
+        if any(x.strip() == t for x in w.dev.since(m)):
+            problems.append(f"{when}: a typed broadcast was echoed on USB (S0 echo still on)")
+        prime(s3)
+        time.sleep(0.3)
+        t = marker()
+        m = w.dev.mark()
+        s3.send(t.encode() + b"\r")
+        time.sleep(1.0)
+        if any(x.startswith("Broadcast blocked from Serial3") for x in w.dev.since(m)):
+            problems.append(f"{when}: a line typed into S3 was blocked")
+
+    with config_guard(bench, 1) as before:
+        flags = [t for t in before[1] if t.upper().startswith("?BCAST,")]
+        try:
+            for cmd in ("?BCAST,OUT,S0,ON", "?BCAST,IN,S3,OFF", "?BCAST,OUT,S3,OFF"):
+                w.run(cmd)
+            toks = snapshot(bench, 1)
+            if not all(t in toks for t in ("?BCAST,OUT,S0,ON", "?BCAST,IN,S3,OFF", "?BCAST,OUT,S3,OFF")):
+                raise AssertionError("setup: the S0 / S3 flags did not take")
+            out = [x.rstrip() for x in w.run("?BCAST,RESET")]
+            problems += _in_order(out, ["Clearing broadcast_settings namespace...",
+                                        "Recreating broadcast_settings with defaults..."]
+                                  + [f"  Created S{n} = true (result: SUCCESS)" for n in range(1, 6)] + [done],
+                                  "?BCAST,RESET")
+            check("after ?BCAST,RESET")
+            w.reboot()
+            _peers_online(bench, w, strict=False)
+            check("after the reboot")
         finally:
             for f in flags:
                 w.run(f)
