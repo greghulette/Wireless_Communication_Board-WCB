@@ -86,7 +86,7 @@ test('wizard.wiz_fake_open_steps opening the setup wizard starts a fresh session
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.wiz_fake_validate_steps the wizard\'s checks: a control system must be chosen; the network password needs 8 characters and each MAC octet two hex digits; slot ids must be 1-99; two Maestros on one board and port are refused; Next with a failing check toasts it and stays put', async ({ page }) => {
+test('wizard.wiz_fake_validate_steps the wizard\'s checks: a control system must be chosen; the network password needs 8 characters and each MAC octet two hex digits; slot ids must be 1-20 (the firmware\'s MAX_WCB_COUNT), which the identity step\'s hints and inputs say too; two Maestros on one board and port are refused; Next with a failing check toasts it and stays put', async ({ page }) => {
   // wizardValidateStep (app.js:11997-12088), wizardNext (10562-10575). Unique ids, the controller's reserved id, the HW
   // version and the Kyber-port clashes are wizard.app_fake_setup_wizard's; the network characters
   // wizard.push_fake_delimiter's. Row wiz.validate_steps.
@@ -118,7 +118,8 @@ test('wizard.wiz_fake_validate_steps the wizard\'s checks: a control system must
   expect(await toastsSince(page, m)).toBe('Password must be at least 8 characters.');
   expect(await page.evaluate(() => wizardState.steps[wizardState.currentIdx])).toBe('network');
 
-  // Identity: an id out of 1-99.
+  // Identity: an id out of 1-20 (the check accepted 1-99 and the hint said 1-8 until 2026-10-13; the firmware's
+  // MAX_WCB_COUNT is 20). The hints and the inputs' max say the same range, for a WCB and a client slot.
   await page.evaluate(() => {
     wizardState.quantity = 2;
     wizardInitBoards(2);
@@ -131,10 +132,15 @@ test('wizard.wiz_fake_validate_steps the wizard\'s checks: a control system must
     document.getElementById('wiz-b1-wcbnum').value = b;
     return wizardValidateStep('identity');
   }, { a, b });
-  for (const [a, b] of [['0', '2'], ['1', '100'], ['', '2'], ['-3', '2']]) {
-    expect.soft(await ids(a, b), `${a},${b}`).toBe('Each slot must have an ID between 1 and 99.');
+  for (const [a, b] of [['0', '2'], ['1', '21'], ['1', '99'], ['', '2'], ['-3', '2']]) {
+    expect.soft(await ids(a, b), `${a},${b}`).toBe('Each slot must have an ID between 1 and 20.');
   }
-  expect(await ids('1', '99')).toBe(null);
+  expect(await ids('1', '20')).toBe(null);
+  expect(await page.evaluate(() => ['wiz-b0-wcbnum', 'wiz-b0-cnum'].map((id) => {
+    const el = document.getElementById(id);
+    return [el.min, el.max, el.parentElement.querySelector('.wiz-hint').dataset.tip];
+  }))).toEqual([['1', '20', 'Unique ID for this board (1–20). Each board must have a different number.'],
+                ['1', '20', 'The device_id this client occupies in your network (1–20). Must be unique among all slots.']]);
 
   // Maestro setup: two rows on Board 1, Serial 1.
   await page.evaluate(() => {
@@ -155,7 +161,7 @@ test('wizard.wiz_fake_validate_steps the wizard\'s checks: a control system must
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.wiz_fake_step_html each wizard step renders its controls from the wizard\'s state: identity tabs with the WCB or client fields and the HW 3.2 USB note; serial rows with the Kyber and Maestro ports locked at their bauds; Kyber S1/S2 with a Marcduino list leaving out the Kyber port; Maestro ports with the Kyber ones disabled and no client board; ETM fields; the review summary; the firmware choice; the connect rows', async ({ page }) => {
+test('wizard.wiz_fake_step_html each wizard step renders its controls from the wizard\'s state: identity tabs with the WCB or client fields and the HW 3.2 USB note; serial rows with the Kyber and Maestro ports locked at their bauds; Kyber S1/S2 with a Marcduino list leaving out the Kyber port; Maestro ports with the Kyber ones disabled and no client board; ETM fields whose hints quote the firmware\'s defaults; the review summary; the firmware choice; the connect rows', async ({ page }) => {
   // wizardHTMLIdentity, wizardHTMLSerial, wizardHTMLKyberConfig, onWizKyberPortChange, wizardHTMLMaestroConfig,
   // wizardHTMLEtm, wizardHTMLReview, wizardHTMLFirmware, wizardHTMLConnect (app.js:10877-11590). The identity and
   // maestro-config renders are also wizard.app_fake_setup_wizard's. Row wiz.step_html.
@@ -222,6 +228,11 @@ test('wizard.wiz_fake_step_html each wizard step renders its controls from the w
     .concat([document.getElementById('wiz-etm-chksm').checked, document.getElementById('wiz-etm-enabled').checked])))
     .toEqual(['650', '12', '4', '3', false, true]);
   expect(await shownEl(page, 'wiz-etm-fields')).toBe(true);
+  // Each hint quotes the firmware's default (WCB.ino etmTimeoutMs 500, etmHeartbeatSec 10, etmMissedHeartbeats 5,
+  // etmBootHeartbeatSec 2 - the same in WCB_Storage.cpp's NVS load); until 2026-10-13 they said 250 ms / 5 s / 3 / 30 s.
+  expect(await page.evaluate(() => ['wiz-etm-timeout', 'wiz-etm-hb', 'wiz-etm-miss', 'wiz-etm-boot']
+    .map((id) => document.getElementById(id).parentElement.querySelector('.wiz-hint').dataset.tip.match(/Default: (.*)$/)?.[1])))
+    .toEqual(['500 ms.', '10 sec.', '5.', '2 sec.']);
   await page.evaluate(() => wizardToggleEtmDetail(false));
   expect([await shownEl(page, 'wiz-etm-fields'), await page.evaluate(() => wizardState.etmEnabled)]).toEqual([false, false]);
 
@@ -270,6 +281,27 @@ test('wizard.wiz_fake_step_html each wizard step renders its controls from the w
   expect(body).toContain('Client slots — not connected by the Wizard');
   expect(body).toContain('ID 3 — Probe');
   expect(body).toContain('HW 3.2 (ESP32-S3) has two USB ports');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.wiz_fake_connect_tip the setup wizard\'s Connect & Push tip names only buttons the row\'s port panel offers - Detect and + Authorize, beside Select by COM# - and no "Use →", a button the panel no longer has', async ({ page }) => {
+  // wizardHTMLConnect's tip, wizPortRenderPanel (app.js). The tip said "Or click Use → to pick a port directly", but the
+  // port list with its Use buttons is gone (wizPortUse has no caller left in the page): the sentence was dropped
+  // 2026-10-13. Row wiz.connect_tip_use_button.
+  await setup(page);
+  await kyberState(page, 'firmware', { connectMode: 'seq', connectSeqN: 1 });
+  const r = await page.evaluate(() => {
+    document.getElementById('wizard-body').innerHTML = wizardBuildStepHTML('connect');
+    wizPortRenderPanel(1);   // the row's panel with no detect running: what its buttons are
+    const body = document.querySelector('.wizard-connect-tip-body');
+    return { text: body.textContent.replace(/\s+/g, ' ').trim(), named: [...body.querySelectorAll('strong')].map((b) => b.textContent.trim()),
+             panel: [...document.querySelectorAll('#wiz-port-panel-1 button')].map((b) => b.textContent.trim()) };
+  });
+  expect(r.text).not.toContain('Use →');
+  expect(r.text).toContain('Click 🔍 Detect on each row, then press the reset button on that board to auto-select its port. First time connecting?');
+  expect(r.named).toEqual(['🔍 Detect', 'First time connecting?', '+ Authorize…']);
+  expect(r.panel).toEqual(['🔍 Detect', '+ Authorize…', 'Select by COM#…']);
+  for (const b of r.named.filter((t) => t !== 'First time connecting?')) expect(r.panel, `the tip names ${b}`).toContain(b);
   expect(page.wizErrors).toEqual([]);
 });
 

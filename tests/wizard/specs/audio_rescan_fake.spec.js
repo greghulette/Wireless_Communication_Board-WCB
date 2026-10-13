@@ -71,7 +71,7 @@ test('wizard.audio_fake_toggle_and_mode an audio device\'s enable box shows its 
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.audio_fake_port_dropdowns a device\'s port picker offers only free ports and its own, a port change refreshes every other picker, and an HCR moved onto S3-S5 has its bauds above 57600 hidden and its 115200 clamped to 57600 - in the HCR picker, the config and the port\'s own serial row', async ({ page }) => {
+test('wizard.audio_fake_port_dropdowns a device\'s port picker offers only free ports and its own, a port change refreshes every other picker, and an HCR moved onto S3-S5 has its bauds above 57600 hidden and its 115200 clamped to 57600 - in the HCR picker, the config and the port\'s own serial row - which the HCR port and baud tooltips say (they said 9600 until 2026-10-13)', async ({ page }) => {
   // updateMP3PortDropdown (app.js:2624-2643), updateHCRPortDropdown (2853-2869), updateDFPPortDropdown (2777-2796),
   // onHCRPortChange (2942-2973), _hcrApplyBaudCap (2828-2851), onMP3PortChange (2552-2598). Enabling a device (or
   // switching it Local / Remote) refreshed only its own picker, so the MP3 taking S3 left the HCR picker offering S3:
@@ -105,6 +105,10 @@ test('wizard.audio_fake_port_dropdowns a device\'s port picker offers only free 
   // Back on a hardware port, every baud is offered again.
   await edit(page, '#b1-hcr-port', '2');
   expect(await visibleOptions(page, 'b1-hcr-baud')).toEqual(['9600', '19200', '38400', '57600', '115200']);
+  // The tooltips say the same cap (WCB_HCR.cpp: S3-S5 take 9600-57600, 115200 is refused there).
+  expect(await page.evaluate(() => ['b1-hcr-port-wrap', 'b1-hcr-baud-wrap'].map((id) => document.querySelector(`#${id} .wiz-hint`).dataset.tip)))
+    .toEqual(['Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 57,600 baud.',
+              'HCR serial baud. S3–S5 (software serial) allow up to 57,600; 115,200 needs S1 or S2.']);
 
   // An MP3 enabled on a board whose S1 hosts a WLED: offered S2-S5, and the WLED row no longer offers the MP3's port.
   await setup(page);
@@ -147,10 +151,10 @@ test('wizard.audio_fake_clamps the MP3 volume clamps to 0-64, the DFPlayer volum
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.audio_fake_route_host the Remote host picker lists the WCB numbers up to the quantity without this board\'s own, never selects this board, and keeps a pulled host; mesh-reported boards above the quantity are not offered (today)', async ({ page }) => {
-  // _populateRouteHostDropdown (app.js:2873-2892), reached from onMP3Change / onHCRChange / onDFPChange and
-  // populateUIFromConfig. Whether a board the mesh reported above the quantity belongs in the list (mapping
-  // destinations include those, appendMappingDestination) is left as it is. Row audio.route_host_dropdown.
+test('wizard.audio_fake_route_host the Remote host picker offers the boards a mapping destination offers - the quantity\'s floor and every board the mesh reported above it - without this board\'s own, never selects this board, and keeps a pulled host', async ({ page }) => {
+  // _populateRouteHostDropdown (app.js), reached from onMP3Change / onHCRChange / onDFPChange and populateUIFromConfig.
+  // It listed 1 to the quantity only; since 2026-10-13 it offers what appendMappingDestination does, the boards the
+  // mesh reported above the quantity included (desiredBoardNumbers). Row audio.route_host_dropdown.
   await setup(page);
   await pullFake(page, 2, board([], { wcb: 2, wcbq: 3 }));
   await holdVerifyPulls(page);
@@ -169,15 +173,38 @@ test('wizard.audio_fake_route_host the Remote host picker lists the WCB numbers 
   await edit(page, 'input[name="b1-dfp"][value="remote"]', true);
   expect([await options(page, 'b1-dfp-remote-wcb'), await page.evaluate(() => boardConfigs[1].dfp.remoteWCB)]).toEqual([['2'], 2]);
 
-  // A pulled route to WCB5, above the quantity of 3: kept and selected. A board the mesh reported above the quantity
-  // (WCB9) is not offered - the list is the quantity's floor, the board's own number and the current host.
+  // A pulled route to WCB5, above the quantity of 3: kept and selected. A board the mesh reports above the quantity
+  // (WCB9) is offered at once, as a mapping destination's list offers it, the pick kept; and after a Local/Remote round
+  // trip, and once picked.
   await setup(page);
   await pullFake(page, 2, board(['HCR,REMOTE,W5'], { wcb: 2, wcbq: 3 }));
-  await page.evaluate(() => { addDiscoveredBoards([9]); });
+  await holdVerifyPulls(page);
+  const host = () => page.evaluate(() => [document.getElementById('b2-hcr-remote-wcb').value, boardConfigs[2].hcr.remoteWCB]);
   expect(await options(page, 'b2-hcr-remote-wcb')).toEqual(['1', '3', '4', '5']);
-  expect(await page.evaluate(() => document.getElementById('b2-hcr-remote-wcb').value)).toBe('5');
+  expect(await host()).toEqual(['5', 5]);
+  await page.evaluate(() => { addDiscoveredBoards([9]); });
+  expect(await options(page, 'b2-hcr-remote-wcb')).toEqual(['1', '3', '4', '5', '6', '7', '8', '9']);
+  expect(await host()).toEqual(['5', 5]);
   await edit(page, 'input[name="b2-hcr"][value="local"]', true);
   await edit(page, 'input[name="b2-hcr"][value="remote"]', true);
-  expect(await options(page, 'b2-hcr-remote-wcb')).not.toContain('9');
+  expect(await options(page, 'b2-hcr-remote-wcb')).toEqual(['1', '3', '4', '5', '6', '7', '8', '9']);
+  expect(await host()).toEqual(['5', 5]);
+  await edit(page, '#b2-hcr-remote-wcb', '9');
+  expect(await host()).toEqual(['9', 9]);
+  expect(await sent(page, 2)).toEqual(['2:?HCR,REMOTE,W9']);
+  // The same numbers a new mapping destination on this board offers (its own number is "Local" there, 0).
+  const destWcbs = await page.evaluate(() => {
+    addMappingRow(2);
+    const card = [...document.querySelectorAll('#b2-mappings-container .mapping-card')].pop();
+    addMappingDestination(card.id, 2);
+    return [...card.querySelector('[id^="map-dest-"][id$="-wcb"]').options].map((o) => o.value).filter((v) => v !== '0');
+  });
+  expect(await options(page, 'b2-hcr-remote-wcb')).toEqual(destWcbs);
+  // MP3 and DFPlayer the same.
+  for (const dev of ['mp3', 'dfp']) {
+    await edit(page, `#b2-${dev}-enable`, true);
+    await edit(page, `input[name="b2-${dev}"][value="remote"]`, true);
+    expect(await options(page, `b2-${dev}-remote-wcb`), dev).toEqual(['1', '3', '4', '5', '6', '7', '8', '9']);
+  }
   expect(page.wizErrors).toEqual([]);
 });

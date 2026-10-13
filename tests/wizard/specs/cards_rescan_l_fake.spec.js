@@ -356,9 +356,11 @@ test('wizard.kyber_fake_repush_warning a Maestro edit on another board reminds t
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.audio_fake_hcr_status_button the HCR Status button shows only on a board with HCR configured, and is enabled only while that board is reachable (on USB, or through a connected relay)', async ({ page }) => {
-  // updateHCRStatusBtn (app.js:13190-13199), called from updateConnectionUI and the HCR handlers. The modal is
-  // wizard.editors_fake_live_controls'. Row audio.hcr_status_button.
+test('wizard.audio_fake_hcr_status_button the HCR Status button shows only on a board with HCR configured, and is enabled only while that board is on USB; on a board managed through a relay it is disabled, with a tooltip saying relay is not supported for it', async ({ page }) => {
+  // updateHCRStatusBtn (app.js), called from updateConnectionUI, setRemoteConnected and the HCR handlers. The modal is
+  // wizard.editors_fake_live_controls'. Through a relay the button was enabled and the modal then said relay is not
+  // supported; since 2026-10-13 it is disabled there, with a tooltip saying so (and .btn-why, so the disabled button
+  // takes the hover that shows it). Row audio.hcr_status_button.
   await setup(page);
   const btn = (n) => page.evaluate((n) => {
     const b = document.getElementById(`b${n}-btn-hcr-status`);
@@ -377,13 +379,24 @@ test('wizard.audio_fake_hcr_status_button the HCR Status button shows only on a 
   await edit(page, '#b2-hcr-enable', false);
   expect((await btn(2))[0]).toBe(false);
 
-  // Through a relay: enabled while the relay is connected.
+  const tip = (n) => page.evaluate((n) => {
+    const b = document.getElementById(`b${n}-btn-hcr-status`);
+    return [b.title, b.classList.contains('btn-why'), getComputedStyle(b).pointerEvents];
+  }, n);
+  expect(await tip(1), 'a USB board: the usual tooltip').toEqual(['Live HCR Vocalizer status (polls while open)', false, 'none']);
+
+  // Through a relay: disabled whether the relay is connected or not, with the tooltip saying why - and the disabled
+  // button takes the hover, so the tooltip shows.
   await setup(page);
   await relayFake(page, 1, { 3: chain(board(['HCR,PORT,S2:9600', 'HCR,POLL,10'], { wcb: 3, wcbq: 3 })) });
-  await page.evaluate(() => updateHCRStatusBtn(3));
-  expect(await btn(3)).toEqual([true, true]);
-  await page.evaluate(() => { boardConnections[1]._connected = false; updateHCRStatusBtn(3); });
+  const RELAY_TIP = ['HCR Status is not supported through a relay — connect this board over USB to see it', true, 'auto'];
   expect(await btn(3)).toEqual([true, false]);
+  expect(await tip(3)).toEqual(RELAY_TIP);
+  await page.evaluate(() => { boardConnections[1]._connected = false; updateHCRStatusBtn(3); });
+  expect([await btn(3), await tip(3)]).toEqual([[true, false], RELAY_TIP]);
+  // Un-managed and then on USB: enabled, the usual tooltip back.
+  await page.evaluate(() => { clearRemoteConnected(3); __fake.conn(3, {}); updateConnectionUI(3, true); });
+  expect([await btn(3), await tip(3)]).toEqual([[true, true], ['Live HCR Vocalizer status (polls while open)', false, 'auto']]);
   expect(page.wizErrors).toEqual([]);
 });
 

@@ -13,10 +13,10 @@ const rowIds = (page, tbody) => page.evaluate((tbody) => [...document.querySelec
 const rowNumbers = (page, tbody) => page.evaluate((tbody) => [...document.querySelectorAll(`#${tbody} tr`)].map((r) => r.cells[0].textContent), tbody);
 const selectOptions = (page, sel) => page.evaluate((sel) => [...document.querySelector(sel).options].map((o) => o.value), sel);
 
-test('wizard.wled_fake_rows a new WLED row takes the lowest id no local or remote WLED uses, its port picker offers only free ports, Remove renumbers the rows; and the S3-S5 baud cap differs by path - 57600 for a row built on S3-S5, 9600 once a port is picked (pinned for a product call)', async ({ page }) => {
-  // addWLEDRow, appendWLEDRow, refreshWLEDPortDropdown, removeWLEDRow (app.js:3028-3116), onWLEDPortChange (3147-3158).
-  // Which S3-S5 cap is right is not decided here: the firmware takes up to 57600 there (WCB_WLED.cpp, setWLEDConfig).
-  // Row wled.rows.
+test('wizard.wled_fake_rows a new WLED row takes the lowest id no local or remote WLED uses, its port picker offers only free ports, Remove renumbers the rows; S3-S5 cap its bauds at 57600 both for a row built there and once a port is picked', async ({ page }) => {
+  // addWLEDRow, appendWLEDRow, refreshWLEDPortDropdown, removeWLEDRow, onWLEDPortChange (app.js). Picking S3-S5 capped
+  // the bauds at 9600 while a row built there capped them at 57600; since 2026-10-13 both cap at 57600, what the
+  // firmware takes there (WCB_WLED.cpp, setWLEDConfig). Row wled.rows.
   await setup(page);
   // WLED 1 local on S1 (with the reservation the board makes for it: label, broadcasts off); WLED 2 hosted on WCB3
   // (auto-learned, read-only here); an MP3 on S4.
@@ -32,10 +32,13 @@ test('wizard.wled_fake_rows a new WLED row takes the lowest id no local or remot
   expect(await selectOptions(page, `#${added}-port`), 'S1 the other row\'s, S4 the MP3\'s').toEqual(['', '2', '3', '5']);
   expect(await rowNumbers(page, 'b1-wled-tbody')).toEqual(['1', '2', '3']);
 
-  // A port picked on S3-S5: the baud list stops at 9600, and the push carries it.
+  // A port picked on S3-S5: the baud list stops at 57600, the row's 115200 comes down to it, and the push carries it -
+  // S3 set to 57600 with the WLED's reservation (it was 9600).
   await edit(page, `#${added}-port`, '3');
-  expect(await selectOptions(page, `#${added}-baud`)).toEqual(['9600']);
-  expect(await sent(page, 1)).toEqual(['1:?LABEL,S3,WLED 3', '1:?BCAST,OUT,S3,OFF', '1:?BCAST,IN,S3,OFF', '1:?WLED,1:W1S1:115200', '1:?WLED,3:W1S3:9600']);
+  expect(await selectOptions(page, `#${added}-baud`)).toEqual(['9600', '19200', '38400', '57600']);
+  expect(await page.evaluate((r) => document.getElementById(`${r}-baud`).value, added)).toBe('57600');
+  expect(await sent(page, 1)).toEqual(['1:?BAUD,S3,57600', '1:?LABEL,S3,WLED 3', '1:?BCAST,OUT,S3,OFF', '1:?BCAST,IN,S3,OFF',
+                                       '1:?WLED,1:W1S1:115200', '1:?WLED,3:W1S3:57600']);
   // Back on a hardware port, every rate again.
   await edit(page, `#${added}-port`, '2');
   expect(await selectOptions(page, `#${added}-baud`)).toEqual(['9600', '19200', '38400', '57600', '115200']);

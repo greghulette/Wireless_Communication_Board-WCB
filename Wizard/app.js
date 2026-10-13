@@ -645,8 +645,19 @@ function addDiscoveredBoards(numbers) {
   for (const n of numbers) {
     if (n >= 1 && n <= WCB_MAX && !_meshBoards.has(n)) { _meshBoards.add(n); added = true; }
   }
-  if (added) reconcileBoardGrid();
+  if (added) { reconcileBoardGrid(); _refreshRouteHostDropdowns(); }
   return added;
+}
+
+// Rebuild every Remote host list on the page (HCR/MP3/DFPlayer, once built), keeping each one's pick: a board the mesh
+// reports later is offered at once, as a mapping destination added then offers it (_populateRouteHostDropdown).
+function _refreshRouteHostDropdowns() {
+  for (const n of Object.keys(boardConfigs)) {
+    for (const dev of ['mp3', 'hcr', 'dfp']) {
+      const sel = document.getElementById(`b${n}-${dev}-remote-wcb`);
+      if (sel?.options.length) _populateRouteHostDropdown(+n, sel, parseInt(sel.value) || 0);
+    }
+  }
 }
 
 function addBoardSection(n) {
@@ -2560,8 +2571,8 @@ function onMP3Change(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-mp3-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.mp3.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.mp3.remoteWCB || 0);
     config.mp3.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.mp3.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -2735,8 +2746,8 @@ function onDFPChange(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-dfp-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.dfp.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.dfp.remoteWCB || 0);
     config.dfp.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.dfp.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -2902,8 +2913,11 @@ function updateHCRPortDropdown(n) {
   }
 }
 
-// Populate a device-route "Host WCB" dropdown (HCR/MP3 Remote mode) with the mesh's
-// WCB numbers, selecting the current host. Reused by both devices.
+// Populate a device-route "Host WCB" dropdown (HCR/MP3/DFPlayer Remote mode) with the mesh's
+// WCB numbers, selecting the current host. Reused by every device. The boards offered are the ones
+// a mapping destination offers (appendMappingDestination): the quantity's floor, every board the
+// mesh reported or that is connected (desiredBoardNumbers - a board WDP joined above the floor
+// included), the board's own number and the current host - with this board's own taken out.
 function _populateRouteHostDropdown(n, sel, selectedHost) {
   if (!sel) return;
   const cfg  = boardConfigs[n];
@@ -2913,6 +2927,7 @@ function _populateRouteHostDropdown(n, sel, selectedHost) {
     parseInt(document.getElementById('g-wcbq')?.value) || 0,
     self,
     selectedHost || 0,
+    ...desiredBoardNumbers(),
     2
   );
   populateWCBDropdown(sel, qty, selectedHost || 0, true);
@@ -2948,8 +2963,8 @@ function onHCRChange(n) {
 
   if (isRemote) {
     const hostSel = document.getElementById(`b${n}-hcr-remote-wcb`);
-    if (hostSel && hostSel.options.length === 0)
-      _populateRouteHostDropdown(n, hostSel, config.hcr.remoteWCB || 0);
+    // Built again each time, keeping the pick on screen: a board the mesh reported since is offered too.
+    if (hostSel) _populateRouteHostDropdown(n, hostSel, parseInt(hostSel.value) || config.hcr.remoteWCB || 0);
     config.hcr.remoteWCB = parseInt(hostSel?.value) || 0;
   } else {
     config.hcr.remoteWCB = 0;   // None/Local — no manual route (push handles the delta-clear)
@@ -3183,7 +3198,8 @@ function onWLEDPortChange(n, rowId) {
   const baudSel = document.getElementById(`${rowId}-baud`);
   if (portSel && baudSel) {
     const port    = parseInt(portSel.value) || 0;
-    const maxBaud = port >= 3 ? 9600 : Infinity;   // S3-5 software-serial cap
+    // S3-5 software-serial cap, the same as appendWLEDRow's: the firmware takes up to 57600 there (115200 refused).
+    const maxBaud = port >= 3 ? 57600 : Infinity;
     const curBaud = parseInt(baudSel.value) || 115200;
     baudSel.innerHTML = WLED_BAUD_RATES.filter(b => b <= maxBaud).map(b =>
       `<option value="${b}" ${b === Math.min(curBaud, maxBaud) ? 'selected' : ''}>${b.toLocaleString()}</option>`).join('');
@@ -6676,6 +6692,7 @@ function setRemoteConnected(n, relayN) {
     updateFwBtn.title = 'Connect via USB to update firmware — not available over wireless relay';
   }
   updateBoardStatusBadge(n, 'remote');
+  updateHCRStatusBtn(n);               // disabled through a relay, with a tooltip saying so
   ensureTerminalPane(relayN);          // relay's own pane (its [TERM] demux + [MGMT] replies)
   ensureTerminalPane(n);               // the TARGET board gets its own pane for [TERM:n] output
   updateTerminalPaneDot(n, true);
@@ -9608,6 +9625,12 @@ function readFile(file) {
 
 function loadSystemFileContent(content) {
   try {
+    // A text with no [GENERAL] or [WCB<n>] section is not a system file (parseSystemFile reads only those): refuse it
+    // before General or the boards are touched, instead of loading it as an empty system with General reset.
+    if (!content.split(/\r?\n/).some(l => /^\[(?:GENERAL|WCB\d+)\]$/i.test(l.trim()))) {
+      showToast('Not a WCB system file: it has no [GENERAL] or [WCB n] section. Nothing was loaded.', 'error', 8000);
+      return;
+    }
     const system = WCBParser.parseSystemFile(content);
     systemConfig = system;
 
@@ -10969,8 +10992,8 @@ function wizardHTMLIdentity() {
 
             <!-- WCB # -->
             <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-              <div class="wizard-ident-label">WCB # ${wizHint('Unique ID for this board (1–8). Each board must have a different number.')}</div>
-              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+              <div class="wizard-ident-label">WCB # ${wizHint(`Unique ID for this board (1–${WCB_MAX}). Each board must have a different number.`)}</div>
+              <input id="wiz-b${i}-wcbnum" type="number" min="1" max="${WCB_MAX}" value="${b.wcbNumber}"
                      class="wizard-ident-input">
             </div>
 
@@ -11023,8 +11046,8 @@ function wizardHTMLIdentity() {
           <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
 
             <div style="display:flex;flex-direction:column;gap:4px;width:62px;flex-shrink:0">
-              <div class="wizard-ident-label">ID ${wizHint('The device_id this client occupies in your network. Must be unique among all slots.')}</div>
-              <input id="wiz-b${i}-cnum" type="number" min="1" max="99" value="${b.wcbNumber}"
+              <div class="wizard-ident-label">ID ${wizHint(`The device_id this client occupies in your network (1–${WCB_MAX}). Must be unique among all slots.`)}</div>
+              <input id="wiz-b${i}-cnum" type="number" min="1" max="${WCB_MAX}" value="${b.wcbNumber}"
                      class="wizard-ident-input">
             </div>
 
@@ -11430,19 +11453,19 @@ function wizardHTMLEtm() {
     </div>
     <div class="wizard-etm-fields" id="wiz-etm-fields" style="${detailDisplay}">
       <div class="wizard-field-row">
-        <label>Timeout (ms)</label>${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 250 ms.')}
+        <label>Timeout (ms)</label>${wizHint('How long to wait for an ETM acknowledgement before counting it as missed. Lower = faster detection but more sensitive to brief delays. Default: 500 ms.')}
         <input id="wiz-etm-timeout" type="number" value="${etmConfig.timeoutMs}">
       </div>
       <div class="wizard-field-row">
-        <label>Heartbeat (sec)</label>${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 5 sec.')}
+        <label>Heartbeat (sec)</label>${wizHint('How often boards broadcast a keep-alive signal to each other. Lower = faster offline detection, but generates more wireless traffic. Default: 10 sec.')}
         <input id="wiz-etm-hb" type="number" value="${etmConfig.heartbeatSec}">
       </div>
       <div class="wizard-field-row">
-        <label>Missed before action</label>${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 3.')}
+        <label>Missed before action</label>${wizHint('How many consecutive missed heartbeats before a board is marked offline. Higher = more tolerance for brief dropouts. Default: 5.')}
         <input id="wiz-etm-miss" type="number" value="${etmConfig.missedHeartbeats}">
       </div>
       <div class="wizard-field-row">
-        <label>Boot heartbeat (sec)</label>${wizHint('Extended heartbeat interval used during startup to give boards time to fully initialize before normal ETM monitoring begins. Default: 30 sec.')}
+        <label>Boot heartbeat (sec)</label>${wizHint('After a boot, a board sends its first heartbeat at a random moment between 1 second and this many seconds, so boards powered on together do not all announce at once. 1-30. Default: 2 sec.')}
         <input id="wiz-etm-boot" type="number" value="${etmConfig.bootHeartbeatSec}">
       </div>
       <div class="wizard-field-row">
@@ -11614,8 +11637,7 @@ function wizardHTMLConnect() {
       <summary>💡 How to connect &amp; authorize ports</summary>
       <div class="wizard-connect-tip-body">
         Connect all WCBs via USB before proceeding — this is the preferred method.
-        Click <strong>🔍 Detect</strong> on each row, then press the reset button on that board to auto-select its port.
-        Or click <strong>Use →</strong> to pick a port directly.<br><br>
+        Click <strong>🔍 Detect</strong> on each row, then press the reset button on that board to auto-select its port.<br><br>
         <strong>First time connecting?</strong> Click <strong>+ Authorize…</strong> to grant the browser permission
         to access each board's USB port. You will need to do this once per WCB you want to configure. So if you are configuring 3 WCBs, click the Authorize button 3 times to grant permissions to the 3 serial ports.
       </div>
@@ -12085,8 +12107,9 @@ function wizardValidateStep(key) {
         };
       });
       const ids = slotInfo.map(s => s.id);
-      if (ids.some(n => n < 1 || n > 99 || isNaN(n)))
-        return 'Each slot must have an ID between 1 and 99.';
+      // 1..WCB_MAX, the firmware's MAX_WCB_COUNT (WCB.ino): ?WCB refuses a number past it.
+      if (ids.some(n => n < 1 || n > WCB_MAX || isNaN(n)))
+        return `Each slot must have an ID between 1 and ${WCB_MAX}.`;
       if (new Set(ids).size !== ids.length)
         return 'Each slot must have a unique ID (WCBs and Clients share the same address space).';
       // Use the CONFIGURED controller id, not a hardcoded 20. The wizard lets the user pick any
@@ -13243,17 +13266,20 @@ async function fetchHCRStatus() {
   }
 }
 
-// Show the HCR Status button only when HCR is configured on this board;
-// enable only when the board is reachable.
+// Show the HCR Status button only when HCR is configured on this board; enable it only while the board is on USB.
+// fetchHCRStatus asks the board's own connection, so a board managed through a relay gets the button disabled with
+// a tooltip saying why, rather than a modal that then says relay is not supported.
 function updateHCRStatusBtn(n) {
   const btn = document.getElementById(`b${n}-btn-hcr-status`);
   if (!btn) return;
   const enabled   = !!boardConfigs[n]?.hcr?.enabled;
   const connected = boardConnections[n]?.isConnected() ?? false;
-  const reachable = connected || (remoteRelayForBoard[n] !== undefined &&
-                    boardConnections[remoteRelayForBoard[n]]?.isConnected());
+  const relayed   = !connected && remoteRelayForBoard[n] !== undefined;
   btn.style.display = enabled ? '' : 'none';
-  btn.disabled      = !reachable;
+  btn.disabled      = !connected;
+  btn.title         = relayed ? 'HCR Status is not supported through a relay — connect this board over USB to see it'
+                              : 'Live HCR Vocalizer status (polls while open)';   // index.html's own title
+  btn.classList.toggle('btn-why', relayed);   // styles.css: a disabled .btn takes no hover unless it says why
 }
 
 async function fetchStatsData() {

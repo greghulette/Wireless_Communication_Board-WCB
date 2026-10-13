@@ -22,12 +22,13 @@ const exportFile = (page) => page.evaluate(async () => {
 const conflictRows = (page) => page.$$eval('#general-conflict-body tbody tr td:first-child', (tds) => tds.map((t) => t.textContent));
 const modalOpen = (page) => page.evaluate(() => document.getElementById('general-conflict-modal').classList.contains('open'));
 
-test('wizard.file_fake_load Load File sets General and a "loaded file" baseline from the file - ETM and NaviCore included, so the same boards pulled afterwards open no keep/use modal - renders its boards, derives the controller and toasts the droid and board count; a file with no sections loads as an empty system, and a failed parse toasts', async ({ page }) => {
+test('wizard.file_fake_load Load File sets General and a "loaded file" baseline from the file - ETM and NaviCore included, so the same boards pulled afterwards open no keep/use modal - renders its boards, derives the controller and toasts the droid and board count; a text with no [GENERAL] or [WCB n] section is refused with a message, General and the boards left as they were, and a failed parse toasts', async ({ page }) => {
   // loadSystemFileContent (app.js:9551-9611), syncGeneralFromConfig (9228-9306). Two defects behind one symptom - a
   // pull of a board the file describes opening the keep/use modal - fixed 2026-10-12: a pull never copied the board's
   // ETM values into General's config (syncGeneralFromConfig set only the inputs), so the export wrote the page's
   // defaults into [GENERAL]; and a load handed syncGeneralFromConfig no NaviCore fields, so General was left with the
-  // controller off and the first General edit put that in the baseline. Row file.load.
+  // controller off and the first General edit put that in the baseline. A text with no sections loaded as an empty
+  // system with General reset; since 2026-10-13 loadSystemFileContent refuses it before touching anything. Row file.load.
   await setup(page);
   await pullFake(page, 1, board(['CONTROLLER,ON,15', 'LABEL,S5,Front', 'ETM,TIMEOUT,600']));
   await pullFake(page, 2, board(['CONTROLLER,ON,15', 'ETM,TIMEOUT,600'], { wcb: 2 }));
@@ -61,15 +62,24 @@ test('wizard.file_fake_load Load File sets General and a "loaded file" baseline 
   expect(await page.locator('#general-conflict-body').textContent()).toContain('than loaded file');
   expect(await conflictRows(page)).toEqual(['MAC Octet 3']);
 
-  // A text with no [GENERAL] or [WCB<n>] section is not refused: it loads as an empty system (today) - General back
-  // to the defaults, no boards.
+  // A text with no [GENERAL] or [WCB<n>] section - plain text, a ?backup pasted into a file, a section of another
+  // name - is refused with a message: General, its baseline and the boards stay as they were.
   await setup(page);
   await pullFake(page, 1, board());
+  const state = () => page.evaluate(() => [document.getElementById('g-wcbq').value, document.getElementById('g-mac3').value,
+                                           generalBaseline.sourceBoard, Object.keys(boardConfigs).join(','), boardConfigs[1]?.wcbNumber]);
+  const before = await state();
+  expect(before).toEqual(['2', '4B', 1, '1,2', 1]);
+  for (const text of ['this is not a system file\njust text', '?WCB,1\r\n?WCBQ,3\r\n?MAC,3,4C', '[NOTES]\n?WCBQ,3', '']) {
+    m = await toastMark(page);
+    await page.evaluate((t) => loadSystemFileContent(t), text);
+    expect.soft(await toastsSince(page, m), JSON.stringify(text)).toBe('Not a WCB system file: it has no [GENERAL] or [WCB n] section. Nothing was loaded.');
+    expect.soft(await state(), JSON.stringify(text)).toEqual(before);
+  }
+  // A section header in any case, with CRLF line ends and spaces round it, is a section: that file loads.
   m = await toastMark(page);
-  await page.evaluate(() => loadSystemFileContent('this is not a system file\njust text'));
-  expect(await toastsSince(page, m)).toContain('Loaded: unnamed droid — 0 board(s)');
-  expect(await page.evaluate(() => [document.getElementById('g-wcbq').value, document.getElementById('g-mac3').value, generalBaseline.sourceBoard]))
-    .toEqual(['1', '00', 'file']);
+  await page.evaluate(() => loadSystemFileContent('# Droid: Tiny\r\n  [general]  \r\n?WCBQ,1^?MAC,3,4B\r\n[wcb1]\r\n?WCB,1\r\n'));
+  expect(await toastsSince(page, m)).toContain('Loaded: Tiny — 1 board(s)');
   // A parse that throws: said, nothing loaded.
   m = await toastMark(page);
   await page.evaluate(() => loadSystemFileContent(null));

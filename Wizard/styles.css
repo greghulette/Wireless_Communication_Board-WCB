@@ -480,6 +480,9 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   letter-spacing: 0.3px; text-decoration: none;
 }
 .btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+/* A disabled button that says why in its title (.btn-why, e.g. HCR Status on a relayed board): it takes the hover so
+   the tooltip shows; a disabled button still fires no click. */
+.btn:disabled.btn-why { pointer-events: auto; }
 .btn-primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .btn-primary:hover { background: var(--accent2); border-color: var(--accent2); }
 .btn-success { background: var(--green2); color: var(--bg); border-color: var(--green2); }
