@@ -2375,6 +2375,9 @@ GATED = {
                  "wifi_rterm_rate")},
     "intellex.wifi_link_loss": ("intellex_reboot", "restarts NaviCore through Intellex's transport: the mesh and SBUS "
                                                    "OUT lose it for about 5 s"),
+    # IX re-scan 2026-10-12 shim.wizard_reconnect_on_bench (suites/s35_intellex_wifi.py): also needs navicore_wifi
+    "intellex.wifi_wizard_reconnect": ("intellex_reboot", "restarts NaviCore through Intellex's transport: the mesh "
+                                                          "and SBUS OUT lose it for about 5 s"),
     **{f"intellex.{n}": ("intellex_wifi_join", "moves the PC's spare WiFi adapter between access points and has "
                                                "Intellex bounce it; attended only")
        for n in ("wifi_ap_hop_reidentify", "wifi_bounce_scoped")},

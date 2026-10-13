@@ -614,3 +614,77 @@ def wifi_bounce_scoped(bench):
                 problems.append(f"{inet}'s default route changed across the bounce ({len(was)} -> {len(now)})")
     bench.note(f"{tid}: {facts}")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ the Wizard's slot across a NaviCore restart
+def _reboot_hook(bench, g, name, ssid, facts):
+    """The spec's nc_reboot hook -> {sentAt, restarted, reattached, reattachedAt} (epoch ms, the page's clock): REBOOT
+    through a raw /_link client of the host the Wizard is on (the same path the Wizard's own lines take), NaviCore's
+    boot over USB and its uptime, the PC's adapter proved back on its access point (wlan.rejoin, as wifi_link_loss),
+    and the host attached again. No network name is handed back; the rejoin's account goes to session.log."""
+    def reboot(host, body):
+        tap = LinkTap(host.port, name="reboot")
+        try:
+            time.sleep(0.5)
+            m = g.nc.dev.mark()
+            dead0 = _dead_lines(host)
+            t_cmd = time.monotonic()
+            sent_at = time.time() * 1000
+            tap.send('{"type":"REBOOT"}\n')
+            st, took, how = _wait_notice(host, dead0, NOTICE_LIMIT_S)
+            facts["noticed_s"] = None if took is None else round(took, 1)
+            try:
+                g.nc.wait_boot(since=m, timeout=40)
+            except AssertionError as e:
+                facts["boot"] = _line1(e)
+            g.nc = NaviCore(bench.dev("navicore"))
+            restarted = _restarted(_uptime_ms(g.nc), (time.monotonic() - t_cmd) * 1000)
+            facts["rejoin"] = wlan.rejoin(bench, name, ssid, "NaviCore's", reach=(NC_AP_IP, 80))
+            st, took = _wait_status(host, lambda s: bool(s.get("attached")), REATTACH_S)
+            facts["reattached_s"] = None if took is None else round(time.monotonic() - t_cmd, 1)
+            return {"sentAt": sent_at, "restarted": restarted, "reattached": took is not None,
+                    "reattachedAt": time.time() * 1000 if took is not None else None}
+        finally:
+            tap.close()
+    return reboot
+
+
+@test("intellex.wifi_wizard_reconnect", "With the Wizard managing every WCB through Intellex attached to NaviCore's "
+      "access point, NaviCore restarted (REBOOT through the link): its own slot is live again within 90 s, no connect "
+      "of slot 1 ever happens, WCB1's baseline and section are never gone, every board is managed and pulled through "
+      "NaviCore's slot again, and the relay routing waits for the host to have NaviCore back (opt-in intellex_reboot, "
+      "with navicore_wifi; 1 NaviCore restart; IX re-scan shim.wizard_reconnect_on_bench)",
+      needs=["navicore", "wcb1"], opt_in="intellex_reboot")
+def wifi_wizard_reconnect(bench):
+    """intellex.wifi_wizard_via_navicore, then a NaviCore restart while the Wizard holds it - the 2026-09-10 incident
+    (after an OTA rebooted NaviCore the shim reconnected 'slot 1' on top of WCB1, wiping its slot: 'Manage all: 0/1 via
+    WCB20'). Intellex src/intellex_shim.js wcbLinkConn / autoConnectWcb (:880-993: the link's own slot, waiting
+    WCB_OWN_RECONNECT_MS for the Wizard's reconnect), routeMeshThroughRelay (:1036-1086: not while the relay is down);
+    Wizard/app.js _startReading's reconnect, which re-arms the boards the relay managed. The spec spies on
+    _modalDoConnect and relayRouteAll and samples WCB1's baseline every 500 ms. Inside config_guard (the Wizard pulls
+    every WCB) and nc_guard (D33: skipped while the recorder holds anything); every WCB's ?RTERM stopped afterwards."""
+    if "navicore_wifi" not in optin.enabled(bench.cfg):
+        raise Skip(optin.skip_reason("navicore_wifi"))
+    _free_of_others(bench)
+    tid = "intellex.wifi_wizard_reconnect"
+    problems, facts = [], {}
+    with config_guard(bench, *bench.wcb_numbers()):
+        try:
+            with nc_guard(bench) as g:
+                _restartable(g.nc)
+                _spare_adapter(bench)          # a PC with no spare adapter skips before NaviCore restarts
+                with _on_ap(bench, problems) as (nc, cfg, name):
+                    ssid, _ = ap_of(cfg)
+                    version = nc.ping()
+                    nid = nc.wcb_status()["self"]
+                    args = {"version": version, "host": NC_AP_IP, "relay": nid, "boards": bench.wcb_numbers()}
+                    try:
+                        run_intellex_test(bench, tid, attach=dict(NC_WS), args=args, hide=(ssid,), timeout=900,
+                                          hooks={"nc_reboot": _reboot_hook(bench, g, name, ssid, facts)})
+                    finally:
+                        _nc_quiet(bench)
+                        g.nc = NaviCore(bench.dev("navicore"))
+        finally:
+            _stop_rterm_all(bench)
+    bench.note(f"{tid}: {facts}")
+    assert not problems, "; ".join(problems)

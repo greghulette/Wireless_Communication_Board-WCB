@@ -182,3 +182,99 @@ test('intellex.wifi_ap_hop_reidentify moved from NaviCore\'s access point to W1\
   expect(B.unaskedWrites(link), 'JSON the tool sent that is not a read').toEqual([]);
   B.expectClean(rec, 'the config tool');
 });
+
+// IX re-scan shim.wizard_reconnect_on_bench (intellex_shim.js wcbLinkConn / autoConnectWcb :880-993, the relay watch
+// :1036-1086; Wizard app.js _startReading's reconnect and re-arm). With every WCB managed and pulled through NaviCore,
+// the harness restarts NaviCore (hook nc_reboot: REBOOT through a raw /_link client, NaviCore's boot over USB, the PC's
+// adapter back on its access point, the host attached again). Within 90 s of the REBOOT NaviCore's own slot is live
+// again; no connect of slot 1 ever happens (the 2026-09-10 incident: a slot-1 connect on top of WCB1 wiped its slot -
+// 'Manage all: 0/1'); WCB1's baseline is never gone; the boards are managed through NaviCore's slot again and pulled;
+// and relayRouteAll is not called while the host had no link to NaviCore.
+test('intellex.wifi_wizard_reconnect NaviCore restarted while the Wizard manages the mesh through it: its own slot comes back, never slot 1',
+  async ({ page, context, rec }) => {
+  test.setTimeout(840_000);                         // the harness's watchdog is 900 s (s35)
+  page.setDefaultTimeout(15_000);
+  const a = await args();
+  await B.boardGuard(context, rec);
+  await throughNaviCore(page, a);
+  await B.recordToasts(page);
+  await page.evaluate(({ relay }) => {
+    const spy = window.__hilReconnect = { connects: [], routeAll: [], samples: 0, base1Gone: 0, section1Gone: 0,
+                                          relayDown: 0 };
+    const realConnect = window._modalDoConnect;
+    window._modalDoConnect = function (slot, ...rest) {
+      spy.connects.push({ slot: Number(slot), at: Date.now() });
+      return realConnect.call(this, slot, ...rest);
+    };
+    const realRoute = window.relayRouteAll;
+    window.relayRouteAll = function (slot, ...rest) {
+      const c = boardConnections[slot];
+      spy.routeAll.push({ slot: Number(slot), at: Date.now(), relayUp: !!(c && c.isConnected && c.isConnected()) });
+      return realRoute.call(this, slot, ...rest);
+    };
+    // When NaviCore's connection last handed the Wizard a line: a slot that reads connected is not proof the relay
+    // is back (the shim's port opens whether or not the host has a link), a line from it is. Re-hooked whenever the
+    // slot's connection object is a new one.
+    spy.lastRx = 0;
+    const hook = () => {
+      const c = boardConnections[relay];
+      if (c && Array.isArray(c._dataCallbacks) && !c.__hilRx) {
+        c.__hilRx = true;
+        c._dataCallbacks.push(() => { spy.lastRx = Date.now(); });
+      }
+    };
+    hook();
+    spy.timer = setInterval(() => {
+      hook();
+      spy.samples++;
+      if (!boardBaselines[1]) spy.base1Gone++;
+      if (!document.getElementById('section-board-1')) spy.section1Gone++;
+      const c = boardConnections[relay];
+      if (!(c && c.isConnected && c.isConnected())) spy.relayDown++;
+    }, 500);
+  }, { relay: a.relay });
+
+  const h = await B.hil.hook('nc_reboot');
+  if (h.skip) test.skip(true, h.skip);
+  expect(h.restarted, 'NaviCore restarted on the REBOOT (its uptime over USB)').toBe(true);
+  expect(h.reattached, 'the host attached to NaviCore\'s access point again').toBe(true);
+  const live = () => page.evaluate(({ relay, since }) => {
+    const c = boardConnections[relay];
+    return !!(c && c.isConnected && c.isConnected()) && window.__hilReconnect.lastRx > since;
+  }, { relay: a.relay, since: h.reattachedAt });
+  const left = Math.max(5_000, h.sentAt + 90_000 - Date.now());
+  await expect.poll(live, { timeout: left, message: `NaviCore's slot ${a.relay} was not live again within 90 s of the `
+    + 'REBOOT (connected, and a line from NaviCore since the host attached again)' }).toBe(true);
+  const liveAt = Date.now();
+  const managed = () => page.evaluate(({ relay, boards }) => boards.filter((b) => String(remoteRelayForBoard[b])
+    !== String(relay) || !boardBaselines[b] || _pullingBoards.has(b)), { relay: a.relay, boards: a.boards });
+  await expect.poll(managed, { timeout: 180_000, message: 'boards not managed and pulled through NaviCore again '
+    + '(remoteRelayForBoard, a baseline, no pull running) within 3 min of its slot coming back' }).toEqual([]);
+  const doneAt = Date.now();
+  const spy = await page.evaluate(() => {
+    const s = window.__hilReconnect;
+    clearInterval(s.timer);
+    return Object.assign({}, s, { timer: null, wcb1: boardBaselines[1] ? boardBaselines[1].wcbNumber : null });
+  });
+  const card = await page.evaluate((relay) => !!document.getElementById(`relay-card-${relay}`), a.relay);
+  const toasts = await page.evaluate(() => (window.__hilToasts || []).map((t) => `${t.type}: ${t.message}`));
+  await B.hil.note(`intellex.wifi_wizard_reconnect: REBOOT at 0 s, host attached again at `
+    + `${Math.round((h.reattachedAt - h.sentAt) / 1000)} s, slot ${a.relay} live at ${Math.round((liveAt - h.sentAt) / 1000)} s, `
+    + `every board managed and pulled at ${Math.round((doneAt - h.sentAt) / 1000)} s; connects ${JSON.stringify(spy.connects.map((c) => c.slot))}, `
+    + `relayRouteAll x${spy.routeAll.length}, the relay's connection down in ${spy.relayDown}/${spy.samples} samples; toasts: `
+    + `${toasts.filter((t) => /Manage all|Relay board|reconnect|did not come back/i.test(t)).join(' | ') || 'none of note'}`);
+  expect(spy.connects.filter((c) => c.slot === 1), 'a connect of slot 1 (the 2026-09-10 incident)').toEqual([]);
+  expect(spy.connects.filter((c) => c.slot !== a.relay), `connects of a slot other than NaviCore's ${a.relay}`)
+    .toEqual([]);
+  if (a.boards.includes(1)) {
+    expect(spy.base1Gone, 'samples in which WCB1\'s baseline was gone').toBe(0);
+    expect(spy.section1Gone, 'samples in which WCB1\'s section was gone').toBe(0);
+    expect(spy.wcb1, 'WCB1\'s baseline names WCB 1 at the end').toBe(1);
+  }
+  expect(card, `NaviCore's relay card (WCB${a.relay}) at the end`).toBe(true);
+  const early = spy.routeAll.filter((c) => c.at >= h.sentAt && c.at < h.reattachedAt);
+  expect(early.map((c) => `${Math.round((c.at - h.sentAt) / 1000)} s (relay ${c.relayUp ? 'reads up' : 'down'})`),
+    'relayRouteAll called while the host had no link to NaviCore').toEqual([]);
+  expect(toasts.filter((t) => /Manage all: 0\//.test(t)), 'a Manage all that pulled nothing').toEqual([]);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
