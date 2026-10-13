@@ -1034,6 +1034,8 @@ def start_run(bench, tests, label, selectors=None, discover=False, no_servos=Fal
         ckpt.data["devices"] = {n: {k: u.get(k) for k in ("serial", "vid", "pid", "location")}
                                 for n, u in resume.usb_map(bench).items()}
         ckpt.save()
+        if any(str(n).startswith("wcb") for t in tests for n in (t.get("needs") or ())):
+            resume.stop_remote_terminals(bench)    # a left-over mirror slows a WCB's console for the whole run
         if len(tests) >= SNAPSHOT_MIN_TESTS:
             pre = set(bench.devs)
             try:

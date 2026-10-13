@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_121909ROCT2026                                  *****////
+///*****                                          Version 6.2.1_122122ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -199,7 +199,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_121909ROCT2026";
+String SoftwareVersion = "6.2.1_122122ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2733,10 +2733,11 @@ bool chainCarriesValueVerb(const String &data) {
   return false;
 }
 
-// True when some delimited token is a timer token (<cmdChar>T or t, then a digit: ;T800, ;t300,<cmd>). With
-// checksumBars, a checksum token (<funcChar>CHK / ?CHK) makes it false: a verified chain goes through the checksum
-// gate, which the timer path skips. Walked in place: a config restore is a ?-first chain of a few KB and this runs for
-// every line.
+// True when some delimited token is a timer token: <cmdChar>T or t at the token's start, then (after any spaces) a digit
+// or a minus sign - ;T800, ;t300,<cmd>, and ;T-500, which the timer engine refuses whole (a negative delay, F6) and
+// therefore must reach. With checksumBars, a checksum token (<funcChar>CHK / ?CHK) makes it false: a verified chain
+// goes through the checksum gate, which the timer path skips. Walked in place: a config restore is a ?-first chain of a
+// few KB and this runs for every line.
 static bool chainTimerTokenScan(const String &data, bool checksumBars) {
   bool timed = false;
   const int n = data.length();
@@ -2745,9 +2746,11 @@ static bool chainTimerTokenScan(const String &data, bool checksumBars) {
     if (end < 0) end = n;
     int k = i;
     while (k < end && data[k] == ' ') k++;
-    if (end - k >= 3 && data[k] == CommandCharacter && (data[k + 1] == 'T' || data[k + 1] == 't') &&
-        isdigit((unsigned char)data[k + 2]))
-      timed = true;
+    if (end - k >= 3 && data[k] == CommandCharacter && (data[k + 1] == 'T' || data[k + 1] == 't')) {
+      int v = k + 2;
+      while (v < end && data[v] == ' ') v++;
+      if (v < end && (isdigit((unsigned char)data[v]) || data[v] == '-')) timed = true;
+    }
     if (checksumBars && end - k >= 4 && (data[k] == LocalFunctionIdentifier || data[k] == '?') &&
         toupper((unsigned char)data[k + 1]) == 'C' && toupper((unsigned char)data[k + 2]) == 'H' &&
         toupper((unsigned char)data[k + 3]) == 'K')

@@ -171,6 +171,39 @@ def record_firmware(bench):
     return fw
 
 
+RTERM_REARM_LISTEN_S = 2.5
+
+
+def stop_remote_terminals(bench):
+    """?RTERM,STOP on every WCB on USB at a run's start. A remote-terminal session mirrors each line the board prints to
+    its relay over ESP-NOW, one paced send per line, and it has no timeout: it lasts until ?RTERM,STOP or a reboot. The
+    Wizard starts one per relayed board and Intellex re-arms it once a second through NaviCore, so a page or an
+    Intellex that went away without stopping it leaves the board mirroring for good. On 2026-10-12 sessions left by
+    Greg's Intellex slowed W1's console to ~300 ms a line and every ?backup missed its window (runs 20261012-191438,
+    -210705). A live client re-arms within a second, so a 'Session started' while listening means one is still
+    attached: noted, and the run goes on. Errors are noted, never raised."""
+    sent = {}
+    for name, d in bench.cfg["devices"].items():
+        if d.get("kind") != "wcb":
+            continue
+        try:
+            w = WCB(bench.dev(name))
+            sent[name] = (w, w.dev.mark())
+            w.dev.send("?RTERM,STOP")
+        except Exception as e:  # noqa: BLE001
+            bench.note(f"{name}: ?RTERM,STOP at the start not sent ({_first(e)})")
+    if not sent:
+        return
+    time.sleep(RTERM_REARM_LISTEN_S)
+    for name, (w, m) in sent.items():
+        lines = [x.rstrip() for x in w.dev.since(m)]
+        if any("[RTERM] Session started" in x for x in lines):
+            bench.note(f"{name}: a remote-terminal client re-armed its mirror within {RTERM_REARM_LISTEN_S:g} s of "
+                       f"?RTERM,STOP - a Wizard or Intellex is still attached (through NaviCore over WiFi?), and its "
+                       f"console runs at the mesh's pace while it is: close it for this run")
+    bench.note(f"remote-terminal sessions stopped at the start on {', '.join(sent)}")
+
+
 # ---------------------------------------------------------------------------- step 1
 def offline_differences(bench, ckpt):
     """(soft, hard, notes, restore_links) without opening a port."""

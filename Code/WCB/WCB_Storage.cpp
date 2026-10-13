@@ -150,13 +150,23 @@ if (wcb_hw_version != 0 && !hwVersionFitsChip(wcb_hw_version)) {
 updatePinMap();
 }
 
+// The GPIOs the IDF reserved for its flash and PSRAM, read before any driver of ours starts: a global constructor runs
+// after the IDF's core init (which reserves the MSPI pins) and before setup(). Later, every driver that takes a pin
+// reserves it too - each serial port's TX, an RMT PWM output, the status LED itself - so the live reservation set alone
+// cannot tell a flash pin from one a port uses (the first cut refused each board's own LED pin, run 20261012-211320).
+static uint64_t s_bootReservedGpio = 0;
+__attribute__((constructor)) static void captureBootReservedGpio() {
+  for (int p = 0; p <= 48; p++)
+    if (esp_gpio_is_reserved(BIT64(p))) s_bootReservedGpio |= BIT64(p);
+}
+
 // Why GPIO `pin` cannot carry the status LED on this chip, or nullptr when it can. ?LED,PIN saves the pin and every
 // boot drives it (pinMode OUTPUT, then the NeoPixel's RMT), so a pin wired to the SPI flash crashes the board at each
 // boot until a USB reflash with an NVS erase, and the console UART's pins cut the USB console off for good. The range
 // check alone let any of them through (coverage re-scan 2026-10-12, led.non_numeric_pin_quirk). The flash pins differ
-// by module - W1's HW 2.4 is an ESP32-PICO with its flash off GPIO7/8 - so they come from the IDF, which reserves the
-// pins its flash and PSRAM use before setup() runs; the S3's fixed SPI pins 26-32 are refused as well in case it did
-// not.
+// by module - W2 is an ESP32-PICO, its flash on GPIO6/11/16/17 - so they come from the IDF (s_bootReservedGpio); the
+// S3's fixed SPI pins 26-32 are refused as well in case it reserved none. A pin a running driver holds (a serial
+// port's TX, a PWM output) is refused too, except the LED's own current pin, which its own driver holds.
 const char *ledPinRefusal(int pin) {
   if (pin < 0 || pin > 48) return "outside 0-48";
   if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) return "this chip has no output on that GPIO";
@@ -165,7 +175,9 @@ const char *ledPinRefusal(int pin) {
   if (pin == 19 || pin == 20) return "it is the ESP32-S3's USB";
   if (pin >= 26 && pin <= 32) return "it is wired to the flash";
 #endif
-  if (esp_gpio_is_reserved(BIT64(pin))) return "it is wired to the flash or PSRAM";
+  if (s_bootReservedGpio & BIT64(pin)) return "it is wired to the flash or PSRAM";
+  if (pin != STATUS_LED_PIN && esp_gpio_is_reserved(BIT64(pin)))
+    return "another peripheral drives it (a serial port's TX or a PWM output)";
   return nullptr;
 }
 
