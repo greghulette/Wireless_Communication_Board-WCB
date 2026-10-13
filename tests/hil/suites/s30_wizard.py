@@ -304,6 +304,12 @@ _FAKE_RESCAN_L = (
     ("general_fake_dirty_flag", "Typing in General marks it dirty and turns Push All amber; a pull or file load does not; Push All clears it (general.dirty_flag)"),
     ("general_fake_peerslive_badge", "A pulled PEERSLIVE shows 'mesh: N live peers' (singular for one); none hides the badge (general.peerslive_badge)"),
     ("toast_fake_ui", "Toasts escape their text, carry Copy and Dismiss, sit above an open modal; errors stay 12 s at least, duration 0 until dismissed (toast.ui)"),
+    ("grid_fake_jump_nav", "The jump nav has a button per board with its alias, kept through a rebuild; a button scrolls to its board and the board most in view is highlighted (grid.jump_nav)"),
+    ("grid_fake_add_section", "A section built for a slot with a config shows it, one for a connected slot comes up Connected, one built in Advanced shows its advanced parts (grid.add_section)"),
+    ("grid_fake_slot_type", "The slot-type radio flips a pulled card to a client (pane, alias cut at 24, header) and back with the WCB config whole (grid.slot_type)"),
+    ("identity_fake_alias", "The alias swaps the live delimiter for _ as well; the header and the nav follow the alias and the WCB number (identity.alias)"),
+    ("identity_fake_sw_version", "After a pull the version is asked with <fc>version to 'End of Version' and shown; a boot banner's line sets it too (identity.sw_version)"),
+    ("identity_fake_identify", "Identify sends <fc>IDENTIFY to a USB board and a one-chunk FRAG through a relay, with a toast; refused when not reachable (identity.identify)"),
 )
 for _key, _title in _FAKE_RESCAN_L:
     def _fake_rescan_l(bench, _id=f"wizard.{_key}"):
