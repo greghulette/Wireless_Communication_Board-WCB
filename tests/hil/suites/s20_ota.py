@@ -469,6 +469,17 @@ def relay_crc_drop_blames_overflow(bench):
     w = usb_wcb(bench)
     plain = "[OTA] relay DATA @0 DROPPED: crc 0BC0B3E6 != DEADBEEF (b64 4 chars)"
     blame = plain + " — serial RX HAS OVERFLOWED, this is the cause"
+    # 'No recent overflow' must be made, not assumed: the blame window is 2 s, and the test before this one can leave
+    # an overflow inside it (full run 20261013-021405 got the blame on this first line). Wait until W1's overflow
+    # count has held for more than 2 s.
+    count, held_since, deadline = _rx_overflows(w), time.monotonic(), time.monotonic() + 15.0
+    while time.monotonic() - held_since < 2.5:
+        if time.monotonic() > deadline:
+            raise Skip("W1's USB RX kept overflowing for 15 s, so 'no recent overflow' could not be set up")
+        time.sleep(0.8)
+        now = _rx_overflows(w)
+        if now != count:
+            count, held_since = now, time.monotonic()
     out = [x.rstrip() for x in w.run("?OTA,DATA,2,4242,0:DEADBEEF,AAAA")]
     assert plain in out, f"with no recent overflow the drop line is {[x for x in out if 'DROPPED' in x]}"
     before = _rx_overflows(w)
