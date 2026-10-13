@@ -285,13 +285,14 @@
   "area": "host.api",
   "behaviour": "GET /_api/webui-version compares each bundle's stamp (footer-dtg, UI_VERSION) with the published branch copy, concurrently, reporting bundled/published/stale/checked/reason per tool; offline the reason is the OFFLINE_NOTE after one reachability probe.",
   "where": "host.py:432-551",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
    "intellex.offline_con_floor",
-   "intellex.routes_api"
+   "intellex.routes_api",
+   "intellex.webui_version_online"
   ],
-  "gap": "Only the offline shape is asserted. The stale verdict (bundled != published), checked:true, the branch-specific URL (settings.tool_base) and the certificate-error reason are unasserted: they need the network.",
-  "testable": "opt-in",
+  "gap": "closed 2026-10-13 by intellex.webui_version_online against a local stand-in, no real network (WCB 9e12130, GUI run 20261013-133752)",
+  "testable": "unattended",
   "bench_needs": "Intellex host + internet",
   "risk": "M",
   "how": "An online opt-in: a host without INTELLEX_OFFLINE whose staged Wizard app.js has UI_VERSION rewritten to 'HIL-OLD'; wcb.checked true, wcb.stale true, published non-empty."
@@ -2181,12 +2182,13 @@
   "area": "tools.fetch",
   "behaviour": "fetch_webui refreshes a tool as one atomic swap (temp dir, every file, then rename keeping .prev), byte-identical to Pages, from the branch's /dev/<branch>/ copy with a fallback to main's, discovering cmdlib files from each vendor manifest with path-safety checks, fetching the images the Wizard names, --check/--force, --tool all as two independent swaps, and refusing at once offline.",
   "where": "tools/fetch_webui.py:82-102, 214-356, 368-457, 460-612",
-  "status": "partial",
+  "status": "tested",
   "tested_by": [
-   "intellex.offline_con_floor"
+   "intellex.offline_con_floor",
+   "intellex.fetch_webui_unit"
   ],
-  "gap": "Only the offline refusal is asserted. The atomic swap and .prev, byte-identity, the branch fallback, the manifest walk, _safe_relname and the partial-failure independence are untested; a regression here is a half-applied tool bundle.",
-  "testable": "opt-in",
+  "gap": "closed 2026-10-13 by intellex.fetch_webui_unit against a local stand-in, no real network (WCB 9e12130, GUI run 20261013-133752)",
+  "testable": "unattended",
   "bench_needs": "Intellex host + internet",
   "risk": "M",
   "how": "_safe_relname is a pure unit (unattended: 'vendor/../../x' refused, 'droidnet/boards/a.json' accepted). The swap needs reachable() true: an online opt-in running fetch_webui --tool wcb --base http://127.0.0.1:<port>/Wizard against a local tree; expect every served byte equal on disk, a .prev of the old bundle, and with one file 404 nothing changed."
@@ -2228,10 +2230,12 @@
   "area": "launch",
   "behaviour": "Intellex.command / Intellex.bat (and scripts/run-*) create the venv on first run from the newest python3, note a venv older than 3.11, fetch the config tool once when src/webui is empty (never fatal), and exec app.py with the arguments; a quarantined .command is explained in the README.",
   "where": "Intellex.command:33-105; Intellex.bat:19-67; scripts/run-macos.command",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "No test runs a launcher; the first-run venv creation, the 3.11 note and the fetch-on-empty path are unasserted.",
-  "testable": "opt-in",
+  "status": "tested",
+  "tested_by": [
+   "intellex.launch_scripts"
+  ],
+  "gap": "closed 2026-10-13 by intellex.launch_scripts against a local stand-in, no real network (WCB 9e12130, GUI run 20261013-133752); the .bat files are checked statically (they cannot run on the Mac)",
+  "testable": "unattended",
   "bench_needs": "none",
   "risk": "L",
   "how": "Opt-in (network, minutes): copy the repo to a scratch dir without .venv and src/webui, run ./Intellex.command --browser with BROWSER=/usr/bin/true and INTELLEX_DATA_DIR staged; expect .venv created, 'Fetching the config tool' printed, src/webui/index.html present and /_api/status answering."
