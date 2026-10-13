@@ -189,3 +189,165 @@ test('wizard.identity_fake_identify Identify sends <fc>IDENTIFY straight to a US
   expect(await toastsSince(page, m)).toContain('WCB 1 (relay) not connected');
   expect(page.wizErrors).toEqual([]);
 });
+
+test('wizard.serial_fake_claim_ui each claim locks its serial row with a note saying whose it is - Kyber, its Marcduino port (baud locked, broadcasts left free), Maestro, PWM (label still editable), MP3, HCR, DFPlayer, WLED - while a serial map and Maestro REMOTE\'s S1 are soft claims: noted, with every control left editable', async ({ page }) => {
+  // updatePortClaimUI (app.js:832-919), evaluatePortClaims (parser.js:1060-1162). The MP3 row's cleared boxes are
+  // wizard.app_fake_serial_claims'. Row serial.claim_ui.
+  await setup(page);
+  const rows = (n) => page.evaluate((n) => [1, 2, 3, 4, 5].map((p) => {
+    const g = (k) => document.getElementById(`b${n}-s${p}-${k}`);
+    return { note: g('claim').textContent, baud: !g('baud').disabled, bcin: !g('bcin').disabled, bcout: !g('bcout').disabled,
+             label: !g('label').disabled };
+  }), n);
+  const LOCKED = { baud: false, bcin: false, bcout: false, label: false };
+  const FREE = { baud: true, bcin: true, bcout: true, label: true };
+  // WCB1: Maestro REMOTE (S1 reserved), a serial map S2 -> W2 S1, a Maestro on S3, a raw serial map S4 -> S2, PWM in on S5.
+  await pullFake(page, 1, board(['MAESTRO,REMOTE', 'MAP,SERIAL,S2,W2S1', 'BAUD,S3,57600', 'MAESTRO,M2:W1S3:57600',
+                                 'MAP,SERIAL,S4,R,S2', 'MAP,PWM,S5,W2S4'], { wcbq: 3 }));
+  expect(await rows(1)).toEqual([
+    { note: 'Maestro remote — S1 kept for the Maestro (no HCR/MP3/DFP/WLED/PWM)', ...FREE },
+    { note: 'Serial map → W2 S1', ...FREE },
+    { note: 'Managed by Maestro ID 2', ...LOCKED },
+    { note: 'Raw serial map → S2', ...FREE },
+    { note: 'Managed by PWM', ...LOCKED, label: true },
+  ]);
+  // A soft claim's boxes show the board's own values; a hard claim's are cleared.
+  expect(await page.evaluate(() => [document.getElementById('b1-s2-bcin').checked, document.getElementById('b1-s3-bcin').checked]))
+    .toEqual([true, false]);
+
+  // WCB2: HCR on S1, a local Kyber on S2 with its Marcduino port on S3, MP3 on S4, WLED on S5.
+  await pullFake(page, 2, board(['BAUD,S1,9600', 'HCR,PORT,S1:9600', 'HCR,POLL,10', ...KYBER, 'MP3,S4:9600:V3',
+                                 'BAUD,S5,57600', 'WLED,1:W2S5:57600'], { wcb: 2, wcbq: 3 }));
+  expect(await rows(2)).toEqual([
+    { note: 'Managed by HCR Vocalizer', ...LOCKED },
+    { note: 'Managed by Kyber (Maestro port)', ...LOCKED },
+    { note: 'Kyber Marcduino port — baud locked at 9,600', baud: false, bcin: true, bcout: true, label: false },
+    { note: 'Managed by MP3 Trigger', ...LOCKED },
+    { note: 'Managed by WLED', ...LOCKED },
+  ]);
+  // WCB3: a DFPlayer on S3; the rest unclaimed.
+  await pullFake(page, 3, board(['DFP,S3:9600:V20'], { wcb: 3, wcbq: 3 }));
+  const r3 = await rows(3);
+  expect(r3[2]).toEqual({ note: 'Managed by DFPlayer', ...LOCKED });
+  expect(r3[0]).toEqual({ note: '', ...FREE });
+  expect(await page.evaluate(() => document.getElementById('b3-s3-claim').closest('tr').classList.contains('claimed'))).toBe(true);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.serial_fake_label_combobox a port label offers the known device names as you type (case-insensitive, by substring); ArrowDown and Enter pick one, which goes into the config like a typed label and is pushed; Escape closes it; a locked (claimed) label never opens it', async ({ page }) => {
+  // initDeviceCombobox, _devRender, _devSetActive, _devCommit, _devHide (app.js:693-787); device-labels.js.
+  // Row serial.label_combobox.
+  await setup(page);
+  await pullFake(page, 1, board(['BAUD,S3,57600', 'MAESTRO,M2:W1S3:57600']));
+  await holdVerifyPulls(page);
+  const pop = () => page.evaluate(() => {
+    const p = document.getElementById('dev-combo-pop');
+    return { open: p.style.display !== 'none', items: [...p.children].map((c) => c.textContent) };
+  });
+  const names = await page.evaluate(() => WCB_DEVICE_LABELS);
+  const label = page.locator('#b1-s1-label');
+  await label.click();
+  expect((await pop()).items, 'focus: the whole list').toEqual(names);
+  await label.pressSequentially('mae');
+  const want = names.filter((t) => t.toLowerCase().includes('mae'));
+  expect(want[0]).toBe('Maestro');
+  expect(await pop()).toEqual({ open: true, items: want });
+  await label.press('ArrowDown');
+  await label.press('Enter');
+  expect(await pop()).toMatchObject({ open: false });
+  expect(await label.inputValue()).toBe('Maestro');
+  expect(await page.evaluate(() => boardConfigs[1].serialPorts[0].label)).toBe('Maestro');
+  expect(await shown(page, 'b1-unsaved-badge'), 'a change, as a typed label is').toBe(true);
+  expect(await sent(page, 1)).toEqual(['1:?LABEL,S1,Maestro']);
+
+  // Escape closes it, the typed text stays.
+  const s2 = page.locator('#b1-s2-label');
+  await s2.click();
+  await s2.pressSequentially('dro');
+  expect((await pop()).open).toBe(true);
+  await s2.press('Escape');
+  expect((await pop()).open).toBe(false);
+  expect(await s2.inputValue()).toBe('dro');
+  // Nothing matches: no list.
+  await s2.fill('');
+  await s2.pressSequentially('zzzq');
+  expect((await pop()).open).toBe(false);
+  // The Maestro's own port: its label is locked, and focusing it opens nothing.
+  await s2.press('Tab');
+  await page.evaluate(() => document.getElementById('b1-s3-label').focus());
+  expect(await page.evaluate(() => document.getElementById('b1-s3-label').disabled)).toBe(true);
+  expect((await pop()).open).toBe(false);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.kyber_fake_marc_port moving the Kyber\'s Marcduino port sets the new port to 9600 with both broadcasts on and relabels it (no ?KYBER line); the Marcduino picker offers every port but the Kyber\'s own, and follows the Kyber port', async ({ page }) => {
+  // onKyberMarcPortChange, updateKyberMarcPortDropdown (app.js:1154-1209). The relabel alone is
+  // wizard.push_fake_card_edits'. Row kyber.marc_port.
+  await setup(page);
+  await pullFake(page, 1, board([...KYBER, 'BAUD,S4,57600', 'BCAST,OUT,S4,OFF', 'BCAST,IN,S4,OFF']));
+  await holdVerifyPulls(page);
+  expect(await options(page, 'b1-kyber-marc-port')).toEqual(['0', '1', '3', '4', '5']);
+  expect(await value(page, 'b1-kyber-marc-port')).toBe('3');
+  await edit(page, '#b1-kyber-marc-port', '4');
+  expect(await page.evaluate(() => {
+    const sp = boardConfigs[1].serialPorts[3];
+    return [sp.baud, sp.broadcastIn, sp.broadcastOut, sp.label, document.getElementById('b1-s4-baud').value,
+            document.getElementById('b1-s4-bcin').checked, document.getElementById('b1-s4-bcout').checked];
+  })).toEqual([9600, true, true, 'Kyber Marcuino', '9600', true, true]);
+  const r = await sent(page, 1);
+  expect(r).toEqual(expect.arrayContaining(['1:?BAUD,S4,9600', '1:?BCAST,OUT,S4,ON', '1:?BCAST,IN,S4,ON', '1:?LABEL,S4,Kyber Marcuino',
+                                            '1:?LABEL,CLEAR,S3']));
+  expect(r.filter((s) => /KYBER/.test(s))).toEqual([]);
+  // The Kyber moves to S1: the Marcduino picker now leaves out S1 and offers S2.
+  await edit(page, '#b1-kyber-port', '1');
+  expect(await options(page, 'b1-kyber-marc-port')).toEqual(['0', '2', '3', '4', '5']);
+  expect(await value(page, 'b1-kyber-marc-port')).toBe('4');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.kyber_fake_targets_info the Kyber Targets panel on the local-Kyber board lists every board\'s Maestros - id, WCB, port, baud - its own and those of a board pulled after it, or says none are configured', async ({ page }) => {
+  // populateKyberTargetsFromConfig (app.js:10185-10201), called by populateUIFromConfig (3424-3434) and onMaestroChange
+  // (3812-3825). The panel was filled only when the Kyber board itself was loaded, so a board pulled after it never
+  // showed there: fixed 2026-10-13 (populateUIFromConfig refreshes the Kyber board's panel). Row kyber.targets_info.
+  const info = () => page.evaluate(() => document.getElementById('b1-kyber-targets-info').textContent.replace(/\s+/g, ' ').trim());
+  await setup(page);
+  await pullFake(page, 1, board(KYBER));
+  expect(await info()).toBe('No Maestros configured yet — add Maestros to each board first, then push.');
+  await setup(page);
+  await pullFake(page, 1, board([...KYBER, 'BAUD,S1,57600', 'MAESTRO,M1:W1S1:57600']));
+  expect(await info()).toBe('Will target: M1 · WCB1 S1 · 57,600 baud');
+  // WCB2 pulled afterwards, with two Maestros: the Kyber board's panel names them too.
+  await pullFake(page, 2, board(['BAUD,S1,115200', 'BAUD,S3,57600', 'MAESTRO,M2:W2S1:115200,M3:W2S3:57600'], { wcb: 2 }));
+  expect(await info()).toBe('Will target: M1 · WCB1 S1 · 57,600 baud | M2 · WCB2 S1 · 115,200 baud | M3 · WCB2 S3 · 57,600 baud');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.kyber_fake_repush_warning a Maestro edit on another board reminds the user to re-push the local-Kyber board, once per 30 s; an edit on the Kyber board itself does not', async ({ page }) => {
+  // showKyberRepushWarning (app.js:10164-10175), onMaestroChange (3807-3826). Row kyber.repush_warning.
+  await page.clock.install();
+  await setup(page);
+  await pullFake(page, 1, board(KYBER));
+  await pullFake(page, 2, board([], { wcb: 2 }));
+  const warned = (m) => toastsSince(page, m).then((t) => t.split('\n').filter((l) => l.includes('has Kyber Local')));
+  const addMaestro = (n, port) => page.evaluate(({ n, port }) => {
+    addMaestroRow(n);
+    const sel = [...document.querySelectorAll(`#b${n}-maestro-tbody tr [id$="-port"]`)].at(-1);
+    sel.value = String(port);
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }, { n, port });
+  let m = await toastMark(page);
+  await addMaestro(2, 1);
+  expect(await warned(m)).toEqual(['WCB 1 has Kyber Local — re-push WCB 1 after finishing all board configurations']);
+  m = await toastMark(page);
+  await addMaestro(2, 3);
+  expect(await warned(m), 'again within 30 s: no second reminder').toEqual([]);
+  await page.clock.fastForward(30_500);
+  m = await toastMark(page);
+  await page.evaluate(() => onMaestroChange(2));
+  expect((await warned(m)).length, '30 s on: reminded again').toBe(1);
+  await page.clock.fastForward(30_500);
+  m = await toastMark(page);
+  await addMaestro(1, 1);
+  expect(await warned(m), 'an edit on the Kyber board itself').toEqual([]);
+  expect(page.wizErrors).toEqual([]);
+});

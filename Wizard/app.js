@@ -3428,6 +3428,10 @@ function populateUIFromConfig(n, config) {
       populateKyberTargetsFromConfig(n, config);
     }
   }
+  // The local-Kyber board's "Will target" panel lists every board's Maestros, so a board loaded after it refreshes it
+  // too: it was filled only when the Kyber board itself was loaded, and left out every board pulled later.
+  const kyberBoard = findKyberLocalBoard();
+  if (kyberBoard !== null && kyberBoard !== n) populateKyberTargetsFromConfig(kyberBoard, boardConfigs[kyberBoard]);
   updateRemoteSectionsUI(n);
   // Sequences
   const tbody = document.getElementById(`b${n}-seq-tbody`);
