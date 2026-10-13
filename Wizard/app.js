@@ -787,21 +787,25 @@ function _devCommit(val) {
 function _devHide() { if (_devPop) _devPop.style.display = 'none'; _devActive = -1; }
 
 // ─── Serial Table ─────────────────────────────────────────────────
+// A serial port's baud options. Software serial (S3-S5) is unreliable above 57600, so the picker discourages it — but
+// the FIRMWARE accepts the whole table on any port (WCB_Storage.cpp:155). Always include the value this port is
+// actually configured for, marked (!), otherwise the select matches no option and renders blank (syncSerialUIToConfig
+// then falls back to the config's value, but the card showed nothing). renderSerialTable builds the table with the
+// config the slot held then, and populateUIFromConfig rebuilds a port's options for a pulled or loaded baud.
+function _serialBaudOptions(p, curBaud) {
+  const maxBaud = p >= 3 ? 57600 : Infinity;
+  return BAUD_RATES.filter(b => b <= maxBaud || b === curBaud).map(b =>
+    `<option value="${b}" ${b === (curBaud || 9600) ? 'selected' : ''}>${b.toLocaleString()}${b > maxBaud ? ' (!)' : ''}</option>`
+  ).join('');
+}
+
 function renderSerialTable(n) {
   const tbody = document.getElementById(`b${n}-serial-tbody`);
   if (!tbody) return;
   tbody.innerHTML = '';
 
   for (let p = 1; p <= 5; p++) {
-    // Software serial (S3-S5) is unreliable above 57600, so the picker discourages it — but the
-    // FIRMWARE accepts the whole table on any port (WCB_Storage.cpp:155). Always include the value
-    // this port is actually configured for, otherwise the select matches no option, renders blank,
-    // and syncSerialUIToConfig reads that blank back as 9600 and pushes it to the board.
-    const maxBaud = p >= 3 ? 57600 : Infinity;
-    const curBaud = boardConfigs[n]?.serialPorts?.[p - 1]?.baud;
-    const baudOptions = BAUD_RATES.filter(b => b <= maxBaud || b === curBaud).map(b =>
-      `<option value="${b}" ${b === (curBaud || 9600) ? 'selected' : ''}>${b.toLocaleString()}${b > maxBaud ? ' (!)' : ''}</option>`
-    ).join('');
+    const baudOptions = _serialBaudOptions(p, boardConfigs[n]?.serialPorts?.[p - 1]?.baud);
 
     const row = document.createElement('tr');
     row.id = `b${n}-serial-row-${p}`;
@@ -1320,6 +1324,11 @@ function onMeshChannelChange() {
   const ch = parseInt(document.getElementById('g-meshch').value) || 1;
   systemConfig.general.meshChannel = ch;
   for (const n in boardConfigs) boardConfigs[n].meshChannel = ch;
+  // An open WiFi note names the mesh channel: re-render it, or it kept the old number until the mode changed.
+  for (const n in boardConfigs) {
+    const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+    if (mode) updateWifiVisibility(n, mode);
+  }
   updateGeneralBaseline();
   _notifyGeneralChanged();
 }
@@ -3355,6 +3364,9 @@ function populateUIFromConfig(n, config) {
   for (let p = 1; p <= 5; p++) {
     const sp = config.serialPorts[p - 1];
     const el = (id) => document.getElementById(`b${n}-s${p}-${id}`);
+    if (el('baud') && ![...el('baud').options].some(o => +o.value === sp.baud)) {
+      el('baud').innerHTML = _serialBaudOptions(p, sp.baud);   // a baud the table was not built with (marked (!))
+    }
     if (el('baud'))  el('baud').value   = sp.baud;
     if (el('bcin'))  el('bcin').checked = sp.broadcastIn;
     if (el('bcout')) el('bcout').checked = sp.broadcastOut;

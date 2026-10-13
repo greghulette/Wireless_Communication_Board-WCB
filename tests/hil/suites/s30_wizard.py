@@ -225,13 +225,18 @@ for _key, _title in _FAKE_RESCAN:
 
 
 # The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
-# section (specs/general_rescan_fake.spec.js). No board and no real port, so CI runs them too.
+# section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
+# (specs/cards_rescan_fake.spec.js). No board and no real port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
     ("general_fake_etm_toggle_checksum", "ETM Enabled off pushes ?ETM,OFF alone and on ?ETM,ON alone, a board pulled with ETM off keeps its details; Packet Checksum is never pushed OFF and a board with it off is put back ON (general.etm_toggle_checksum)"),
     ("general_fake_etm_fields", "The ETM numbers: the message count clamps to 10-200, an emptied field falls back to the firmware default, and every board's config and push follow (general.etm_fields)"),
     ("general_fake_mismatch_modal", "The keep/use modal: none for a factory-default board or with the setup wizard open; Use takes the NaviCore controller and id and marks the other boards unsaved; after a file load it names 'loaded file' (general.mismatch_modal)"),
+    ("grid_fake_reconcile", "The board grid is the floor plus mesh-reported boards plus live connections, in order; a shrinking floor removes idle sections with their configs but never a connected or mid-flash board (grid.reconcile)"),
+    ("identity_fake_hw_version", "A board pulled with HW 0 pushes no ?HW line, nor does picking Select; the LED pin group shows for 3.1/3.2 only, and only a user's pick marks the board unsaved (identity.hw_version)"),
+    ("serial_fake_baud_options", "The serial table offers S3-S5 up to 57600 plus the configured baud marked (!): a board pulled with S4 at 115200 shows it, and pushed untouched sends nothing (serial.table_baud_options)"),
+    ("wifi_fake_ui", "The WiFi radios show the AP or Join fields with a note naming the mesh channel, Off hides them; mode and credentials go into the config, the board is marked unsaved, and the push sends one ?WIFI line (wifi.ui)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):
