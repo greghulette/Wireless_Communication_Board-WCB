@@ -637,3 +637,96 @@ def bare_l_lowest_local(bench):
                     w.run(f"?WLED,CLEAR,{wid}")
                 _relabel(w, before[1], "S4", "S5")
     assert not bad, "; ".join(bad)
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+@contextmanager
+def _local_wled5(bench, w, before):
+    """WLED 5 local on W1 S4 at 9600 with W1's WDP off; cleared, and S4's label put back, on exit."""
+    me = bench.usb_wcb_number()
+    with _wdp_off(w, before[1]):
+        try:
+            if not _has(w.run(f"?WLED,5:W{me}S4:9600"), "[WLED] WLED 5: local S4 at 9600 baud (slot "):
+                raise AssertionError(f"setup: ?WLED,5:W{me}S4:9600 was not taken")
+            yield
+        finally:
+            w.run("?WLED,CLEAR,5")
+            _relabel(w, before[1], "S4")
+
+
+@test("wled.bad_args_usage", "A ;L verb with a missing or bad argument prints its usage line and writes nothing to the WLED port: PS, FX and PAL with no number, COL with a 2-digit colour, JSON with no payload, and an empty verb (a local WLED 5 on W1 S4, WDP off)", needs=["wcb1"])
+def bad_args_usage(bench):
+    """Coverage re-scan 2026-10-12, wled.verbs_bad_args. wledDispatchLocal (WCB_WLED.cpp) hands the verb to WcbCmd's
+    WcbWled::build with &Serial as the diag, which prints the usage line and returns "" so nothing is sent; wled.bad_verb
+    covers the unknown verb. ;L5,ON first is the control that the port takes WLED bytes."""
+    s4 = link(bench, 1, "S4")
+    w = usb_wcb(bench)
+    _require_free(bench, 1, "S4")
+    _ids_free(bench, 5)
+    cases = ((";L5,PS", "[WLED] Usage: ;L[id],PS,<preset#>"),
+             (";L5,FX", "[WLED] Usage: ;L[id],FX,<index>[,<speed>,<intensity>]"),
+             (";L5,PAL", "[WLED] Usage: ;L[id],PAL,<index>"),
+             (";L5,COL,12", "[WLED] Usage: ;L[id],COL,RRGGBB  (or RRGGBBWW for RGBW)"),
+             (";L5,JSON", "[WLED] JSON needs a payload"),
+             (";L5,", "[WLED] Empty ;L command"))
+    bad = []
+    with config_guard(bench, 1) as before, _local_wled5(bench, w, before):
+        s4.listen(9600)
+        watch = Watch(s4)
+        w.send(";L5,ON")
+        try:
+            watch.expect(s4, ON, timeout=2)
+        except AssertionError:
+            raise AssertionError(f"control: ;L5,ON did not reach W1 S4: {watch.got(s4)!r}")
+        time.sleep(0.3)
+        watch = Watch(s4)
+        for cmd, line in cases:
+            out = [x.rstrip() for x in w.run(cmd)]
+            if line not in out:
+                bad.append(f"{cmd} printed {[x for x in out if 'WLED' in x]}, not {line!r}")
+        time.sleep(0.8)
+        if watch.got(s4):
+            bad.append(f"the refused verbs wrote {watch.got(s4)!r} to W1 S4")
+    assert not bad, "; ".join(bad)
+
+
+@test("wled.debug_tx_lines", "Under ?DEBUG,ON a ;L to a local WLED prints '[WLED-DBG] TX -> <json>' and one to a remote proxy prints '[WLED] <id> -> WCB<host>: <verb>'; with debug off neither line prints (a local WLED 5 on W1 S4 and W1's proxy for WLED 1 on W2, WDP off)", needs=["wcb1"], links=["W1S4", "W2S2"])
+def debug_tx_lines(bench):
+    """Coverage re-scan 2026-10-12, wled.debug_tx_line. wledSend (WCB_WLED.cpp) prints the TX line after writing a local
+    WLED port, and processWLEDRuntimeCommand prints the forward line after sending a proxy's verb to its host, both
+    behind debugEnabled. W1's proxy for WLED 1 is W2's WLED 1 on W2 S2 (s09's route); the bytes are checked on both
+    wires so a line is never printed for a send that did not happen."""
+    s4, far = link(bench, 1, "S4"), link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    _require_free(bench, 1, "S4")
+    _ids_free(bench, 5)
+    proxy = next((m for m in (re.match(r"^\?WLED,1:W(\d+)S\d:\d+$", t, re.I) for t in bench.config_tokens(1)) if m), None)
+    if not proxy or int(proxy.group(1)) == bench.usb_wcb_number():
+        raise Skip("W1 has no remote proxy for WLED 1")
+    host = int(proxy.group(1))
+    bad = []
+    with config_guard(bench, 1) as before, _local_wled5(bench, w, before):
+        s4.listen(9600)
+        far.listen()
+        try:
+            for debug in (True, False):
+                w.run("?DEBUG,ON" if debug else "?DEBUG,OFF")
+                watch = Watch(s4, far)
+                local = [x.rstrip() for x in w.run(";L5,ON")]
+                remote = [x.rstrip() for x in w.run(";L1,OFF")]
+                for l, data, what in ((s4, ON, ";L5,ON on W1 S4"), (far, b'{"on":false}\n', f";L1,OFF on W{host} S2")):
+                    try:
+                        watch.expect(l, data, timeout=3)
+                    except AssertionError:
+                        bad.append(f"debug {'on' if debug else 'off'}: {what} did not arrive: {watch.got(l)!r}")
+                tx, fwd = '[WLED-DBG] TX -> {"on":true}', f"[WLED] 1 -> WCB{host}: OFF"
+                if debug:
+                    if tx not in local:
+                        bad.append(f"debug on: the local ;L5,ON printed {[x for x in local if 'WLED' in x]}, not {tx!r}")
+                    if fwd not in remote:
+                        bad.append(f"debug on: the proxied ;L1,OFF printed {[x for x in remote if 'WLED' in x]}, not {fwd!r}")
+                elif _has(local, "[WLED-DBG]") or _has(remote, "[WLED] 1 ->"):
+                    bad.append(f"debug off: a debug line printed: {[x for x in local + remote if 'WLED' in x]}")
+        finally:
+            w.run("?DEBUG,OFF")
+    assert not bad, "; ".join(bad)

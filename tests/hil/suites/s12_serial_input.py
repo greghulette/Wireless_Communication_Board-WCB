@@ -2516,3 +2516,34 @@ def checksum_c_chain(bench):
     ran_version = _has(out, "End of Version")
     assert ran_config and ran_version, (f"only part of a ?C-first checksummed chain ran (config={ran_config}, "
                                         f"version={ran_version}): {[x for x in out if 'Unknown' in x or 'VERIFIED' in x]}")
+
+
+# ============================================================ coverage re-scan 2026-10-12 (low-risk rows)
+@test("input.wdpda_empty_list", "?WDP,DA on a board with no saved serial-attached device (W3) prints the header and '(none — a wired device self-identifies by sending @WDP1)' with no forget hint, and its ?WDP,DUMP carries no [WDPDA:N=3] record", needs=["wcb1"], links=[])
+def wdpda_empty_list(bench):
+    """Coverage re-scan 2026-10-12, wdpda.print_and_dump. wdpDaPrint (WCB_WDP.cpp) prints the '(none ...)' line when no
+    port holds a record, heard or not, and the FORGET/CLEAR hint only when it listed one; wdpDaDump writes a [WDPDA]
+    record per saved device. W1 and W2 always hold test devices (the input.wdpda_* tests), so W3 is read on its own USB.
+    It is never cleared here: a saved device is not in the config chain and could not be put back."""
+    own3 = bench.usb_wcbs().get(3)
+    if not own3:
+        raise Skip("W3 has no USB console here")
+    w3 = WCB(bench.dev(own3))
+    rows = [x.rstrip() for x in _da_rows(w3)]
+    listed = [x for x in rows if re.match(r"^\s+S\d\s", x)]
+    if listed:
+        raise Skip(f"W3 holds {len(listed)} serial-attached device(s); clearing them could not be undone")
+    bad = []
+    if "Serial-attached devices (WDP-DA announces):" not in rows:
+        bad.append(f"?WDP,DA printed no header: {rows[:4]}")
+    if "  (none — a wired device self-identifies by sending @WDP1)" not in rows:
+        bad.append(f"?WDP,DA on an empty list printed {rows[:6]}")
+    if _has(rows, "Saved on a device's second announce") or _has(rows, "WDP,DA,CLEAR"):
+        bad.append("an empty list still printed the forget hint")
+    dump = [x.rstrip() for x in w3.run("?WDP,DUMP", timeout=8)]
+    own_rows = [x for x in dump if x.startswith("[WDPDA:N=3,")]
+    if own_rows:
+        bad.append(f"W3's dump has {len(own_rows)} WDPDA record(s) of its own")
+    if not any(x.startswith("[WDP:END,") for x in dump):
+        bad.append("W3's ?WDP,DUMP did not finish")
+    assert not bad, "; ".join(bad)
