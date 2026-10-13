@@ -226,8 +226,8 @@ for _key, _title in _FAKE_RESCAN:
 
 # The medium-risk Wizard paths of the same re-scan (rows with risk M, named at the end of each title): the General
 # section (specs/general_rescan_fake.spec.js), the board grid and the cards' identity, serial and WiFi fields
-# (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js). No board
-# and no real port, so CI runs them too.
+# (specs/cards_rescan_fake.spec.js), the Kyber and NaviCore cards (specs/kyber_navicore_rescan_fake.spec.js), the audio
+# devices (specs/audio_rescan_fake.spec.js). No board and no real port, so CI runs them too.
 _FAKE_RESCAN_M = (
     ("general_fake_wcbq_change", "WCB Quantity: More... lists 1-20, a pick sets the floor (the grid grows and shrinks, a connected board above it stays), widens every WCB# dropdown and marks General pending (general.wcbq_change)"),
     ("general_fake_password_mac_channel", "The password, MAC octets and mesh channel edited in General reach every board's config and the General baseline, turn Push All amber, and every board's push carries them (general.password_mac_channel)"),
@@ -243,6 +243,10 @@ _FAKE_RESCAN_M = (
     ("kyber_fake_baud", "A Kyber baud change is written into the Kyber port's serial baud, so the push carries ?BAUD,S<port> and no Kyber line (kyber.baud)"),
     ("navicore_fake_remote_radio", "Under NaviCore only its card shows; the Remote radio sets the board's Kyber mode to remote, the status names the id, the push sends ?MAESTRO,REMOTE; None takes it back (navicore.remote_radio)"),
     ("navicore_fake_reconcile_maestros", "A board that gains a Maestro under NaviCore goes remote, and one that loses its last Maestro leaves remote (navicore.reconcile_maestros)"),
+    ("audio_fake_toggle_and_mode", "An audio device's enable box shows its block and starts Local; a Local port pushes ?HCR,PORT and ?HCR,POLL, unchecked ?HCR,CLEAR, Remote ?HCR,REMOTE,W<n>, leaving Remote ?HCR,REMOTE,OFF first (audio.toggle_and_mode)"),
+    ("audio_fake_port_dropdowns", "Device port pickers offer only free ports and their own, every picker follows a device taking or freeing a port, and an HCR on S3-S5 is clamped to 57600 in its picker, config and serial row (audio.port_dropdowns)"),
+    ("audio_fake_clamps", "MP3 volume 0-64, DFPlayer volume 0-30, HCR poll 0 or 3-3600 (shown in the field), on edit and again at push time (audio.clamps)"),
+    ("audio_fake_route_host", "The Remote host picker lists 1 to the quantity without this board, never selects this board, keeps a pulled host; boards above the quantity are not offered today (audio.route_host_dropdown)"),
 )
 for _key, _title in _FAKE_RESCAN_M:
     def _fake_rescan_m(bench, _id=f"wizard.{_key}"):

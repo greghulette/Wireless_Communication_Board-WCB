@@ -2468,6 +2468,17 @@ function reconcileRemoteWithMaestros(n) {
 }
 
 // ─── Audio devices (MP3 Trigger / HCR Vocalizer / DFPlayer) ────────
+// A device enabled, disabled or switched Local/Remote takes or frees a port: re-filter every device picker on the board,
+// as the port-change handlers do. Each mode handler refreshed only its own, so enabling the MP3 on S3 left the HCR
+// (and DFPlayer) picker offering S3, and picking it there put two devices on one UART.
+function _refreshDevicePortPickers(n) {
+  updateMP3PortDropdown(n);
+  updateDFPPortDropdown(n);
+  updateHCRPortDropdown(n);
+  refreshAllWLEDPortDropdowns(n);
+  refreshAllMaestroPortDropdowns(n);
+}
+
 // Each device has an Enable checkbox (b<n>-<dev>-enable) that shows/hides its
 // settings block, plus a Local/Remote sub-radio (name b<n>-<dev>). The effective
 // "mode" is: not enabled -> 'none'; else the sub-radio value (default 'local').
@@ -2534,7 +2545,7 @@ function onMP3Change(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateMP3PortDropdown(n);
+  _refreshDevicePortPickers(n);   // the MP3 took or freed a port: every picker, not just its own
   onBoardFieldChange(n);
 }
 
@@ -2709,7 +2720,7 @@ function onDFPChange(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateDFPPortDropdown(n);
+  _refreshDevicePortPickers(n);   // the DFPlayer took or freed a port: every picker, not just its own
   onBoardFieldChange(n);
 }
 
@@ -2923,7 +2934,7 @@ function onHCRChange(n) {
 
   WCBParser.evaluatePortClaims(config);
   updatePortClaimUI(n);
-  updateHCRPortDropdown(n);
+  _refreshDevicePortPickers(n);   // the HCR took or freed a port: every picker, not just its own
   updateHCRStatusBtn(n);
   onBoardFieldChange(n);
 }
