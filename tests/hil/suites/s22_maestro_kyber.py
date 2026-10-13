@@ -2720,6 +2720,122 @@ def get_off_s1_ports(bench):
     assert not bad, "; ".join(bad)
 
 
+@test("maestro.get_reply_kept_from_raw_mapping", "Ten get-queries to Maestro 5 on W1 S3 while a raw serial mapping reads S3 (?MAP,SERIAL,S3R,S4) each keep their reply: '[MAESTRO] get 5 'getErrors' -> m5err=4', no timeout, and none of the reply bytes reach S4 (WDP off; no reboot)", needs=NEEDS, links=["W1S3", "W1S4"])
+def get_reply_kept_from_raw_mapping(bench):
+    """Coverage re-scan 2026-10-12, map.raw_forwarding (the maestroQueryPort half). RawSerialForwardingTask (WCB.ino)
+    skips a raw mapping whose input is maestroQueryPort, and re-tests that gate for every byte it drains, because
+    handleMaestroGet (WCB_Maestro.cpp) reads the reply from the port for MAESTRO_QUERY_TIMEOUT_MS with maestroQueryPort
+    set; without the gate the task, polling every millisecond, takes reply bytes, forwards them to the mapping's output
+    and leaves the get short. A raw mapping on a Maestro's port is not refused by either side. The Maestro is the probe
+    with a reply rule, as in maestro.get_off_s1_ports, at 9600 on S3; its reply bytes are below 0x80, so one bridged after
+    a timeout cannot command the real Maestro 2. Maestro 5 is added with WDP off, the mapping cleared before the slot,
+    and S3 / S4's saved tokens replayed (module rules)."""
+    s3, s4 = link(bench, 1, "S3"), link(bench, 1, "S4")
+    _require_remote_pair(bench)
+    w = usb_wcb(bench)
+    bad = []
+    with config_guard(bench, 1) as before:
+        lines = _m_lines(before[1])
+        if len(lines) > 8 or any(re.match(r"^\?MAESTRO,M5:", t, re.I) for t in lines):
+            raise Skip("W1 needs a free slot and no Maestro 5")
+        for p in ("S3", "S4"):
+            busy = _port_busy(before[1], p)
+            if busy:
+                raise Skip(f"W1 {p} is in use: {busy}")
+        tokens = _port_tokens(before[1], "S3") + _port_tokens(before[1], "S4")
+        with _wdp_off(w, before[1]):
+            mapped = False
+            try:
+                w.run("?DEBUG,MAESTRO,ON")
+                out = w.run("?MAESTRO,M5:W1S3:9600")
+                if not _has(out, "✓ Maestro 5: Local S3 at 9600 baud (slot"):
+                    raise AssertionError(f"setup: ?MAESTRO,M5:W1S3:9600 printed {out}")
+                out = w.run("?MAP,SERIAL,S3R,S4")
+                if not _has(out, "Serial mapping set: Serial3 (RAW) -> 1 destination(s)"):
+                    raise AssertionError(f"setup: ?MAP,SERIAL,S3R,S4 printed {out}")
+                mapped = True
+                s3.listen(9600)
+                s4.listen()
+                for k in range(10):
+                    s3.probe.rule_clear()
+                    s3.rule(1, "AA0521", bytes.fromhex("0400"))
+                    w.run("?VAR,CLEAR,m5err")
+                    m4, wm = s4.mark(), w.dev.mark()
+                    w.send(";M5,getErrors")
+                    time.sleep(0.8)
+                    got = [x.rstrip() for x in w.dev.since(wm)]
+                    if "[MAESTRO] get 5 'getErrors' -> m5err=4" not in got:
+                        bad.append(f"get {k + 1}: no 'get 5 'getErrors' -> m5err=4' line"
+                                   + (f" ({[x for x in got if 'timeout (' in x][0]})" if _has(got, "timeout (") else ""))
+                    if s4.received(m4):
+                        bad.append(f"get {k + 1}: S4 got {s4.received(m4).hex(' ')} from the reply")
+                    if _get(w, "m5err") != "[VAR] m5err = 4":
+                        bad.append(f"get {k + 1}: {_get(w, 'm5err')}")
+            finally:
+                s3.probe.rule_clear()
+                if mapped:
+                    w.run("?MAP,SERIAL,CLEAR,S3")
+                w.run("?MAESTRO,CLEAR,M5:W1S3")
+                w.run("?VAR,CLEAR,m5err")
+                w.run("?DEBUG,MAESTRO,OFF")
+                for t in tokens:
+                    w.run(t)
+    assert not bad, "; ".join(bad)
+
+
+@test("kyber.local_port_raw_mapping_skipped", "On a Kyber_Local board (the Kyber on W1 S2) a raw serial mapping reading the Kyber port (?MAP,SERIAL,S2R,S4) does not take its bytes: getErrors frames into S2 reach W2's Maestro once each and W1 S1 through the Kyber path, and nothing reaches S4 (2 reboots)", needs=NEEDS, links=["W1S1", "W1S2", "W1S4", "W2S1"])
+def local_port_raw_mapping_skipped(bench):
+    """Coverage re-scan 2026-10-12, map.raw_forwarding (the Kyber-port half). RawSerialForwardingTask (WCB.ino) skips a
+    raw mapping whose input is kyberLocalPort while Kyber_Local, because KyberLocalTask owns that port: reading it too
+    steals bytes from the Kyber path and double-sends them. addSerialMonitorMapping does not refuse the Kyber port, so
+    the skip is all that keeps the two readers apart. W1 goes Kyber_Local on S2 as in kyber.local_mode_s2 (targeted
+    forwarding, auto-populated), so a getErrors frame for Maestro 2 goes to W1 S1 and, as one shared broadcast, to W2's
+    real Maestro 2 (a read-only query). _restore_remote puts W1 back to Maestro_Remote with S2's saved tokens."""
+    s1, s2, s4, tap = link(bench, 1, "S1"), link(bench, 1, "S2"), link(bench, 1, "S4"), link(bench, 2, "S1")
+    _require_remote_pair(bench)
+    w = usb_wcb(bench)
+    _require_kyber_broadcast_remote(w)
+    bad = []
+    with config_guard(bench, 1, 2) as before:
+        for p in ("S2", "S4"):
+            busy = _port_busy(before[1], p)
+            if busy:
+                raise Skip(f"W1 {p} is in use: {busy}")
+        ports = _port_tokens(before[1], "S2")
+        mapped = False
+        try:
+            out = w.run("?KYBER,LOCAL,S2", timeout=8)
+            if not _has(out, "Kyber is LOCAL on Serial2"):
+                raise AssertionError(f"setup: ?KYBER,LOCAL,S2 printed {out[:6]}")
+            bm = w.reboot()
+            if not _has(w.dev.since(bm), "Kyber_Local Task Created"):
+                raise AssertionError("setup: the reboot did not start the Kyber_Local task")
+            out = w.run("?MAP,SERIAL,S2R,S4")
+            if not _has(out, "Serial mapping set: Serial2 (RAW) -> 1 destination(s)"):
+                raise AssertionError(f"setup: ?MAP,SERIAL,S2R,S4 printed {out}")
+            mapped = True
+            s1.listen()
+            s2.listen(115200)
+            s4.listen()
+            tap.listen()
+            for k in range(5):
+                watch = Watch(s1, s2, s4, tap)
+                s2.send(GET_ERRORS_2)
+                _wait_bytes(watch, (s1, tap), 3, 3.0)
+                time.sleep(1.0)
+                if watch.got(s4):
+                    bad.append(f"frame {k + 1}: S4 got {watch.got(s4).hex(' ')} from the Kyber port")
+                if watch.got(tap) != GET_ERRORS_2:
+                    bad.append(f"frame {k + 1}: W2 S1 got {watch.got(tap).hex(' ') or 'nothing'}, not AA 02 21 once")
+                if watch.got(s1)[:3] != GET_ERRORS_2:
+                    bad.append(f"frame {k + 1}: W1 S1 got {watch.got(s1).hex(' ') or 'nothing'}, not AA 02 21 first")
+        finally:
+            if mapped:
+                w.run("?MAP,SERIAL,CLEAR,S2")
+            _restore_remote(w, ports)
+    assert not bad, "; ".join(bad)
+
+
 @test("maestro.daisy_chain_same_port", "Two Maestro ids daisy-chained on W1 S1: the id-0 and target-9 verbs write one frame per slot, each addressed to its own id, the per-id verb and subroutine write once, and clearing the second id leaves S1 reserved (WDP off; no reboot)", needs=NEEDS, links=["W1S1", "W2S1"])
 def daisy_chain_same_port(bench):
     """WCB-WP53 row 2. sendMaestroServoVerb's broadcast (dev 0) and target-9 loops (WCB_Maestro.cpp) walk every local

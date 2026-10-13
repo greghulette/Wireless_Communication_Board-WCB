@@ -2274,6 +2274,7 @@ GATED = {
                                                 "on, and reboots each board twice"),
     "wifi.join_absent_ssid_keeps_mesh": ("wifi_modes", "points W1's JOIN at a network nobody hosts for about 70 s and "
                                                        "reboots W1 twice"),
+    "input.usb_line_cap_32k": ("wifi_modes", "turns W1's access point off for one boot and reboots it twice"),
     "etm.seq_wrap": ("etm_seq_wrap", "floods the mesh with about 65,000 JSON broadcasts from W1 for several minutes "
                                      "and reboots W2"),
     **{t: ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard")

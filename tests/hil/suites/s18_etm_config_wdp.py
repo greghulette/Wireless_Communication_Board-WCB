@@ -1872,6 +1872,79 @@ def format_refusals(bench):
     assert not missing, f"?config lacks {missing}"
 
 
+@test("chars.prefix_delim_collision", "A chain that changes the delimiter first (?DELIM,|^...) then offers that delimiter as a prefix is refused by every prefix setter: ?CMDCHAR,| and ?CC| with \"'|' is the command delimiter — every chain would split at it. Pick a different command character.\", then - once those and the ';' collision of ?FUNCCHAR / ?LF were refused - ?FUNCCHAR,| and ?LF| with the function-identifier line; the characters end as ^ ? ;", needs=["wcb1"], links=[])
+def prefix_delim_collision(bench):
+    """Coverage re-scan 2026-10-12, chars.funcchar_refusals and chars.cmdchar_refusals (the delimiter-collision arm).
+    prefixCharOk (WCB.ino) refuses a prefix equal to commandDelimiter for ?FUNCCHAR, ?CMDCHAR, ?LF<c> and ?CC<c>. A
+    whole line is split on the live delimiter before any setter reads it, so ?FUNCCHAR,| typed while '|' is the
+    delimiter arrives as '?FUNCCHAR,' and gets the format line; the arm is reached when one chain changes the delimiter
+    and then names it: '?DELIM,|^?CMDCHAR,|' is split on '^' as it is read, both tokens are queued, and the queue runs
+    them one at a time (handleSingleCommand), the setter after ?DELIM has taken effect - as a factory chain that carries
+    ?DELIM does. Safety order: a function identifier equal to the delimiter splits every line at its own prefix, ?DELIM
+    included, which only an erase-flash undoes; so the ?FUNCCHAR / ?LF arms run only after the recoverable ones showed
+    the check is in prefixCharOk (the command-character arms: '|' as command character is undone by ?DELIM,^ then
+    ?CMDCHAR,;) and that ?FUNCCHAR and ?LF call it (their ';' refusal: undone by ;FUNCCHAR,?). dev.send throughout."""
+    w = usb_wcb(bench)
+    problems = []
+    delim_line = "'|' is the command delimiter — every chain would split at it. Pick a different {}."
+    semi_line = ("';' is already the command character — the entire ';' command family would stop working. "
+                 "Pick a different function identifier.")
+
+    def send(line, wait=0.8):
+        m = w.dev.mark()
+        w.dev.send(line)
+        time.sleep(wait)
+        return [x.rstrip() for x in w.dev.since(m)]
+
+    def back():
+        """Put ^ ? ; back if an arm moved anything; True when nothing had moved."""
+        chars = _prefix_chars(w)
+        if chars == ("^", "?", ";"):
+            return True
+        problems.append(f"the characters were left as {chars!r}")
+        _restore_prefixes(w)
+        return False
+
+    with config_guard(bench, 1) as before:
+        if token(before[1], "?CMDCHAR,") != "?CMDCHAR,;" or any(t.upper().startswith(("?DELIM,", "?FUNCCHAR,"))
+                                                               for t in before[1]):
+            raise Skip("W1's prefix characters are not the defaults ^ ? ;")
+        gate = True
+        try:
+            for line, what in (("?DELIM,|^?CMDCHAR,|", "command character"), ("?DELIM,|^?CC|", "command character")):
+                out = send(line)
+                if "Delimiter updated to: '|'" not in out:
+                    problems.append(f"{line}: the ?DELIM half did not run: {out[:4]}")
+                if delim_line.format(what) not in out:
+                    problems.append(f"{line} printed {out[:4]}")
+                    gate = False
+                send("?DELIM,^", 0.5)
+                gate = back() and gate
+            for line in ("?FUNCCHAR,;", "?LF;"):
+                out = send(line, 0.5)
+                if semi_line not in out:
+                    problems.append(f"{line} printed {out[:4]}")
+                    gate = False
+                    if _has(out, "updated to ';'"):
+                        send(";FUNCCHAR,?", 0.5)
+                gate = back() and gate
+            if gate:
+                for line in ("?DELIM,|^?FUNCCHAR,|", "?DELIM,|^?LF|"):
+                    out = send(line)
+                    if "Delimiter updated to: '|'" not in out:
+                        problems.append(f"{line}: the ?DELIM half did not run: {out[:4]}")
+                    if delim_line.format("function identifier") not in out:
+                        problems.append(f"{line} printed {out[:4]}")
+                    send("?DELIM,^", 0.5)
+                    back()
+            else:
+                problems.append("?FUNCCHAR,| and ?LF| were not sent: a recoverable arm failed first")
+        finally:
+            if _prefix_chars(w) != ("^", "?", ";"):
+                _restore_prefixes(w)
+    assert not problems, "; ".join(problems)
+
+
 @test("wcb.erase_bad_argument", "?ERASE, ?ERASE,NV and ?ERASE,NVSX print the usage line and erase nothing: no restart follows within 6 s, no NVS namespace loses an entry, and the chain is unchanged", needs=["wcb1"], links=[])
 def erase_bad_argument(bench):
     """WCB-WP35 row 3. processLocalCommand's ERASE branch (WCB.ino) calls eraseNVSFlash only when the argument, upper-

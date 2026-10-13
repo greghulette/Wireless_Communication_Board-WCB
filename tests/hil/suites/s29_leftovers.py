@@ -672,6 +672,16 @@ def _banner_problems(banner, toks, version, live):
     nvar = len([t for t in toks if t.upper().startswith("?VAR,SET,")])
     if nvar:
         exact.append(f"[VAR] Loaded {nvar} variable(s)")
+    # seqStoreBegin's count line (WCB_SeqStore.cpp; coverage re-scan 2026-10-12, seq.store_begin_boot): one per stored
+    # sequence, and the file holds one '<key>,<value>\n' line each, so its size follows from the chain's ?SEQ,SAVE tokens
+    seqs = [t for t in toks if t.upper().startswith("?SEQ,SAVE,")]
+    size = sum(len(t) - len("?SEQ,SAVE,") + 1 for t in seqs)
+    seq_line = next((x for x in banner if x.startswith("[SEQ] ") and " stored sequence(s) in the sequence store (" in x),
+                    None)
+    if seq_line is None:
+        p.append("no '[SEQ] N stored sequence(s) in the sequence store' line")
+    elif seq_line != f"[SEQ] {len(seqs)} stored sequence(s) in the sequence store ({size} of 32768 bytes)":
+        p.append(f"{seq_line!r}: the chain holds {len(seqs)} sequence(s) making a {size}-byte file")
     if not any(t.upper().startswith("?MAP,SERIAL,") for t in toks):
         exact.append("  No serial mappings configured")
     if not any(t.upper().startswith("?MAP,PWM") for t in toks):
@@ -747,7 +757,7 @@ def _cut(lines):
     return lines[s:e + 1]
 
 
-@test("boot.banner_w1", "After a reboot, W1's boot banner matches its config chain line by line: identity block, port rows with baud, flags and labels, MAC and peers, controller, WiFi, general settings, loaded devices and routes, Kyber mode, the Maestro table in slot order, learned peers against ?PEERSLIVE (1 reboot)", needs=["wcb1"], links=[])
+@test("boot.banner_w1", "After a reboot, W1's boot banner matches its config chain line by line: identity block, port rows with baud, flags and labels, MAC and peers, controller, WiFi, general settings, loaded devices and routes, Kyber mode, the Maestro table in slot order, learned peers against ?PEERSLIVE, the sequence store's count and size line (1 reboot)", needs=["wcb1"], links=[])
 def banner_w1(bench):
     w = usb_wcb(bench)
     toks = snapshot(bench, 1)

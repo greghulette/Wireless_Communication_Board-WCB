@@ -1324,6 +1324,72 @@ def usb_line_over_heap_dropped_whole(bench):
          f"drop line: {dropped[:1]}): the head ran on its own")
 
 
+@test("input.usb_line_cap_32k", "With W1's WiFi off, so its largest free block is past 32 KB, a 33 KB checksummed ;S0 chain typed on USB meets the cap: one '[SERIAL] S0: line longer than 32768 characters - dropped' line, no token runs, nothing verifies, and the next line runs; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=[], opt_in="wifi_modes", opt_in_why="turns W1's access point off for one boot and reboots it twice")
+def usb_line_cap_32k(bench):
+    """Coverage re-scan 2026-10-12, reader.line_cap_usb. processIncomingSerial (WCB.ino) appends a character only while
+    the line is shorter than serialLineMax (32768 on USB, 4096 on S1-S5) and drops the whole line past it, so its head
+    never runs without the ^?CHK its tail carried. In AP mode the largest free block (~16-17 KB) is below the cap, so a
+    long line meets the heap-failure arm first (input.usb_line_over_heap_dropped_whole); with WiFi off the cap arm is
+    the one reached. A mode applies only at boot (processWifiCommand, WCB_WiFi.cpp), so W1 boots once with WiFi off and
+    once more with its own ?WIFI,AP line replayed (s28 _restore_ap: the line is never printed). Every token is
+    ;S0<tag><5 digits>, so what ran is counted on USB."""
+    from suites.s28_wifi import _restore_ap, _wifi_token
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok, mode, ssid, _ = _wifi_token(before[1])
+        if mode != "AP":
+            raise Skip("W1 does not host an access point")
+        changed = False
+        try:
+            out = w.run("?WIFI,OFF")
+            changed = True
+            if not _has(out, "WiFi disabled — reboot to apply."):
+                raise AssertionError(f"?WIFI,OFF printed {out}")
+            w.reboot()
+            mm = next((m for m in map(HEAP_RX.match, w.run("?STATS", timeout=6)) if m), None)
+            if not mm:
+                raise AssertionError("?STATS printed no 'Heap:' line")
+            largest = int(mm.group(2))
+            bench.note(f"W1 with WiFi off: largest free block {largest} bytes")
+            if largest < 40000:
+                raise AssertionError(f"with WiFi off W1's largest free block is {largest} bytes, too little for a "
+                                     f"32 KB line to reach the cap")
+            tag = "Q" + nonce()[:1]
+            tokens = [f";S0{tag}{k:05d}" for k in range(33500 // 10)]
+            chain = "^".join(tokens)
+            line = f"{chain}^?CHK{zlib.crc32(chain.encode()) & 0xFFFFFFFF:08X}"
+            m = w.dev.mark()
+            w.dev.send_paced(line)
+            last, still, end = -1, time.monotonic(), time.monotonic() + 40.0
+            while time.monotonic() < end:                     # until W1's console has been quiet for 3 s
+                n = len(w.dev.since(m))
+                if n != last:
+                    last, still = n, time.monotonic()
+                elif time.monotonic() - still >= 3.0:
+                    break
+                time.sleep(0.2)
+            out = [x.rstrip() for x in w.dev.since(m)]
+            ran = sum(1 for x in out if re.match(rf"^{tag}\d{{0,5}}$", x))
+            drops = [x for x in out if x.startswith("[SERIAL] S0:")]
+            bench.note(f"a {len(line)}-byte USB line: {ran} token(s) ran, drop lines {drops[:2]}")
+            if drops != ["[SERIAL] S0: line longer than 32768 characters - dropped"]:
+                problems.append(f"expected one '[SERIAL] S0: line longer than 32768 characters - dropped', got {drops[:3]}")
+            if ran:
+                problems.append(f"{ran} of the over-long line's tokens ran")
+            if _has(out, "Command checksum"):
+                problems.append("the over-long line reached the checksum gate")
+            if w.rebooted_since(m):
+                problems.append("W1 rebooted while it read the over-long line")
+            t = marker()
+            if not any(x.strip() == t for x in w.run(f";S0{t}")):
+                problems.append("the line after the over-long one did not run")
+        finally:
+            if changed:
+                _restore_ap(w, tok, ssid, problems)
+    assert not problems, "; ".join(problems)
+
+
 @test("input.live_baud_text_port", "?BAUD on a soft port while text streams into it neither reboots W1 nor wedges its command reader: five same-rate re-begins of S3 under a stream of comment lines, then 19200 and back with the line quiet, after which a ;S0 line typed into S3 runs", needs=["wcb1"])
 def live_baud_text_port(bench):
     """WCB-WP32 row 3. applyLiveBaud (WCB.ino:2453-2487) sets serialReconfigPort, gives a reader already in a drain 12 ms,
