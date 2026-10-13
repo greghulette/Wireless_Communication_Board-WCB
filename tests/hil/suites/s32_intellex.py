@@ -1678,7 +1678,8 @@ def ui_launcher_connect_error(bench):
 @test("intellex.ui_launcher_tools_stale", "A stale bundled tool shows in the chooser's folded summary ('config tool + "
       "Wizard update available', each alone when only one is) and in the attention count, the panel line says 'update "
       "available (<published>)', and the summary's Update runs the panel's Update tools for both tools and clears the "
-      "line (Playwright, webui-version and update-webui fulfilled; IX re-scan launcher.maintenance_summary)")
+      "line, after which the summary offers no Update (Playwright, webui-version and update-webui fulfilled; IX re-scan "
+      "launcher.maintenance_summary)")
 def ui_launcher_tools_stale(bench):
     """Intellex src/launcher.html paintMaint (:343-394), checkUi (:868-901), Update tools (:1176-1191);
     tests/intellex/specs/ui_launcher.spec.js. Nothing reaches GitHub: both routes are fulfilled in the page."""
@@ -2295,11 +2296,13 @@ def ui_launcher_identify_states(bench):
 
 @test("intellex.ui_launcher_wifi_watch", "The chooser's WiFi list with no droid: one hint from the most informative "
       "candidate with ' — still watching…' while the 2-minute watch runs, a rescan every 4 s, and after 2 minutes a "
-      "last pass without the suffix and no more rescans (Playwright with a fake clock; IX re-scan launcher.wifi_list)")
+      "last pass without the suffix, no more rescans, the header reading 'scan complete' and 'No droid found' offered "
+      "again (Playwright with a fake clock; IX re-scan launcher.wifi_list)")
 def ui_launcher_wifi_watch(bench):
-    """Intellex src/launcher.html scanWifi and watchForDroid (:681-769), WATCH_EVERY_MS 4 s, WATCH_FOR_MS 2 min, under
-    Playwright's page.clock. Pinned as it is today (a product call): '#scanstate' still reads 'watching…' after the
-    watch has ended, because the last pass saw a routable host that does not answer."""
+    """Intellex src/launcher.html scanWifi and watchForDroid, WATCH_EVERY_MS 4 s, WATCH_FOR_MS 2 min, under Playwright's
+    page.clock. The re-scan's product call, changed in Intellex 2026-10-13: '#scanstate' kept reading 'watching…' after
+    the watch had ended (the last pass still saw a routable host not answering), and the end of the watch never offered
+    'No droid found'; now the header says 'scan complete' and the offer is made when the watch runs out."""
     run_intellex_test(bench, "intellex.ui_launcher_wifi_watch")
 
 

@@ -256,8 +256,8 @@ test('intellex.ui_launcher_connect_error a refused attach stays on the chooser a
 });
 
 // IX re-scan launcher.maintenance_summary (launcher.html:343-394 paintMaint, :868-901 checkUi, :1176-1191 Update tools):
-// a stale bundled tool shows in the folded summary and in the attention count, and the summary's Update drives the
-// panel's own Update tools button.
+// a stale bundled tool shows in the folded summary and in the attention count, the summary's Update drives the
+// panel's own Update tools button, and once the tools are current the summary offers no Update.
 test('intellex.ui_launcher_tools_stale a stale tool is called out in the summary and its Update works', async ({ page, context, rec }) => {
   page.setDefaultTimeout(15_000);
   await page.setViewportSize({ width: 1280, height: 1000 });
@@ -310,9 +310,14 @@ test('intellex.ui_launcher_tools_stale a stale tool is called out in the summary
   expect(updates[0], 'Update tools asks for both tools').toBe('');
   expect(await page.evaluate(() => document.getElementById('maint').open), 'Update opened the panel').toBe(true);
   await expect.poll(() => text(page, '#status'), { timeout: 10_000 }).toBe('updated — config tool HILNC-b, Wizard HILWIZ-b');
-  // The summary's action stays offered when the tools are current (paintMaint passes 'Update' either way).
+  // Current tools: the summary offers no Update (paintMaint passes it only with something to update; it was offered
+  // either way until Intellex 2026-10-13). The panel's own Update tools button stays for a forced refresh.
   await expect.poll(() => mline('m-tools'), { timeout: 10_000 })
-    .toEqual({ text: 'Tools up to date', warn: false, action: 'Update' });
+    .toEqual({ text: 'Tools up to date', warn: false, action: null });
+  expect(await page.evaluate(() => getComputedStyle(document.getElementById('m-tools-a')).display),
+    'the hidden Update link takes no space').toBe('none');
+  expect(await page.evaluate(() => { const b = document.getElementById('update'); return [b.disabled,
+    getComputedStyle(b).display !== 'none']; }), 'the panel\'s Update tools stays offered').toEqual([false, true]);
   await expect.poll(() => text(page, '#attntext'), { timeout: 10_000 }).toBe('2 things need attention');
   expect(rec.errors, 'page errors').toEqual([]);
 });
@@ -380,7 +385,8 @@ test('intellex.ui_launcher_identify_states identify\'s other answers upgrade the
 
 // IX re-scan launcher.wifi_list (launcher.html:681-769 scanWifi, watchForDroid): with nothing that is a droid, one hint
 // from the most informative candidate - reachable before routable before the first - with ' — still watching…' while
-// the 2 min watch runs; the watch rescans every 4 s and stops at 2 min, its last pass without the suffix. The page's
+// the 2 min watch runs; the watch rescans every 4 s and stops at 2 min, its last pass without the suffix, the header
+// saying 'scan complete' and the status line offering the tool without a droid ('No droid found…') again. The page's
 // clock is Playwright's (page.clock), so 2 minutes pass in moments.
 test('intellex.ui_launcher_wifi_watch one hint while watching, and the watch ends after 2 minutes', async ({ page, context, rec }) => {
   page.setDefaultTimeout(15_000);
@@ -403,6 +409,9 @@ test('intellex.ui_launcher_wifi_watch one hint while watching, and the watch end
   cands = [cands[1], cand({ host: '192.168.4.5', routable: true, reachable: true, hint: 'HIL something on port 80' })];
   await page.clock.runFor(4_100);
   await expect.poll(empty, { timeout: 5_000 }).toBe('HIL something on port 80 — still watching…');
+  expect(await text(page, '#scanstate'), 'the header while the watch runs').toBe('watching…');
+  // The status line says something else meanwhile (any later message would), so the end of the watch must say it again.
+  await page.evaluate(() => setStatus('HIL: the status line moved on'));
   // Past the 2 minutes: one more pass, then the last one without the suffix, and no more rescans.
   await page.clock.fastForward(120_000);
   await expect.poll(empty, { timeout: 5_000, message: 'the last pass still says it is watching' })
@@ -412,9 +421,12 @@ test('intellex.ui_launcher_wifi_watch one hint while watching, and the watch end
   await page.clock.runFor(30_000);
   await page.waitForTimeout(1_000);
   expect(discovers(), 'the watch kept rescanning after 2 minutes').toBe(n1);
-  // Pinned as it is today (a product call): the header keeps 'watching…' after the watch has ended, since the last
-  // pass still saw a routable host not answering (scanWifi sets it from what it found, not from the watch).
-  expect(await text(page, '#scanstate')).toBe('watching…');
+  // The watch is over: the header stops saying 'watching…' even though the last pass still saw a routable host not
+  // answering, and with both lists empty the status line offers the tool without a droid (both were the re-scan's
+  // product call; Intellex 2026-10-13 - the header kept 'watching…' for good and the offer never came).
+  expect(await text(page, '#scanstate'), 'the header once the watch has ended').toBe('scan complete');
+  await expect.poll(() => text(page, '#status'), { timeout: 5_000, message: 'the end of the watch did not offer the '
+    + 'tool without a droid' }).toMatch(/^No droid found\. You can still open the tool on its own/);
   expect(rec.errors, 'page errors').toEqual([]);
 });
 
