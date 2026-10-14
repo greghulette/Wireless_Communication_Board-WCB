@@ -72,7 +72,9 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # navicore-fix10 since 2026-10-11 16:30: NaviCore main 47eb28e (the SoftAP waits for its AP start before clearing the
 # DHCP gateway option, found by ncwifi.ap_ssid_change_at_boot) with the hooks, App SHA 4208afb865c1328b,
 # v0.2.0_111618QOCT26, built and flashed on the Mac; navicore-fix9 is kept beside it.
-BENCH_IMAGE = "navicore-fix11"
+# navicore-fix12 since 2026-10-14 17:33: NaviCore main 5600830 (the mesh transmit watchdog, WCB_Client 1.18.0 e586f1a)
+# with the hooks, App SHA 5dcd2eefcd3d42e0, v0.2.0_141730QOCT26; navicore-fix11 is kept beside it.
+BENCH_IMAGE = "navicore-fix12"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.

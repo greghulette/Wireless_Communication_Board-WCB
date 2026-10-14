@@ -980,7 +980,10 @@ like NaviCore's). The change lives on a local branch and is not pushed: pushing 
 - **(b) `NAVICORE_HIL_HOOKS` builds only**, compiled out of CI: `DBG_WIRE` (bit 7): a hex line, through the
   non-blocking writer, for every block written to S3, S4, S5, Serial2 and the WCBStream; `#L90,<ms>` stalls
   `loop()`; `#L91` corrupts `/config.json` (keeping a copy) for the load-fallback test; `#L92` makes the next
-  GET_CONFIG overflow; `#L93` makes the next LittleFS save fail. All RAM-only, cleared at boot. A test needing one
+  GET_CONFIG overflow; `#L93` makes the next LittleFS save fail; `#L94,<mode>[,<probeMs>]` (2026-10-14, NaviCore
+  969fb1f) drops every frame WCB_Client sends - until the transmit watchdog's ESP-NOW restart (1) or until reboot (2) -
+  and sets the watchdog's probe interval, `#L94,R` puts it back and zeroes the automatic-restart count
+  (`ncmesh.tx_watchdog_*`). All RAM-only, cleared at boot. A test needing one
   skips with "needs a NAVICORE_HIL_HOOKS build" when `#L90` answers `Unknown #L code`.
 
 ### The opt-in keys (hil/optin.py)

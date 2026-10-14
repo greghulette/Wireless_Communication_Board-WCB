@@ -2741,3 +2741,200 @@ def bridged_rec_ls(bench):
         problems.append(f"W1 dropped relayed lines: {lost}")
     bench.note("ncmesh.bridged_rec_ls: " + "; ".join(notes))
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ the transmit watchdog (WCB_Client 1.18.0)
+# HIL full run 20261014-084137: right after etm.rterm_backup_stress NaviCore went on hearing every WCB while none heard
+# it (WCB20 OFFLINE everywhere, gone from their WDP tables) for 20 minutes, until a REBOOT. WCB_Client's transmit
+# watchdog (setTxWatchdog, on in NaviCore) now proves the mesh still hears it with a WDP SOLICIT every 30 s, restarts
+# ESP-NOW after 3 unanswered probes and reports level 2 when that does not help; NaviCore then restarts, at most twice
+# in a row (NaviCore.ino TXWD_MAX_AUTO_REBOOTS). #L94 (hook builds) drops every frame WCB_Client sends - until the
+# ESP-NOW restart (1) or until reboot (2) - and sets the probe interval, so these tests do not wait 30 s a probe.
+TXWD_LINE = re.compile(r"Transmit watchdog: (on|off), level (\d+), probes (\d+), misses (\d+), ESP-NOW restarts (\d+), "
+                       r"automatic reboots (\d+), send errors (\d+), last answered (never|\d+ s ago)")
+TXWD_FAST_MS = 5000
+TXWD_EVENT = re.compile(r"\[WCB_Client\] mesh transmit (stalled|still stalled|recovered)|\[MESH\] transmit watchdog")
+
+
+def _txwd(nc):
+    """NaviCore's '#L11' 'Transmit watchdog:' line -> dict."""
+    for x in nc.cli("#L11", until=r"Transmit watchdog:", flush=False):
+        m = TXWD_LINE.search(x)
+        if m:
+            return {"on": m.group(1) == "on", "level": int(m.group(2)), "probes": int(m.group(3)),
+                    "misses": int(m.group(4)), "restarts": int(m.group(5)), "reboots": int(m.group(6)),
+                    "errors": int(m.group(7)), "answered": m.group(8)}
+    raise AssertionError("#L11 printed no 'Transmit watchdog:' line: NaviCore runs a build before WCB_Client 1.18.0")
+
+
+def _w_sees(w, nid):
+    """'Online' / 'OFFLINE' from a WCB's ?STATS row for NaviCore, or None when it has no row."""
+    for x in w.run("?STATS", timeout=8):
+        m = re.match(rf"^WCB{nid}(?: \(special\))?: .*, (Online|OFFLINE)", x.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
+def _w_sees_wait(w, nid, timeout):
+    end = time.monotonic() + timeout
+    seen = None
+    while time.monotonic() < end:
+        seen = _w_sees(w, nid)
+        if seen == "Online":
+            return seen
+        time.sleep(2.0)
+    return seen
+
+
+def _txwd_arm(nc, mode):
+    lines = nc.cli(f"#L94,{mode},{TXWD_FAST_MS}", until=r"\[HIL\] #L94")
+    if not any(f"[HIL] #L94: transmit wedge mode {mode}" in x for x in lines):
+        raise AssertionError(f"#L94,{mode},{TXWD_FAST_MS} did not confirm (last lines {[x[:70] for x in lines[-3:]]})")
+
+
+def _txwd_reset(nc):
+    """No wedge, the 30 s interval, the automatic-restart count zeroed (#L94,R)."""
+    nc.cli("#L94,R", until=r"\[HIL\] #L94")
+
+
+@test("ncmesh.tx_watchdog_quiet", "NaviCore's mesh transmit watchdog is on and quiet on a healthy mesh: #L11 shows it on "
+      "at level 0, and with a probe every 5 s (#L94 on a hook build; else the 30 s default, waited 65 s) its probe count "
+      "rises, every probe is answered - level 0, no misses, last answered within an interval - and NaviCore prints no "
+      "stall, recovery or restart line", needs=["navicore", "wcb1"], links=[])
+def tx_watchdog_quiet(bench):
+    """WCB_Client::setTxWatchdog: a WDP SOLICIT (the ?WDP,POLL probe) every interval while boards are heard; a WCB
+    answers with an advert within 0.6 s and prints nothing (WCB_WDP.cpp wdpArmSolicitedAdvert). A miss on a healthy
+    mesh is the false positive the watchdog must never have: three in a row restart ESP-NOW for nothing."""
+    nc = _nc(bench)
+    hooks = _hooks(nc)
+    st0 = _txwd(nc)
+    if not st0["on"]:
+        raise AssertionError("#L11 says NaviCore's transmit watchdog is off")
+    problems = []
+    try:
+        if hooks:
+            _txwd_arm(nc, 0)
+        m = nc.dev.mark()
+        time.sleep(22 if hooks else 65)
+        st = _txwd(nc)
+        events = [x.strip()[:120] for x in nc.dev.since(m) if TXWD_EVENT.search(x)]
+        grew = st["probes"] - st0["probes"]
+        bench.note(f"ncmesh.tx_watchdog_quiet: {grew} probe(s) in {22 if hooks else 65} s "
+                   f"({'5 s' if hooks else '30 s'} interval), {st}")
+        if grew < (2 if hooks else 1):
+            problems.append(f"the probe count rose by {grew}: the watchdog is not probing")
+        if st["level"] or st["misses"]:
+            problems.append(f"a healthy mesh left the watchdog at level {st['level']} with {st['misses']} miss(es)")
+        if st["answered"] == "never" or int(st["answered"].split()[0]) > (12 if hooks else 40):
+            problems.append(f"the last answered probe was {st['answered']}")
+        if events:
+            problems.append(f"NaviCore printed watchdog events on a healthy mesh: {events[:3]}")
+    finally:
+        if hooks:
+            _txwd_reset(nc)
+    assert not problems, "; ".join(problems)
+
+
+@test("ncmesh.tx_watchdog_esp_now_restart", "A transmit wedge that an ESP-NOW restart clears (#L94,1: every frame "
+      "NaviCore sends dropped before the radio): within 60 s NaviCore reports 'mesh transmit stalled' with its MAC as "
+      "set and the radio on the mesh channel and restarts ESP-NOW, the WCBs answer again ('recovered'), W1 lists "
+      "NaviCore online, and NaviCore does not reboot (restarts +1, automatic reboots unchanged, level 0)",
+      needs=["navicore", "wcb1"], links=[])
+def tx_watchdog_esp_now_restart(bench):
+    """WCB_Client _txWatchTick: 3 unanswered probes (WCB_TXWD_RETRY_MS apart once one is missed) -> level 1,
+    _restartEspNow() (mesh MAC put back if lost, esp_now deinit/init, every peer re-registered, debugTxWedge(1)
+    cleared) -> the next probe is answered -> 'recovered' and onTxStall(0). NaviCore's onMeshTxStall prints its own
+    line at each level and only reboots at level 2."""
+    nc = _nc(bench)
+    if not _hooks(nc):
+        raise Skip(HOOK_SKIP)
+    w1 = usb_wcb(bench)
+    nid = _nid(nc)
+    st0 = _txwd(nc)
+    problems = []
+    try:
+        m = nc.dev.mark()
+        t0 = time.monotonic()
+        _txwd_arm(nc, 1)
+        hit = nc.dev.expect(r"\[WCB_Client\] mesh transmit stalled: \d+ WDP solicit\(s\) in a row unanswered for (\d+) s "
+                            r"while boards are heard \(STA MAC ([0-9A-F:]+) (as set|NOT the mesh MAC), channel (\d+) of "
+                            r"mesh (\d+)", timeout=60, since=m)
+        t_stall = time.monotonic() - t0
+        if hit.group(3) != "as set":
+            problems.append(f"the stall report says the STA MAC is {hit.group(2)}, NOT the mesh MAC: a dropped frame "
+                            f"does not touch it")
+        if hit.group(4) != hit.group(5):
+            problems.append(f"the radio was on channel {hit.group(4)}, the mesh on {hit.group(5)}")
+        nc.dev.expect(r"\[MESH\] transmit watchdog: no WCB answers - ESP-NOW restarted", timeout=5, since=m)
+        rec = nc.dev.expect(r"\[WCB_Client\] mesh transmit recovered: the boards answer again after (\d+) s",
+                            timeout=30, since=m)
+        t_rec = time.monotonic() - t0
+        nc.dev.expect(r"\[MESH\] transmit watchdog: the WCBs answer again", timeout=5, since=m)
+        seen = _w_sees_wait(w1, nid, 20)
+        st = _txwd(nc)
+        reboots = [x for x in nc.dev.since(m) if "restarting NaviCore" in x or "setup complete" in x]
+        bench.note(f"ncmesh.tx_watchdog_esp_now_restart: stalled after {t_stall:.1f} s (unanswered {hit.group(1)} s), "
+                   f"recovered after {t_rec:.1f} s ({rec.group(1)} s unanswered); W1 sees NaviCore {seen}; {st}")
+        if seen != "Online":
+            problems.append(f"after the recovery W1 lists NaviCore {seen}")
+        if st["level"] != 0:
+            problems.append(f"the watchdog stayed at level {st['level']}")
+        if st["restarts"] != st0["restarts"] + 1:
+            problems.append(f"ESP-NOW restarts went from {st0['restarts']} to {st['restarts']}, not +1")
+        if st["reboots"] != st0["reboots"] or reboots:
+            problems.append(f"NaviCore rebooted for a wedge an ESP-NOW restart cures ({reboots[:2]})")
+    finally:
+        _txwd_reset(nc)
+    assert not problems, "; ".join(problems)
+
+
+@test("ncmesh.tx_watchdog_reboot", "OPT-IN (navicore_reboot): a transmit wedge only a reboot clears (#L94,2): NaviCore "
+      "restarts ESP-NOW (level 1), is still unanswered (level 2), says 'restarting NaviCore (automatic restart 1 of 2)' "
+      "and restarts; after the boot its automatic-reboot count is 1, the watchdog is back at level 0, and W1 lists "
+      "NaviCore online again; #L94,R zeroes the count", needs=["navicore", "wcb1"], links=[], opt_in="navicore_reboot")
+def tx_watchdog_reboot(bench):
+    """NaviCore.ino onMeshTxStall/txwdService: level 2 flags a restart that loop() makes after wcb->update() returns,
+    counting it in RTC memory (TXWD_MAX_AUTO_REBOOTS = 2, kept across a software reset, cleared by a power-on and
+    after 30 min answered). debugTxWedge(2) survives the ESP-NOW restart and ends with the reboot - the case the
+    restart exists for."""
+    nc = _nc(bench)
+    if not _hooks(nc):
+        raise Skip(HOOK_SKIP)
+    w1 = usb_wcb(bench)
+    nid = _nid(nc)
+    st0 = _txwd(nc)
+    if st0["reboots"] >= 2:
+        _txwd_reset(nc)
+        st0 = _txwd(nc)
+    problems = []
+    try:
+        m = nc.dev.mark()
+        t0 = time.monotonic()
+        _txwd_arm(nc, 2)
+        nc.dev.expect(r"\[WCB_Client\] mesh transmit stalled: .* - restarting ESP-NOW", timeout=60, since=m)
+        t1 = time.monotonic() - t0
+        nc.dev.expect(r"\[WCB_Client\] mesh transmit still stalled: ", timeout=60, since=m)
+        t2 = time.monotonic() - t0
+        hit = nc.dev.expect(r"\[MESH\] transmit watchdog: still no WCB answers after an ESP-NOW restart - restarting "
+                            r"NaviCore \(automatic restart (\d+) of (\d+)\)", timeout=10, since=m)
+        if hit.group(1) != str(st0["reboots"] + 1):
+            problems.append(f"the restart was numbered {hit.group(1)}, after {st0['reboots']} before")
+        nc.wait_boot(since=m, timeout=30)
+        t3 = time.monotonic() - t0
+        st = _txwd(nc)
+        seen = _w_sees_wait(w1, nid, 30)
+        bench.note(f"ncmesh.tx_watchdog_reboot: level 1 after {t1:.1f} s, level 2 after {t2:.1f} s, back from the "
+                   f"restart after {t3:.1f} s; W1 sees NaviCore {seen}; {st}")
+        if st["reboots"] != st0["reboots"] + 1:
+            problems.append(f"after the restart #L11 counts {st['reboots']} automatic reboot(s), not {st0['reboots'] + 1}")
+        if not st["on"] or st["level"] != 0:
+            problems.append(f"after the restart the watchdog is {'on' if st['on'] else 'off'} at level {st['level']}")
+        if seen != "Online":
+            problems.append(f"after NaviCore's restart W1 lists it {seen}")
+    finally:
+        _txwd_reset(nc)
+    st = _txwd(nc)
+    if st["reboots"]:
+        problems.append(f"#L94,R left the automatic-reboot count at {st['reboots']}")
+    assert not problems, "; ".join(problems)
