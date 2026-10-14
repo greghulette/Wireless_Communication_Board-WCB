@@ -27,6 +27,7 @@ interface=<adapter>`.
 import contextlib
 import os
 import re
+import struct
 import time
 
 from hil import optin
@@ -37,6 +38,7 @@ from hil.wlan import default_routes as _default_routes
 from hil.wlan import pc_on_ap as _pc_on_ap
 from hil.wlan import realtek_enabled as _realtek_enabled
 from hil.ws import WsClient
+from hil.ws import frame as ws_frame
 from suites.common import (Console, Watch, config_guard, fault, fault_off, link, marker, nonce, snapshot, token,
                            usb_wcb)
 from suites.s03_wcb import _w2_online
@@ -1255,6 +1257,276 @@ def ws_drop_reports(bench):
             w.run("?DEBUG,OFF")
             w.run(base_s3, timeout=20)                       # after any hold still running
             ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+def _line_name(x):
+    """A console line as a test may print it: a command or a chain (W1's ?backup carries its mesh password and WiFi
+    passphrase) by its verb only, anything else cut to 50 characters."""
+    return x.split(",")[0][:24] + ",..." if (x.startswith("?") or "^" in x) else x[:50]
+
+
+def _ws_lacks(usb, got):
+    """The console lines `got` (the socket's lines) lacks, matched in order: what the tee did not deliver."""
+    k, lacking = 0, []
+    for x in usb:
+        j = k
+        while j < len(got) and got[j] != x:
+            j += 1
+        if j == len(got):
+            lacking.append(x)
+        else:
+            k = j + 1
+    return lacking
+
+
+def _ws_open_slow(ip, rcvbuf, wait=15.0):
+    """A WsClient whose receive buffer is `rcvbuf` bytes, set before connecting: once it stops reading, its window
+    fills within a few KB (hil/ws.py)."""
+    end = time.monotonic() + wait
+    while time.monotonic() < end:
+        try:
+            return WsClient(ip, timeout=4.0, rcvbuf=rcvbuf)
+        except OSError:
+            time.sleep(1.5)
+    return None
+
+
+def _hold_s3(w, base_s3):
+    if not any(f"Baud rate for Serial3 updated to {HOLD_BAUD}" in x for x in w.run(f"?BAUD,S3,{HOLD_BAUD}")):
+        raise AssertionError(f"setup: ?BAUD,S3,{HOLD_BAUD} did not confirm")
+
+
+@test("ws.burst_keeps_live_client", "OPT-IN (wifi_pc): a live WebSocket client on W1's access point stays connected through a burst of console output. With W1's loop held ~4 s by a slow ;S3 line, four ?backup typed on USB run back to back when it ends (~12 KB, each reply bigger than the 2 KB sink): the client gets every console line in order, or W1 reports what it dropped ('[WS] dropped N output line(s)'), it still answers a ;S0 sent over the socket afterwards, and W1's console never pauses over 1.5 s in the burst", needs=["wcb1"], links=["W1S3"], opt_in="wifi_pc")
+def ws_burst_keeps_live_client(bench):
+    """Re-scan row ws.burst_closes_live_client: found 2026-10-13 building ws.drop_reports, where a 10-16 KB burst
+    closed a live client three times (runs 20261013-082616, -084533, -084748) and stalled the loop 3.5 s. WCB_WS.cpp's
+    sender never blocks since 2026-10-14: send(MSG_DONTWAIT) writes what each socket takes, each client keeps its
+    place in the frame in flight, 'no room' and 'no memory' (ENOMEM: W1's heap with the AP up, #111) mean try again
+    on a later pass, and only a hard socket error or WS_STUCK_MS (10 s) without taking a byte closes a client. A full
+    sink on the loop task waits for a client still taking bytes, at most WS_PASS_WAIT_MS (600 ms) per loop() pass.
+    The backups carry W1's credentials: a line the socket lacks is named by its verb only."""
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        base_s3 = token(snapshot(bench, 1), "?BAUD,S3,") or "?BAUD,S3,9600"
+        try:
+            _hold_s3(w, base_s3)
+            _ws_quiet(ws, quiet=0.6, cap=4)
+            ws.text, ws.text_frames = "", []
+            m = w.dev.mark()
+            w.dev.send(_hold_line(4.0))                      # holds W1's loop ~4 s, printing nothing
+            time.sleep(0.5)
+            for _ in range(4):
+                w.dev.send("?backup")                        # queued; run back to back once the hold ends
+            end = marker("E")
+            w.run(f";S0{end}", timeout=40)
+            closed = None
+            try:
+                _ws_until(ws, lambda t: end in t, 15)
+            except (ConnectionError, OSError) as e:
+                closed = str(e)
+            timed = [(t, x.rstrip()) for t, x in w.dev.since_timed(m) if x.strip()]
+            starts = [i for i, (_, x) in enumerate(timed) if "WCB Configuration Backup" in x]
+            ends = [i for i, (_, x) in enumerate(timed) if "End of Backup" in x]
+            burst = timed[starts[0]:ends[-1] + 1] if starts and ends else timed
+            gap = max((b[0] - a[0] for a, b in zip(burst, burst[1:])), default=0.0)
+            usb = [x for _, x in burst if not x.startswith("[WS] ")]
+            dropped = _drops([x for _, x in timed], r"output line\(s\) — client too slow")
+            lacking = _ws_lacks(usb, [x.rstrip() for x in ws.text.split("\n") if x.strip()]) if not closed else usb
+            bench.note(f"ws.burst_keeps_live_client: {len(ends)} backups, {sum(len(x) + 2 for x in usb)} console "
+                       f"bytes in {burst[-1][0] - burst[0][0] if burst else 0:.1f} s, {len(ws.text_frames)} frame(s); "
+                       f"longest console pause {gap:.2f} s; socket lacks {len(lacking)} line(s), W1 reported "
+                       f"{dropped} dropped; W1 {_heap_note(w)}")
+            if len(ends) != 4:
+                problems.append(f"{len(ends)} of the four ?backup finished on USB")
+            if closed:
+                problems.append(f"W1 closed the live client during the burst ({closed})")
+            else:
+                alive = marker("A")
+                ws.text = ""
+                ws.send_text(f";S0{alive}\n")
+                try:
+                    if not _ws_until(ws, lambda t: alive in t, 5):
+                        problems.append("after the burst the client got no answer to a ;S0 it sent")
+                except (ConnectionError, OSError) as e:
+                    problems.append(f"W1 closed the client just after the burst ({e})")
+            if lacking and not dropped and not closed:
+                problems.append(f"the socket lacks {len(lacking)} console line(s) W1 never reported dropping "
+                                f"(first: {_line_name(lacking[0])!r})")
+            if gap > 1.5:
+                problems.append(f"W1's console paused {gap:.2f} s in the burst: the loop waited on the socket")
+        finally:
+            w.run(base_s3, timeout=20)                       # after any hold still running
+            ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.ping_pong_and_close", "OPT-IN (wifi_pc): W1 answers a WebSocket PING with a PONG carrying the same payload, sent between data frames: a PING sent while ?backup streams out gets its PONG and leaves every frame whole (the chain passes its CRC, every text frame is valid UTF-8), an empty PING gets an empty PONG, and a CLOSE is echoed and leaves W1 counting no client", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_ping_pong_and_close(bench):
+    """WCB_WS.cpp registers /ws with handle_ws_control_frames (2026-10-14). Before, httpd answered PING and CLOSE
+    itself with a blocking send from its own task, which could land inside a frame the loop's non-blocking sender had
+    half written; now wsHandler reads every frame's payload, queues the PONG for sinkPump to send at the next frame
+    boundary (queuePong), and echoes a CLOSE itself when no frame is part-way out (closeEcho) before httpd closes the
+    session. ?backup's chain carries W1's credentials: only its CRC is checked, never shown."""
+    from suites.s05_mesh import _chain_ok, _live_chain
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open(ip)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        try:
+            _ws_quiet(ws, quiet=0.6, cap=4)
+            ws.text, ws.text_frames, ws.pongs = "", [], []
+            ws.send_text("?backup\n")
+            time.sleep(0.05)
+            ws.send_ping(b"HILPING")
+            if not _ws_until(ws, lambda t: "End of Backup" in t and bool(ws.pongs), 20):
+                problems.append(f"?backup with a PING sent into it: {'no PONG' if not ws.pongs else 'no End of Backup'} "
+                                f"in 20 s ({len(ws.text)} characters)")
+            _ws_quiet(ws, quiet=0.8, cap=4)
+            if ws.pongs != [b"HILPING"]:
+                problems.append(f"the PING sent into ?backup got {ws.pongs!r} back, not one PONG b'HILPING'")
+            chain = _live_chain([x.rstrip() for x in ws.text.split("\n")], False)
+            if not _chain_ok(chain):
+                problems.append(f"with a PONG sent among ?backup's frames the chain ({len(chain or '')} characters) "
+                                f"fails its CRC")
+            bad = 0
+            for f in ws.text_frames:
+                try:
+                    f.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    bad += 1
+            if bad:
+                problems.append(f"{bad} of {len(ws.text_frames)} text frame(s) are not valid UTF-8 on their own")
+            n = len(ws.pongs)
+            ws.send_ping(b"")
+            _ws_until(ws, lambda t: len(ws.pongs) > n, 3)
+            if ws.pongs[n:] != [b""]:
+                problems.append(f"an empty PING got {ws.pongs[n:]!r} back, not one empty PONG")
+            ws.sock.sendall(ws_frame(struct.pack(">H", 1000), opcode=0x8))
+            gone = False
+            try:
+                ws.read_until("\x00never\x00", timeout=3)
+                ws.sock.settimeout(3)
+                ws._frame()                                  # after the echo: the socket closes
+            except (ConnectionError, OSError):
+                gone = True
+            if not ws.close_frames:
+                problems.append("W1 did not echo the CLOSE frame")
+            if not gone:
+                problems.append("the socket stayed open 3 s after the CLOSE")
+            time.sleep(1.0)
+            k = _ws_client_count(w)
+            if k != 0:
+                problems.append(f"after the CLOSE W1 counts {k} WebSocket client(s)")
+            bench.note(f"ws.ping_pong_and_close: {len(ws.text_frames)} frame(s) of ?backup, PONGs {ws.pongs!r}, "
+                       f"CLOSE echoed {bool(ws.close_frames)}")
+        finally:
+            ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+def _fill_until_dropped(w, since, most=50):
+    """?backup on USB until W1 reports a dropped WebSocket line after `since` (the client's window and W1's send buffer
+    are full), at most `most` times -> (each ?backup's seconds, whether a drop was reported). The Mac's receive buffer
+    took about 40 KB before the first drop (run 20261014-021636), and W1 reports drops at most once a second."""
+    took = []
+
+    def dropped():
+        return _drops([x.rstrip() for x in w.dev.since(since)], r"output line\(s\) — client too slow")
+    for _ in range(most):
+        t0 = time.monotonic()
+        w.run("?backup", timeout=15)
+        took.append(time.monotonic() - t0)
+        if dropped():
+            return took, True
+    time.sleep(1.5)
+    return took, bool(dropped())
+
+
+@test("ws.stalled_client_costs_nothing", "OPT-IN (wifi_pc): a WebSocket client that stops reading costs W1 nothing. With the client not reading, ?backup typed on USB until its window and W1's send buffer are full (W1 reports '[WS] dropped N output line(s)') each finishes within 1.6 s; reading again, the client is still connected and gets the answer to a ;S0 it sends, and every console line it lacks was reported dropped. Stopped for good while W1 owes it output, it is closed about 10 s later with '[WS] closed 1 client(s) that took no output for 10 s', and W1 counts no client", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_stalled_client_costs_nothing(bench):
+    """WCB_WS.cpp's sender (2026-10-14): a socket with no room returns EWOULDBLOCK at once, so loop() never waits on
+    it; a full sink waits only for a client that took bytes in the last WS_FRESH_MS (300 ms), and at most
+    WS_PASS_WAIT_MS (600 ms) a pass; WS_STUCK_MS (10 s) without a byte taken while it owes output closes the client -
+    #113's dead peer when no station-left event says so. Before, each flush to such a client blocked loop() up to
+    send_wait_timeout (2 s), and the first failure closed it. The client asks for a 2 KB receive buffer, but the Mac
+    took 9 KB without a drop in the first cut (run 20261014-020343) and about 40 KB in the next, so the backups go on
+    until W1 reports one. The backups' lines are named by verb only."""
+    problems = []
+    with _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        ws = _ws_open_slow(ip, 2048)
+        assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+        try:
+            _ws_quiet(ws, quiet=0.6, cap=4)
+            ws.text = ""
+            m = w.dev.mark()
+            stopped = time.monotonic()
+            took, full = _fill_until_dropped(w, m)           # the client reads nothing meanwhile
+            waited = time.monotonic() - stopped
+            if not full:
+                raise Skip(f"{len(took)} ?backup ({len(took) * 3} KB or so) never filled the client's window: no "
+                           f"drop to test")
+            # WS_STUCK_MS counts from the last byte the client took - just before the first drop, about a second
+            # before it was reported - so reading again now is well inside the 10 s.
+            alive = marker("A")
+            closed = None
+            try:
+                _ws_quiet(ws, quiet=1.0, cap=15)             # reading again: what W1 kept for it
+                usb = [x.rstrip() for x in w.dev.since(m) if x.strip() and not x.startswith("[WS] ")]
+                got = [x.rstrip() for x in ws.text.split("\n") if x.strip()]
+                ws.text = ""
+                ws.send_text(f";S0{alive}\n")
+                if not _ws_until(ws, lambda t: alive in t, 5):
+                    problems.append("reading again, the client got no answer to a ;S0 it sent")
+            except (ConnectionError, OSError) as e:
+                closed = str(e)
+                usb, got = [], []
+            out = [x.rstrip() for x in w.dev.since(m)]
+            dropped = _drops(out, r"output line\(s\) — client too slow")
+            lacking = _ws_lacks(usb, got)
+            bench.note(f"ws.stalled_client_costs_nothing: {len(took)} ?backup took {', '.join(f'{t:.2f}' for t in took)} s "
+                       f"with the client not reading ({waited:.1f} s in all); it lacked {len(lacking)} line(s), W1 "
+                       f"reported {dropped} dropped")
+            if closed:
+                problems.append(f"W1 closed the client that had stopped reading for {waited:.1f} s ({closed})")
+            slow = [f"{t:.2f}" for t in took if t > 1.6]
+            if slow:
+                problems.append(f"?backup took {', '.join(slow)} s with the client not reading: the loop waited on it")
+            if lacking and not dropped:
+                problems.append(f"the client lacks {len(lacking)} console line(s) W1 never reported dropping (first: "
+                                f"{_line_name(lacking[0])!r})")
+            if not closed:
+                # Stopped for good: fill its window and W1's send buffer again, then let WS_STUCK_MS run out.
+                m2 = w.dev.mark()
+                _, full2 = _fill_until_dropped(w, m2)
+                t_full = time.monotonic()
+                if not full2:
+                    problems.append("the second fill never filled the client's window: the stuck close is untested")
+                else:
+                    try:
+                        hit = w.dev.expect(r"^\[WS\] closed (\d+) client\(s\) that took no output for (\d+) s",
+                                           timeout=16, since=m2)
+                        after = time.monotonic() - t_full
+                        if hit.group(1) != "1":
+                            problems.append(f"W1 closed {hit.group(1)} clients for taking no output, not 1")
+                        bench.note(f"ws.stalled_client_costs_nothing: W1 said '{hit.group(0)}' {after:.1f} s after "
+                                   f"the window was full")
+                    except AssertionError:
+                        problems.append("W1 never closed the client that stopped reading for good (no '[WS] closed N "
+                                        "client(s) that took no output' within 16 s of its window filling)")
+                    k = _ws_client_count(w)
+                    if k != 0:
+                        problems.append(f"after the stuck client was closed W1 counts {k} WebSocket client(s)")
+        finally:
+            try:
+                ws.sock.close()
+            except OSError:
+                pass
     _left_clean(bench, w, problems)
     assert not problems, "; ".join(problems)
 

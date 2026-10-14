@@ -88,9 +88,14 @@ class WsClient:
         self.text = ""
         self.raw = b""
         self.text_frames = []      # each text frame's payload as sent (self.text decodes with errors="replace")
+        self.pongs = []            # each PONG's payload, in order
+        self.close_frames = []     # each CLOSE frame's payload the peer sent
 
     def send_text(self, s: str):
         self.sock.sendall(frame(s.encode()))
+
+    def send_ping(self, payload: bytes = b""):
+        self.sock.sendall(frame(payload, opcode=0x9))
 
     def _frame(self):
         while True:
@@ -121,7 +126,10 @@ class WsClient:
                 self.text += payload.decode(errors="replace")
             elif op == 0x9:
                 self.sock.sendall(frame(payload, opcode=0xA))
+            elif op == 0xA:
+                self.pongs.append(payload)
             elif op == 0x8:
+                self.close_frames.append(payload)
                 break
         return self.text
 

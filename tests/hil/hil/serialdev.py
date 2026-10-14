@@ -325,6 +325,11 @@ class SerialDevice:
         with self._cv:
             return [t for _, t in self.lines[mark:]]
 
+    def since_timed(self, mark):
+        """[(time.monotonic() when the line arrived, text)] from `mark` on."""
+        with self._cv:
+            return list(self.lines[mark:])
+
     def expect(self, pattern, timeout=3.0, since=None):
         """Wait for a line matching `pattern` at or after `since`; return the re.Match."""
         rx = re.compile(pattern)
