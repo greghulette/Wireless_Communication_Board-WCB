@@ -813,8 +813,12 @@ def realtek_on_ap(bench, problems, ssid, whose, reach, identify, home=None):
     else:
         took = _realtek_move(bench, name, ssid, whose, reach, identify)
         if took is None:
+            # 2026-10-14: after W1's access point failed a join (its heap was exhausted), the Realtek utility dropped
+            # the saved WCB1 password and waited for one to be typed. That prompt is invisible from here - a screenshot
+            # without Screen Recording shows only the wallpaper, and StatusBarApp lists no window - so say where to look.
             raise AssertionError(f"{name} was not proved on {whose} access point within {REALTEK_JOIN_S:.0f} s of "
-                                 f"choosing it in the Realtek menu (twice)")
+                                 f"choosing it in the Realtek menu (twice) - if this repeats, look at the Mac's screen: "
+                                 f"the Realtek utility may be waiting for that network's password to be typed")
         bench.note(f"adapter {name}: moved to {whose} access point through the Realtek menu, proved {took:.1f} s after "
                    f"the click")
     _remember_spare(name)
