@@ -1430,6 +1430,25 @@ def ws_ping_pong_and_close(bench):
     assert not problems, "; ".join(problems)
 
 
+def _free_heap(w):
+    """W1's free heap in bytes from its ?WIFI block, or None."""
+    m = re.match(r"^(\d+) bytes", _status(w).get("Free heap", ""))
+    return int(m.group(1)) if m else None
+
+
+def _heap_back(w, heap0, within=20.0, slack=3000):
+    """Poll W1's free heap until it is within `slack` bytes of `heap0` -> (back?, last reading, seconds waited)."""
+    t0 = time.monotonic()
+    last = None
+    while True:
+        last = _free_heap(w)
+        if heap0 is None or (last is not None and last >= heap0 - slack):
+            return True, last, time.monotonic() - t0
+        if time.monotonic() - t0 >= within:
+            return False, last, time.monotonic() - t0
+        time.sleep(2.0)
+
+
 def _fill_until_dropped(w, since, most=50):
     """?backup on USB until W1 reports a dropped WebSocket line after `since` (the client's window and W1's send buffer
     are full), at most `most` times -> (each ?backup's seconds, whether a drop was reported). The Mac's receive buffer
@@ -1458,6 +1477,8 @@ def ws_stalled_client_costs_nothing(bench):
     took 9 KB without a drop in the first cut (run 20261014-020343) and about 40 KB in the next, so the backups go on
     until W1 reports one. The backups' lines are named by verb only."""
     problems = []
+    w1 = usb_wcb(bench)
+    heap0 = _free_heap(w1)                                   # before the PC joins: what W1 has to come back to
     with _pc_on_w1_ap(bench, problems) as (w, ip, _):
         ws = _ws_open_slow(ip, 2048)
         assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
@@ -1528,6 +1549,12 @@ def ws_stalled_client_costs_nothing(bench):
             except OSError:
                 pass
     _left_clean(bench, w, problems)
+    back, last, took_s = _heap_back(w, heap0)
+    bench.note(f"ws.stalled_client_costs_nothing: W1's free heap {heap0} before the PC joined, {last} "
+               f"{took_s:.0f} s after it left")
+    if not back:
+        problems.append(f"20 s after the PC left W1's free heap is {last} bytes, not back within 3 KB of the {heap0} it "
+                        f"had before: the stalled client's session still holds memory (the next client cannot join)")
     assert not problems, "; ".join(problems)
 
 

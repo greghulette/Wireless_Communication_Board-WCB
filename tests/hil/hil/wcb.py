@@ -434,8 +434,22 @@ class WCB:
     def backup_chain(self):
         """The 'For Configured Boards' chain from ?backup, CRC-checked. A [TERM:<n>] line is another board's console
         mirrored here by a ?RTERM session, whose own ?backup header and chain would otherwise be taken for this
-        board's (run 20260929-101257: W2's chain read as W1's, a CRC mismatch on every read until the session ended)."""
-        lines = [t for t in self.run("?backup", timeout=8) if not t.startswith("[TERM:")]
+        board's (run 20260929-101257: W2's chain read as W1's, a CRC mismatch on every read until the session ended).
+
+        A board short of heap leaves out the lines it cannot build and checksums what it did print, so the chain passes
+        its CRC and is still not its config; it says so after it ('WARNING: N command(s) could not be built (out of
+        memory) - this backup is INCOMPLETE. Run ?backup again.', F19). Such a read is asked again, as the warning
+        says, and never returned: config_guard took one as a test's baseline, found the lines back afterwards and
+        'restored' W1 by clearing three of its own sequences (run 20261014-025548)."""
+        for _ in range(4):
+            lines = [t for t in self.run("?backup", timeout=8) if not t.startswith("[TERM:")]
+            short = [t for t in lines if "could not be built (out of memory)" in t]
+            if not short:
+                break
+            time.sleep(2.0)
+        else:
+            raise AssertionError(f"{self.dev.name}'s ?backup was INCOMPLETE four times running ({short[0].strip()[:90]!r}): "
+                                 f"its heap is short, and a chain missing lines is not its config")
         for i, t in enumerate(lines):
             if "*** === For Configured Boards" in t:
                 for nxt in lines[i + 1:]:

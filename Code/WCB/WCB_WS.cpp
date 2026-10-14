@@ -5,6 +5,7 @@
 #include <esp_http_server.h>
 #include <WiFi.h>
 #include <errno.h>
+#include <esp_heap_caps.h>
 #include <freertos/semphr.h>
 #include <lwip/sockets.h>     // close() — the session-close hook owns the fd; send(MSG_DONTWAIT) — the sender
 
@@ -49,6 +50,15 @@ static const size_t   WS_SINK_BUF    = 2048;
 static const uint32_t WS_PASS_WAIT_MS = 600;
 static const uint32_t WS_FRESH_MS     = 300;
 static const uint32_t WS_STUCK_MS     = 10000;
+// Below this much free heap the sender hands lwIP no more console output; it waits (or the tee drops lines) until
+// ACKs give memory back. Output handed over sits in lwIP's send buffer (up to ~5.7 KB a socket) and the WiFi driver's
+// dynamic TX buffers until the client ACKs it - and the driver takes a dynamic RX buffer from the same heap for every
+// packet it RECEIVES. A client that stopped reading took W1 to 1.4 KB free (run 20261014-025548): the window update it
+// sent when it read again could not be received, it never got another byte and was closed as stuck, and W1's heap
+// stayed near 9 KB long enough that the PC could not join the access point for the next test. With the access point
+// up and a PC on it W1 has 14-18 KB; the floor leaves the radio and the rest of the firmware about 8 KB of it. PONG and
+// CLOSE frames are a few bytes and pass it.
+static const size_t   WS_HEAP_FLOOR   = 8192;
 
 // Serial0 is the source id the USB reader uses. Reusing it means a WebSocket
 // command takes byte-for-byte the same path as a typed one — same routing, same
@@ -100,6 +110,7 @@ struct WsTx {
   uint8_t  ctl[2 + 125];       // a PONG owed: the whole frame, header included
   size_t   ctlLen   = 0;
   size_t   ctlSent  = 0;
+  bool     closing  = false;   // its close could not be queued yet: retried every pass (txClose), nothing sent to it
 };
 static WsTx     tx[WS_MAX_CLIENTS];
 static uint8_t  frameHdr[4];
@@ -111,9 +122,12 @@ static SemaphoreHandle_t txLock = nullptr;
 
 static void txReset(WsTx &c, int fd) {
   c.fd = fd; c.inFrame = false; c.hdrSent = c.paySent = 0; c.ctlLen = c.ctlSent = 0; c.lastTook = millis();
+  c.closing = false;
 }
 
-static bool txOwes(const WsTx &c) { return c.fd >= 0 && (c.inFrame || c.ctlLen > c.ctlSent); }
+static bool txLive(const WsTx &c) { return c.fd >= 0 && !c.closing; }
+
+static bool txOwes(const WsTx &c) { return txLive(c) && (c.inFrame || c.ctlLen > c.ctlSent); }
 
 static bool txMidFrame(const WsTx &c) {
   return (c.inFrame && (c.hdrSent || c.paySent)) || c.ctlSent;
@@ -125,7 +139,7 @@ static WsTx *txFor(int fd) {
 }
 
 bool wcbWsSinkLive() {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (tx[i].fd >= 0) return true;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (txLive(tx[i])) return true;
   return false;
 }
 
@@ -133,7 +147,7 @@ bool wcbWsRunning() { return wsServer != nullptr; }
 
 int wcbWsClientCount() {
   int n = 0;
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (tx[i].fd >= 0) n++;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (txLive(tx[i])) n++;
   return n;
 }
 
@@ -176,7 +190,7 @@ static void queuePong(int fd, const uint8_t *payload, size_t len) {
   if (!txLock || len > 125) return;
   xSemaphoreTake(txLock, portMAX_DELAY);
   WsTx *c = txFor(fd);
-  if (c && !c->ctlSent) {
+  if (c && !c->closing && !c->ctlSent) {
     if (!txOwes(*c)) c->lastTook = millis();
     c->ctl[0] = 0x8A;                  // FIN + PONG
     c->ctl[1] = (uint8_t)len;
@@ -193,7 +207,7 @@ static void closeEcho(int fd) {
   xSemaphoreTake(txLock, portMAX_DELAY);
   WsTx *c = txFor(fd);
   if (c) {
-    if (!txMidFrame(*c)) {
+    if (!c->closing && !txMidFrame(*c)) {
       static const uint8_t bye[2] = { 0x88, 0x00 };
       send(fd, bye, sizeof(bye), MSG_DONTWAIT);
     }
@@ -225,8 +239,9 @@ static size_t utf8SafeLen(const char *b, size_t n) {
 // Writes what the socket takes NOW of buf[sent..len). False only when the session is dead. "No room" and "no
 // memory" are not dead: with the access point up W1's heap runs within a few hundred bytes of empty (#111), and lwIP
 // then refuses a segment (ENOMEM) that it takes a moment later - the old blocking send closed a live client on it.
-static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32_t now) {
+static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32_t now, bool gated = true) {
   while (sent < len) {
+    if (gated && heap_caps_get_free_size(MALLOC_CAP_8BIT) < WS_HEAP_FLOOR) return true;   // later (WS_HEAP_FLOOR)
     const int r = send(c.fd, buf + sent, len - sent, MSG_DONTWAIT);
     if (r > 0) { sent += (size_t)r; c.lastTook = now; continue; }
     if (r == 0) return true;
@@ -236,10 +251,21 @@ static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32
   return true;
 }
 
-// Leave the tee and close the session (loop task, txLock held). wsClose() then finds no slot for it.
+// Ask httpd to close the session; free the slot once it has the request or the session is gone. The request is a
+// message on httpd's control socket, and with the heap exhausted that send fails (httpd_queue_work: "failed to queue
+// work"): the slot was freed anyway, the session stayed open with its whole unsent buffer while TCP retried a client
+// that had left, and W1's heap stayed ~9 KB short for the next test (run 20261014-025548). So a slot whose request did
+// not go stays 'closing' - out of the tee, nothing sent to it - and sinkPump asks again every pass.
+static void txTryClose(WsTx &c) {
+  const esp_err_t e = wsServer ? httpd_sess_trigger_close(wsServer, c.fd) : ESP_ERR_NOT_FOUND;
+  if (e == ESP_OK || e == ESP_ERR_NOT_FOUND) txReset(c, -1);   // httpd will close it (wsClose finds no slot), or did
+}
+
+// Leave the tee and close the session (loop task, txLock held).
 static void txClose(WsTx &c) {
-  if (wsServer) httpd_sess_trigger_close(wsServer, c.fd);
-  txReset(c, -1);
+  c.inFrame = false; c.hdrSent = c.paySent = 0; c.ctlLen = c.ctlSent = 0;
+  c.closing = true;
+  txTryClose(c);
 }
 
 // Moves output from the sink to the clients without ever waiting. Called ONLY from loop() — wcbWsService() and the
@@ -286,7 +312,7 @@ static bool sinkPump() {
       else { frameHdr[1] = 126; frameHdr[2] = (uint8_t)(n >> 8); frameHdr[3] = (uint8_t)n; frameHdrLen = 4; }
       for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         WsTx &c = tx[i];
-        if (c.fd < 0) continue;
+        if (!txLive(c)) continue;
         if (!txOwes(c)) c.lastTook = now;  // its no-progress clock starts when it begins to owe
         c.inFrame = true; c.hdrSent = 0; c.paySent = 0;
       }
@@ -295,9 +321,10 @@ static bool sinkPump() {
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
       WsTx &c = tx[i];
       if (c.fd < 0) continue;
+      if (c.closing) { txTryClose(c); continue; }
       bool alive = true;
       if (c.ctlLen && !(c.inFrame && (c.hdrSent || c.paySent))) {     // a PONG, between frames only
-        alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now);
+        alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now, false);
         if (alive && c.ctlSent == c.ctlLen) c.ctlLen = c.ctlSent = 0;
       }
       if (alive && c.inFrame && !c.ctlLen) {
@@ -318,7 +345,7 @@ static bool sinkPump() {
     size_t done = frameLen;
     for (int i = 0; i < WS_MAX_CLIENTS; i++) {
       const WsTx &c = tx[i];
-      if (c.fd < 0 || !c.inFrame) continue;
+      if (!txLive(c) || !c.inFrame) continue;
       const size_t at = (c.hdrSent < frameHdrLen) ? 0 : c.paySent;
       if (at < done) done = at;
     }
@@ -330,7 +357,7 @@ static bool sinkPump() {
       taskEXIT_CRITICAL(&sinkMux);
       frameLen -= done;
       for (int i = 0; i < WS_MAX_CLIENTS; i++)
-        if (tx[i].fd >= 0 && tx[i].inFrame) tx[i].paySent -= done;
+        if (txLive(tx[i]) && tx[i].inFrame) tx[i].paySent -= done;
     }
     if (frameLen) break;                   // someone is still part-way through: the rest waits for a later pass
   }
@@ -547,7 +574,7 @@ static void closeSessionsOfLeftStations() {
   IPAddress ap = WiFi.softAPIP();
   xSemaphoreTake(txLock, portMAX_DELAY);
   for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-    if (tx[i].fd < 0) continue;
+    if (!txLive(tx[i])) continue;
     struct sockaddr_in6 peer = {};
     socklen_t len = sizeof(peer);
     if (getpeername(tx[i].fd, (struct sockaddr *)&peer, &len) != 0) continue;
