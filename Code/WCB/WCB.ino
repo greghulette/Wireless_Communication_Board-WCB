@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_131040ROCT2026                                  *****////
+///*****                                          Version 6.2.1_140252ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -200,7 +200,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_131040ROCT2026";
+String SoftwareVersion = "6.2.1_140252ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2543,6 +2543,20 @@ static void applySoftSerialIntTx(int port) {
 // ?BAUD re-began it (a LoadProhibited panic in rxBits, HIL maestro.get_off_s1_ports).
 volatile int serialReconfigPort = 0;
 
+// A soft port's new rate. The receiver is stopped, not ended: end() frees its two queues (~3.9 KB) and begin() then
+// allocated them again, and with the access point up and a WebSocket client taking output the heap may not have
+// 3.9 KB in one piece at that moment - a throwing operator new abort()ed the board (HIL ws.drop_reports, run
+// 20261014-021636: ?BAUD,S3,600 with a client on W1's access point). UARTBase::beginRx keeps queues of the same size
+// (the EspSoftwareSerial patch), so a baud change allocates nothing; a receiver that still cannot start says so.
+static void rebaudSoftPort(WcbSoftSerial &s, int port, uint32_t baud, int8_t rxPin, int8_t txPin) {
+  s.enableRx(false);
+  s.begin(baud, SWSERIAL_8N1, rxPin, txPin, false, 95);
+  applySoftSerialIntTx(port);
+  if (!s.isListening())
+    Serial.printf("[SOFTSERIAL] S%d: not enough memory to start its receiver at %lu baud - S%d receives nothing "
+                  "until ?BAUD,S%d is sent again\n", port, (unsigned long)baud, port, port);
+}
+
 void applyLiveBaud(int port, uint32_t baud) {
   serialReconfigPort = port;
   // Give any task already inside a drain a chance to finish its pass before the teardown.
@@ -2554,23 +2568,17 @@ void applyLiveBaud(int port, uint32_t baud) {
     case 2: Serial2.flush(); Serial2.updateBaudRate(baud); break;
     case 3:
       if (!isSerialPortUsedForPWMInput(3) && !isSerialPortPWMOutput(3)) {
-        Serial3.end();
-        Serial3.begin(baud, SWSERIAL_8N1, SERIAL3_RX_PIN, SERIAL3_TX_PIN, false, 95);
-        applySoftSerialIntTx(3);
+        rebaudSoftPort(Serial3, 3, baud, SERIAL3_RX_PIN, SERIAL3_TX_PIN);
       }
       break;
     case 4:
       if (!isSerialPortUsedForPWMInput(4) && !isSerialPortPWMOutput(4)) {
-        Serial4.end();
-        Serial4.begin(baud, SWSERIAL_8N1, SERIAL4_RX_PIN, SERIAL4_TX_PIN, false, 95);
-        applySoftSerialIntTx(4);
+        rebaudSoftPort(Serial4, 4, baud, SERIAL4_RX_PIN, SERIAL4_TX_PIN);
       }
       break;
     case 5:
       if (!isSerialPortUsedForPWMInput(5) && !isSerialPortPWMOutput(5)) {
-        Serial5.end();
-        Serial5.begin(baud, SWSERIAL_8N1, SERIAL5_RX_PIN, SERIAL5_TX_PIN, false, 95);
-        applySoftSerialIntTx(5);
+        rebaudSoftPort(Serial5, 5, baud, SERIAL5_RX_PIN, SERIAL5_TX_PIN);
       }
       break;
   }

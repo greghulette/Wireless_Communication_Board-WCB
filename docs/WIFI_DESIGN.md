@@ -203,6 +203,25 @@ the transports identical — handlers go on printing exactly as they always have
 `wcbWsSinkWrite()` only appends to a buffer: no print (that would recurse straight
 back into the tee), no allocation, no TCP send.
 
+**The sender never blocks** (2026-10-14, HIL row `ws.burst_closes_live_client`). `sinkPump` runs on `loop()` and
+writes with `send(MSG_DONTWAIT)`: what a socket takes now goes, the rest waits for a later pass. Every client is
+sent the same frame and keeps its own place in it; the frame's bytes leave the 2 KB sink only when the slowest
+client has sent them. "No room" (`EWOULDBLOCK`) and "no memory" (`ENOMEM` - with the AP up the heap runs within a
+few hundred bytes of empty, #111) are not failures; a hard socket error is. A slow client loses whole lines,
+reported as `[WS] dropped N output line(s) — client too slow`, instead of being closed. The reports are summed and
+printed at most once a second, and a report the full sink cannot take is not itself counted as a drop - with a
+stalled client each report otherwise caused the next, one per `loop()` pass. Only a bulk reply on the
+loop task (the sink full inside one command) waits, a tick at a time, for a client that took bytes in the last
+300 ms (`WS_FRESH_MS`), and for at most 600 ms per pass in all (`WS_PASS_WAIT_MS`). Before, each flush was a
+blocking send of up to `send_wait_timeout` (2 s) and the first failure closed the client: a 10-16 KB burst closed a
+healthy client on W1's access point and stalled `loop()` 3.5 s, and a 5 s grace window made the stall 9.4 s. A
+partial send that timed out was also taken for a whole one, which could cut a frame short.
+
+**Only this file writes to a WebSocket after the handshake.** `/ws` is registered with
+`handle_ws_control_frames`, so httpd no longer answers PING and CLOSE itself with a blocking send from its task,
+which could land inside a frame the sender had half written. `wsHandler` reads every frame's payload, queues a
+PONG that `sinkPump` sends at the next frame boundary, and echoes a CLOSE when no frame is part-way out.
+
 **Per-command flags.** The drain resets `lastReceivedViaESPNOW` and `inSequenceBody`
 before dispatching, exactly as the Serial0 reader does. They are snapshotted per
 queue item, so a value left from a prior mesh recall's body drain would otherwise
@@ -224,10 +243,12 @@ of empty (HIL tracker #111). It was three until 2026-10-07.
 
 **A client that leaves without closing is let go at once** (HIL tracker #113). A phone out of range or a PC moved
 to another network leaves its socket open while TCP retries it, and everything teed to it waits in lwIP, up to a
-TCP send buffer (~5.7 KB) per session. So a failed send closes the session (`httpd_sess_trigger_close`), not just
-the tee; `wsClose` resets the socket (`SO_LINGER` 0) so its buffers are freed at once; when the AP's last station
-leaves, every session from the AP's /24 is closed on the next `loop()`; and httpd's send timeout, which a send to a
-gone client blocks `loop()` for, is 2 s.
+TCP send buffer (~5.7 KB) per session. So a hard send error closes the session (`httpd_sess_trigger_close`), not
+just the tee, and so does 10 s in which a client that owes output takes none of it (`WS_STUCK_MS`, reported as
+`[WS] closed N client(s) that took no output for 10 s`); `wsClose` resets the socket (`SO_LINGER` 0) so its buffers
+are freed at once; and when the AP's last station leaves, every session from the AP's /24 is closed on the next
+`loop()`. No send blocks `loop()` (see the sender above); httpd's own `send_wait_timeout` of 2 s now covers only its
+handshake replies.
 
 **AP address: the stock `192.168.4.1`. Do not call `softAPConfig()`.**
 
@@ -383,6 +404,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | (this commit) | §6a: the WebSocket sender never blocks - `send(MSG_DONTWAIT)`, a place in the frame per client, `ENOMEM`/`EWOULDBLOCK` retried on a later pass, a slow client losing reported lines instead of its session, at most 600 ms of inline wait per `loop()` pass for a bulk reply, and a client that takes no output for 10 s closed. PING/CLOSE are handled by `wsHandler` so httpd never writes into a half-sent frame. HIL row `ws.burst_closes_live_client` (Greg: "Do it"). |
 | 2026-10-07 | `41ce60b` | §6a: a WebSocket client that leaves without closing is let go at once - closed on a failed send and when the AP's last station leaves, reset so lwIP frees its buffers; send timeout 2 s (HIL tracker #113). |
 | 2026-10-07 | `48da52a` | §6a: two WebSocket clients at once, not three (HIL tracker #111, Greg's call); a third evicts the least recently used. The memory section no longer reads the old 110 KB `ESP.getFreeHeap()` figure, which counted the IRAM heap, as headroom. |
 | 2026-09-28 | `e55ba82` | §2: JOIN reads its association and the AP's channel from the driver, not `WiFi.status()` and the radio's momentary channel, cancels the core's forced reconnect on a loss, and starts over after 20 s associated without an address (tracker #103: the lost network was never noticed and never rejoined). |

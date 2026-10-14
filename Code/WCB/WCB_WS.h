@@ -53,7 +53,9 @@ bool wcbWsSinkLive();
 // Output tee, called from WCBSerial::write() so a WebSocket client sees exactly
 // what a USB console would. MUST NOT print, allocate or block: it runs inside
 // arbitrary Serial.printf calls on whatever task is printing. It only appends to
-// a buffer; the actual TCP send happens in wcbWsService() from loop().
+// a buffer; the sends happen on the loop task, in wcbWsService() or - when a bulk
+// reply fills the buffer inside one command - inline, and never block: a client that
+// cannot take more loses whole lines, which are counted and reported (WCB_WS.cpp).
 void wcbWsSinkWrite(uint8_t c);
 
 // Number of connected clients — reported by ?WIFI.

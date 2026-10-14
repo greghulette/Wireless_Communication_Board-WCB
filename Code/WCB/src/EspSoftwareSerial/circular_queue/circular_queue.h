@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #if defined(ESP8266) || defined(ESP32) || !defined(ARDUINO)
 #include <atomic>
 #include <memory>
+#include <new>
 #include <algorithm>
 #include "Delegate.h"
 using std::min;
@@ -65,8 +66,12 @@ public:
     /*!
         @brief  Constructs a queue of the given maximum capacity.
     */
-    circular_queue(const size_t capacity) : m_bufSize(capacity + 1), m_buffer(new T[m_bufSize])
+    circular_queue(const size_t capacity) : m_bufSize(capacity + 1), m_buffer(new (std::nothrow) T[m_bufSize])
     {
+        // WCB patch: nothrow. A throwing new[] abort()ed the board when a ?BAUD change re-began a soft port with
+        // the heap short of the ~3.8 KB ISR queue (HIL run 20261014-021636); the queue now comes back with
+        // capacity 0 and UARTBase::beginRx leaves the receiver off instead.
+        if (!m_buffer) m_bufSize = 1;
         m_inPos.store(0);
         m_outPos.store(0);
     }

@@ -4,7 +4,9 @@
 
 #include <esp_http_server.h>
 #include <WiFi.h>
-#include <lwip/sockets.h>     // close() — the session-close hook owns the fd
+#include <errno.h>
+#include <freertos/semphr.h>
+#include <lwip/sockets.h>     // close() — the session-close hook owns the fd; send(MSG_DONTWAIT) — the sender
 
 // Provided by WCB.ino. Note the NON-CONST reference — the dispatcher may rewrite
 // the line in place, so it cannot be handed a temporary.
@@ -32,6 +34,21 @@ static const uint8_t  WS_QUEUE_DEPTH = 6;
 static const uint32_t WS_ENQUEUE_WAIT_MS = 50;
 // Output staging. One flush is roughly one TCP segment.
 static const size_t   WS_SINK_BUF    = 2048;
+// THE SENDER NEVER BLOCKS (2026-10-14, HIL row ws.burst_closes_live_client). Output goes out with send(MSG_DONTWAIT):
+// what a socket takes now is written, the rest waits for a later loop() pass. A client that is slow to take a burst
+// loses whole lines (counted, reported like any other tee drop) instead of being closed, and loop() never waits on
+// a network write, where the old blocking send waited up to send_wait_timeout per client per flush and closed the
+// client at the first failure (a 10-16 KB burst on W1's access point closed a healthy client and stalled loop()
+// 3.5 s; a grace window made it 9.4 s). Three limits replace the timeout:
+//   WS_PASS_WAIT_MS - inside a print on the loop task, a full sink may wait this long in one loop() pass, in all, for
+//     a client to take it before lines drop. A healthy client needs none of it for a ~6 KB ?backup (lwIP queues
+//     ~5.7 KB per socket at once); it lets a bigger reply through to a client that is ACKing.
+//   WS_FRESH_MS - that wait is only for a client that took bytes this recently: one that has stopped costs nothing.
+//   WS_STUCK_MS - a client that owes output and has taken none of it for this long is closed: #113's dead peer when
+//     no station-left event says so (JOIN mode, or a station still associated but gone quiet).
+static const uint32_t WS_PASS_WAIT_MS = 600;
+static const uint32_t WS_FRESH_MS     = 300;
+static const uint32_t WS_STUCK_MS     = 10000;
 
 // Serial0 is the source id the USB reader uses. Reusing it means a WebSocket
 // command takes byte-for-byte the same path as a typed one — same routing, same
@@ -45,7 +62,6 @@ struct WsCmd {
 
 static QueueHandle_t  wsQueue   = nullptr;
 static httpd_handle_t wsServer  = nullptr;
-static int            wsFds[WS_MAX_CLIENTS] = { -1, -1 };
 
 // ---- Output sink ----------------------------------------------------------
 static char     sinkBuf[WS_SINK_BUF];
@@ -53,15 +69,63 @@ static size_t   sinkLen      = 0;
 static bool     sinkDropping = false;
 static uint32_t sinkDrops    = 0;     // whole lines dropped; reported from loop()
 static uint32_t cmdDrops     = 0;     // commands refused at the queue
+static uint32_t stuckCloses  = 0;     // clients closed by WS_STUCK_MS; reported from loop()
 // The loop task, captured the first time wcbWsService() runs. wcbWsSinkWrite() may
 // only flush inline while running on THIS task — see the note there.
 static TaskHandle_t sinkLoopTask = nullptr;
 // Guards sinkBuf/sinkLen/sinkDropping. The tee runs on whatever task is printing
 // and sinkPump() runs on loop — see the locking note above sinkPump().
 static portMUX_TYPE sinkMux = portMUX_INITIALIZER_UNLOCKED;
+// What the tee has waited, inline, since wcbWsService() last ran (WS_PASS_WAIT_MS).
+static uint32_t passWaitMs = 0;
+// Set on the loop task while wcbWsService() prints its drop reports. A report the full sink cannot take is not itself
+// counted as a dropped line: with a stalled client it would be, and each report would cause the next, one a pass, for
+// as long as the client stayed stalled (HIL run 20261014-021636: twelve '[WS] dropped 1 output line(s)' in 50 ms).
+static bool sinkReporting = false;
+
+// ---- The clients and what each still owes --------------------------------
+// Every client is sent the same frame: frameHdr, then sinkBuf[0..frameLen). Each keeps its own place in it, because
+// a non-blocking send takes what the socket has room for and a client may be part-way through when the next pass
+// comes. The frame's bytes stay put until the slowest client has sent them (sinkPump compacts only what all have).
+// A PONG is queued per client and sent only BETWEEN data frames: a control frame written into the middle of a data
+// frame breaks the stream. That is also why the handler takes the control frames itself (handle_ws_control_frames):
+// httpd's own PING reply is a blocking send from its task, which could land inside a frame this sender has half
+// written - from now on only this file writes to a WebSocket once its handshake is done.
+struct WsTx {
+  int      fd       = -1;
+  bool     inFrame  = false;   // owes the frame in flight
+  size_t   hdrSent  = 0;       // of frameHdrLen
+  size_t   paySent  = 0;       // of sinkBuf[0..frameLen), moved back as sinkPump compacts
+  uint32_t lastTook = 0;       // millis() of the last byte the socket took, or of when it began to owe
+  uint8_t  ctl[2 + 125];       // a PONG owed: the whole frame, header included
+  size_t   ctlLen   = 0;
+  size_t   ctlSent  = 0;
+};
+static WsTx     tx[WS_MAX_CLIENTS];
+static uint8_t  frameHdr[4];
+static size_t   frameHdrLen = 0;
+static size_t   frameLen    = 0;     // 0 = no frame in flight
+// tx[] membership and every write to a WebSocket: the loop's sender against the httpd task (handshake, PONG queueing,
+// a CLOSE's echo, the session-close hook). Held only around non-blocking work, never across a wait.
+static SemaphoreHandle_t txLock = nullptr;
+
+static void txReset(WsTx &c, int fd) {
+  c.fd = fd; c.inFrame = false; c.hdrSent = c.paySent = 0; c.ctlLen = c.ctlSent = 0; c.lastTook = millis();
+}
+
+static bool txOwes(const WsTx &c) { return c.fd >= 0 && (c.inFrame || c.ctlLen > c.ctlSent); }
+
+static bool txMidFrame(const WsTx &c) {
+  return (c.inFrame && (c.hdrSent || c.paySent)) || c.ctlSent;
+}
+
+static WsTx *txFor(int fd) {
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (tx[i].fd == fd) return &tx[i];
+  return nullptr;
+}
 
 bool wcbWsSinkLive() {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] >= 0) return true;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (tx[i].fd >= 0) return true;
   return false;
 }
 
@@ -69,23 +133,73 @@ bool wcbWsRunning() { return wsServer != nullptr; }
 
 int wcbWsClientCount() {
   int n = 0;
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] >= 0) n++;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (tx[i].fd >= 0) n++;
   return n;
 }
 
+// httpd task (handshake, traffic).
 static void sinkAdd(int fd) {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] == fd) return;
-  // First client after a quiet period: start from a clean sheet. sinkDropping is
-  // set when a send fails, which is exactly what happens as the last client
-  // leaves mid-line — without this reset it survives the disconnect and eats the
-  // first whole line the NEXT client is sent.
-  if (!wcbWsSinkLive()) { sinkLen = 0; sinkDropping = false; }
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] < 0) { wsFds[i] = fd; return; }
-  wsFds[0] = fd;   // full: evict the oldest rather than refuse the newcomer
+  if (!txLock) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  if (!txFor(fd)) {
+    // First client after a quiet period: start from a clean sheet. sinkDropping is
+    // set when the sink overflows mid-line; without this reset it survives the last
+    // client leaving and eats the first whole line the NEXT client is sent.
+    if (!wcbWsSinkLive()) {
+      taskENTER_CRITICAL(&sinkMux);
+      sinkLen = 0; sinkDropping = false;
+      taskEXIT_CRITICAL(&sinkMux);
+      frameLen = 0;
+    }
+    WsTx *slot = txFor(-1);
+    if (!slot) {                       // full: evict the oldest rather than refuse the newcomer
+      slot = &tx[0];
+      if (wsServer) httpd_sess_trigger_close(wsServer, slot->fd);   // its stream stops mid-frame: close it
+    }
+    txReset(*slot, fd);                // joins at the next frame, never part-way into this one
+  }
+  xSemaphoreGive(txLock);
 }
 
+// httpd task (CLOSE frame, session-close hook). Frees the slot before the fd can be closed and reused.
 static void sinkDrop(int fd) {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (wsFds[i] == fd) wsFds[i] = -1;
+  if (!txLock) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c) txReset(*c, -1);
+  xSemaphoreGive(txLock);
+}
+
+// httpd task: a PING's PONG (RFC 6455 5.5.3, the same payload), sent by sinkPump at the next frame boundary. A PONG
+// already part-sent finishes first; a newer PING replaces one not yet begun - answering only the latest is allowed.
+static void queuePong(int fd, const uint8_t *payload, size_t len) {
+  if (!txLock || len > 125) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c && !c->ctlSent) {
+    if (!txOwes(*c)) c->lastTook = millis();
+    c->ctl[0] = 0x8A;                  // FIN + PONG
+    c->ctl[1] = (uint8_t)len;
+    if (len) memcpy(c->ctl + 2, payload, len);
+    c->ctlLen = 2 + len;
+  }
+  xSemaphoreGive(txLock);
+}
+
+// httpd task: the client sent CLOSE. Echo an empty CLOSE if no frame is part-way out (best effort, never waits), then
+// leave the tee; httpd closes the session when the handler returns.
+static void closeEcho(int fd) {
+  if (!txLock) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c) {
+    if (!txMidFrame(*c)) {
+      static const uint8_t bye[2] = { 0x88, 0x00 };
+      send(fd, bye, sizeof(bye), MSG_DONTWAIT);
+    }
+    txReset(*c, -1);
+  }
+  xSemaphoreGive(txLock);
 }
 
 // Longest prefix of b[0..n) that does not end part-way through a UTF-8 sequence.
@@ -108,7 +222,28 @@ static size_t utf8SafeLen(const char *b, size_t n) {
   return n;
 }
 
-// Flush the staging buffer to every connected client. Called ONLY from loop().
+// Writes what the socket takes NOW of buf[sent..len). False only when the session is dead. "No room" and "no
+// memory" are not dead: with the access point up W1's heap runs within a few hundred bytes of empty (#111), and lwIP
+// then refuses a segment (ENOMEM) that it takes a moment later - the old blocking send closed a live client on it.
+static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32_t now) {
+  while (sent < len) {
+    const int r = send(c.fd, buf + sent, len - sent, MSG_DONTWAIT);
+    if (r > 0) { sent += (size_t)r; c.lastTook = now; continue; }
+    if (r == 0) return true;
+    const int e = errno;
+    return e == EAGAIN || e == EWOULDBLOCK || e == ENOMEM || e == ENOBUFS || e == EINTR;
+  }
+  return true;
+}
+
+// Leave the tee and close the session (loop task, txLock held). wsClose() then finds no slot for it.
+static void txClose(WsTx &c) {
+  if (wsServer) httpd_sess_trigger_close(wsServer, c.fd);
+  txReset(c, -1);
+}
+
+// Moves output from the sink to the clients without ever waiting. Called ONLY from loop() — wcbWsService() and the
+// tee's inline flush on the loop task. Returns true when a client is live.
 //
 // THE LOCKING RULE. sinkBuf/sinkLen are written from whatever task is printing —
 // including the ESP-NOW receive callback on the WiFi task — while this function
@@ -116,52 +251,102 @@ static size_t utf8SafeLen(const char *b, size_t n) {
 // memmove below has its byte relocated out from under it and sinkLen then
 // clobbered: torn output a host parser cannot tell from a real reply.
 //
-// The critical sections are deliberately tiny and never span the TCP send. That
-// is safe because appends only ever write at sinkBuf[sinkLen] and sinkLen only
-// grows, so the region [0, send) handed to httpd cannot be touched by a
-// concurrent writer — only the tail moves, and the tail is re-read under the lock
-// afterwards. Holding a spinlock across httpd_ws_send_frame_async() would disable
-// interrupts on this core for the whole of a network write, which is exactly the
-// stall this file exists to prevent.
+// The spinlock sections are deliberately tiny and never span a send. That is safe
+// because appends only ever write at sinkBuf[sinkLen] and sinkLen only grows, so the
+// frame [0, frameLen) the sender reads cannot be touched by a concurrent writer —
+// only the tail moves, and the tail is re-read under the lock. Holding a spinlock
+// across send() would disable interrupts on this core for the whole of a network
+// call. txLock (a mutex, not a spinlock) is what keeps the httpd task's writes and
+// slot changes out of the middle of a pass.
+// True on the task that holds txLock: a print from inside a send (none today - IDF's own log lines do not pass
+// through WCBSerial) must not take the mutex again on the same task.
+static bool txHeldHere() {
+  return txLock && xSemaphoreGetMutexHolder(txLock) == xTaskGetCurrentTaskHandle();
+}
+
 static bool sinkPump() {
-  if (!wsServer) return wcbWsSinkLive();
+  if (!wsServer || !txLock || txHeldHere()) return wcbWsSinkLive();
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  const uint32_t now = millis();
 
-  size_t send;
-  taskENTER_CRITICAL(&sinkMux);
-  send = sinkLen ? utf8SafeLen(sinkBuf, sinkLen) : 0;
-  if (!send && sinkLen) send = sinkLen;      // cannot improve it — send rather than stall
-  taskEXIT_CRITICAL(&sinkMux);
-  if (!send) return wcbWsSinkLive();
+  for (int round = 0; round < 4; round++) {
+    // Open the next frame: what the sink holds now, cut back to a whole UTF-8 character. With nothing to send the
+    // pass still runs the clients below: a PONG owed goes out on a quiet console too.
+    size_t n = 0;
+    if (!frameLen) {
+      taskENTER_CRITICAL(&sinkMux);
+      n = sinkLen ? utf8SafeLen(sinkBuf, sinkLen) : 0;
+      if (!n && sinkLen) n = sinkLen;      // cannot improve it — send rather than stall
+      taskEXIT_CRITICAL(&sinkMux);
+    }
+    if (n && wcbWsSinkLive()) {
+      frameLen = n;
+      frameHdr[0] = 0x81;                  // FIN + TEXT
+      if (n < 126) { frameHdr[1] = (uint8_t)n; frameHdrLen = 2; }
+      else { frameHdr[1] = 126; frameHdr[2] = (uint8_t)(n >> 8); frameHdr[3] = (uint8_t)n; frameHdrLen = 4; }
+      for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        WsTx &c = tx[i];
+        if (c.fd < 0) continue;
+        if (!txOwes(c)) c.lastTook = now;  // its no-progress clock starts when it begins to owe
+        c.inFrame = true; c.hdrSent = 0; c.paySent = 0;
+      }
+    }
 
-  httpd_ws_frame_t f = {};
-  f.final   = true;
-  f.type    = HTTPD_WS_TYPE_TEXT;
-  f.payload = (uint8_t *)sinkBuf;
-  f.len     = send;
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-    if (wsFds[i] < 0) continue;
-    if (httpd_ws_send_frame_async(wsServer, wsFds[i], &f) != ESP_OK) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+      WsTx &c = tx[i];
+      if (c.fd < 0) continue;
+      bool alive = true;
+      if (c.ctlLen && !(c.inFrame && (c.hdrSent || c.paySent))) {     // a PONG, between frames only
+        alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now);
+        if (alive && c.ctlSent == c.ctlLen) c.ctlLen = c.ctlSent = 0;
+      }
+      if (alive && c.inFrame && !c.ctlLen) {
+        alive = txSome(c, frameHdr, frameHdrLen, c.hdrSent, now);
+        if (alive && c.hdrSent == frameHdrLen) alive = txSome(c, (const uint8_t *)sinkBuf, frameLen, c.paySent, now);
+        if (alive && c.hdrSent == frameHdrLen && c.paySent == frameLen) c.inFrame = false;
+      }
       // Close the session, not just leave the tee: a session left open holds its unsent output in lwIP (up to a
       // whole TCP send buffer, ~5.7 KB) for as long as TCP retries a peer that has gone, and two or three such
-      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113, run
-      // 20261007-140804: 4.8 KB free, largest block 980 B, nothing connected). wsClose resets it.
-      // At the FIRST failure, deliberately: the send runs on the loop task and blocks it up to send_wait_timeout
-      // (2 s) each time. A 5 s grace window was tried on 2026-10-13 (HIL ws.burst_closes_live_client: a healthy
-      // client on W1's AP is dropped when a 10-16 KB backlog flushes) and made it worse - the loop stalled 9.4 s
-      // instead of 3.5 s and the client was dropped anyway, because the AP link really could not take the burst.
-      // Keeping a slow client needs a send that never blocks the loop (queue per client, send when writable).
-      httpd_sess_trigger_close(wsServer, wsFds[i]);
-      wsFds[i] = -1;
+      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113). wsClose resets it.
+      if (!alive) txClose(c);
+      else if (txOwes(c) && now - c.lastTook >= WS_STUCK_MS) { stuckCloses++; txClose(c); }
     }
+
+    // Free what every client still in the frame has sent: the slowest one sets the pace. When none is left in it
+    // (all done, or all gone) the whole frame goes and the next one can open.
+    if (!frameLen) break;                  // nothing in flight: the sink was empty this round
+    size_t done = frameLen;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+      const WsTx &c = tx[i];
+      if (c.fd < 0 || !c.inFrame) continue;
+      const size_t at = (c.hdrSent < frameHdrLen) ? 0 : c.paySent;
+      if (at < done) done = at;
+    }
+    if (done) {
+      taskENTER_CRITICAL(&sinkMux);
+      const size_t left = (sinkLen > done) ? (sinkLen - done) : 0;
+      if (left) memmove(sinkBuf, sinkBuf + done, left);
+      sinkLen = left;
+      taskEXIT_CRITICAL(&sinkMux);
+      frameLen -= done;
+      for (int i = 0; i < WS_MAX_CLIENTS; i++)
+        if (tx[i].fd >= 0 && tx[i].inFrame) tx[i].paySent -= done;
+    }
+    if (frameLen) break;                   // someone is still part-way through: the rest waits for a later pass
   }
 
-  // Re-read sinkLen: a writer may have appended while the send was in flight.
-  taskENTER_CRITICAL(&sinkMux);
-  const size_t left = (sinkLen > send) ? (sinkLen - send) : 0;
-  if (left) memmove(sinkBuf, sinkBuf + send, left);
-  sinkLen = left;
-  taskEXIT_CRITICAL(&sinkMux);
-  return wcbWsSinkLive();
+  const bool live = wcbWsSinkLive();
+  xSemaphoreGive(txLock);
+  return live;
+}
+
+// A client the tee may wait for: it owes output and took some within WS_FRESH_MS. Read without the lock - a
+// stale answer costs one wait of at most a tick or one line dropped early.
+static bool sinkClientFresh() {
+  const uint32_t now = millis();
+  for (int i = 0; i < WS_MAX_CLIENTS; i++)
+    if (txOwes(tx[i]) && now - tx[i].lastTook < WS_FRESH_MS) return true;
+  return false;
 }
 
 // THE TEE. Runs inside arbitrary Serial.printf calls, on whatever task is
@@ -193,28 +378,39 @@ void wcbWsSinkWrite(uint8_t c) {
   // the next wcbWsService() means discarding most of it. Measured: pulling a
   // config over the socket lost a line mid-dump.
   //
-  // So flush inline, but ONLY on the loop task. That is the whole reason this
-  // check exists: on any other task — above all the ESP-NOW receive callback — a
-  // TCP send here would block the WiFi task, which is the failure this file is
-  // built to avoid. Off the loop task we still drop, because dropping a telemetry
-  // line is survivable and stalling the radio is not.
+  // So flush inline, but ONLY on the loop task. On any other task — above all the
+  // ESP-NOW receive callback — touching the sockets here would hold up the WiFi
+  // task, which is the failure this file is built to avoid. Off the loop task we
+  // still drop, because dropping a telemetry line is survivable and stalling the
+  // radio is not. On the loop task the sends never block; when a client cannot take
+  // more yet, the tee waits a tick and tries again - only while some client is
+  // still taking bytes (WS_FRESH_MS), and for at most WS_PASS_WAIT_MS per loop()
+  // pass in all - then drops.
   //
-  // sinkPump() takes the lock itself, so it must be called OUTSIDE the critical
-  // section — taskENTER_CRITICAL does not nest across a network write.
-  if (xTaskGetCurrentTaskHandle() == sinkLoopTask) {
-    sinkPump();
-    taskENTER_CRITICAL(&sinkMux);
-    if (sinkLen < WS_SINK_BUF) {
-      sinkBuf[sinkLen++] = (char)c;
+  // sinkPump() takes the locks itself, so it must be called OUTSIDE the critical
+  // section — taskENTER_CRITICAL does not nest across a network call.
+  if (xTaskGetCurrentTaskHandle() == sinkLoopTask && !txHeldHere()) {
+    const uint32_t t0 = millis();
+    for (;;) {
+      sinkPump();
+      taskENTER_CRITICAL(&sinkMux);
+      if (sinkLen < WS_SINK_BUF) {
+        sinkBuf[sinkLen++] = (char)c;
+        taskEXIT_CRITICAL(&sinkMux);
+        passWaitMs += millis() - t0;
+        return;
+      }
       taskEXIT_CRITICAL(&sinkMux);
-      return;
+      if (passWaitMs + (millis() - t0) >= WS_PASS_WAIT_MS || !sinkClientFresh()) break;
+      vTaskDelay(1);
     }
-    taskEXIT_CRITICAL(&sinkMux);
+    passWaitMs += millis() - t0;
   }
 
+  const bool report = sinkReporting && xTaskGetCurrentTaskHandle() == sinkLoopTask;
   taskENTER_CRITICAL(&sinkMux);
   sinkDropping = true;
-  sinkDrops++;
+  if (!report) sinkDrops++;
   taskEXIT_CRITICAL(&sinkMux);
 }
 
@@ -284,8 +480,9 @@ static esp_err_t wsHandler(httpd_req_t *req) {
   frame.type = HTTPD_WS_TYPE_TEXT;
   esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);   // length probe
   if (err != ESP_OK) return err;
-  if (frame.type == HTTPD_WS_TYPE_CLOSE) { accRelease(fd); sinkDrop(fd); return ESP_OK; }
-  if (frame.len == 0) return ESP_OK;
+  // Control frames come here too (handle_ws_control_frames, wcbWsBegin): httpd no longer answers them itself.
+  if (frame.type == HTTPD_WS_TYPE_CLOSE) { accRelease(fd); closeEcho(fd); return ESP_OK; }   // httpd then closes it
+  if (frame.type == HTTPD_WS_TYPE_PING && frame.len > 125) return ESP_FAIL;                 // RFC 6455 5.5
 
   // OVERSIZED: we cannot read it, and we must not leave it unread. The call above
   // is a LENGTH PROBE — esp_http_server has parsed the header but the payload is
@@ -303,10 +500,14 @@ static esp_err_t wsHandler(httpd_req_t *req) {
     return ESP_FAIL;
   }
 
-  frame.payload = rxBuf;
-  err = httpd_ws_recv_frame(req, &frame, sizeof(rxBuf));
-  if (err != ESP_OK) return err;
-  if (frame.type != HTTPD_WS_TYPE_TEXT) return ESP_OK;
+  // Every frame's payload is read, a PING's and a PONG's too: one left in the socket is parsed as the next header.
+  if (frame.len) {
+    frame.payload = rxBuf;
+    err = httpd_ws_recv_frame(req, &frame, sizeof(rxBuf));
+    if (err != ESP_OK) return err;
+  }
+  if (frame.type == HTTPD_WS_TYPE_PING) { queuePong(fd, rxBuf, frame.len); return ESP_OK; }
+  if (frame.type != HTTPD_WS_TYPE_TEXT || !frame.len) return ESP_OK;
 
   sinkAdd(fd);                            // re-arm on traffic
   WsAcc *a = accFor(fd);
@@ -332,9 +533,9 @@ static void wsClose(httpd_handle_t /*hd*/, int sockfd) {
 // ---- A client whose station left the access point -----------------------
 // The AP sees a station leave (WIFI_EVENT_AP_STADISCONNECTED) long before TCP gives up on its sockets. When the
 // last station has gone, every session from the AP's own subnet is dead: close them at once rather than wait for a
-// send to fail on each (each failed send also stalls loop() for the send timeout). With stations still there a
-// dead session closes at its first failed send instead (sinkPump). The flag is set on the Arduino event task and
-// read on loop().
+// send to fail or for WS_STUCK_MS to pass on each. With stations still there a dead session closes at its first hard
+// send error, or after WS_STUCK_MS without taking a byte it owes (sinkPump). The flag is set on the Arduino event
+// task and read on loop().
 static volatile bool apStationLeft = false;
 
 static void onApStationLeft(arduino_event_id_t, arduino_event_info_t) { apStationLeft = true; }
@@ -342,24 +543,24 @@ static void onApStationLeft(arduino_event_id_t, arduino_event_info_t) { apStatio
 static void closeSessionsOfLeftStations() {
   if (!apStationLeft) return;
   apStationLeft = false;
-  if (!wsServer || WiFi.getMode() == WIFI_STA || WiFi.softAPgetStationNum() > 0) return;
+  if (!wsServer || !txLock || WiFi.getMode() == WIFI_STA || WiFi.softAPgetStationNum() > 0) return;
   IPAddress ap = WiFi.softAPIP();
+  xSemaphoreTake(txLock, portMAX_DELAY);
   for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-    if (wsFds[i] < 0) continue;
+    if (tx[i].fd < 0) continue;
     struct sockaddr_in6 peer = {};
     socklen_t len = sizeof(peer);
-    if (getpeername(wsFds[i], (struct sockaddr *)&peer, &len) != 0) continue;
+    if (getpeername(tx[i].fd, (struct sockaddr *)&peer, &len) != 0) continue;
     uint32_t v4;
     if (peer.sin6_family == AF_INET) v4 = ((struct sockaddr_in *)&peer)->sin_addr.s_addr;
     else if (peer.sin6_family == AF_INET6 && peer.sin6_addr.un.u32_addr[0] == 0 && peer.sin6_addr.un.u32_addr[1] == 0 &&
              peer.sin6_addr.un.u32_addr[2] == PP_HTONL(0x0000FFFFUL)) v4 = peer.sin6_addr.un.u32_addr[3];   // v4-mapped
     else continue;
     IPAddress ip(v4);
-    if (ip[0] == ap[0] && ip[1] == ap[1] && ip[2] == ap[2]) {   // the AP's /24: a client that came through it
-      httpd_sess_trigger_close(wsServer, wsFds[i]);
-      wsFds[i] = -1;
-    }
+    if (ip[0] == ap[0] && ip[1] == ap[1] && ip[2] == ap[2])     // the AP's /24: a client that came through it
+      txClose(tx[i]);
   }
+  xSemaphoreGive(txLock);
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -368,8 +569,10 @@ bool wcbWsBegin() {
   if (wsServer) return true;              // already running
 
   wsQueue = xQueueCreate(WS_QUEUE_DEPTH, sizeof(WsCmd));
-  if (!wsQueue) {
+  if (!txLock) txLock = xSemaphoreCreateMutex();
+  if (!wsQueue || !txLock) {
     Serial.println("[WS] command queue alloc FAILED — WebSocket disabled");
+    if (wsQueue) { vQueueDelete(wsQueue); wsQueue = nullptr; }
     return false;
   }
 
@@ -377,8 +580,9 @@ bool wcbWsBegin() {
   cfg.max_open_sockets = WS_MAX_CLIENTS;
   cfg.close_fn         = wsClose;
   cfg.lru_purge_enable = true;
-  // A send to a client that has gone blocks loop() until it times out (sinkPump runs on loop): 5 s by default, seen
-  // as five-second stalls of W1's console with one dead client (#113). Two is plenty for a live one on this link.
+  // Only httpd's own sends use it now - the handshake reply and HTTP errors, on its task. The console goes out
+  // through sinkPump, which never blocks (WS_STUCK_MS). Before that, a send to a client that had gone blocked loop()
+  // for this long each time: 5 s by default, seen as five-second stalls of W1's console (#113).
   cfg.send_wait_timeout = 2;
   // The default 4096 is not enough once our handler's frame work is on it.
   cfg.stack_size       = 6144;
@@ -394,6 +598,9 @@ bool wcbWsBegin() {
   uri.handler      = wsHandler;
   uri.user_ctx     = nullptr;
   uri.is_websocket = true;
+  // PING and CLOSE come to wsHandler instead of being answered by httpd with a blocking send on its own task, which
+  // could land inside a frame sinkPump has half written: only this file writes to a WebSocket after the handshake.
+  uri.handle_ws_control_frames = true;
   if (httpd_register_uri_handler(wsServer, &uri) != ESP_OK) {
     Serial.println("[WS] URI register FAILED — WebSocket disabled");
     httpd_stop(wsServer); wsServer = nullptr;
@@ -415,6 +622,7 @@ void wcbWsService() {
   // We are on the loop task here, by definition. Capture it so the output tee can
   // tell "safe to flush inline" from "this is the WiFi task, drop instead".
   if (!sinkLoopTask) sinkLoopTask = xTaskGetCurrentTaskHandle();
+  passWaitMs = 0;                   // a new loop() pass: the tee may wait WS_PASS_WAIT_MS again
 
   static bool startTried = false;
   if (!wsServer) {
@@ -449,11 +657,21 @@ void wcbWsService() {
   }
 
   // Report drops from HERE, never from the handler or the tee — both run where a
-  // print would block the wrong task. Once per occurrence, not per line.
-  if (sinkDrops) { uint32_t n = sinkDrops; sinkDrops = 0;
-                   Serial.printf("[WS] dropped %u output line(s) — client too slow\n", (unsigned)n); }
-  if (cmdDrops)  { uint32_t n = cmdDrops;  cmdDrops  = 0;
-                   Serial.printf("[WS] dropped %u inbound command(s) — queue full or oversized\n", (unsigned)n); }
+  // print would block the wrong task. Summed, at most once a second: while a client
+  // is stalled nearly every pass that prints drops something for it.
+  static uint32_t lastReportMs = 0;
+  if ((sinkDrops || cmdDrops || stuckCloses) && millis() - lastReportMs >= 1000) {
+    lastReportMs = millis();
+    sinkReporting = true;
+    if (sinkDrops) { uint32_t n = sinkDrops; sinkDrops = 0;
+                     Serial.printf("[WS] dropped %u output line(s) — client too slow\n", (unsigned)n); }
+    if (cmdDrops)  { uint32_t n = cmdDrops;  cmdDrops  = 0;
+                     Serial.printf("[WS] dropped %u inbound command(s) — queue full or oversized\n", (unsigned)n); }
+    if (stuckCloses) { uint32_t n = stuckCloses; stuckCloses = 0;
+                       Serial.printf("[WS] closed %u client(s) that took no output for %u s\n", (unsigned)n,
+                                     (unsigned)(WS_STUCK_MS / 1000)); }
+    sinkReporting = false;
+  }
 
   sinkPump();
 }
