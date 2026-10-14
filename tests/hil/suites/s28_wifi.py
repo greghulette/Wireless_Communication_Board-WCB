@@ -818,6 +818,32 @@ def _ws_client_count(w, timeout=5.0):
     return int(m.group(1)) if m else None
 
 
+def _chain_names_lost(full, short):
+    """The tokens `full` has and `short` lacks, by name only ('?MAESTRO', '?SEQ,SAVE,Leia', at most 6) - the chains
+    carry W1's mesh password and WiFi passphrase. Split on '^', a sequence's own '^' leaves fragments that do not start
+    with the chain's function character: those are counted, never named."""
+    from suites.s03_wcb import _names
+    from suites.s05_mesh import CHAIN_TAIL
+
+    def toks(c):
+        m = CHAIN_TAIL.match(c or "")
+        return (m.group(1) if m else (c or "")).split("^")
+    lead = (full or "?")[:1]
+    have = set(toks(short))
+    gone = [t for t in toks(full) if t not in have]
+    named = [t for t in gone if t.startswith(lead)]
+    rest = len(gone) - len(named)
+    return f"{len(gone)} token(s): {', '.join(_names(named)) or 'none named'}" + (f" (+{rest} fragment(s))" if rest else "")
+
+
+def _heap_note(w):
+    """'free heap 18044 bytes (min since boot 7336)' from W1's ?WIFI block."""
+    try:
+        return f"free heap {_status(w).get('Free heap', '?')}"
+    except AssertionError:
+        return "printed no ?WIFI block"
+
+
 def _left_clean(bench, w, problems):
     """After the PC left: W1 counts no WebSocket client. W1's heap is noted, low-water mark included: with the access
     point up a classic ESP32 has about 18 KB, and a PC's association and socket traffic take the low-water mark within
@@ -937,15 +963,29 @@ def ws_backup_over_ws(bench):
         ws = _ws_open(ip)
         assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
         try:
-            ws.text, ws.text_frames = "", []
-            ws.send_text("?backup\n")
-            if not _ws_until(ws, lambda t: "End of Backup" in t, 20):
-                problems.append(f"?backup over the WebSocket did not finish ({len(ws.text)} characters in 20 s)")
-            chain = _live_chain([x.rstrip() for x in ws.text.split("\n")], False)
+            for attempt in (1, 2):
+                ws.text, ws.text_frames = "", []
+                ws.send_text("?backup\n")
+                if not _ws_until(ws, lambda t: "End of Backup" in t, 20):
+                    problems.append(f"?backup over the WebSocket did not finish ({len(ws.text)} characters in 20 s)")
+                chain = _live_chain([x.rstrip() for x in ws.text.split("\n")], False)
+                # printBackupConfig leaves out a line it could not build for lack of heap, checksums what it did
+                # print and says so right after: '... WARNING: N command(s) could not be built (out of memory) -
+                # this backup is INCOMPLETE. Run ?backup again.' (F19). That is W1's heap with the access point up
+                # and a client on it (tracker #111), not the tee: do what the warning says, once, and note it.
+                short = [x.strip() for x in ws.text.split("\n") if "could not be built (out of memory)" in x]
+                if not (short and _chain_ok(chain) and chain != usb_chain) or attempt == 2:
+                    break
+                bench.note(f"?backup over WS, try 1: W1 said {short[0][:110]!r}; chain {len(chain)} of "
+                           f"{len(usb_chain)} characters, lacking {_chain_names_lost(usb_chain, chain)}; W1 "
+                           f"{_heap_note(w)} - asking again, as the warning says")
             if not _chain_ok(chain):
                 problems.append(f"the WebSocket's chain ({len(chain or '')} characters) fails its CRC")
             elif chain != usb_chain:
-                problems.append(f"the WebSocket's chain differs from USB's ({len(chain)} vs {len(usb_chain)} characters)")
+                said = f"; W1 said {short[0][:110]!r}" if short else " and W1 printed no out-of-memory warning"
+                problems.append(f"the WebSocket's chain differs from USB's ({len(chain)} vs {len(usb_chain)} "
+                                f"characters, lacking {_chain_names_lost(usb_chain, chain)}){said}; W1 "
+                                f"{_heap_note(w)}")
             backup_frames = len(ws.text_frames)
             m = w.dev.mark()
             ws.text = ""
@@ -1066,8 +1106,20 @@ def ws_client_slots(bench):
                 c = _ws_open(ip)
                 assert c is not None, f"client {k + 1} could not open ws://{ip}/ws with a lease held"
                 clients.append(c)
+                opened = time.monotonic()
                 c.send_text("?VERSION\n")
-                c.read_until("End of Version", timeout=6)
+                try:
+                    c.read_until("End of Version", timeout=6)
+                except (ConnectionError, OSError) as e:     # say which client W1 closed, when, and what it held then
+                    after = time.monotonic() - opened
+                    try:
+                        st = _status(w)
+                        held = f"W1 then reported {st.get('WS endpoint')!r}, free heap {st.get('Free heap')!r}"
+                    except AssertionError:
+                        held = "W1 then printed no ?WIFI block"
+                    raise AssertionError(f"W1 closed client {k + 1} of {WS_MAX_CLIENTS} {after:.1f} s after it "
+                                         f"opened, before ?VERSION's answer ended ({len(c.text)} characters had "
+                                         f"arrived: {e}); {held}") from e
             n = _ws_client_count(w)
             if n != WS_MAX_CLIENTS:
                 problems.append(f"with {WS_MAX_CLIENTS} clients open W1 counts {n}")
