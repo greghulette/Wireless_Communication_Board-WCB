@@ -222,6 +222,8 @@ partial send that timed out was also taken for a whole one, which could cut a fr
 which could land inside a frame the sender had half written. `wsHandler` reads every frame's payload, queues a
 PONG that `sinkPump` sends at the next frame boundary, and echoes a CLOSE when no frame is part-way out.
 
+**A heap floor for console output** (`WS_HEAP_FLOOR`, 8 KB). Output handed to lwIP sits in its send buffer and the WiFi driver's dynamic TX buffers until the client ACKs it, and the driver takes a dynamic RX buffer from the same heap for every packet it receives. A client that stopped reading took W1 to 1.4 KB free: its window update could not be received, it was closed as stuck, and the heap stayed short long enough that the next client could not join. Below the floor `sinkPump` hands lwIP nothing more (PONG/CLOSE excepted). A close that httpd cannot queue (its control socket needs a little heap too) keeps the slot `closing` and is asked again every pass, instead of leaving the session open with its whole send buffer.
+
 **Per-command flags.** The drain resets `lastReceivedViaESPNOW` and `inSequenceBody`
 before dispatching, exactly as the Serial0 reader does. They are snapshotted per
 queue item, so a value left from a prior mesh recall's body drain would otherwise
@@ -404,6 +406,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-14 | `f5348c5` | §6a: `WS_HEAP_FLOOR` (8 KB) - no console output into lwIP below it; a session close httpd could not queue is retried every pass (full run `20261014-025548`: a stalled client starved W1's heap, the close was lost, the next client could not join). |
 | 2026-10-14 | `4fd7698` | §6a: the WebSocket sender never blocks - `send(MSG_DONTWAIT)`, a place in the frame per client, `ENOMEM`/`EWOULDBLOCK` retried on a later pass, a slow client losing reported lines instead of its session, at most 600 ms of inline wait per `loop()` pass for a bulk reply, and a client that takes no output for 10 s closed. PING/CLOSE are handled by `wsHandler` so httpd never writes into a half-sent frame. HIL row `ws.burst_closes_live_client` (Greg: "Do it"). |
 | 2026-10-07 | `41ce60b` | §6a: a WebSocket client that leaves without closing is let go at once - closed on a failed send and when the AP's last station leaves, reset so lwIP frees its buffers; send timeout 2 s (HIL tracker #113). |
 | 2026-10-07 | `48da52a` | §6a: two WebSocket clients at once, not three (HIL tracker #111, Greg's call); a third evicts the least recently used. The memory section no longer reads the old 110 KB `ESP.getFreeHeap()` figure, which counted the IRAM heap, as headroom. |
