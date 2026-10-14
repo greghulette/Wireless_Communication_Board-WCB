@@ -1942,9 +1942,13 @@
   "area": "ws",
   "behaviour": "A live WebSocket client on W1's access point stays connected through a burst of console output.",
   "where": "WCB_WS.cpp sinkPump (httpd_ws_send_frame_async failure closes the session), wcbWsBegin send_wait_timeout = 2",
-  "status": "untested",
-  "tested_by": [],
-  "gap": "Found 2026-10-13 building ws.drop_reports: after W1's loop was held and released, the flush of the backlog (~10-16 KB) closed the live test client three times (runs 20261013-082616, -084533, -084748). sinkPump closes a session on any failed send - meant for a dead peer (#113) - and the send is synchronous with a 2 s timeout, so a stalled AP link during a burst ends a healthy session. Cause of the stall unmeasured (radio shared with the mesh?). A grace window (close only after failures persist for some seconds) would keep #113's protection; a product/firmware decision. 2026-10-13: Greg chose a 5 s grace window; built (3b9e2dd) and measured (run 20261013-094445): the client was still dropped and W1's loop stalled 9.4 s instead of 3.5 s, because each failed send blocks the loop for send_wait_timeout (2 s) and the AP link really could not take the burst. Reverted. The real fix is a send that never blocks the loop (a per-client queue drained when the socket is writable): a larger firmware change, back to Greg.",
+  "status": "tested",
+  "tested_by": [
+   "ws.burst_keeps_live_client",
+   "ws.stalled_client_costs_nothing",
+   "ws.ping_pong_and_close"
+  ],
+  "gap": "Found 2026-10-13 building ws.drop_reports: after W1's loop was held and released, the flush of the backlog (~10-16 KB) closed the live test client three times (runs 20261013-082616, -084533, -084748). sinkPump closes a session on any failed send - meant for a dead peer (#113) - and the send is synchronous with a 2 s timeout, so a stalled AP link during a burst ends a healthy session. Cause of the stall unmeasured (radio shared with the mesh?). A grace window (close only after failures persist for some seconds) would keep #113's protection; a product/firmware decision. 2026-10-13: Greg chose a 5 s grace window; built (3b9e2dd) and measured (run 20261013-094445): the client was still dropped and W1's loop stalled 9.4 s instead of 3.5 s, because each failed send blocks the loop for send_wait_timeout (2 s) and the AP link really could not take the burst. Reverted. The real fix is a send that never blocks the loop (a per-client queue drained when the socket is writable): a larger firmware change, back to Greg. 2026-10-14 (Greg: \"Do it\"): built in WCB 4fd7698 - sinkPump sends with MSG_DONTWAIT, a place in the frame per client, EWOULDBLOCK/ENOMEM retried on a later pass, a slow client loses reported lines instead of its session, at most 600 ms inline wait per pass, a client that takes no output for 10 s closed; PING/CLOSE handled by wsHandler. Verified run 20261014-022739: a 12.6 KB burst after a held loop reached the live client whole with the console never pausing over 0.10 s; a stalled client cost ?backup nothing (0.30-0.42 s), was kept, and was closed 11.7 s after its window filled.",
   "testable": "opt-in",
   "bench_needs": "PC on W1's AP (wifi_pc)",
   "risk": "M",
