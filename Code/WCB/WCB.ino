@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_151045ROCT2026                                  *****////
+///*****                                          Version 6.2.1_151144ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -201,7 +201,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_151045ROCT2026";
+String SoftwareVersion = "6.2.1_151144ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -5710,14 +5710,19 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
             // General-debug visibility: mirror what processIncomingSerial prints
             // for locally-typed commands, so ?DEBUG,ON shows ETM-received
             // commands without needing the more verbose ?DEBUG,ETM,ON.
-            // Exception: ?STATS,RPT telemetry is high-rate internal chatter (every
-            // board reports its delivery counters periodically) and floods the
-            // terminal under general ?DEBUG,ON — so it rides ?DEBUG,MGMT with the
-            // rest of the relay traffic instead, matching storeReportedStats().
+            // Exceptions, which ride ?DEBUG,MGMT with the rest of the relay traffic:
+            // ?STATS,RPT telemetry is high-rate internal chatter (every board reports
+            // its delivery counters periodically), matching storeReportedStats(); and
+            // ?RTERM,* is the Wizard's remote-terminal plumbing - it re-arms every
+            // managed board's session every 12 s (app.js RTERM_KEEPALIVE_MS), so under
+            // ?DEBUG,ON a board printed "Processing ETM input from WCB20: ?RTERM,START,20"
+            // every 12 s between the commands being debugged (Greg, 2026-10-15: "if
+            // anything its a mgmt debug thing").
             {
                 String etmUp = etmCmd; etmUp.toUpperCase();
-                bool isStatsRpt = etmUp.startsWith(String(LocalFunctionIdentifier) + "STATS,RPT");
-                if (isStatsRpt ? debugMGMT : debugEnabled)
+                const String lfi(LocalFunctionIdentifier);
+                const bool mgmtChatter = etmUp.startsWith(lfi + "STATS,RPT") || etmUp.startsWith(lfi + "RTERM,");
+                if (mgmtChatter ? debugMGMT : debugEnabled)
                     Serial.printf("Processing ETM input from WCB%d: %s\n", senderWCB, etmCmd.c_str());
             }
 

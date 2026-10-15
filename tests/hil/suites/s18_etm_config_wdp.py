@@ -2627,12 +2627,14 @@ def frag_chksm_boundary(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("etm.rx_debug_lines", "W2 under ?DEBUG,ON prints 'Processing ETM input from WCB1: ...' for an ETM command from W1, but an inbound ?STATS,RPT only under ?DEBUG,MGMT, beside its '[STATS] RPT from' line", needs=["wcb1"], links=[])
+@test("etm.rx_debug_lines", "W2 under ?DEBUG,ON prints 'Processing ETM input from WCB1: ...' for an ETM command from W1, but an inbound ?STATS,RPT and the remote-terminal plumbing (?RTERM,START / ?RTERM,STOP, which the Wizard re-sends every 12 s) only under ?DEBUG,MGMT, beside the RPT's '[STATS] RPT from' line", needs=["wcb1"], links=[])
 def rx_debug_lines(bench):
     """WCB-WP30 row 8, ETM half (the non-ETM lines are in etm.nonetm_whitelist_scope). The ETM receive path of
     espNowReceiveCallback (WCB.ino) mirrors a received command as 'Processing ETM input from WCB<n>: <cmd>' under
     ?DEBUG,ON, except a ?STATS,RPT - high-rate telemetry - which rides ?DEBUG,MGMT like storeReportedStats' own
-    '[STATS] RPT from' line. The row W2 stores is cleared with ;W2,?STATS,RESET, as stats.rpt_remote does."""
+    '[STATS] RPT from' line, and ?RTERM,* - the Wizard re-arms each managed board's terminal every 12 s, and under
+    ?DEBUG,ON that echo came between every command being debugged (Greg, 2026-10-15). The row W2 stores is cleared with
+    ;W2,?STATS,RESET, as stats.rpt_remote does; the session ;W2,?RTERM,START,1 opens is stopped with ;W2,?RTERM,STOP."""
     w = usb_wcb(bench)
     vals = [int(nonce(), 16) % 90000 + 10000 for _ in range(2)]
     rpt = [f"?STATS,RPT,9,{v},1,2,3,4,5,6" for v in vals]
@@ -2647,20 +2649,36 @@ def rx_debug_lines(bench):
             w.send(f";W2,{rpt[0]}")
             time.sleep(1.5)
             quiet = [x.rstrip() for x in c2.lines(m)]
+            m = c2.mark()
+            w.send(";W2,?RTERM,START,1")
+            time.sleep(1.5)
+            w.send(";W2,?RTERM,STOP")
+            time.sleep(1.5)
+            rterm_quiet = [x.rstrip() for x in c2.lines(m)]
             _crun(c2, "?DEBUG,MGMT,ON")
             m = c2.mark()
             w.send(f";W2,{rpt[1]}")
+            time.sleep(1.5)
+            w.send(";W2,?RTERM,START,1")
+            time.sleep(1.5)
+            w.send(";W2,?RTERM,STOP")
             time.sleep(1.5)
             mgmt = [x.rstrip() for x in c2.lines(m)]
         finally:
             _crun(c2, "?DEBUG,MGMT,OFF")
             _crun(c2, "?DEBUG,OFF")
             w.send(";W2,?STATS,RESET")
+            w.send(";W2,?RTERM,STOP")
             time.sleep(0.5)
     assert "Processing ETM input from WCB1: ?PEERSLIVE" in plain, f"no 'Processing ETM input' line under ?DEBUG,ON: {plain}"
     assert not _has(quiet, "Processing ETM input from WCB1: ?STATS,RPT") and not _has(quiet, "[STATS] RPT from WCB9"), \
         f"?STATS,RPT printed under ?DEBUG,ON alone: {quiet}"
     assert f"Processing ETM input from WCB1: {rpt[1]}" in mgmt, f"no 'Processing ETM input' line for RPT under ?DEBUG,MGMT: {mgmt}"
+    assert not _has(rterm_quiet, "Processing ETM input from WCB1: ?RTERM"), \
+        f"?RTERM,START/STOP echoed under ?DEBUG,ON alone: {[x for x in rterm_quiet if 'RTERM' in x]}"
+    assert _has(rterm_quiet, "[RTERM] Session started"), f"the ;W2,?RTERM,START,1 under ?DEBUG,ON never ran: {rterm_quiet}"
+    for verb in ("?RTERM,START,1", "?RTERM,STOP"):
+        assert f"Processing ETM input from WCB1: {verb}" in mgmt, f"no 'Processing ETM input' line for {verb} under ?DEBUG,MGMT"
     assert f"[STATS] RPT from WCB9: sent={vals[1]} ackd=1 retries=2 failed=3 unguaranteed=4 bcast=5 recv=6" in mgmt, \
         "no '[STATS] RPT from WCB9' line under ?DEBUG,MGMT"
 
