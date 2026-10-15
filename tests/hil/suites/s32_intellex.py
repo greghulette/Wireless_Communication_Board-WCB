@@ -2388,6 +2388,16 @@ def ui_launcher_branch_set_fetches_tool(bench):
     run_intellex_test(bench, "intellex.ui_launcher_branch_set_fetches_tool")
 
 
+@test("intellex.ui_launcher_app_update", "The launcher's Intellex line and Update Intellex: up to date says so; a release "
+      "available is called out in the summary, asks in the page before installing (Cancel installs nothing), shows the "
+      "install's step and percent and then 'restarting'; a refusal shows the host's reason; a git checkout offers its "
+      "new commits; the first start after an update says so once; Check asks again (Playwright, /_api/app-update "
+      "fulfilled)")
+def ui_launcher_app_update(bench):
+    """Intellex src/launcher.html checkApp / paintApp / $('appupd*') against src/selfupdate.py status() shapes."""
+    run_intellex_test(bench, "intellex.ui_launcher_app_update")
+
+
 def _seed_branch_cache(sd):
     import time
     with open(os.path.join(sd, "appdata", "Intellex", "branches_cache.json"), "w", encoding="utf-8") as f:
@@ -2515,6 +2525,20 @@ def fetch_webui_unit(bench):
     the offline refusal."""
     require(bench)
     run_intellex_py(bench, "intellex.fetch_webui_unit", "webui_units.py", args={"group": "fetch_webui"})
+
+
+@test("intellex.selfupdate_unit", "Intellex updating itself (src/selfupdate.py) against a stand-in for GitHub Releases: "
+      "the check (none, up to date, newer with this computer's build and checksums, without either, offline, cached); "
+      "Windows swaps the running .exe by rename and restarts, refusing a download that fails SHA256SUMS.txt; macOS "
+      "swaps the .app (symlinks kept, the old one kept); a git checkout fast-forwards and restarts, refusing over "
+      "uncommitted changes or its own commits; install is 409 with nothing to install or a flash running; "
+      "version.info() ignores a stale build stamp from source (in-process)")
+def selfupdate_unit(bench):
+    """Intellex src/selfupdate.py and its host routes in the venv (tests/intellex/py/selfupdate_units.py group
+    selfupdate): sys.executable and selfupdate.mode/root point at stand-ins under the stage, restart() is recorded,
+    and every request goes to a 127.0.0.1 server - nothing reaches GitHub and nothing of Greg's is replaced."""
+    require(bench)
+    run_intellex_py(bench, "intellex.selfupdate_unit", "selfupdate_units.py", args={"group": "selfupdate"})
 
 
 @test("intellex.tool_serving_unit", "A tool always shows the copy on disk: every file of both tools goes out no-cache, "

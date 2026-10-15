@@ -1053,8 +1053,9 @@ def _git(cwd, *args):
 
 
 @case("version.info(): from a checkout, git's short SHA, '+dirty' on a tree with an uncommitted change, built 'from "
-      "source'; a build stamp wins over git, dirty or not; with neither, no commit; describe() and GET /_api/version "
-      "say the same", group="version")
+      "source', and a build stamp left in the checkout does NOT win (Intellex 2026-10-15: it made a source run claim to "
+      "be an old build); a frozen app reads its stamp and never asks git; with neither, no commit; describe() and GET "
+      "/_api/version say the same", group="version")
 def version_info(ctx):
     import version
     scratch = os.path.join(ctx.stage, "scratch", "version")
@@ -1084,15 +1085,27 @@ def version_info(ctx):
         stamp = types.ModuleType("build_stamp")
         stamp.COMMIT, stamp.BUILT = "hilstamp1", "2026-10-12 23:59"
         sys.modules["build_stamp"] = stamp
+        srv = _server()        # started here, not under sys.frozen below: a host started "frozen" does not come up
         got = version.info()
-        if got != {"version": V, "commit": "hilstamp1", "built": "2026-10-12 23:59"}:
-            problems.append(f"a build stamp on a dirty tree: {got}, expected the stamp's commit and time")
-        if version.describe() != f"v{V} (hilstamp1, 2026-10-12 23:59)":
-            problems.append(f"describe() with a stamp: {version.describe()!r}")
-        code, body = _server().req("GET", "/_api/version")
-        if code != 200 or body != got:
-            problems.append(f"GET /_api/version: {code} {body}, expected info() {got}")
-        del sys.modules["build_stamp"]
+        if got.get("commit") != sha + "+dirty" or got.get("built") != "from source":
+            problems.append(f"a build stamp left in a checkout, run from source: {got}, expected git's answer")
+        sys.frozen = True
+        try:
+            got = version.info()
+            if got != {"version": V, "commit": "hilstamp1", "built": "2026-10-12 23:59"}:
+                problems.append(f"a frozen app's build stamp: {got}, expected the stamp's commit and time")
+            if version.describe() != f"v{V} (hilstamp1, 2026-10-12 23:59)":
+                problems.append(f"describe() with a stamp: {version.describe()!r}")
+            code, body = srv.req("GET", "/_api/version")
+            if code != 200 or body != got:
+                problems.append(f"GET /_api/version: {code} {body}, expected info() {got}")
+            del sys.modules["build_stamp"]
+            got = version.info()
+            if got != {"version": V, "commit": "", "built": ""}:
+                problems.append(f"a frozen app with no stamp: {got}, expected nothing (and no git asked)")
+        finally:
+            del sys.frozen
+        sys.modules.pop("build_stamp", None)
         nogit = os.path.join(scratch, "nogit", "src")
         os.makedirs(nogit, exist_ok=True)
         os.environ["GIT_CEILING_DIRECTORIES"] = scratch               # git must not find the repo around the stage

@@ -712,6 +712,115 @@ test('intellex.ui_launcher_branch_set_fetches_tool a changed branch fetches its 
   expect(rec.errors, 'page errors').toEqual([]);
 });
 
+// 2026-10-15, Greg: "for intellex, i think we need an update intellex button/option". Intellex src/launcher.html
+// checkApp / paintApp / the appupd buttons, against /_api/app-update* fulfilled here (src/selfupdate.py's status shape):
+// up to date; a release available - the summary line, the in-page confirm (the window shows no confirm()), Cancel, the
+// install's progress and the restart; an install the host refuses; a git checkout with new commits; the "updated from"
+// line said once; Check asks again.
+test('intellex.ui_launcher_app_update the launcher offers an Intellex update, confirms it in the page, shows its progress and the restart, and says once that it updated', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const idle = { running: false, step: '', percent: 0, error: '', done: false, restarting: false };
+  const base = { current: '0.2.0', commit: 'abc1234', built: '2026-10-15 12:00', mode: 'windows', checked: true,
+                 checking: false, available: false, latest: '0.2.0', reason: 'up to date', error: '', asset: '',
+                 behind: 0, branch: '', notes_url: '', updatedFrom: '', install: { ...idle } };
+  let state = { ...base };
+  let installReply = { status: 200, json: { ok: true } };
+  const posts = [];
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, { discover: (route) => route.fulfill({ json: { candidates: [] } }) });
+  await context.route(/\/_api\/app-update(\/(check|install|seen))?$/, (route, req) => {
+    const path = new URL(req.url()).pathname;
+    if (req.method() === 'POST') posts.push(path);
+    if (path.endsWith('/install')) return route.fulfill({ status: installReply.status, json: installReply.json });
+    if (path.endsWith('/seen')) return route.fulfill({ json: { ok: true } });
+    return route.fulfill({ json: state });
+  });
+  const status = () => page.evaluate(() => { const s = document.getElementById('status'); return [s.textContent, s.className]; });
+  const mrow = () => page.evaluate(() => {
+    const el = document.getElementById('m-app');
+    return { text: el.querySelector('.t').textContent, warn: el.querySelector('.dot').classList.contains('warn'),
+             action: el.querySelector('a').style.display === 'none' ? '' : el.querySelector('a').textContent };
+  });
+  // The panel is folded on a fresh page; step 2 opens it through the summary's own link instead.
+  const open = async ({ unfold = true } = {}) => {
+    await page.goto('/_launcher', { waitUntil: 'load' });
+    await expect.poll(() => text(page, '#appupd-line'), { timeout: 10_000 }).not.toBe('checking…');
+    if (unfold) await page.evaluate(() => { document.getElementById('maint').open = true; });
+  };
+
+  // 1. Up to date.
+  await open();
+  expect(await mrow()).toEqual({ text: 'Intellex 0.2.0 · up to date', warn: false, action: '' });
+  expect(await text(page, '#appupd-line')).toBe('Intellex 0.2.0 (abc1234) — up to date');
+  expect(await page.isDisabled('#appupd')).toBe(true);
+
+  // 2. A release available: the summary line, the confirm, Cancel, then the install to its restart.
+  state = { ...base, available: true, latest: '0.3.0', asset: 'Intellex-0.3.0-windows.exe', reason: '' };
+  await open({ unfold: false });
+  expect(await page.evaluate(() => document.getElementById('maint').open), 'the panel starts folded').toBe(false);
+  expect(await mrow()).toEqual({ text: 'Intellex 0.3.0 available', warn: true, action: 'Update' });
+  expect(await text(page, '#attntext')).toMatch(/need(s)? attention$/);
+  await page.click('#m-app-a');
+  expect(await page.evaluate(() => document.getElementById('maint').open)).toBe(true);
+  expect(await page.isVisible('#appupd-confirm')).toBe(true);
+  expect(await text(page, '#appupd-ask')).toBe('Install Intellex 0.3.0 (Intellex-0.3.0-windows.exe)? It is checked '
+    + 'against the release\'s checksum, this version is kept, and Intellex restarts.');
+  await page.click('#appupd-cancel');
+  expect(await page.isVisible('#appupd-confirm')).toBe(false);
+  expect(posts.filter((p) => p.endsWith('/install')), 'Cancel installed something').toEqual([]);
+  await page.click('#appupd');
+  await page.click('#appupd-go');
+  await expect.poll(() => posts.filter((p) => p.endsWith('/install')).length, { timeout: 5_000 }).toBe(1);
+  state = { ...state, install: { ...idle, running: true, step: 'downloading Intellex-0.3.0-windows.exe', percent: 40 } };
+  await expect.poll(() => text(page, '#appupd-line'), { timeout: 5_000 })
+    .toBe('Intellex 0.2.0 (abc1234) — updating: downloading Intellex-0.3.0-windows.exe 40%');
+  expect(await page.isDisabled('#appupd')).toBe(true);
+  state = { ...state, install: { ...idle, done: true, restarting: true, step: 'restarting', percent: 100 } };
+  await expect.poll(() => text(page, '#appupd-line'), { timeout: 5_000 })
+    .toBe('Intellex 0.2.0 (abc1234) — restarting into the new version…');
+
+  // 3. The host refuses: its reason, in the error style.
+  state = { ...base, available: true, latest: '0.3.0', asset: 'Intellex-0.3.0-windows.exe', reason: '' };
+  installReply = { status: 409, json: { ok: false, error: 'a flash is running - update Intellex once it has finished' } };
+  await open();
+  await page.click('#appupd');
+  await page.click('#appupd-go');
+  await expect.poll(status, { timeout: 5_000 }).toEqual(['the update did not start: a flash is running - update '
+    + 'Intellex once it has finished', 'status err']);
+
+  // 4. A git checkout with new commits.
+  state = { ...base, mode: 'source', commit: 'abc1234', available: true, behind: 2, branch: 'main', latest: 'def5678',
+            reason: '' };
+  installReply = { status: 200, json: { ok: true } };
+  await open();
+  expect(await mrow()).toEqual({ text: 'Intellex: 2 new commits', warn: true, action: 'Update' });
+  expect(await text(page, '#appupd-line')).toBe('Intellex 0.2.0 (abc1234) — 2 new commits on main');
+  expect(await text(page, '#appupd-note')).toContain('fast-forward only, never over changes of your own');
+  await page.click('#appupd');
+  expect(await text(page, '#appupd-ask')).toBe('Pull 2 new commits into this checkout (main), refresh its Python '
+    + 'packages and restart?');
+
+  // 5. The first start after an update says so once, and tells the host it was said.
+  state = { ...base, updatedFrom: '0.1.0' };
+  const seen = posts.filter((p) => p.endsWith('/seen')).length;
+  await open();
+  expect(await text(page, '#appupd-line')).toBe('Intellex 0.2.0 (abc1234) — updated from 0.1.0');
+  await expect.poll(() => posts.filter((p) => p.endsWith('/seen')).length, { timeout: 5_000 }).toBe(seen + 1);
+
+  // 6. Check asks the host to ask GitHub again.
+  state = { ...base, reason: 'no Intellex release has been published yet' };
+  const checks = posts.filter((p) => p.endsWith('/check')).length;
+  await open();
+  expect(await mrow()).toEqual({ text: 'Intellex 0.2.0 · no Intellex release has been published yet', warn: false,
+                                 action: '' });
+  await page.click('#appupd-check');
+  await expect.poll(() => posts.filter((p) => p.endsWith('/check')).length, { timeout: 5_000 }).toBe(checks + 1);
+  await expect.poll(status, { timeout: 5_000 }).toEqual(['Intellex: no Intellex release has been published yet',
+    'status']);
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
 // IX re-scan launcher.log_docs_version (launcher.html:1116-1173): with docs stored, Docs asks the host for a second
 // window on /wiki/ and opens it itself when there is none (host.py has no window backend: a popup), and opens nothing
 // when the host made one; the header shows the build as /_api/version says it.
