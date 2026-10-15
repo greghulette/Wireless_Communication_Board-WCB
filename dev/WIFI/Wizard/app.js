@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.00:37.R.OCT.2026';
+const UI_VERSION = '15.12:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -266,6 +266,7 @@ function parseWCBVersion(ver) {
 // Cyan   (dev)  = board is AHEAD of GitHub (local dev build)
 // Yellow ↑      = board is BEHIND GitHub (update available) — also shows Update FW button
 function updateBoardSwVersionDisplay(n) {
+  updateSeqBytes(n);   // the store's cap depends on the firmware (seqStoreLimit)
   const el        = document.getElementById(`b${n}-sw-version`);
   const updateBtn = document.getElementById(`b${n}-btn-update-fw`);
   if (!el) return;
@@ -4931,7 +4932,53 @@ function applySeqPager(n) {
   else if (matched.length === total) info = `${first + 1}–${first + shown.size} of ${total} ${noun}`;
   else                               info = `${first + 1}–${first + shown.size} of ${matched.length} matching (${total} ${noun})`;
   parts.push(`<span class="seq-pager-info">${info}</span>`);
+  parts.push(`<span class="seq-pager-bytes" id="b${n}-seq-bytes"></span>`);
   nav.innerHTML = parts.join('');
+  if (!tbody._seqBytesWired) {                 // an edit changes the size before any push: follow it as typed
+    tbody._seqBytesWired = true;
+    tbody.addEventListener('input', () => updateSeqBytes(n));
+  }
+  updateSeqBytes(n);
+}
+
+// ─── The sequence store's size ────────────────────────────────────
+// The WIFI firmware keeps a board's sequences in a file of their own, one 'key,value' line each, capped at
+// SEQ_STORE_BYTES (Code/WCB/WCB_SeqStore.h SEQ_FILE_MAX) rather than at a number of sequences - so the pager shows the
+// bytes they take beside the count (Greg, 2026-10-15). Worked out here from what a push would send (getSequencesFromUI),
+// so it follows an edit before it is pushed and needs nothing from a board behind a relay; it matches the board's own
+// boot line ("3 stored sequence(s) ... (83 of 32768 bytes)"). Amber from SEQ_STORE_NEAR, red past the cap: the board
+// refuses a ?SEQ,SAVE that does not fit ("no room"). Firmware older than the file store (fecd481, 29 Sep 2026) keeps
+// sequences in the settings store beside everything else, which has no such figure: the count alone there.
+const SEQ_STORE_BYTES = 32768;
+const SEQ_STORE_SINCE = new Date(2026, 8, 29);
+const SEQ_STORE_NEAR  = 0.9;
+const _utf8Len = (str) => new TextEncoder().encode(str).length;
+
+function seqStoreLimit(n) {
+  const built = parseWCBVersion(String(boardConfigs[n]?.fwVersion || ''));
+  return built && built >= SEQ_STORE_SINCE ? SEQ_STORE_BYTES : 0;
+}
+
+function seqStoreBytes(n) {
+  return getSequencesFromUI(n).reduce((t, q) => t + _utf8Len(q.key) + 1 + _utf8Len(q.value) + 1, 0);
+}
+
+function updateSeqBytes(n) {
+  const el = document.getElementById(`b${n}-seq-bytes`);
+  if (!el) return;
+  const cap = seqStoreLimit(n);
+  if (!cap) { el.textContent = ''; el.className = 'seq-pager-bytes'; el.title = ''; return; }
+  const used = seqStoreBytes(n);
+  const fmt = (v) => v.toLocaleString('en-US');
+  const over = used > cap;
+  const near = !over && used >= cap * SEQ_STORE_NEAR;
+  el.textContent = `· ${fmt(used)} of ${fmt(cap)} bytes`;
+  el.className = 'seq-pager-bytes' + (over ? ' seq-bytes-over' : near ? ' seq-bytes-near' : '');
+  el.title = over
+    ? `These sequences take ${fmt(used)} bytes and the board holds ${fmt(cap)}: a push is refused for the ones that do `
+      + `not fit ("no room"). Shorten or remove ${fmt(used - cap)} bytes' worth.`
+    : near ? `${fmt(cap - used)} bytes left in the board's sequence store`
+    : 'The board\'s sequence store: each sequence takes its name, its commands and 2 bytes';
 }
 
 function seqPagerGo(n, page) {
