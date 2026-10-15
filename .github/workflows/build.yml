@@ -180,10 +180,22 @@ jobs:
             git tag "$TAG"
             git push origin "$TAG"
           fi
+          # The first release of a line (7.0.1 of 7.0) carries docs/release-notes/<major>.<minor>.md
+          # ahead of the generated notes, when that file exists; later patches get the generated
+          # notes only. The checkout is shallow, so the line's earlier tags come from the remote.
+          MM=$(echo "${VERSION%%_*}" | cut -d. -f1,2)
+          NOTES="docs/release-notes/${MM}.md"
+          EARLIER=$(git ls-remote --tags origin | grep -F "refs/tags/v${MM}." | grep -vF "refs/tags/${TAG}" || true)
+          NOTE_ARGS=()
+          if [ -f "$NOTES" ] && [ -z "$EARLIER" ]; then
+            NOTE_ARGS=(--notes-file "$NOTES")
+            echo "First release of ${MM}: notes from ${NOTES}"
+          fi
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --latest \
               --title "WCB Firmware ${VERSION}" \
               --generate-notes \
+              "${NOTE_ARGS[@]}" \
               Code/bin/WCB_${VERSION}_main_*.bin
           fi
