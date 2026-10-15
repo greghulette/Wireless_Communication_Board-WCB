@@ -373,6 +373,21 @@ for _key, _title in _GH_EXPLAIN:
     test(f"wizard.{_key}", f"{_title} (no board: GitHub and its status page stood in for in the page)")(_gh_explain)
 
 
+# The stored-sequence pager (2026-10-14, Greg: boards with 100+ sequences made the section endless): one page of 5, 10,
+# 25, 50 or all, remembered in the browser, a filter on name or contents, page buttons; rows are only hidden, so a push
+# still carries every sequence. Spec: specs/seq_pager_fake.spec.js (Wizard/app.js applySeqPager).
+_SEQ_PAGER = (
+    ("seq_pager_pages", "23 sequences show 5 at a time: page buttons with arrows, the size drop-down (5/10/25/50/All) keeps the first sequence on screen, the size is remembered in the browser"),
+    ("seq_pager_many_pages", "Past 7 pages the bar shows the first, the last and the current page with its neighbours, gaps as an ellipsis"),
+    ("seq_pager_filter", "The filter matches a name or the commands, not case-sensitive, pages what matches, says when nothing does, and a push still carries every sequence"),
+    ("seq_pager_add_remove", "+ Add clears the filter and turns to the last page with the new row focused; removing the only rows of the last page goes back a page"),
+)
+for _key, _title in _SEQ_PAGER:
+    def _seq_pager(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: a fake board's sequences in the page)")(_seq_pager)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their
