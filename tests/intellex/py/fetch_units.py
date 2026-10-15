@@ -12,7 +12,7 @@ failure.
 group "fetch_wiki" (intellex.fetch_wiki_unit): fetch_wiki._targets reads both link dialects and image tags into pages
 and assets, dropping a leading './' or '/' but keeping a leading '../' (_asset_path; it was lstrip("./"), which turned
 '../x.png' into the wiki's own 'x.png'), _is_asset tells a file from a dotted page name; fetch_one crawls from Home and
-_Sidebar when the page index cannot be read, skips a 404 page, leaves an image over 1 MB online (HEAD first), refuses
+_Sidebar when the page index cannot be read, skips a 404 page, fetches every image whole whatever its size (no HEAD), refuses
 an asset path with a leading '../' out loud (a printed line and a problem, never requested) and one that escapes the
 wiki's directory further in; _swap_in (:286-321) recovers a previous run's half-swap and puts
 the old copy back when the final rename fails; main() (:338-381) swaps each wiki separately, keeps what is on disk for a
@@ -271,7 +271,8 @@ def swap(ctx):
 
 
 class _Wiki:
-    """fetch_wiki's network: page_index, _get and _size_of answered from {page: markdown} and {asset: size}."""
+    """fetch_wiki's network: page_index and _get answered from {page: markdown} and {asset: size}. heads stays: a HEAD
+    would mean the size check came back (images are fetched whole, whatever their size, since 2026-10-15)."""
 
     def __init__(self, pages, assets, index=()):
         self.pages, self.assets, self.index = pages, assets, list(index)
@@ -290,27 +291,21 @@ class _Wiki:
                 return b"x" * size
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
 
-    def size_of(self, url, timeout=15.0):
-        self.heads.append(url)
-        for a, size in self.assets.items():
-            if url.endswith(a):
-                return size
-        return 0
 
 
 @contextlib.contextmanager
 def _wiki_net(net):
     import fetch_wiki
-    saved = (fetch_wiki.page_index, fetch_wiki._get, fetch_wiki._size_of)
-    fetch_wiki.page_index, fetch_wiki._get, fetch_wiki._size_of = net.page_index, net.get, net.size_of
+    saved = (fetch_wiki.page_index, fetch_wiki._get)
+    fetch_wiki.page_index, fetch_wiki._get = net.page_index, net.get
     try:
         yield net
     finally:
-        fetch_wiki.page_index, fetch_wiki._get, fetch_wiki._size_of = saved
+        fetch_wiki.page_index, fetch_wiki._get = saved
 
 
-@case("fetch_one with no page index crawls Home and _Sidebar in both dialects, skips a 404 page, leaves an image over "
-      "1 MB online (asked with HEAD, never fetched) and refuses an asset path that leaves the wiki - a leading ../ "
+@case("fetch_one with no page index crawls Home and _Sidebar in both dialects, skips a 404 page, fetches a 2 MB image "
+      "whole (no size ceiling since 2026-10-15, no HEAD) and refuses an asset path that leaves the wiki - a leading ../ "
       "with a line of its own, never re-read as a path inside it", group="fetch_wiki")
 def crawl(ctx):
     import shutil
@@ -326,20 +321,20 @@ def crawl(ctx):
         "_Sidebar": "[[Home]] [[Linked But Missing]]",
         "Getting-Started": "back to [[Home]]",
         "Wiring": "see [Getting Started](Getting-Started)",
-    }, assets={"Images/big.png": fetch_wiki.MAX_ASSET_BYTES + 1, "Images/small.png": 10, "escape.png": 10,
+    }, assets={"Images/big.png": (2 << 20) + 1, "Images/small.png": 10, "escape.png": 10,
                "outside.png": 10})
     printed = io.StringIO()
     with _wiki_net(net), contextlib.redirect_stdout(printed):
         pages, assets, problems_seen = fetch_wiki.fetch_one("wcb", staged)
     on_disk = sorted(str(p.relative_to(staged)).replace(os.sep, "/") for p in staged.rglob("*") if p.is_file())
     problems = []
-    if pages != 4 or assets != 1:
-        problems.append(f"fetch_one counted {pages} page(s), {assets} asset(s); expected 4 and 1")
-    want = ["Getting-Started.md", "Home.md", "Images/small.png", "Wiring.md", "_Sidebar.md"]
+    if pages != 4 or assets != 2:
+        problems.append(f"fetch_one counted {pages} page(s), {assets} asset(s); expected 4 and 2")
+    want = ["Getting-Started.md", "Home.md", "Images/big.png", "Images/small.png", "Wiring.md", "_Sidebar.md"]
     if on_disk != want:
         problems.append(f"staged {on_disk}, expected {want}")
     for words in ("page index unreadable - crawled links instead", "refused (path escapes the wiki directory)",
-                  "1 image(s) over 1024 KB left online", "../outside.png: refused (a leading ../ leaves the wiki)"):
+                  "../outside.png: refused (a leading ../ leaves the wiki)"):
         if not any(words in p for p in problems_seen):
             problems.append(f"no {words!r} among the problems reported: {problems_seen}")
     if "[wcb] refused asset ../outside.png: a leading ../ leaves the wiki" not in printed.getvalue():
@@ -348,8 +343,10 @@ def crawl(ctx):
         problems.append("the leading-../ asset was requested (as the wiki's own outside.png)")
     if any("outside" in p for p in on_disk) or os.path.exists(staged.parent / "outside.png"):
         problems.append("the leading-../ asset was written")
-    if any(u.endswith("Images/big.png") for u in net.got):
-        problems.append("the image over 1 MB was downloaded, not only asked about with HEAD")
+    if not any(u.endswith("Images/big.png") for u in net.got) or any("left online" in p for p in problems_seen):
+        problems.append("the 2 MB image was not downloaded whole (every image is, whatever its size, since 2026-10-15)")
+    if net.heads:
+        problems.append(f"a size check (HEAD) came back: {net.heads}")
     if any("escape.png" in u for u in net.got + net.heads):
         problems.append("the asset path that leaves the wiki was requested")
     if os.path.exists(staged.parent.parent / "escape.png") or any("escape" in p for p in on_disk):

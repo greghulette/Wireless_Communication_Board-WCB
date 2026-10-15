@@ -1901,7 +1901,7 @@ def fetch_firmware_unit(bench):
 
 @test("intellex.fetch_wiki_unit", "tools/fetch_wiki.py: both link dialects and image tags read into pages and assets, a "
       "dotted page name not taken for a file; with no page index the crawl from Home and _Sidebar, a 404 page skipped, "
-      "an image over 1 MB left online after a HEAD, an asset path out of the wiki refused (a leading ../ logged and "
+      "a 2 MB image fetched whole (no size ceiling), an asset path out of the wiki refused (a leading ../ logged and "
       "skipped, no longer stripped into a path inside the wiki); the swap recovering a "
       "half-swap and putting the old copy back; one empty wiki kept on disk while the others update; offline, nothing "
       "touched (GitHub stood in for; IX re-scan tools.fetch_wiki)")

@@ -983,5 +983,76 @@ def update_reports_changed(ctx):
         shutil.rmtree(root + ".prev", ignore_errors=True)
     check(not problems, "; ".join(problems))
 
+
+@case("a frozen app serves its own build's tools unless a copy downloaded since is the better one: the newer version "
+      "stamp wins (a month-old download no longer hides the tools a new app ships); a copy of the branch now chosen "
+      "beats one of another branch either way round; the wikis go by fetch time, and a download with no record loses to "
+      "the app's own (Greg 2026-10-15: 'Config tools should be up to date as of the time of app creation/build')",
+      group="tool_serving")
+def frozen_copy_choice(ctx):
+    import json as _json
+    import pathlib
+    import paths
+    import settings
+    root = pathlib.Path(ctx.stage, "scratch", "choice")
+    shutil.rmtree(root, ignore_errors=True)
+    bundle, user = root / "bundle", paths.user_data_dir()
+
+    def wizard(base, ui, branch=None):
+        shutil.rmtree(base / "webui_wcb", ignore_errors=True)
+        _put_text(str(base / "webui_wcb" / "Wizard" / "app.js"), f"const UI_VERSION = '{ui}';\n")
+        src = base / "webui_wcb.source.json"
+        if branch:
+            src.write_text(_json.dumps({"branch": branch, "stamp": ui}), encoding="utf-8")
+        elif src.exists():
+            src.unlink()
+
+    def wiki(base, at):
+        shutil.rmtree(base / "wiki" / "wcb", ignore_errors=True)
+        _put_text(str(base / "wiki" / "wcb" / "Home.md"), "# home\n")
+        src = base / "wiki" / "wcb.source.json"
+        if at is None:
+            src.unlink(missing_ok=True)
+        else:
+            src.write_text(_json.dumps({"at": at}), encoding="utf-8")
+
+    saved = (paths.FROZEN, paths.BUNDLE_DIR)
+    paths.FROZEN, paths.BUNDLE_DIR = True, bundle
+    problems = []
+    try:
+        cases = (  # (bundled UI, bundled branch, user UI, user branch, chosen branch, expected winner)
+            ("15.12:07.R.OCT.2026", "main", "09.13:25.R.SEP.2026", None, "main", "bundle"),
+            ("15.12:07.R.OCT.2026", "main", "16.10:00.R.OCT.2026", None, "main", "user"),
+            ("15.12:07.R.OCT.2026", "main", "15.12:07.R.OCT.2026", "main", "main", "user"),
+            ("15.12:07.R.OCT.2026", "main", "01.09:00.R.OCT.2026", "WIFI", "WIFI", "user"),
+            ("15.12:07.R.OCT.2026", "main", "20.09:00.R.OCT.2026", "WIFI", "main", "bundle"),
+            ("15.12:07.R.OCT.2026", None, "not a stamp", None, "main", "bundle"),
+        )
+        for b_ui, b_br, u_ui, u_br, want_branch, winner in cases:
+            wizard(bundle, b_ui, b_br)
+            wizard(user, u_ui, u_br)
+            settings.set_branch("wcb", want_branch)
+            paths._choice_cache.clear()
+            got = "user" if paths.data_dir("webui_wcb") == user / "webui_wcb" else "bundle"
+            if got != winner:
+                problems.append(f"bundled {b_ui} ({b_br}), downloaded {u_ui} ({u_br}), branch {want_branch}: served "
+                                f"the {got} copy, expected the {winner}'s")
+        for b_at, u_at, winner in ((2000.0, 1000.0, "bundle"), (1000.0, 2000.0, "user"), (2000.0, None, "bundle"),
+                                   (None, None, "user")):
+            wiki(bundle, b_at)
+            wiki(user, u_at)
+            got = "user" if paths.data_subdir("wiki", "wcb") == user / "wiki" / "wcb" else "bundle"
+            if got != winner:
+                problems.append(f"wiki fetched at {b_at} (app) and {u_at} (download): served the {got}'s, expected "
+                                f"the {winner}'s")
+    finally:
+        paths.FROZEN, paths.BUNDLE_DIR = saved
+        paths._choice_cache.clear()
+        settings.set_branch("wcb", "main")
+        for d in (user / "webui_wcb", user / "wiki"):
+            shutil.rmtree(d, ignore_errors=True)
+        (user / "webui_wcb.source.json").unlink(missing_ok=True)
+    check(not problems, "; ".join(problems))
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())

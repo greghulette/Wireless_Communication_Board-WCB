@@ -148,7 +148,13 @@ test('intellex.ui_launcher the chooser with fixture ports and droids', async ({ 
     await hostPost('/_api/branch', { product: 'navicore', branch: 'main' });
   }
 
-  // ── the log ──────────────────────────────────────────────────────────────────────────────────────────────────
+  // ── Settings, and the log inside it (2026-10-15: the header's Log button became Settings) ─────────────────────
+  const unfolded = () => page.evaluate(() => [document.getElementById('maint').open,
+                                              document.getElementById('settings').getAttribute('aria-pressed')]);
+  expect(await unfolded(), 'the panel before Settings').toEqual([false, 'false']);
+  await page.click('#settings');
+  await expect.poll(unfolded, { timeout: 5_000 }).toEqual([true, 'true']);
+  expect(await text(page, '#maint-sum')).toMatch(/^Settings · updates, firmware, docs and logs · /);
   await page.click('#showlog');
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.getElementById('logtail')).display))
     .toBe('block');
@@ -156,6 +162,9 @@ test('intellex.ui_launcher the chooser with fixture ports and droids', async ({ 
   expect(await text(page, '#showlog')).toBe('Hide log');
   await page.click('#showlog');
   expect(await page.evaluate(() => getComputedStyle(document.getElementById('logtail')).display)).toBe('none');
+  expect(await text(page, '#showlog')).toBe('Show log');
+  await page.click('#settings');
+  await expect.poll(unfolded, { timeout: 5_000 }).toEqual([false, 'false']);
 
   // ── Back, when the host is attached ─────────────────────────────────────────────────────────────────────────
   await context.route(/\/_api\/status(\?|$)/, r => r.fulfill({ json: { attached: true, target: 'serial COM91',
