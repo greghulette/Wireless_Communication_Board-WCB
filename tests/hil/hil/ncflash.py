@@ -74,7 +74,9 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # v0.2.0_111618QOCT26, built and flashed on the Mac; navicore-fix9 is kept beside it.
 # navicore-fix12 since 2026-10-14 17:33: NaviCore main 5600830 (the mesh transmit watchdog, WCB_Client 1.18.0 e586f1a)
 # with the hooks, App SHA 5dcd2eefcd3d42e0, v0.2.0_141730QOCT26; navicore-fix11 is kept beside it.
-BENCH_IMAGE = "navicore-fix12"
+# navicore-fix13 since 2026-10-15 00:08: NaviCore main f953dd2 (requires WCB_Client 1.18.1: two boards answer a probe)
+# with WCBClient 0c5803e, App SHA b850ca84104e4ab9, v0.2.0_142148QOCT26; fix12 kept beside it.
+BENCH_IMAGE = "navicore-fix13"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.

@@ -2793,6 +2793,23 @@ def _txwd_arm(nc, mode):
         raise AssertionError(f"#L94,{mode},{TXWD_FAST_MS} did not confirm (last lines {[x[:70] for x in lines[-3:]]})")
 
 
+def _txwd_ready(nc, timeout=80.0):
+    """Probing every 5 s with no wedge, wait until a probe has been answered -> #L11's state. The watchdog asks only
+    boards that are online and have advertised to NaviCore; right after a NaviCore restart there are none until the
+    WCBs' heartbeats and their next WDP adverts (60 s apart) arrive. A test that measures or wedges before that waits
+    on boards it cannot ask (a NaviCore restart just before ncmesh.tx_watchdog_quiet left one probe in 22 s, run
+    20261015-001036)."""
+    _txwd_arm(nc, 0)
+    end = time.monotonic() + timeout
+    st = _txwd(nc)
+    while st["answered"] == "never" and time.monotonic() < end:
+        time.sleep(3.0)
+        st = _txwd(nc)
+    if st["answered"] == "never":
+        raise Skip(f"no probe answered within {timeout:.0f} s of probing every 5 s: NaviCore has no board to ask ({st})")
+    return st
+
+
 def _txwd_reset(nc):
     """No wedge, the 30 s interval, the automatic-restart count zeroed (#L94,R)."""
     nc.cli("#L94,R", until=r"\[HIL\] #L94")
@@ -2814,7 +2831,7 @@ def tx_watchdog_quiet(bench):
     problems = []
     try:
         if hooks:
-            _txwd_arm(nc, 0)
+            st0 = _txwd_ready(nc)
         m = nc.dev.mark()
         time.sleep(22 if hooks else 65)
         st = _txwd(nc)
@@ -2851,9 +2868,9 @@ def tx_watchdog_esp_now_restart(bench):
         raise Skip(HOOK_SKIP)
     w1 = usb_wcb(bench)
     nid = _nid(nc)
-    st0 = _txwd(nc)
     problems = []
     try:
+        st0 = _txwd_ready(nc)
         m = nc.dev.mark()
         t0 = time.monotonic()
         _txwd_arm(nc, 1)
@@ -2903,12 +2920,11 @@ def tx_watchdog_reboot(bench):
         raise Skip(HOOK_SKIP)
     w1 = usb_wcb(bench)
     nid = _nid(nc)
-    st0 = _txwd(nc)
-    if st0["reboots"] >= 2:
+    if _txwd(nc)["reboots"] >= 2:
         _txwd_reset(nc)
-        st0 = _txwd(nc)
     problems = []
     try:
+        st0 = _txwd_ready(nc)
         m = nc.dev.mark()
         t0 = time.monotonic()
         _txwd_arm(nc, 2)
