@@ -30,6 +30,7 @@ from datetime import datetime
 from .checkpoint import (PAUSE, Checkpoint, CheckpointError, atomic_write_json, find_resumable,
                          fmt_duration, harness_info, redact_text)
 from . import nvs as nvsrec
+from . import silence
 from . import optin, servos
 from .config import read_config
 from .links import LinkManager
@@ -880,6 +881,13 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                     own = {"PASS": "The test itself passed, but that board sent nothing to the mesh meanwhile."}.get(
                         status, f"The test itself said ({status}): {detail}")
                     status, detail = "FAIL", f"{stall}\n{own}"
+                # After a failure only: a USB WCB that stopped answering is diagnosed (held in reset by its USB-serial
+                # driver, or hung) and brought back before the next test, which would otherwise fail on it too
+                # (hil/silence.py; W1 in intellex.flash_navicore_app, twice).
+                if status in ("FAIL", "ERROR"):
+                    silent = silence.check(bench)
+                    if silent:
+                        detail = detail + "\n" + "\n".join(f"SILENT WCB after the test: {x}" for x in silent)
             # A baud a test pinned with listen(<baud>) must not outlive it: config_guard's resync only re-binds
             # auto-baud wires, so one pinned W1S2 at 115200 once garbled every later injection into that 9600 port.
             # A wire on NaviCore's own pins is released whatever its baud: nothing re-binds it between tests, and a
