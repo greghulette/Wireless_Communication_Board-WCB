@@ -296,6 +296,29 @@ def wifi_wizard_via_navicore(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("intellex.wifi_wizard_terminal_via_navicore", "The Wizard through Intellex attached to NaviCore's access point: "
+      "?DEBUG,OFF typed into each WCB's terminal comes back 'Debugging disabled' through NaviCore right after the pulls "
+      "and again after 45 s with nothing typed - past the firmware's 30 s remote-terminal timeout, so only the Wizard's "
+      "re-arms keep it (opt-in navicore_wifi; 2026-10-15 'the terminals for the wcbs ... no messages were working')",
+      needs=["navicore", "wcb1"], opt_in="navicore_wifi")
+def wifi_wizard_terminal_via_navicore(bench):
+    """The round trip wifi_wizard_via_navicore does not make: sendTerminalCommandTo pushes the line to the board as
+    MGMT,FRAG through NaviCore's relay, and the reply reaches the page only as the [TERM:n] lines the board's ?RTERM
+    session mirrors (Code/WCB/WCB_RemoteTerm.cpp; RTERM_IDLE_MS ends a session not re-armed, app.js
+    _rtermKeepAliveArm re-arms it). ?DEBUG,OFF changes RAM only and leaves debug off, as the bench runs.
+    HIL_WIZARD_REF=<ref> runs it against another Wizard (hil/intellex.py seed_bundles). config_guard on every WCB;
+    every WCB's ?RTERM stopped afterwards."""
+    _free_of_others(bench)
+    problems = []
+    with config_guard(bench, *bench.wcb_numbers()):
+        try:
+            with _on_ap(bench, problems) as (nc, cfg, _):
+                problems += _nc_over_wifi(bench, "intellex.wifi_wizard_terminal_via_navicore", nc, cfg, timeout=540)
+        finally:
+            _stop_rterm_all(bench)
+    assert not problems, "; ".join(problems)
+
+
 def _rterm_hooks(bench, relay):
     """The rate test's hooks -> (hooks, state). rterm_mark marks every WCB's USB console; rterm_count counts the
     '[RTERM] Session started -> relay WCB<relay>' lines each printed since (rterm_starts) and the seconds between."""

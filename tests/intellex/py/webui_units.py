@@ -798,5 +798,190 @@ def all_independent(ctx):
     check(not problems, "; ".join(problems))
 
 
+
+# ------------------------------------------------------------------ group "tool_serving"
+# intellex.tool_serving_unit (2026-10-15: after a branch switch and an Update the Wizard's files on disk were WIFI's and
+# the window still ran main's app.js, out of the webview's own cache). Intellex src/host.py _tool_files, _versioned,
+# webui_dir/wcb_dir and api_update_webui's changed/notes/--force, on its real build_app() in this process.
+_WZ_PAGE = ('<!DOCTYPE html><html><head><link rel="stylesheet" href="styles.css">'
+            '<link href="https://fonts.example/css2?family=x" rel="stylesheet"></head><body>'
+            '<script src="parser.js"></script><script src="app.js"></script>'
+            '<script src="gone.js"></script><script>/* inline */</script></body></html>\n')
+
+
+def _put_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _token(path):
+    st = os.stat(path)
+    return f"{st.st_mtime_ns:x}.{st.st_size:x}"
+
+
+def _refs(html):
+    import re
+    return re.findall(r'<(?:script|link)\b[^>]*?\b(?:src|href)="([^"]*)"', html, re.I)
+
+
+def _wizard_bundle(root, ui):
+    """A Wizard bundle at <root>/Wizard: index.html (_WZ_PAGE), app.js stamped `ui`, parser.js, styles.css, vendor/."""
+    wz = os.path.join(str(root), "Wizard")
+    _put_text(os.path.join(wz, "index.html"), _WZ_PAGE)
+    _put_text(os.path.join(wz, "app.js"), f"const UI_VERSION = '{ui}';\n")
+    _put_text(os.path.join(wz, "parser.js"), "// parser\n")
+    _put_text(os.path.join(wz, "styles.css"), "body{}\n")
+    os.makedirs(os.path.join(wz, "vendor"), exist_ok=True)
+    return wz
+
+
+@case("each tool's files are sent no-cache, and its served page asks for its own scripts and stylesheet at "
+      "?v=<mtime>.<size> of each file and is otherwise the file on disk plus the shim tag; a file that changes gets a "
+      "new URL, the shim, another site and a missing file keep theirs; a directory is 403, a missing file or a path out "
+      "of the bundle 404", group="tool_serving")
+def tool_files_revalidated(ctx):
+    import host
+    from bridge_units import _server
+    s = _server()
+    problems = []
+    wz = _wizard_bundle(os.path.join(ctx.src, "webui_wcb"), "HIL-WZ-A")
+    nc_index = os.path.join(ctx.src, "webui", "index.html")
+    _put_text(nc_index, '<html><body><span id="footer-dtg">HIL-NC</span><script src="flasher.js"></script></body></html>\n')
+    _put_text(os.path.join(ctx.src, "webui", "flasher.js"), "// flasher\n")
+    tok = lambda name: _token(os.path.join(wz, name))  # noqa: E731
+
+    def page(path):
+        st, hdr, body = s.http("GET", path)
+        return st, hdr, body.decode("utf-8", "replace")
+
+    st, hdr, html = page("/wcb/Wizard/")
+    want = [f"styles.css?v={tok('styles.css')}", "https://fonts.example/css2?family=x", "/_intellex.js",
+            f"parser.js?v={tok('parser.js')}", f"app.js?v={tok('app.js')}", "gone.js"]
+    if st != 200 or _refs(html) != want:
+        problems.append(f"GET /wcb/Wizard/: {st}, references {_refs(html)}, expected {want}")
+    import re
+    plain = re.sub(r'\?v=[0-9a-f]+\.[0-9a-f]+"', '"', html).replace(host.SHIM_TAG + "\n", "", 1)
+    if plain != _WZ_PAGE:
+        problems.append("the served Wizard page differs from its file beyond the shim tag and the ?v= stamps")
+    if "no-store" not in hdr.get("cache-control", ""):
+        problems.append(f"the Wizard page's Cache-Control is {hdr.get('cache-control')!r}, not no-store")
+    for name in ("app.js", "parser.js", "styles.css"):
+        st, hdr, body = s.http("GET", f"/wcb/Wizard/{name}?v={tok(name)}")
+        with open(os.path.join(wz, name), "rb") as f:
+            disk = f.read()
+        if st != 200 or body != disk or hdr.get("cache-control") != "no-cache":
+            problems.append(f"GET /wcb/Wizard/{name}: {st}, {len(body)} bytes (file {len(disk)}), Cache-Control "
+                            f"{hdr.get('cache-control')!r}; expected the file, no-cache")
+    st, hdr, html = page("/")
+    if f"flasher.js?v={_token(os.path.join(ctx.src, 'webui', 'flasher.js'))}" not in html:
+        problems.append(f"the config tool's page asks for {_refs(html)}, not a stamped flasher.js")
+    st, hdr, _ = s.http("GET", "/flasher.js")
+    if st != 200 or hdr.get("cache-control") != "no-cache":
+        problems.append(f"GET /flasher.js: {st}, Cache-Control {hdr.get('cache-control')!r}; expected 200 no-cache")
+
+    # app.js replaced (as an update or a branch switch does): a new URL for it, the same for the others.
+    old = tok("app.js")
+    _put_text(os.path.join(wz, "app.js"), "const UI_VERSION = 'HIL-WZ-B';\n// another build, another length\n")
+    st, hdr, html = page("/wcb/Wizard/")
+    if f"app.js?v={tok('app.js')}" not in html or old == tok("app.js"):
+        problems.append(f"after app.js changed the page asks for {_refs(html)}; expected app.js?v={tok('app.js')}")
+    if f"parser.js?v={tok('parser.js')}" not in html:
+        problems.append("an unchanged parser.js lost its stamp")
+
+    for path, want_st in (("/wcb/Wizard/vendor/", 403), ("/wcb/Wizard/gone.js", 404), ("/no-such-file.js", 404),
+                          ("/wcb/..%2fwebui/index.html", 404), ("/wcb/Wizard/..%2f..%2fwebui/index.html", 404),
+                          ("/%2e%2e/%2e%2e/etc/hosts", 404)):
+        st, _, body = s.http("GET", path)
+        if st != want_st or b"HIL-NC" in body:
+            problems.append(f"GET {path}: {st}, expected {want_st}")
+    check(not problems, "; ".join(problems))
+
+
+@case("a frozen app serves each tool from wherever paths.data_dir says it is NOW: the shipped copy while there is no "
+      "user copy, then - once an update has written one - the user copy's files, page stamps and /_api/webui-version "
+      "bundled stamp, with no restart (the first Update on a frozen install changed nothing on screen)",
+      group="tool_serving")
+def tool_dir_per_request(ctx):
+    import paths
+    from bridge_units import _server
+    s = _server()
+    problems = []
+    _wizard_bundle(os.path.join(ctx.src, "webui_wcb"), "HIL-WZ-SHIPPED")
+    user_root = paths.user_data_dir() / "webui_wcb"
+    shutil.rmtree(user_root, ignore_errors=True)
+    saved = paths.FROZEN
+    paths.FROZEN = True
+    try:
+        st, _, body = s.http("GET", "/wcb/Wizard/app.js")
+        if st != 200 or b"HIL-WZ-SHIPPED" not in body:
+            problems.append(f"no user copy: GET app.js {st} {body[:60]!r}, expected the shipped copy")
+        code, v = s.req("GET", "/_api/webui-version", timeout=60)
+        if ((v or {}).get("wcb") or {}).get("bundled") != "HIL-WZ-SHIPPED":
+            problems.append(f"no user copy: webui-version says {(v or {}).get('wcb')}")
+
+        user = _wizard_bundle(user_root, "HIL-WZ-USER")
+        _put_text(os.path.join(user, "app.js"), "const UI_VERSION = 'HIL-WZ-USER';\n// the user's copy\n")
+        st, _, body = s.http("GET", "/wcb/Wizard/app.js")
+        if st != 200 or b"HIL-WZ-USER" not in body:
+            problems.append(f"after an update wrote the user copy: GET app.js {st} {body[:60]!r}, still not it")
+        st, _, html = s.http("GET", "/wcb/Wizard/")
+        if f"app.js?v={_token(os.path.join(user, 'app.js'))}" not in html.decode("utf-8", "replace"):
+            problems.append(f"the page's app.js stamp is not the user copy's: {_refs(html.decode('utf-8', 'replace'))}")
+        code, v = s.req("GET", "/_api/webui-version", timeout=60)
+        if ((v or {}).get("wcb") or {}).get("bundled") != "HIL-WZ-USER":
+            problems.append(f"after the update webui-version still says {(v or {}).get('wcb')}")
+    finally:
+        paths.FROZEN = saved
+        shutil.rmtree(user_root, ignore_errors=True)
+    check(not problems, "; ".join(problems))
+
+
+@case("POST /_api/update-webui says which tools the run swapped in (changed, from the bundle directory, not the "
+      "stamp: a forced fetch of the same stamp still counts) and the fetcher's branch lines (notes), and hands the "
+      "fetcher --force for ?force=1 only", group="tool_serving")
+def update_reports_changed(ctx):
+    import subprocess
+    import host
+    from bridge_units import _server
+    s = _server()
+    problems = []
+    calls = []
+    root = os.path.join(ctx.src, "webui_wcb")
+    _wizard_bundle(root, "HIL-WZ-SAME")
+    out = ["[wcb] branch hil-wzb", "[wcb] bundled  : HIL-WZ-SAME", "[wcb] updated to HIL-WZ-SAME",
+           "[navicore] branch hil-ncb publishes no tool - using main's", "bundled : HIL-NC"]
+
+    def fake(argv, **_k):
+        calls.append(list(argv))
+        if argv[argv.index("--tool") + 1] in ("wcb", "all"):       # fetch_webui._swap_in: rename, keep .prev
+            staged = root + ".hilstage"
+            shutil.rmtree(staged, ignore_errors=True)
+            shutil.rmtree(root + ".prev", ignore_errors=True)
+            _wizard_bundle(staged, "HIL-WZ-SAME")
+            os.rename(root, root + ".prev")
+            os.rename(staged, root)
+        return subprocess.CompletedProcess(argv, 0, "\n".join(out) + "\n", "")
+    real = host.proc.run
+    host.proc.run = fake
+    try:
+        code, r = s.req("POST", "/_api/update-webui?tool=wcb&force=1", {}, timeout=60)
+        if code != 200 or (r or {}).get("changed") != ["wcb"] or r.get("wcbVersion") != "HIL-WZ-SAME":
+            problems.append(f"a forced Wizard fetch, same stamp: {code} changed {(r or {}).get('changed')}, "
+                            f"wcbVersion {(r or {}).get('wcbVersion')}; expected ['wcb'], HIL-WZ-SAME")
+        if (r or {}).get("notes") != ["[wcb] branch hil-wzb", "[navicore] branch hil-ncb publishes no tool - using main's"]:
+            problems.append(f"notes {(r or {}).get('notes')}, expected the two branch lines")
+        if not calls or calls[-1][-1] != "--force":
+            problems.append(f"?force=1 ran {calls[-1:]}, not ... --force")
+        code, r = s.req("POST", "/_api/update-webui?tool=navicore", {}, timeout=60)
+        if code != 200 or (r or {}).get("changed") != []:
+            problems.append(f"a run that swapped nothing: changed {(r or {}).get('changed')}, expected []")
+        if "--force" in calls[-1]:
+            problems.append(f"without ?force=1 the fetcher got --force: {calls[-1]}")
+    finally:
+        host.proc.run = real
+        shutil.rmtree(root + ".prev", ignore_errors=True)
+    check(not problems, "; ".join(problems))
+
 if __name__ == "__main__":
     sys.exit(_ixpy.main())

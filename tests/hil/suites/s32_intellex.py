@@ -161,8 +161,9 @@ def smoke_repo_compile(bench):
 
 # ------------------------------------------------------------------ IX-WP3: the host's API and its guards
 @test("intellex.routes", "Intellex serves both tools unforked: / and /wcb/Wizard/ carry the shim once, as their first "
-      "script, and are otherwise the bundled file byte for byte, uncached; /wcb/Wizard redirects; /_intellex.js opens "
-      "with the branch prelude; with no bundle each tool route answers 503 (IX-WP3)")
+      "script, and are otherwise the bundled file byte for byte but for a ?v=<mtime>.<size> stamp on each of the page's "
+      "own scripts and stylesheet, uncached; /wcb/Wizard redirects; /_intellex.js opens with the branch prelude; with "
+      "no bundle each tool route answers 503 (IX-WP3)")
 def routes(bench):
     require(bench)
     sd = stage(bench, "intellex.routes")
@@ -184,9 +185,13 @@ def routes(bench):
                 problems.append(f"{path}: the shim is not the first script")
             with open(disk, encoding="utf-8", errors="replace") as f:
                 on_disk = f.read()
-            # _inject_shim inserts the tag and a newline before the first <script> (Intellex host.py).
-            if html.replace(SHIM_TAG + chr(10), "", 1) != on_disk:
-                problems.append(f"{path}: the served page differs from {os.path.relpath(disk, sd)} beyond the shim tag")
+            # _inject_shim inserts the tag and a newline before the first <script>, and _versioned stamps the page's own
+            # files ?v=<mtime>.<size> (Intellex host.py, 2026-10-15: a webview kept running a cached app.js).
+            if re.sub(r'\?v=[0-9a-f]+\.[0-9a-f]+"', '"', html).replace(SHIM_TAG + chr(10), "", 1) != on_disk:
+                problems.append(f"{path}: the served page differs from {os.path.relpath(disk, sd)} beyond the shim tag "
+                                f"and the ?v= stamps")
+            if not re.search(r'<script src="[^"/:?]+\?v=[0-9a-f]+\.[0-9a-f]+"', html):
+                problems.append(f"{path}: none of the page's own scripts carries a ?v= stamp")
             cache = {k.lower(): v for k, v in hdr.items()}.get("cache-control", "")
             if "no-store" not in cache:
                 problems.append(f"{path}: Cache-Control is {cache!r}, not no-store")
@@ -2371,6 +2376,18 @@ def ui_launcher_maintenance_buttons(bench):
     run_intellex_test(bench, "intellex.ui_launcher_maintenance_buttons")
 
 
+@test("intellex.ui_launcher_branch_set_fetches_tool", "The chooser's Set, when it changes a product's branch, fetches "
+      "that tool at once (?force=1&tool=wcb|navicore|all) and says which copy landed (main's for a branch that "
+      "publishes none) or why none did; every open page of that tool - a Wizard and a config tool beside the chooser - "
+      "offers Reload/Later and reloads only on Reload; an unchanged Set fetches nothing; Update tools tells only a "
+      "tool it swapped in (Playwright, offline; 2026-10-15 'it knew to change the binary, but not the gui')")
+def ui_launcher_branch_set_fetches_tool(bench):
+    """Intellex src/launcher.html $('br-save').onclick, fetchBranchTools, announceTools and $('update').onclick, and
+    src/intellex_shim.js updateNotice (the 'intellex' BroadcastChannel); /_api/update-webui is fulfilled in the page,
+    the branches are written to the stage's settings.json and put back to main."""
+    run_intellex_test(bench, "intellex.ui_launcher_branch_set_fetches_tool")
+
+
 def _seed_branch_cache(sd):
     import time
     with open(os.path.join(sd, "appdata", "Intellex", "branches_cache.json"), "w", encoding="utf-8") as f:
@@ -2498,6 +2515,18 @@ def fetch_webui_unit(bench):
     the offline refusal."""
     require(bench)
     run_intellex_py(bench, "intellex.fetch_webui_unit", "webui_units.py", args={"group": "fetch_webui"})
+
+
+@test("intellex.tool_serving_unit", "A tool always shows the copy on disk: every file of both tools goes out no-cache, "
+      "each served page asks for its own scripts and stylesheet at ?v=<mtime>.<size> (a changed file, a new URL), a "
+      "frozen app serves an update's user copy with no restart, and /_api/update-webui says which tools it swapped in "
+      "and passes --force for ?force=1 (in-process; 2026-10-15 'it knew to change the binary, but not the gui')")
+def tool_serving_unit(bench):
+    """Intellex src/host.py _tool_files, _versioned, webui_dir/wcb_dir and api_update_webui (changed, notes, --force)
+    on its real build_app() in the venv (tests/intellex/py/webui_units.py group tool_serving): bundles written into
+    the stage's src, paths.FROZEN set for the frozen case, the fetcher replaced by a stand-in that swaps the Wizard."""
+    require(bench)
+    run_intellex_py(bench, "intellex.tool_serving_unit", "webui_units.py", args={"group": "tool_serving"})
 
 
 # A stand-in Python for the launcher scripts. Each name a launcher looks for on PATH (python3.11, python3, ...) and the

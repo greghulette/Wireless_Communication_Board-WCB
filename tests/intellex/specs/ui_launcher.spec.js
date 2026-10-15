@@ -608,6 +608,110 @@ test('intellex.ui_launcher_branch_refresh Refresh forces the list and says why i
   expect(rec.errors, 'page errors').toEqual([]);
 });
 
+// 2026-10-15, Greg: "i switched to the wifi branch, but the gui didn't update. it knew to change the binary, but not
+// the gui." Intellex src/launcher.html $('br-save').onclick / fetchBranchTools / announceTools and the shim's
+// updateNotice (intellex_shim.js): Set fetches a changed product's tool at once, forced (?force=1&tool=...), says
+// which copy landed or why none did, and every open page of that tool - here a Wizard and a config tool in the same
+// browser context, as the shell's panes and a tool's own window are - offers Reload/Later; nothing reloads by itself.
+// An unchanged Set fetches nothing; Update tools tells only a tool it swapped in. /_api/update-webui is fulfilled here.
+test('intellex.ui_launcher_branch_set_fetches_tool a changed branch fetches its tool at once and every open page of that tool offers a reload', async ({ page, context, rec }) => {
+  page.setDefaultTimeout(15_000);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const replies = [];
+  const fetched = [];
+  await context.route(/\/_api\/ports(\?|$)/, (r) => r.fulfill({ json: { ports: [] } }));
+  await hostGuard(context, rec, {
+    discover: (route) => route.fulfill({ json: { candidates: [] } }),
+    'update-webui': (route, req) => {
+      fetched.push(new URL(req.url()).search);
+      return route.fulfill({ json: replies.shift() || { ok: true } });
+    },
+  });
+  const wiz = await context.newPage();
+  await wiz.goto('/wcb/Wizard/', { waitUntil: 'load' });
+  const nc = await context.newPage();
+  await nc.goto('/', { waitUntil: 'load' });
+  const notice = (p) => p.evaluate(() => {
+    const n = document.getElementById('intellex-update');
+    return n ? n.querySelector('.intellex-update-msg').textContent : null;
+  });
+  const status = () => page.evaluate(() => { const s = document.getElementById('status'); return [s.textContent, s.className]; });
+  const TAIL = ' Reload to use it — edits not yet pushed are lost.';
+  await page.goto('/_launcher', { waitUntil: 'load' });
+  await page.evaluate(() => { document.getElementById('maint').open = true; });
+  await expect.poll(() => page.evaluate(() => document.querySelectorAll('#br-wcb option').length), { timeout: 10_000 })
+    .toBeGreaterThan(1);
+  // Set ends by re-reading the branches and refilling both drop-downs (checkBranches): the next pick waits for that
+  // refill, or it could land in a select about to be rebuilt.
+  const lists = [];
+  page.on('response', (r) => { if (new URL(r.url()).pathname === '/_api/branch-list') lists.push(r.url()); });
+  const pick = async (sel, name) => {
+    await page.selectOption(sel, ':other:');
+    await page.fill(sel + '-txt', name);
+  };
+  const save = async (want) => {
+    const n = lists.length;
+    await page.click('#br-save');
+    await expect.poll(status, { timeout: 10_000 }).toEqual(want);
+    await expect.poll(() => lists.length, { timeout: 10_000, message: 'Set did not re-read the branches' })
+      .toBeGreaterThan(n);
+  };
+  try {
+    // 1. WCB to a branch: the Wizard fetched for it at once, forced; the open Wizard offers a reload, the config tool
+    //    hears nothing; Later puts the notice away.
+    replies.push({ ok: true, version: 'HIL-NC', wcbVersion: 'HIL-WZ-B', changed: ['wcb'], notes: ['[wcb] branch hil-wzb'] });
+    await pick('#br-wcb', 'hil-wzb');
+    await save(['branch set — Wizard HIL-WZ-B (hil-wzb); press Download firmware to fetch that build', 'status']);
+    expect(fetched, 'Set fetched the Wizard, forced').toEqual(['?force=1&tool=wcb']);
+    await expect.poll(() => notice(wiz), { timeout: 5_000 }).toBe("The Wizard is now hil-wzb's (HIL-WZ-B)." + TAIL);
+    expect(await notice(nc), 'the config tool, unchanged, is not told').toBe(null);
+    await wiz.click('#intellex-update-later');
+    expect(await notice(wiz), 'Later').toBe(null);
+
+    // 2. Set again with nothing changed: no fetch, the old line, no notice.
+    await save(['branch set — press Download firmware to fetch that build', 'status']);
+    expect(fetched.length, 'an unchanged Set fetched a tool').toBe(1);
+
+    // 3. NaviCore to a branch, the fetch failing (offline): the status says the config tool is still the previous
+    //    branch's, in the error style, and the open config tool is told its firmware branch changed.
+    replies.push({ ok: false, error: 'github.io is not reachable - the bundled tools are unchanged.', version: 'HIL-NC',
+                   wcbVersion: 'HIL-WZ-B', changed: [], notes: [] });
+    await pick('#br-nc', 'hil-ncb');
+    await save(["branch set, but the config tool could not be fetched (github.io is not reachable - the bundled tools "
+      + "are unchanged.) — it is still the previous branch's; press Update tools when online", 'status err']);
+    expect(fetched[1]).toBe('?force=1&tool=navicore');
+    await expect.poll(() => notice(nc), { timeout: 5_000 }).toBe('NaviCore firmware now comes from hil-ncb.' + TAIL);
+    expect(await notice(wiz), 'the Wizard, unchanged, is not told').toBe(null);
+    await nc.click('#intellex-update-later');
+
+    // 4. Both in one Set: one forced fetch of both; a branch that publishes no tool keeps main's and says so.
+    replies.push({ ok: true, version: 'HIL-NC-2', wcbVersion: 'HIL-WZ-C', changed: ['navicore', 'wcb'],
+                   notes: ["[navicore] branch hil-nc2 publishes no tool - using main's", '[wcb] branch hil-wzc'] });
+    await pick('#br-nc', 'hil-nc2');
+    await pick('#br-wcb', 'hil-wzc');
+    await save(["branch set — config tool HIL-NC-2 (main's — hil-nc2 publishes no config tool), Wizard HIL-WZ-C "
+      + '(hil-wzc); press Download firmware to fetch that build', 'status']);
+    expect(fetched[2]).toBe('?force=1&tool=all');
+    await expect.poll(() => notice(nc), { timeout: 5_000 }).toBe("NaviCore firmware now comes from hil-nc2; the config "
+      + "tool stays main's (HIL-NC-2), as hil-nc2 publishes none." + TAIL);
+    await expect.poll(() => notice(wiz), { timeout: 5_000 }).toBe("The Wizard is now hil-wzc's (HIL-WZ-C)." + TAIL);
+    await nc.click('#intellex-update-later');
+    await wiz.click('#intellex-update-later');
+
+    // 5. Update tools: only a tool it swapped in is told; Reload reloads that page, which comes back without it.
+    replies.push({ ok: true, version: 'HIL-NC-2', wcbVersion: 'HIL-WZ-D', changed: ['wcb'] });
+    await page.click('#update');
+    await expect.poll(() => notice(wiz), { timeout: 10_000 }).toBe('The Wizard was updated to HIL-WZ-D.' + TAIL);
+    expect(await notice(nc), 'Update told a tool it did not swap in').toBe(null);
+    await Promise.all([wiz.waitForEvent('load'), wiz.click('#intellex-update-reload')]);
+    expect(await notice(wiz), 'after Reload').toBe(null);
+  } finally {
+    await hostPost('/_api/branch', { product: 'wcb', branch: 'main' });
+    await hostPost('/_api/branch', { product: 'navicore', branch: 'main' });
+  }
+  expect(rec.errors, 'page errors').toEqual([]);
+});
+
 // IX re-scan launcher.log_docs_version (launcher.html:1116-1173): with docs stored, Docs asks the host for a second
 // window on /wiki/ and opens it itself when there is none (host.py has no window backend: a popup), and opens nothing
 // when the host made one; the header shows the build as /_api/version says it.

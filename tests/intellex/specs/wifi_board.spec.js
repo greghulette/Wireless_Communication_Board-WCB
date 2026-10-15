@@ -118,6 +118,49 @@ test('intellex.wifi_wizard_via_navicore the Wizard through Intellex on NaviCore\
   B.expectClean(rec, 'the Wizard');
 });
 
+// 2026-10-15, Greg, through NaviCore's WiFi in Intellex: "the terminals for the wcbs ... came up, but no messages were
+// working. I hit the debug command and it normally says debugging on, but i didn't even get that response." A managed
+// board's terminal shows only what its ?RTERM session mirrors to the relay (Code/WCB/WCB_RemoteTerm.cpp), and on the WIFI
+// firmware a session not re-armed for RTERM_IDLE_MS (30 s) ends (WCBSerial::expireIfIdle); the Wizard re-arms it every
+// RTERM_KEEPALIVE_MS (app.js _rtermKeepAliveArm). So a command typed in each WCB's terminal (sendTerminalCommandTo:
+// MGMT,FRAG through NaviCore) gets its reply back right after the pulls AND again after 45 s of nothing typed. Only
+// whether the reply line arrived is read - a count of one fixed string - never the terminal's text.
+const DEBUG_OFF_REPLY = 'Debugging disabled';         // Code/WCB/WCB.ino, the ?DEBUG handler
+async function terminalAnswers(page, n, label) {
+  const count = () => page.evaluate(({ n, r }) => {
+    const el = document.getElementById(`term-pane-output-${n}`);
+    return el ? el.textContent.split(r).length - 1 : -1;
+  }, { n, r: DEBUG_OFF_REPLY });
+  const before = await count();
+  expect(before, `WCB${n} has a terminal pane`).toBeGreaterThanOrEqual(0);
+  await page.evaluate((n) => {
+    document.getElementById(`term-pane-input-${n}`).value = '?DEBUG,OFF';
+    return sendTerminalCommandTo(n);
+  }, n);
+  const t0 = Date.now();
+  await expect.poll(count, { timeout: 12_000,
+    message: `WCB${n}: ?DEBUG,OFF typed in its terminal ${label} - no "${DEBUG_OFF_REPLY}" came back through NaviCore` })
+    .toBeGreaterThan(before);
+  return Date.now() - t0;
+}
+
+test('intellex.wifi_wizard_terminal_via_navicore each WCB\'s terminal through NaviCore answers a typed command, and still does after 45 s idle',
+  async ({ page, context, rec }) => {
+  test.setTimeout(480_000);                         // the harness's watchdog is 540 s (s35)
+  page.setDefaultTimeout(15_000);
+  const a = await args();
+  await B.boardGuard(context, rec);
+  await throughNaviCore(page, a);
+  const first = {};
+  for (const b of a.boards) first[b] = await terminalAnswers(page, b, 'right after the pulls');
+  await page.waitForTimeout(45_000);                // past the firmware's 30 s session timeout: only re-arms keep it
+  const later = {};
+  for (const b of a.boards) later[b] = await terminalAnswers(page, b, 'after 45 s with nothing typed');
+  await B.hil.note(`intellex.wifi_wizard_terminal_via_navicore: "${DEBUG_OFF_REPLY}" back in ms, after the pulls ` +
+    `${JSON.stringify(first)}, after 45 s idle ${JSON.stringify(later)}`);
+  B.expectClean(rec, 'the Wizard');
+});
+
 test('intellex.wifi_rterm_rate the Wizard through NaviCore re-arms no WCB\'s remote terminal more than 6 times a minute once settled',
   async ({ page, context, rec }) => {
   test.setTimeout(600_000);                         // the harness's watchdog is 660 s (s35)

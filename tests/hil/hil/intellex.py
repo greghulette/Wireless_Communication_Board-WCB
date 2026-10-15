@@ -27,6 +27,7 @@ must import Intellex's own modules run as scripts under Intellex's venv (run_int
 import ast
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -107,9 +108,10 @@ def running_intellex():
     """[(pid, command line)] of Intellex instances NOT started by this harness: Greg's own app, or a host from a
     source checkout. One attached to NaviCore's AP made NaviCore re-arm W1's terminal once a second and held W1's
     reboots off (tracker #93); one attached to a COM port holds it. Staged hosts (a path under .../ixstage/<id>/src/)
-    are ours. Windows only; elsewhere the check is skipped."""
+    are ours. On macOS from `ps` (it was Windows-only, so on the Mac a test host and Greg's own app attached to
+    NaviCore's access point at the same time with nothing to say so - 2026-10-15)."""
     if os.name != "nt":
-        return []
+        return _running_intellex_posix()
     ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'Intellex.exe' -or "
           "($_.CommandLine -match 'src[\\\\/](app|host)\\.py') } | Select-Object ProcessId,CommandLine | ConvertTo-Json")
     try:
@@ -124,6 +126,25 @@ def running_intellex():
     mine = os.sep + STAGE_DIR + os.sep
     return [(r["ProcessId"], r.get("CommandLine") or "") for r in rows
             if mine not in (r.get("CommandLine") or "").replace("/", os.sep)]
+
+
+def _running_intellex_posix():
+    """running_intellex() from `ps`: a Python running some checkout's src/app.py or src/host.py (Greg runs Intellex
+    from source: `.venv/bin/python3 src/app.py`), or a packaged Intellex.app, but not a staged host of ours."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=30,
+                             **OWN_GROUP).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    mine = os.sep + STAGE_DIR + os.sep
+    rows = []
+    for line in out.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if not pid.isdigit() or int(pid) == os.getpid() or mine in cmd:
+            continue
+        if re.search(r"(^|[\\/ ])src[\\/](app|host)\.py(\s|$)", cmd) or "/Intellex.app/Contents/MacOS/" in cmd:
+            rows.append((int(pid), cmd))
+    return rows
 
 
 # ------------------------------------------------------------------ staging
@@ -154,7 +175,11 @@ def seed_bundles(bench, src_dir, tools="worktree"):
     """Put the two tools where a non-frozen Intellex serves them from (src/webui, src/webui_wcb).
     worktree: NaviCore/config_tool and this repo's Wizard/, as fetch_webui.py would publish them (the default: tests
     the tools as they are now). shipped: Intellex's own bundles (what users of the current Intellex get). none: no
-    bundle at all (the 503 pages)."""
+    bundle at all (the 503 pages).
+
+    HIL_WIZARD_REF=<git ref> takes the Wizard (and its Images) from that ref of this repo instead of the worktree:
+    the same test against another Wizard - main's released one against the bench's firmware, say (2026-10-15: the
+    WCB terminals through NaviCore went quiet in a Wizard that was main's)."""
     idir = intellex_dir(bench)
     if tools == "none":
         return
@@ -181,10 +206,26 @@ def seed_bundles(bench, src_dir, tools="worktree"):
     for f in lists["IMAGES"]:
         _copy(os.path.join(nav, "Images", f), os.path.join(web, "Images", f))
     wcb = os.path.join(src_dir, "webui_wcb")
+    ref = os.environ.get("HIL_WIZARD_REF", "").strip()
+    if ref:
+        bench.note(f"intellex: the Wizard staged from {ref} ({_git(REPO, 'rev-parse', '--short', ref) or '?'}), "
+                   f"not the worktree (HIL_WIZARD_REF)")
+    put = (lambda sub, f, dst: _copy_from_ref(ref, f"{sub}/{f}", dst)) if ref else \
+        (lambda sub, f, dst: _copy(os.path.join(REPO, sub, f), dst))
     for f in list(lists["WCB_FILES"]) + list(lists["WCB_VENDOR"]):
-        _copy(os.path.join(REPO, "Wizard", f), os.path.join(wcb, lists["WCB_SUBDIR"], f))
+        put("Wizard", f, os.path.join(wcb, lists["WCB_SUBDIR"], f))
     for f in lists["WCB_IMAGES"]:
-        _copy(os.path.join(REPO, "Images", f), os.path.join(wcb, "Images", f))
+        put("Images", f, os.path.join(wcb, "Images", f))
+
+
+def _copy_from_ref(ref, path, dst):
+    """This repo's `path` as of git ref `ref`, written to dst (a file the ref lacks is skipped: an older Wizard)."""
+    r = subprocess.run(["git", "-C", REPO, "show", f"{ref}:{path}"], capture_output=True, timeout=60, **OWN_GROUP)
+    if r.returncode != 0:
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "wb") as f:
+        f.write(r.stdout)
 
 
 def _stage_ignore(include_data):
