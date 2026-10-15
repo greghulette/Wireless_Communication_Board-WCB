@@ -677,18 +677,41 @@ def _free_port():
         return sk.getsockname()[1]
 
 
+class _FakeWindow:
+    """What pywebview's create_window returns: a closed event (handlers added with +=) and destroy(), recorded."""
+
+    def __init__(self, title):
+        self.title, self.destroyed, self.on_closed = title, False, []
+        fw = self
+
+        class _Event:
+            def __iadd__(self, fn):
+                fw.on_closed.append(fn)
+                return self
+        self.events = types.SimpleNamespace(closed=_Event())
+
+    def destroy(self):
+        self.destroyed = True
+
+    def closed_by_user(self):
+        for fn in self.on_closed:
+            fn()
+
+
 class _FakeWebview(types.ModuleType):
-    """pywebview: create_window and start recorded; either can be made to raise."""
+    """pywebview: create_window and start recorded; either can be made to raise. objects: the windows it returned."""
 
     def __init__(self, fail_create=False, fail_start=False):
         super().__init__("webview")
-        self.windows, self.starts = [], []
+        self.windows, self.starts, self.objects = [], [], []
         self.fail_create, self.fail_start = fail_create, fail_start
 
     def create_window(self, title, url, **k):
         if self.fail_create:
             raise RuntimeError("HIL: no window toolkit")
         self.windows.append((title, url, k))
+        self.objects.append(_FakeWindow(title))
+        return self.objects[-1]
 
     def start(self, func=None, **k):
         if self.fail_start:
@@ -810,7 +833,8 @@ def app_browser_fallbacks(ctx):
 
 
 @case("app.py window mode: one 'Intellex' window on the chooser, pywebview's storage kept under the data directory, "
-      "--dev for its debug flag, --inspect for WebView2's debugging port, and the open-window hook for a second window",
+      "--dev for its debug flag, --inspect for WebView2's debugging port, the open-window hook for a second window, and "
+      "closing the main window closes that one too (it kept Intellex running out of sight, holding its port)",
       group="app")
 def app_window(ctx):
     problems = []
@@ -842,6 +866,12 @@ def app_window(ctx):
             hook("WCB Wizard", "/wcb/Wizard/")
             if [(t, u) for t, u, _ in wv.windows[1:]] != [("WCB Wizard", f"http://127.0.0.1:{port}/wcb/Wizard/")]:
                 problems.append(f"{label}: the open-window hook made {[(t, u) for t, u, _ in wv.windows[1:]]}")
+            elif len(wv.objects) == 2:
+                main, extra = wv.objects
+                main.closed_by_user()
+                if not extra.destroyed or main.destroyed:
+                    problems.append(f"{label}: closing the main window left the second one "
+                                    f"{'open' if not extra.destroyed else 'closed, but destroyed the main one too'}")
     check(not problems, "; ".join(problems))
 
 
