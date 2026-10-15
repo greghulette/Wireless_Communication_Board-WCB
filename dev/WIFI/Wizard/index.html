@@ -775,9 +775,18 @@
 
       <!-- Stored Sequences -->
       <div class="subsection" style="--rail:#b07cff">
-      <div class="flex items-center gap-8 mb-12">
+      <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <input type="search" class="seq-filter" id="b{N}-seq-filter" placeholder="Filter by name or contents"
+               spellcheck="false" oninput="seqPagerFilter({N}, this.value)"
+               title="Show only the sequences whose name or commands contain this text (not case-sensitive)">
+        <label class="seq-page-size" title="How many sequences one page shows (remembered in this browser)">Show
+          <select id="b{N}-seq-size" onchange="seqPagerSize({N}, this.value)">
+            <option value="5">5</option><option value="10">10</option><option value="25">25</option>
+            <option value="50">50</option><option value="0">All</option>
+          </select>
+        </label>
         <label class="seq-test-scope" style="margin-left:auto">
           <input type="checkbox" id="b{N}-seq-test-mesh"> Test mesh-wide
           <span class="wiz-hint tip-left" data-tip="Off (default): TEST fires this board only (;SEQkey,L). On: TEST fires the sequence on EVERY board that has the same key (;SEQkey) — the real mesh-wide trigger.">i</span>
@@ -793,6 +802,7 @@
         </thead>
         <tbody id="b{N}-seq-tbody"></tbody>
       </table>
+      <div class="seq-pager" id="b{N}-seq-pager"></div>
       </div>
 
       <!-- Variables -->

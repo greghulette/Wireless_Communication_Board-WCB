@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '09.08:21.R.OCT.2026';
+const UI_VERSION = '15.00:37.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3508,6 +3508,8 @@ function populateUIFromConfig(n, config) {
     tbody.innerHTML = '';
     for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
     refreshAllSeqSharedIndicators();   // board n's keys changed → refresh every board's hints
+    _seqPager(n).page = 1;
+    applySeqPager(n);                  // one page of them, with the filter kept
   }
 
   // Variables
@@ -4831,7 +4833,132 @@ function updateSeqValCount(rowId, n) {
   }
 }
 
-function addSequenceRow(n) { appendSequenceRow(n, '', ''); }
+function addSequenceRow(n) {
+  appendSequenceRow(n, '', '');
+  // The new row is the last one and its empty key matches no filter: drop the filter and turn to the last page, so
+  // what was just added is on screen with its key field focused.
+  const st = _seqPager(n);
+  if (st.filter) {
+    st.filter = '';
+    const f = document.getElementById(`b${n}-seq-filter`);
+    if (f) f.value = '';
+  }
+  st.page = Infinity;
+  applySeqPager(n);
+  const rows = document.querySelectorAll(`#b${n}-seq-tbody tr`);
+  rows[rows.length - 1]?.querySelector('.seq-key-input')?.focus();
+}
+
+// ── Stored-sequence pager ─────────────────────────────────────────────────────
+// Some boards hold a hundred sequences or more, and the table showed every one. It now shows one page - 5, 10, 25,
+// 50 or all, remembered in this browser - with a filter on name or contents and page buttons. Rows are only HIDDEN,
+// never taken out: getSequencesFromUI() (the push), the shared-key hints and the TEST/SAVE buttons read every row in
+// the table, so a sequence on another page is still pushed and still compared. A row being edited stays where it is
+// until the filter, the page or the page size changes - re-filtering on every keystroke would hide it mid-word.
+const SEQ_PAGE_SIZES    = [5, 10, 25, 50, 0];   // 0 = all
+const SEQ_PAGE_SIZE_KEY = 'wcbWizard.seqPageSize';
+const seqPagers = {};                          // board slot -> { page, size, filter }
+
+function _seqPageSizeSaved() {
+  try {
+    const v = parseInt(localStorage.getItem(SEQ_PAGE_SIZE_KEY), 10);
+    if (SEQ_PAGE_SIZES.includes(v)) return v;
+  } catch (_) { /* storage blocked: the default */ }
+  return 5;
+}
+
+function _seqPager(n) {
+  if (!seqPagers[n]) seqPagers[n] = { page: 1, size: _seqPageSizeSaved(), filter: '' };
+  return seqPagers[n];
+}
+
+function _seqRowMatches(row, needle) {
+  if (!needle) return true;
+  const key = (row.querySelector('.seq-key-input')?.value || '').toLowerCase();
+  const val = (row.querySelector('.seq-val-textarea')?.value || '').toLowerCase();
+  return key.includes(needle) || val.includes(needle);
+}
+
+// Page numbers to show: all of them up to 7, else the first, the last and the current one with its neighbours.
+function _seqPageList(cur, pages) {
+  if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+  let lo = Math.max(2, cur - 1), hi = Math.min(pages - 1, cur + 1);
+  if (cur <= 3) { lo = 2; hi = 4; }
+  if (cur >= pages - 2) { lo = pages - 3; hi = pages - 1; }
+  const out = [1];
+  if (lo > 2) out.push('…');
+  for (let p = lo; p <= hi; p++) out.push(p);
+  if (hi < pages - 1) out.push('…');
+  out.push(pages);
+  return out;
+}
+
+function applySeqPager(n) {
+  const tbody = document.getElementById(`b${n}-seq-tbody`);
+  if (!tbody) return;
+  const st = _seqPager(n);
+  const needle = st.filter.trim().toLowerCase();
+  const rows = [...tbody.querySelectorAll('tr')];
+  const matched = rows.filter(r => _seqRowMatches(r, needle));
+  const size = st.size || Math.max(1, matched.length);
+  const pages = Math.max(1, Math.ceil(matched.length / size));
+  st.page = Math.min(Math.max(1, st.page), pages);
+  const first = (st.page - 1) * size;
+  const shown = new Set(matched.slice(first, first + size));
+  for (const r of rows) r.style.display = shown.has(r) ? '' : 'none';
+  // A textarea sized while its row was hidden measured 0 tall: size the ones now on screen.
+  for (const r of shown) { const ta = r.querySelector('.seq-val-textarea'); if (ta) autoResizeTextarea(ta); }
+  const sel = document.getElementById(`b${n}-seq-size`);
+  if (sel) sel.value = String(st.size);
+  const nav = document.getElementById(`b${n}-seq-pager`);
+  if (!nav) return;
+  if (!rows.length) { nav.innerHTML = ''; return; }
+  const btn = (label, page, { active = false, disabled = false, title = '' } = {}) =>
+    `<button type="button" class="btn btn-sm ${active ? 'btn-primary' : 'btn-ghost'}"${disabled ? ' disabled' : ''}` +
+    `${title ? ` title="${title}"` : ''}${active ? ' aria-current="page"' : ''} onclick="seqPagerGo(${n},${page})">${label}</button>`;
+  const parts = [];
+  if (pages > 1) {
+    parts.push(btn('‹', st.page - 1, { disabled: st.page <= 1, title: 'Previous page' }));
+    for (const p of _seqPageList(st.page, pages)) {
+      parts.push(p === '…' ? '<span class="seq-pager-gap">…</span>' : btn(String(p), p, { active: p === st.page }));
+    }
+    parts.push(btn('›', st.page + 1, { disabled: st.page >= pages, title: 'Next page' }));
+  }
+  const total = rows.length;
+  const noun = total === 1 ? 'sequence' : 'sequences';
+  let info;
+  if (!matched.length)               info = `no match among ${total} ${noun}`;
+  else if (matched.length === total) info = `${first + 1}–${first + shown.size} of ${total} ${noun}`;
+  else                               info = `${first + 1}–${first + shown.size} of ${matched.length} matching (${total} ${noun})`;
+  parts.push(`<span class="seq-pager-info">${info}</span>`);
+  nav.innerHTML = parts.join('');
+}
+
+function seqPagerGo(n, page) {
+  _seqPager(n).page = page;
+  applySeqPager(n);
+}
+
+function seqPagerFilter(n, text) {
+  const st = _seqPager(n);
+  st.filter = text || '';
+  st.page = 1;
+  applySeqPager(n);
+}
+
+// One size for every board, remembered in this browser; each board keeps the first sequence it had on screen.
+function seqPagerSize(n, value) {
+  let size = parseInt(value, 10);
+  if (!SEQ_PAGE_SIZES.includes(size)) size = 5;
+  try { localStorage.setItem(SEQ_PAGE_SIZE_KEY, String(size)); } catch (_) { /* not remembered */ }
+  for (const slot of new Set([...Object.keys(seqPagers).map(Number), n])) {
+    const st = _seqPager(slot);
+    const firstShown = (st.page - 1) * (st.size || 0);
+    st.size = size;
+    st.page = size ? Math.floor(firstShown / size) + 1 : 1;
+    applySeqPager(slot);
+  }
+}
 
 function appendSequenceRow(n, key, value) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
@@ -4896,6 +5023,7 @@ async function removeSequenceRow(n, rowId) {
 
   // Remove from DOM immediately
   row.remove();
+  applySeqPager(n);   // the rows after it move up a place, and the last page may now be empty
 
   // Patch in-memory config and baseline so the key doesn't resurface on next push
   for (const store of [boardConfigs[n], boardBaselines[n]]) {

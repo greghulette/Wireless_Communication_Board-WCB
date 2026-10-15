@@ -1533,3 +1533,21 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
   font-size: 12px; color: var(--text2); cursor: pointer; white-space: nowrap;
 }
 .seq-test-scope input { cursor: pointer; margin: 0; }
+
+/* ── Stored-sequence pager (app.js applySeqPager) ── */
+.seq-filter {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 12px; padding: 4px 8px; outline: none; width: 220px; max-width: 40vw;
+  transition: border-color var(--transition);
+}
+.seq-filter:focus { border-color: var(--accent); }
+.seq-page-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); white-space: nowrap; }
+.seq-page-size select {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 12px; padding: 3px 6px;
+}
+.seq-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+.seq-pager:empty { display: none; }
+.seq-pager .btn { min-width: 30px; justify-content: center; }
+.seq-pager-gap { color: var(--text3); padding: 0 4px; }
+.seq-pager-info { font-size: 12px; color: var(--text3); margin-left: 8px; font-family: var(--mono); }
