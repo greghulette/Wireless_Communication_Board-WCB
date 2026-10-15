@@ -33,7 +33,7 @@ from suites.common import link, marker
 from suites.s40_navicore_config import FLAG_ACTIONS, _hooks
 
 BANNER_START = "=== NaviCore ==="                                           # NaviCore.ino:4556
-HOOK_LINE = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
+HOOK_LINE = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L94 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
              "never a release")                                          # :4559-4561, hook builds only
 # Lines no healthy boot prints: the PSRAM halt, an unreadable config, the mesh or the WCB Wizard surface failing, a
 # SoftAP that failed or was refused, an out-of-range baud, the empty-mesh-password box (NaviCore.ino:4486-4953).

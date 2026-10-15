@@ -469,7 +469,7 @@ def s3_console_quiet(bench):
     line - 'E (<ms>) <tag>: ...', which NaviCore's USB also shows - goes out S3 at S3's baud, into whatever is wired
     there (an HCR at 115200 reads it as a command stream). Seen on NaviCore's USB on this bench only around WiFi station
     churn ('E (n) wifi:CCMP replay detected', 'wifi:addba response cb: ap bss deleted', runs 20260929-114920 and
-    -122112); no hook makes one on demand (navicore_hil.h has #L90-#L93, none of them an IDF error).
+    -122112); no hook makes one on demand (navicore_hil.h has #L90-#L94, none of them an IDF error).
     Three windows on the S3 wire, at GET_CONFIG's S3 baud: (1) a burst of console output NaviCore prints on USB only
     (CONSOLE_BURST, an unknown '?HILQ<tag>' whose echo is a marker, GET_MESH_STATS), then QUIET_S more; (2) with
     navicore_reboot ticked too, a REBOOT inside nc_guard (s46 _restart; skipped while the recorder holds a take) from
