@@ -145,6 +145,12 @@ bool wcbWsSinkLive() {
 
 bool wcbWsRunning() { return wsServer != nullptr; }
 
+const char *wcbWsLockHolderName() {
+  if (!txLock) return "no WS";
+  TaskHandle_t h = xSemaphoreGetMutexHolder(txLock);
+  return h ? pcTaskGetName(h) : "none";
+}
+
 int wcbWsClientCount() {
   int n = 0;
   for (int i = 0; i < WS_MAX_CLIENTS; i++) if (txLive(tx[i])) n++;

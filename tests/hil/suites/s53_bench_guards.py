@@ -148,3 +148,41 @@ def silence_unit(bench):
     finally:
         silence.QUIET_S = saved
     assert not problems, "; ".join(problems)
+
+
+HANG_STUCK = re.compile(r"^\[HANG\] loop\(\) stuck (\d+) s in (.+?) \(loop task (\w+)\); WS lock held by (.+?); "
+                        r"heap free (\d+), min (\d+)$")
+
+
+@test("wcb.loop_hang_reported", "With loop() stopped on purpose for 20 s (?DEBUG,FAULT,LOOPSTALL,20, a test knob that "
+      "blocks it inside that command), W1's loop watch prints '[HANG] loop() stuck 15 s in handleSingleCommand running "
+      "?DEBUG (loop task blocked)' - the command's verb, never its arguments - once, then '[HANG] loop() running again' "
+      "when it moves, and W1 answers ?VERSION after (Code/WCB/WCB_LoopWatch.cpp)", needs=["wcb1"])
+def loop_hang_reported(bench):
+    """What a board whose loop() stopped now says about itself: W1 went silent twice in long runs and nothing on its
+    console said where. The watch is an esp_timer reading loop()'s pass count once a second; it prints with
+    esp_rom_printf, which takes no lock a stuck task could hold. 15 s (LOOP_STUCK_MS), then every 30 s while stuck."""
+    w1 = usb_wcb(bench)
+    dev = w1.dev
+    m = dev.mark()
+    dev.send("?DEBUG,FAULT,LOOPSTALL,20")
+    dev.expect(r"^\[FAULT\] LOOPSTALL: loop\(\) stops for 20 s now", timeout=4, since=m)
+    hit = dev.expect(HANG_STUCK.pattern, timeout=22, since=m)
+    secs, where, state, holder = int(hit.group(1)), hit.group(2), hit.group(3), hit.group(4)
+    problems = []
+    if not 15 <= secs <= 17:
+        problems.append(f"reported stuck {secs} s, expected 15-17 (LOOP_STUCK_MS 15 s, a 1 s watch)")
+    if where != "handleSingleCommand running ?DEBUG":
+        problems.append(f"named {where!r}, expected 'handleSingleCommand running ?DEBUG' (the verb only)")
+    if state != "blocked":
+        problems.append(f"loop task {state!r}, expected 'blocked' (delay())")
+    again = dev.expect(r"^\[HANG\] loop\(\) running again after (\d+) s$", timeout=12, since=m)
+    dev.expect(r"^\[FAULT\] LOOPSTALL: loop\(\) runs again$", timeout=5, since=m)
+    stuck_lines = [x for x in dev.since(m) if x.startswith("[HANG] loop() stuck")]
+    if len(stuck_lines) != 1:
+        problems.append(f"{len(stuck_lines)} stuck reports for a 20 s stall, expected 1 (the next only after 30 s)")
+    if "LOOPSTALL" in where or ",20" in " ".join(stuck_lines):
+        problems.append("the report carries the command's arguments")
+    bench.note(f"wcb.loop_hang_reported: {hit.group(0)[:200]!r}; then {again.group(0)!r} (WS lock: {holder})")
+    w1.version()
+    assert not problems, "; ".join(problems)

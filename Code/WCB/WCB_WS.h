@@ -65,3 +65,5 @@ int wcbWsClientCount();
 // which is also what a server that FAILED to start reports — ?WIFI needs to tell
 // "up, nobody connected" from "never came up", because those want different fixes.
 bool wcbWsRunning();
+// The name of the task holding the sender's lock, "none", or "no WS" before the endpoint exists (WCB_LoopWatch).
+const char *wcbWsLockHolderName();

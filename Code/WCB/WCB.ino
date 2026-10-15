@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 6.2.1_140803ROCT2026                                  *****////
+///*****                                          Version 6.2.1_151045ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -95,6 +95,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_WDP.h"
 #include "WCB_WiFi.h"
 #include "WCB_WS.h"
+#include "WCB_LoopWatch.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
 #include "command_timer_queue.h"
@@ -200,7 +201,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "6.2.1_140803ROCT2026";
+String SoftwareVersion = "6.2.1_151045ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -6315,6 +6316,18 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     else    Serial.printf("[FAULT] BAUD0: NVS refused the write for Serial%d - nothing changed\n", port);
     return;
   }
+  if (f.startsWith("LOOPSTALL")) {                 // ?DEBUG,FAULT,LOOPSTALL[,<s>]: loop() stops, as W1's did (WCB_LoopWatch.h)
+    const int secs = f.length() > 10 ? f.substring(10).toInt() : 20;
+    if (secs < 1 || secs > 60) {
+      Serial.println("[FAULT] LOOPSTALL takes 1-60 seconds: ?DEBUG,FAULT,LOOPSTALL,<s>");
+      return;
+    }
+    Serial.printf("[FAULT] LOOPSTALL: loop() stops for %d s now - no command runs, no heartbeat goes out\n", secs);
+    Serial.flush();
+    delay((uint32_t)secs * 1000UL);  // blocked, on this command: what the watch must name (step, verb, task state)
+    Serial.println("[FAULT] LOOPSTALL: loop() runs again");
+    return;
+  }
   if (f == "HWOTHER") {                            // a HW version saved for the other chip, as older firmware allowed
 #if CONFIG_IDF_TARGET_ESP32S3
     const int other = 24;
@@ -6346,7 +6359,7 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     return;
   }
   Serial.println("Invalid FAULT knob. Use: ?DEBUG,FAULT,<TIMERMEM|SEQREAD|SEQLIST|VARNVS|ESPNOWDOWN|JOINCHAN|"
-                 "JOINNOIP|CHANDRIFT|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
+                 "JOINNOIP|CHANDRIFT|LOOPSTALL[,s]|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
 }
 
 void processLocalCommand(const String &message) {
@@ -10177,40 +10190,42 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // returns, so from here on a healthy board is never watched by the guard.)
   esp_log_level_set("gpio", gpioLogLevel);   // see gpio_install_isr_service above
   bootGuardDisarm();
+  loopWatchBegin();   // from here a loop() that stops says where (WCB_LoopWatch.h)
   // Serial.println("------------- Setup Complete-----------------");
 }
 
 void loop() {
-  rtermRelayDrain();        // flush queued remote-terminal packets to USB serial (safe from loop)
-  WCBDebugSerial.expireIfIdle();   // end a remote-terminal session nobody re-armed for 30 s
-  wcbEspNowReportDrops();   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
-  reportEtmQueueRefusals(); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
-  drainRcJsonRelay();       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
-  drainPendingTimerChains();// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
-  processCommandGroups();
-  processETMHeartbeats();
-  wdpTick();               // WDP: broadcast our advert on schedule + age the neighbor table
-  wdpDaTick();             // WDP-DA: age out serial-attached devices that stopped announcing
-  drainLearnedPeerMaintenance();  // flush learned-peer NVS writes + post-boot prune
-  etmDrainAckQueue();       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
-  processETMAcksAndRetries();
-  processETMChar();
-  sendHeldETMCharResult(false);
-  processETMLoad();
-  checkMgmtTimeout();
-  checkConfigPullTimeout();
-  drainMgmtReqs();         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
-  serviceConfigPullJob();  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
-  drainMgmtOut();          // print reassembled MGMT results here, NOT on the WiFi callback
-  drainStatusOut();        // and the callback's status lines ("[ETM] WCBn came ONLINE")
-  drainOtaPackets();       // run queued OTA flash writes in safe loop() context (P2)
-  drainWdpPackets();       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
-  wcbWifiService();        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
-  wcbWsService();          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
-  checkOtaTimeout();       // abort a stalled OTA session (current app untouched)
-  processMP3Responses();   // Read MP3 Trigger serial responses (non-blocking)
-  processDFPResponses();   // Read DFPlayer Mini response frames (non-blocking)
-  processHCRTick();        // HCR: auto-poll + parse status (non-blocking)
+  g_loopTick++;
+  LOOP_STEP(rtermRelayDrain());        // flush queued remote-terminal packets to USB serial (safe from loop)
+  LOOP_STEP(WCBDebugSerial.expireIfIdle());   // end a remote-terminal session nobody re-armed for 30 s
+  LOOP_STEP(wcbEspNowReportDrops());   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
+  LOOP_STEP(reportEtmQueueRefusals()); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
+  LOOP_STEP(drainRcJsonRelay());       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
+  LOOP_STEP(drainPendingTimerChains());// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
+  LOOP_STEP(processCommandGroups());
+  LOOP_STEP(processETMHeartbeats());
+  LOOP_STEP(wdpTick());               // WDP: broadcast our advert on schedule + age the neighbor table
+  LOOP_STEP(wdpDaTick());             // WDP-DA: age out serial-attached devices that stopped announcing
+  LOOP_STEP(drainLearnedPeerMaintenance());  // flush learned-peer NVS writes + post-boot prune
+  LOOP_STEP(etmDrainAckQueue());       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
+  LOOP_STEP(processETMAcksAndRetries());
+  LOOP_STEP(processETMChar());
+  LOOP_STEP(sendHeldETMCharResult(false));
+  LOOP_STEP(processETMLoad());
+  LOOP_STEP(checkMgmtTimeout());
+  LOOP_STEP(checkConfigPullTimeout());
+  LOOP_STEP(drainMgmtReqs());         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  LOOP_STEP(serviceConfigPullJob());  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
+  LOOP_STEP(drainMgmtOut());          // print reassembled MGMT results here, NOT on the WiFi callback
+  LOOP_STEP(drainStatusOut());        // and the callback's status lines ("[ETM] WCBn came ONLINE")
+  LOOP_STEP(drainOtaPackets());       // run queued OTA flash writes in safe loop() context (P2)
+  LOOP_STEP(drainWdpPackets());       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
+  LOOP_STEP(wcbWifiService());        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
+  LOOP_STEP(wcbWsService());          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
+  LOOP_STEP(checkOtaTimeout());       // abort a stalled OTA session (current app untouched)
+  LOOP_STEP(processMP3Responses());   // Read MP3 Trigger serial responses (non-blocking)
+  LOOP_STEP(processDFPResponses());   // Read DFPlayer Mini response frames (non-blocking)
+  LOOP_STEP(processHCRTick());        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
   // splitters — by the time commands reach this queue they are unconditional.)
   if (!commandQueue) return;
@@ -10240,7 +10255,10 @@ void loop() {
     inSequenceBody = inItem.sequenceBody;   // restore per-item so nested recalls stay local
     seqCurPath     = itemPath;              // this item's call stack, for recallStoredCommand's cycle guard
     quietWindowExempt = false;              // a handler sets it when this command must not hold off a restart
+    g_loopStep = "handleSingleCommand";
+    g_loopCmd  = commandStr.c_str();
     handleSingleCommand(commandStr, inItem.sourceID);
+    g_loopCmd  = nullptr;
     // A sequence-body item's flag must NOT persist past its own dispatch: a recall's body
     // commands drain last, so without this the global would latch true and every later
     // top-level recall would be misread as nested and skip its mesh fan-out. The per-item
@@ -10264,6 +10282,7 @@ void loop() {
   // restart goes anyway, so no stream of commands can hold it off for good (tracker #93).
   // Nor under a config pull job: it sends over several loop() passes now, and a restart mid-reply
   // leaves the requester a partial part set to time out on.
+  g_loopStep = "the deferred restart";
   if (pwmRebootPending || rebootPending) {
     const unsigned long now = millis();
     if (!restartWaitStarted) {             // normally the pass that ran the command that set the flag

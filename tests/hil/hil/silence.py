@@ -23,6 +23,7 @@ from .wcb import WCB
 
 BOOT_LINE = "Reset reason:"        # Code/WCB/WCB.ino's boot banner, printed early on every start
 QUIET_S = 4.0                      # nothing at all on the console for this long, then a second ?VERSION unanswered
+HANG_LOOKBACK = 400                # console lines searched for the board's own [HANG] line
 
 
 def _answers(dev):
@@ -50,6 +51,13 @@ def diagnose(dev):
     s = dev._ser
     if s is None:
         return f"{name} silent and its port not open: not diagnosed"
+    # What the board said about itself before going quiet: WCB_LoopWatch prints '[HANG] loop() stuck N s in <step>'
+    # through the ROM's UART print once loop() has made no pass for 15 s, even with every lock held.
+    try:
+        hang = [x.strip() for x in dev.since(max(0, dev.mark() - HANG_LOOKBACK)) if x.startswith("[HANG] loop() stuck")]
+    except Exception:  # noqa: BLE001
+        hang = []
+    said = f" Its last word: {hang[-1][:240]!r}." if hang else " It printed no [HANG] line."
     m = dev.mark()
     try:
         s.rts = False          # the line state the harness opened it with (serialdev._open_port_now), written again
@@ -62,20 +70,21 @@ def diagnose(dev):
         ok = _answers(dev)
         return (f"{name} was HELD IN RESET: silent, and it booted the moment RTS/DTR were written low again on the "
                 f"open port ({boot!r}) - its USB-serial driver had raised RTS by itself; "
-                f"{'it answers ?VERSION now' if ok else 'it still does not answer ?VERSION'}")
+                f"{'it answers ?VERSION now' if ok else 'it still does not answer ?VERSION'}.{said}")
     if _answers(dev):
-        return f"{name} did not answer ?VERSION, then did with nothing done but RTS/DTR written low again: slow, not stuck"
+        return (f"{name} did not answer ?VERSION, then did with nothing done but RTS/DTR written low again: slow, not "
+                f"stuck.{said}")
     m = dev.mark()
     try:
         usb_jtag_reset(dev)   # RTS high with DTR low: EN on an auto-reset circuit as on the S3's USB-Serial/JTAG
     except Exception as e:  # noqa: BLE001
-        return f"{name} HUNG (RTS/DTR low again changed nothing); the reset pulse failed: {e}"
+        return f"{name} HUNG (RTS/DTR low again changed nothing); the reset pulse failed: {e}.{said}"
     boot = _boot_seen(dev, m, 8.0)
     time.sleep(4.0)
     ok = _answers(dev)
     return (f"{name} HUNG: silent, RTS/DTR low again changed nothing, and a reset pulse "
             f"{'restarted it (' + repr(boot) + ')' if boot else 'showed no boot banner'}; "
-            f"{'it answers ?VERSION now' if ok else 'it STILL does not answer ?VERSION'}")
+            f"{'it answers ?VERSION now' if ok else 'it STILL does not answer ?VERSION'}.{said}")
 
 
 def check(bench):

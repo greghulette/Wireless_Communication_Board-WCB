@@ -678,6 +678,22 @@ def _console_panics(bench, marks):
     return "; ".join(out)
 
 
+LOOP_HANG = "[HANG] loop() "      # Code/WCB/WCB_LoopWatch.cpp: a WCB's loop() made no pass for 15 s (or ran again)
+
+
+def _console_hangs(bench, marks):
+    """Every '[HANG] loop() ...' line a WCB printed during the test, as notes: the board's loop() made no pass for 15 s
+    (WCB_LoopWatch: the step it is in, the command verb, the loop task's state, who holds the WS lock). Not a failure on
+    its own - a test whose board stayed stuck fails by itself, and the silence check after it says the rest."""
+    for name, (dev, since) in marks.items():
+        try:
+            hits = [x.strip() for x in dev.since(since) if x.startswith(LOOP_HANG)]
+        except Exception:  # noqa: BLE001 - a scan never breaks the run
+            continue
+        for h in hits[:5]:
+            bench.note(f"{name}: {h[:260]}")
+
+
 def _ports_back(bench, awake_s=120, abort=None):
     """Wait for every active port to reopen. Counted in loop turns, not by the clock: if the host sleeps again during
     the wait, the clock jump must not use up the budget before USB has even re-enumerated. abort() (Pause or Stop
@@ -884,6 +900,7 @@ def _run_tests(bench, tests, on_start, on_result, should_stop, ckpt, should_paus
                 # After a failure only: a USB WCB that stopped answering is diagnosed (held in reset by its USB-serial
                 # driver, or hung) and brought back before the next test, which would otherwise fail on it too
                 # (hil/silence.py; W1 in intellex.flash_navicore_app, twice).
+                _console_hangs(bench, console_marks)
                 if status in ("FAIL", "ERROR"):
                     silent = silence.check(bench)
                     if silent:
