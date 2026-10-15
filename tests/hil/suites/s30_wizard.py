@@ -97,6 +97,26 @@ def pull(bench):
         run_wizard_test(bench, "wizard.pull", args={"tokens": before[1]})
 
 
+@test("wizard.seq_bytes_match_board", "The sequence pager's '· N of 32,768 bytes' for W1, worked out in the page from the "
+      "sequences it pulled, is the figure W1 reports for its own sequence store (?NVS 'Sequences: n in the sequence store, "
+      "N of 32768 bytes'), with the same number of sequences", needs=["wcb1"])
+def seq_bytes_match_board(bench):
+    """Wizard/app.js seqStoreBytes (each sequence: its name, its commands and 2 bytes - the store's 'key,value' line)
+    against Code/WCB/WCB_SeqStore.cpp seqStoreReport's file size: the page's formula and anything the firmware does to a
+    value it saves must agree, or the page would warn too late or too soon (Greg 2026-10-15, the bytes beside the count)."""
+    w1 = usb_wcb(bench)
+    line = next((x for x in w1.run("?NVS", timeout=6) if x.startswith("Sequences:")), "")
+    m = re.match(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes", line)
+    if not m:
+        raise Skip(f"W1's ?NVS has no sequence-store line ({line[:80]!r}): firmware before the file store")
+    count, used, cap = (int(v) for v in m.groups())
+    if not count:
+        raise Skip("W1 has no stored sequences to compare")
+    with config_guard(bench, 1):
+        run_wizard_test(bench, "wizard.seq_bytes_match_board", args={"count": count, "bytes": used, "cap": cap})
+    bench.note(f"wizard.seq_bytes_match_board: W1 {count} sequence(s), {used} of {cap} bytes - the page showed the same")
+
+
 @test("wizard.push_label", "A label typed into the Wizard and pushed lands in W1's saved config", needs=["wcb1"])
 def push_label(bench):
     with config_guard(bench, 1) as before:
@@ -381,6 +401,8 @@ _SEQ_PAGER = (
     ("seq_pager_many_pages", "Past 7 pages the bar shows the first, the last and the current page with its neighbours, gaps as an ellipsis"),
     ("seq_pager_filter", "The filter matches a name or the commands, not case-sensitive, pages what matches, says when nothing does, and a push still carries every sequence"),
     ("seq_pager_add_remove", "+ Add clears the filter and turns to the last page with the new row focused; removing the only rows of the last page goes back a page"),
+    ("seq_pager_bytes", "Beside the count, the bytes the sequences take of the 32,768 the store holds (WIFI firmware only), "
+     "following an edit before the push, amber from 90 % and red past the cap"),
 )
 for _key, _title in _SEQ_PAGER:
     def _seq_pager(bench, _id=f"wizard.{_key}"):

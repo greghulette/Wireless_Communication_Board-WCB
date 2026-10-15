@@ -104,3 +104,62 @@ test('wizard.seq_pager_add_remove "+ Add" clears the filter and turns to the las
   expect(await shown(page)).toEqual(['s06', 'boom07', 's08', 's09', 's10']);
   expect(await nav(page)).toEqual({ pages: ['‹', '1', '2*', '›-'], info: '6–10 of 10 sequences' });
 });
+
+// The store's size beside the count (Greg 2026-10-15: "something like 1–6 of 6 sequences (83 of 32768 bytes)"). The WIFI
+// firmware's store holds 32,768 bytes, one 'key,value' line each (Code/WCB/WCB_SeqStore.h SEQ_FILE_MAX); the page works
+// it out from what a push would send, so it follows an edit before it is pushed. Only for firmware with that store.
+const NEW_FW = '6.2.1_151144ROCT2026';     // a WIFI build: the file store (since fecd481, 29 Sep 2026)
+const OLD_FW = '6.2.1_201144RAUG2026';     // main's build: sequences in the settings store, no byte cap to show
+const seqBytes = (lines) => lines.reduce((t, l) => {
+  const [, , key, ...rest] = l.split(',');
+  return t + Buffer.byteLength(key) + 1 + Buffer.byteLength(rest.join(',')) + 1;
+}, 0);
+const bytes = (page, n = 1) => page.evaluate((n) => {
+  const el = document.getElementById(`b${n}-seq-bytes`);
+  return el ? { text: el.textContent, cls: el.className.replace('seq-pager-bytes', '').trim(), title: el.title } : null;
+}, n);
+const setFw = (page, ver, n = 1) => page.evaluate(({ n, ver }) => {
+  boardConfigs[n].fwVersion = ver;
+  updateBoardSwVersionDisplay(n);
+}, { n, ver });
+const fmt = (v) => v.toLocaleString('en-US');
+
+test('wizard.seq_pager_bytes the pager shows the bytes the sequences take of the 32,768 the store holds, follows an edit before the push, is amber from 90 % and red past the cap, counts the whole store under a filter, and is not shown for firmware without the file store', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, board(SEQS));
+  await setFw(page, NEW_FW);
+  const want = seqBytes(SEQS);
+  expect(await bytes(page)).toEqual({ text: `· ${fmt(want)} of 32,768 bytes`, cls: '',
+    title: 'The board\'s sequence store: each sequence takes its name, its commands and 2 bytes' });
+  expect((await nav(page)).info, 'the count is unchanged').toBe('1–5 of 23 sequences');
+  // An edit, before any push: s01's value grows by 3 bytes.
+  const ta = page.locator('#b1-seq-tbody tr').first().locator('.seq-val-textarea');
+  await ta.fill((await ta.inputValue()) + 'ZZZ');
+  expect((await bytes(page)).text).toBe(`· ${fmt(want + 3)} of 32,768 bytes`);
+  // A filter pages what it matches; the bytes stay the whole store's.
+  await filter(page, 'BOOM');
+  expect((await bytes(page)).text).toBe(`· ${fmt(want + 3)} of 32,768 bytes`);
+  await filter(page, '');
+  // Firmware before the file store: the count alone.
+  await setFw(page, OLD_FW);
+  expect((await bytes(page)).text).toBe('');
+  expect((await nav(page)).info).toBe('1–5 of 23 sequences');
+
+  // Near the cap: 8 sequences of 3,690 commands each, 29,552 bytes (90 % is 29,491).
+  const big = Array.from({ length: 8 }, (_, i) => `SEQ,SAVE,b${i},${'x'.repeat(3690)}`);
+  await pullFake(page, 1, board(big));
+  await setFw(page, NEW_FW);
+  const nearB = seqBytes(big);
+  expect(nearB).toBe(29552);
+  expect(await bytes(page)).toEqual({ text: `· 29,552 of 32,768 bytes`, cls: 'seq-bytes-near',
+    title: `${fmt(32768 - nearB)} bytes left in the board's sequence store` });
+  // Past it: one more of 3,999 (the most one sequence may hold) - 33,555 bytes, red, and the title says by how much.
+  await page.click('button[onclick="addSequenceRow(1)"]');
+  const row = page.locator('#b1-seq-tbody tr').last();
+  await row.locator('.seq-key-input').fill('zz');
+  await row.locator('.seq-val-textarea').fill('y'.repeat(3999));
+  const b = await bytes(page);
+  expect([b.text, b.cls]).toEqual([`· 33,555 of 32,768 bytes`, 'seq-bytes-over']);
+  expect(b.title).toContain('a push is refused for the ones that do not fit ("no room")');
+  expect(b.title).toContain('Shorten or remove 787 bytes');
+});

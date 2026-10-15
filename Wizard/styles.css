@@ -1551,3 +1551,6 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
 .seq-pager .btn { min-width: 30px; justify-content: center; }
 .seq-pager-gap { color: var(--text3); padding: 0 4px; }
 .seq-pager-info { font-size: 12px; color: var(--text3); margin-left: 8px; font-family: var(--mono); }
+.seq-pager-bytes { font-size: 12px; color: var(--text3); margin-left: 6px; font-family: var(--mono); }
+.seq-pager-bytes.seq-bytes-near { color: var(--yellow); }
+.seq-pager-bytes.seq-bytes-over { color: var(--red); font-weight: 600; }

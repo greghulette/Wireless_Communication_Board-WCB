@@ -27,6 +27,18 @@ test('wizard.pull shows the saved bauds and labels of the board it pulled', asyn
   expect(page.wizErrors).toEqual([]);
 });
 
+// Wizard/app.js seqStoreBytes against the board's own figure for its sequence store (?NVS, read by the harness).
+test('wizard.seq_bytes_match_board the pager shows the bytes the board reports for its sequence store', async ({ page, hilCtx }) => {
+  const { count, bytes, cap } = hilCtx.args;
+  await openWizard(page);
+  const n = await connectBoard(page, hilCtx);
+  const fmt = (v) => v.toLocaleString('en-US');
+  await expect(page.locator(`#b${n}-seq-bytes`), 'the pager\'s byte figure')
+    .toHaveText(`· ${fmt(bytes)} of ${fmt(cap)} bytes`, { timeout: 15_000 });
+  expect(await page.evaluate((n) => getSequencesFromUI(n).length, n), 'sequences in the page').toBe(count);
+  expect(page.wizErrors).toEqual([]);
+});
+
 test('wizard.push_label pushes a port label typed into the board card', async ({ page, hilCtx }) => {
   const { port, label } = hilCtx.args;
   await openWizard(page);
