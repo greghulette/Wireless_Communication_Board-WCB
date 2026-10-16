@@ -76,7 +76,16 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # with the hooks, App SHA 5dcd2eefcd3d42e0, v0.2.0_141730QOCT26; navicore-fix11 is kept beside it.
 # navicore-fix13 since 2026-10-15 00:08: NaviCore main f953dd2 (requires WCB_Client 1.18.1: two boards answer a probe)
 # with WCBClient 0c5803e, App SHA b850ca84104e4ab9, v0.2.0_142148QOCT26; fix12 kept beside it.
-BENCH_IMAGE = "navicore-fix13"
+# navicore-fix15 since 2026-10-15 21:45: NaviCore main c828bb3 (boot clears the S4/S5 RX interrupts a restart left
+# armed, which overflowed ipc1 on boot: run 20261015-145452) with the hooks, App SHA 4e633dca68f7f5e9,
+# v0.2.0_152141QOCT26; fix13 kept beside it. (fix14 is the same change built from a dirty tree, for the first check.)
+# navicore-fix16 since 2026-10-15 22:03: NaviCore main 2f49370 (a USB request's long answer is paced even before
+# HWCDC reports a host: GET_CONFIG straight after a REBOOT came back cut at 8 KB) with the hooks, App SHA
+# 15eef2843dbe1683, v0.2.0_152200QOCT26; fix15 kept beside it.
+# navicore-fix18 since 2026-10-15 22:25: NaviCore main c4d27b6 (the GPIO ISR service registration starts just after a
+# tick; fix17 was the same change, dirty, for the 100-restart check) with the hooks, App SHA 86309ff96b9b4e6d,
+# v0.2.0_152222QOCT26; fix16 kept beside it.
+BENCH_IMAGE = "navicore-fix18"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.
