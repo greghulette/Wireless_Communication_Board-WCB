@@ -480,6 +480,9 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
   letter-spacing: 0.3px; text-decoration: none;
 }
 .btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+/* A disabled button that says why in its title (.btn-why, e.g. HCR Status on a relayed board): it takes the hover so
+   the tooltip shows; a disabled button still fires no click. */
+.btn:disabled.btn-why { pointer-events: auto; }
 .btn-primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .btn-primary:hover { background: var(--accent2); border-color: var(--accent2); }
 .btn-success { background: var(--green2); color: var(--bg); border-color: var(--green2); }
@@ -1097,7 +1100,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .etm-detail.visible { display: block; }
 
 /* ─── Toast Notifications ────────────────────────────────────── */
-.toast-container { position: fixed; top: 72px; right: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+/* Above every overlay (modals 500, the splash 600): the setup wizard reports its validation errors as toasts while its
+   modal is open, and the stale firmware-branch warning is raised while the splash is up. Under an overlay a toast was
+   dimmed and its Copy/Dismiss buttons took no clicks. */
+.toast-container { position: fixed; top: 72px; right: 16px; z-index: 700; display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 10px 16px;
@@ -1109,7 +1115,10 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: upp
 .toast.success { border-color: var(--green2); }
 .toast.error   { border-color: var(--red2); }
 .toast.info    { border-color: var(--accent2); }
-.toast-msg     { flex: 1; }
+/* min-width 0 and anywhere-wrapping: a message with a long unbroken run (the stale-branch warning's
+   localStorage.removeItem('wcb_fw_branch')) otherwise kept its full width and pushed Copy and Dismiss out of the
+   toast, off the right edge of the window. */
+.toast-msg     { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .toast-btn {
   flex-shrink: 0; background: none; border: none; cursor: pointer;
   color: var(--text3); padding: 2px 4px; border-radius: 4px;
@@ -1451,6 +1460,9 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
 .wdp-mesh-table th { color: var(--text-secondary, #9aa3b0); font-weight: 600; }
 .wdp-mesh-table tr.wdp-stale { opacity: 0.5; }
 .wdp-if  { white-space: nowrap; }
+/* A serial-attached (WDP-DA) device, listed under its port. Quiet = saved but not heard lately. */
+.wdp-da  { padding-left: 14px; white-space: nowrap; }
+.wdp-da.wdp-quiet { opacity: 0.6; }
 .wdp-sub { color: var(--text-secondary, #9aa3b0); font-size: 12px; }
 .wdp-live { color: var(--green); }
 /* The querying board's own row (PEER=3) — highlighted so the view shows the whole mesh. */
@@ -1521,3 +1533,24 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
   font-size: 12px; color: var(--text2); cursor: pointer; white-space: nowrap;
 }
 .seq-test-scope input { cursor: pointer; margin: 0; }
+
+/* ── Stored-sequence pager (app.js applySeqPager) ── */
+.seq-filter {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 12px; padding: 4px 8px; outline: none; width: 220px; max-width: 40vw;
+  transition: border-color var(--transition);
+}
+.seq-filter:focus { border-color: var(--accent); }
+.seq-page-size { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); white-space: nowrap; }
+.seq-page-size select {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 12px; padding: 3px 6px;
+}
+.seq-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 8px; }
+.seq-pager:empty { display: none; }
+.seq-pager .btn { min-width: 30px; justify-content: center; }
+.seq-pager-gap { color: var(--text3); padding: 0 4px; }
+.seq-pager-info { font-size: 12px; color: var(--text3); margin-left: 8px; font-family: var(--mono); }
+.seq-pager-bytes { font-size: 12px; color: var(--text3); margin-left: 6px; font-family: var(--mono); }
+.seq-pager-bytes.seq-bytes-near { color: var(--yellow); }
+.seq-pager-bytes.seq-bytes-over { color: var(--red); font-weight: 600; }

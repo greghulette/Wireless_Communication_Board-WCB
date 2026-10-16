@@ -60,6 +60,20 @@ function createDefaultBoardConfig() {
     // through backup import/export; set on the board via ?SBOS0 / ?BCAST,OUT,S0. No UI toggle.
     broadcastToS0: false,
 
+    // WiFi (?WIFI) — PER BOARD, unlike meshChannel which is system-wide. Each board
+    // independently hosts an AP, joins one, or stays off; the CHANNEL is not part of
+    // this because the radio only has one and it always follows meshChannel.
+    // The password is carried so a restore can bring an AP back working — a restore
+    // that replayed the SSID without the passphrase would fail closed at boot and the
+    // board would come up with no AP and nothing saying why.
+    wifi: {
+      mode:     'off',   // 'off' | 'ap' | 'join'
+      apSsid:   '',      // '' = firmware derives WCB-<alias> / WCB-<number>
+      apPass:   '',      // >= 8 chars or the firmware refuses to start the AP
+      joinSsid: '',
+      joinPass: '',
+    },
+
     // Kyber
     kyber: {
       mode:          'none',  // 'none' | 'local' | 'remote'
@@ -485,6 +499,13 @@ function parseToken(body, config) {
       config.isRelay = (parseInt(parts[1]) || 0) === 1;
       break;
 
+    case 'CLIENT':
+      // ?CLIENT,<alias> — Wizard-only: buildSystemFile writes it for a client slot (a WCB_Client device, shown as a
+      // card and never pushed). No firmware has the command, so a saved system file is the only place it appears.
+      config.type        = 'client';
+      config.clientAlias = _unescapeFileText(body.slice(cmd.length + 1)).slice(0, 24);
+      break;
+
     case 'LED':
       if (upperParts[1] === 'PIN') config.statusLedPin = parseInt(parts[2]) || 38;
       break;
@@ -570,17 +591,17 @@ function parseToken(body, config) {
       break;
 
     // ── Command Characters ──
+    // The value is ONE character, and it can be a comma: an older firmware accepted ?DELIM,, and a board still on it
+    // backs up as ?DELIM,,. parts[1] splits that into two empty fields and read as '', which boardGo then "fixed" by
+    // bootstrapping ?DELIM,^ onto the board. So the character is whatever follows the verb's own comma.
     case 'DELIM':
-      config.delimiter = parts[1] ?? '^';
-      break;
-
     case 'FUNCCHAR':
-      config.funcChar = parts[1] ?? '?';
+    case 'CMDCHAR': {
+      const ch  = body.slice(cmd.length + 1).charAt(0);
+      const key = cmd === 'DELIM' ? 'delimiter' : cmd === 'FUNCCHAR' ? 'funcChar' : 'cmdChar';
+      config[key] = ch || (cmd === 'DELIM' ? '^' : cmd === 'FUNCCHAR' ? '?' : ';');
       break;
-
-    case 'CMDCHAR':
-      config.cmdChar = parts[1] ?? ';';
-      break;
+    }
 
     // ── Serial Baud ──
     case 'BAUD': {
@@ -619,6 +640,33 @@ function parseToken(body, config) {
       if (portIdx >= 0 && portIdx < 5) {
         if (direction === 'OUT') config.serialPorts[portIdx].broadcastOut = enabled;
         if (direction === 'IN')  config.serialPorts[portIdx].broadcastIn  = enabled;
+      }
+      break;
+    }
+
+    // ── WiFi ──
+    case 'WIFI': {
+      // ?WIFI,OFF
+      // ?WIFI,AP,<ssid>,<pass>
+      // ?WIFI,JOIN,<ssid>,<pass>
+      // Split manually rather than trusting parts[]: a WPA2 passphrase may contain
+      // commas, so everything after the SSID field is password, not more fields.
+      const mode = upperParts[1];
+      if (mode === 'OFF' || !mode) {
+        config.wifi.mode = 'off';
+        break;
+      }
+      if (mode !== 'AP' && mode !== 'JOIN') break;   // unknown subcommand — ignore
+      const ssid = (parts[2] || '').trim();
+      const pass = parts.length > 3 ? parts.slice(3).join(',') : '';
+      if (mode === 'AP') {
+        config.wifi.mode   = 'ap';
+        config.wifi.apSsid = ssid;
+        config.wifi.apPass = pass;
+      } else {
+        config.wifi.mode     = 'join';
+        config.wifi.joinSsid = ssid;
+        config.wifi.joinPass = pass;
       }
       break;
     }
@@ -848,7 +896,13 @@ function parseToken(body, config) {
         case 'MISS':    config.etm.missedHeartbeats  = parseInt(parts[2]) || 5;      break;
         case 'BOOT':    config.etm.bootHeartbeatSec  = parseInt(parts[2]) || 2;      break;
         case 'COUNT':   config.etm.messageCount      = parseInt(parts[2]) || 20;     break;
-        case 'DELAY':   config.etm.messageDelayMs    = parseInt(parts[2]) || 100;    break;
+        // 0 is a legal delay (WCB.ino: 0-5000 ms), unlike every value above, so `|| 100` read a board's 0 as 100
+        // and the next full push wrote 100 onto it. Only a value that is not a number falls back.
+        case 'DELAY': {
+          const d = parseInt(parts[2]);
+          config.etm.messageDelayMs = Number.isNaN(d) ? 100 : d;
+          break;
+        }
         case 'CHKSM':   config.etm.checksumEnabled   = (parts[2]?.toUpperCase() === 'ON'); break;
       }
       break;
@@ -1009,13 +1063,14 @@ function evaluatePortClaims(config) {
     port.claimedBy = null;
   }
 
-  // Kyber claims its ports (local mode only)
+  // Kyber claims its ports (local mode only). A bare or legacy ?KYBER,LOCAL (no port) is S2 - the
+  // firmware's loadKyberSettings fallback and the `|| 2` of the ?KYBER,LOCAL emit below. Since
+  // tracker #73 D4 this is the ONLY port a local Kyber takes from devices/PWM, so without the
+  // fallback the real Kyber port would be offered to them.
   if (config.kyber.mode === 'local') {
-    if (config.kyber.port) {
-      const idx = config.kyber.port - 1;
-      if (idx >= 0 && idx < 5)
-        config.serialPorts[idx].claimedBy = { type: 'kyber' };
-    }
+    const kyberIdx = (config.kyber.port || 2) - 1;
+    if (kyberIdx >= 0 && kyberIdx < 5)
+      config.serialPorts[kyberIdx].claimedBy = { type: 'kyber' };
     if (config.kyber.marcduinoPort) {
       const idx = config.kyber.marcduinoPort - 1;
       if (idx >= 0 && idx < 5)
@@ -1100,22 +1155,17 @@ function evaluatePortClaims(config) {
     }
   }
 
-  // Kyber/Maestro MODE reservations — mirror the firmware's device-port guards:
-  // with a local Kyber, ?WLED/?HCR/?MP3 configs are rejected on BOTH S1 and S2;
-  // with remote Maestro (NaviCore-driven), they are rejected on S1 (see the
-  // identical guards in WCB_WLED.cpp / WCB_HCR.cpp / WCB_MP3.cpp). Without this,
-  // device dropdowns offer ports the board will refuse and the push fails
-  // silently. Applied LAST with a no-clobber guard so a real claim (maestro,
-  // kyber.port, serial-map, …) always keeps its more specific type — this only
-  // fills otherwise-empty slots to keep them out of the device dropdowns.
-  if (config.kyber) {
-    const reserve = (idx) => {
-      if (!config.serialPorts[idx].claimedBy)
-        config.serialPorts[idx].claimedBy = { type: 'kyber-reserved' };
-    };
-    if (config.kyber.mode === 'local')  { reserve(0); reserve(1); }
-    if (config.kyber.mode === 'remote') { reserve(0); }
-  }
+  // Maestro REMOTE reservation — mirrors the firmware's kyberModeReservesPort (WCB_Storage.cpp),
+  // which the HCR/MP3/DFP/WLED guards and canUsePWMOnPort all call: remote Maestro (Kyber or
+  // NaviCore elsewhere) keeps S1 for the Maestro. Without this, device and PWM dropdowns offer a
+  // port the board will refuse and the push fails silently. A local Kyber reserves only its own
+  // port, which the 'kyber' claim above already covers; its other hardware port takes a device or
+  // PWM like any port (tracker #73 D4 - both used to be reserved here). Applied LAST with a
+  // no-clobber guard so a real claim (maestro, serial-map, …) keeps its more specific type — this
+  // only fills an otherwise-empty S1 to keep it out of the device dropdowns. The Kyber-port and
+  // Maestro dropdowns (app.js) deliberately ignore it: S1 is still where REMOTE's Maestro goes.
+  if (config.kyber && config.kyber.mode === 'remote' && !config.serialPorts[0].claimedBy)
+    config.serialPorts[0].claimedBy = { type: 'kyber-reserved' };
 }
 
 // ─────────────────────────────────────────────
@@ -1204,8 +1254,11 @@ function parseSystemFile(fileContent) {
   // Sort boards by WCB number
   system.boards.sort((a, b) => a.wcbNumber - b.wcbNumber);
 
-  // Update quantity to match actual board count if file has more boards
-  if (system.boards.length > system.general.wcbQuantity) {
+  // The quantity is the one the file was saved with. It is the mesh's floor, not a board count: a board above it (one
+  // WDP joined) and a client slot are boards of their own, and raising the quantity to the number of sections made a
+  // reload add default boards the file never held and push that number to every board (W-17). Only a file whose
+  // [GENERAL] carries no ?WCBQ (buildSystemFile always writes one) still takes the number of boards.
+  if (!/(?:^|\^)\?WCBQ,/im.test(sections['GENERAL'] || '') && system.boards.length > system.general.wcbQuantity) {
     system.general.wcbQuantity = system.boards.length;
   }
 
@@ -1306,11 +1359,27 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
   // network needs the same value so peer tables stay consistent. Canonical token
   // is CONTROLLER; firmware still accepts the legacy SPECIAL on input.
-  const curSpecial  = !!config.specialPeer;
-  const baseSpecial = !!baseline?.specialPeer;
-  if (fullPush || !baseline || curSpecial !== baseSpecial ||
-      (curSpecial && (config.specialPeerId ?? 20) !== (baseline?.specialPeerId ?? 20)))
-    add(curSpecial ? `CONTROLLER,ON,${config.specialPeerId ?? 20}` : `CONTROLLER,OFF`);
+  // The firmware keeps the id while the controller is OFF, and only ON takes an id, so a disabled CUSTOM id is
+  // stored as ON,<id> then OFF - the pair its own backup emits (collectConfigCommands, WCB.ino). A full push that
+  // wrote only CONTROLLER,OFF re-parsed as id 20, and a restore quietly reverted the id.
+  {
+    const curSpecial  = !!config.specialPeer;
+    const curId       = config.specialPeerId ?? 20;
+    const baseSpecial = !!baseline?.specialPeer;
+    const baseId      = baseline?.specialPeerId ?? 20;
+    if (fullPush || !baseline) {
+      if (curSpecial) add(`CONTROLLER,ON,${curId}`);
+      else {
+        if (curId !== 20) add(`CONTROLLER,ON,${curId}`);
+        add('CONTROLLER,OFF');
+      }
+    } else if (curSpecial) {
+      if (!baseSpecial || curId !== baseId) add(`CONTROLLER,ON,${curId}`);
+    } else if (baseSpecial || curId !== baseId) {
+      if (curId !== baseId) add(`CONTROLLER,ON,${curId}`);
+      add('CONTROLLER,OFF');
+    }
+  }
 
   // ── Network ──
   if (fullPush || !baseline || baseline.macOctet2 !== config.macOctet2)
@@ -1336,11 +1405,51 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   if (fullPush || !baseline || baseline.cmdChar !== config.cmdChar)
     add(`CMDCHAR,${config.cmdChar}`);
 
+  // ── Kyber: release the old port first (Kyber LOCAL port move, or leaving Kyber LOCAL) ──
+  // A board already in Kyber LOCAL refuses ?MAESTRO on its current Kyber port (configureMaestro,
+  // WCB_Maestro.cpp), so swapping the two (Kyber S2 -> S1, Maestro S1 -> S2) lost the Maestro move
+  // to the stale Kyber port. ?KYBER,CLEAR drops it; the ?KYBER,LOCAL after the Maestro block below
+  // claims the new one. Leaving Kyber LOCAL releases the port too: ?MAESTRO,REMOTE and ?KYBER,CLEAR
+  // both put it back (kyberReleasePort, WCB_Storage.cpp; tracker #73 D9). Either release is sent
+  // ahead of the BAUD/BCAST lines because it puts the port back to 9600 with broadcasts on - this
+  // push's own settings for that port must land after it, not be undone by it. A full push can't
+  // see the board's current Kyber port, so it always releases first. The `|| 2` mirrors the
+  // ?KYBER,LOCAL emit below.
+  // A delta push must then re-send the released port's BAUD/BCAST even when unchanged: the
+  // baseline becomes this config after the push, so leaving the board on the release's 9600 /
+  // broadcasts-on while the Wizard shows the old values would hide that port from every later diff.
+  // A board going from Maestro REMOTE to Kyber LOCAL is released early too: REMOTE still reserves S1
+  // (kyberModeReservesPort, WCB_Storage.cpp) until something clears it, and the MP3/HCR/DFP/WLED
+  // blocks run before the claim-late ?KYBER,LOCAL - so a device the Wizard now offers on S1 of a
+  // local-Kyber board (tracker #73 D4) was refused, while the baseline recorded it as configured.
+  // CLEAR on a REMOTE board releases no port (kyberLocalPort is 0), so kyberReleasedIdx stays -1.
+  // kyberChanged also gates the claim-late ?KYBER,LOCAL below. The targets compare as a set (_kyberTargetsKey).
+  const kyberChanged = fullPush || !baseline ||
+    baseline.kyber.mode !== config.kyber.mode ||
+    baseline.kyber.port !== config.kyber.port ||
+    _kyberTargetsKey(baseline.kyber?.targets) !== _kyberTargetsKey(config.kyber?.targets);
+  const baseKyberPort = baseline?.kyber?.mode === 'local' ? (baseline.kyber.port || 2) : 0;
+  let kyberReleasedIdx = -1;
+  if (config.kyber.mode === 'local') {
+    if (fullPush || !baseline || baseline.kyber?.mode === 'remote' ||
+        (baseKyberPort && baseKyberPort !== (config.kyber.port || 2))) {
+      add('KYBER,CLEAR');
+      if (baseline && !fullPush) kyberReleasedIdx = baseKyberPort - 1;
+    }
+  } else if (fullPush || !baseline || baseline.kyber.mode !== config.kyber.mode) {
+    // Leaving LOCAL (or a mode change / full push). Not on a targets-only diff of a remote/none
+    // board: remote mode never reads kyberTargets (those are the proxy ?MAESTRO lines, pushed by the
+    // Maestro block), and a needless MAESTRO,REMOTE would trip commandStringNeedsReboot (app.js).
+    // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
+    add(config.kyber.mode === 'remote' ? 'MAESTRO,REMOTE' : 'KYBER,CLEAR');
+    if (baseKyberPort && !fullPush) kyberReleasedIdx = baseKyberPort - 1;
+  }
+
   // ── Serial Baud Rates ──
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (fullPush || !base || base.baud !== cur.baud)
+    if (fullPush || !base || base.baud !== cur.baud || i === kyberReleasedIdx)
       add(`BAUD,S${i+1},${cur.baud}`);
   }
 
@@ -1363,33 +1472,33 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   for (let i = 0; i < 5; i++) {
     const cur  = config.serialPorts[i];
     const base = baseline?.serialPorts?.[i];
-    if (fullPush || !base || base.broadcastOut !== cur.broadcastOut)
+    if (fullPush || !base || base.broadcastOut !== cur.broadcastOut || i === kyberReleasedIdx)
       add(`BCAST,OUT,S${i+1},${cur.broadcastOut ? 'ON' : 'OFF'}`);
-    if (fullPush || !base || base.broadcastIn !== cur.broadcastIn)
+    if (fullPush || !base || base.broadcastIn !== cur.broadcastIn || i === kyberReleasedIdx)
       add(`BCAST,IN,S${i+1},${cur.broadcastIn ? 'ON' : 'OFF'}`);
   }
   // S0/USB broadcast output — global (no per-port slot). Preserve on round-trip.
   if (fullPush || (baseline?.broadcastToS0 ?? false) !== (config.broadcastToS0 ?? false))
     add(`BCAST,OUT,S0,${config.broadcastToS0 ? 'ON' : 'OFF'}`);
 
-  // ── Kyber ──
-  // Targets are embedded in the KYBER,LOCAL command, not in MAESTRO
-  const kyberChanged = fullPush || !baseline ||
-    baseline.kyber.mode !== config.kyber.mode ||
-    baseline.kyber.port !== config.kyber.port ||
-    JSON.stringify(baseline.kyber?.targets ?? []) !== JSON.stringify(config.kyber?.targets ?? []);
-
-  if (kyberChanged) {
-    if (config.kyber.mode === 'local') {
-      let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
-      if (config.kyber.targets?.length > 0)
-        cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
-      add(cmd);
-    } else if (config.kyber.mode === 'remote') {
-      // Canonical name; firmware also accepts the legacy ?KYBER,REMOTE alias.
-      add('MAESTRO,REMOTE');
-    } else {
-      add('KYBER,CLEAR');
+  // ── WiFi ──
+  // Emitted as ONE line carrying mode + credentials together, because that is the
+  // shape the firmware command takes. Only when something actually changed: this
+  // needs a reboot to take effect (commandStringNeedsReboot in app.js lists WIFI,),
+  // so pushing it on every unrelated edit would nag for a restart that changes nothing.
+  {
+    const w  = config.wifi  ?? { mode: 'off' };
+    const bw = baseline?.wifi ?? { mode: 'off' };
+    const changed = fullPush ||
+      (bw.mode ?? 'off')     !== (w.mode ?? 'off')     ||
+      (bw.apSsid ?? '')      !== (w.apSsid ?? '')      ||
+      (bw.apPass ?? '')      !== (w.apPass ?? '')      ||
+      (bw.joinSsid ?? '')    !== (w.joinSsid ?? '')    ||
+      (bw.joinPass ?? '')    !== (w.joinPass ?? '');
+    if (changed) {
+      if (w.mode === 'ap')        add(`WIFI,AP,${w.apSsid ?? ''},${w.apPass ?? ''}`);
+      else if (w.mode === 'join') add(`WIFI,JOIN,${w.joinSsid ?? ''},${w.joinPass ?? ''}`);
+      else                        add('WIFI,OFF');
     }
   }
 
@@ -1491,8 +1600,11 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   // Fall back to local maestros (with this board's WCB number) for normal edits.
   const effectiveTable  = config.maestroTable   ?? config.maestros.map(m => ({ ...m, wcb: config.wcbNumber }));
   const baselineTable   = baseline?.maestroTable ?? baseline?.maestros?.map(m => ({ ...m, wcb: config.wcbNumber }));
-  const maestrosChanged = fullPush || !baseline ||
-    JSON.stringify(baselineTable) !== JSON.stringify(effectiveTable);
+  // Compared by content: rebuildMaestroRoutingTables (app.js) builds { id, wcb, port, baud }, the fallback above
+  // { id, port, baud, wcb }, and as raw JSON the same table after any Maestro edit - one taken back included -
+  // re-sent ?MAESTRO for nothing.
+  const tableKey = (t) => JSON.stringify((t ?? []).map(m => [m.id, m.wcb, m.port, m.baud]));
+  const maestrosChanged = fullPush || !baseline || tableKey(baselineTable) !== tableKey(effectiveTable);
 
   if (maestrosChanged) {
     const bTbl = baselineTable ?? [];
@@ -1515,6 +1627,19 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
         .join(',');
       add(`MAESTRO,${chain}`);
     }
+  }
+
+  // ── Kyber LOCAL (claim late) ──
+  // After the Maestro and MP3/HCR/DFP/WLED blocks: ?KYBER,LOCAL refuses a port that still hosts a
+  // local Maestro (kyberLocalPortRefused, WCB_Storage.cpp), and a Maestro moving off the new Kyber
+  // port is only cleared by the Maestro block above. Sent first, the claim was refused and the board
+  // came out of the push with no Kyber. Still ahead of the PWM/mapping block, which can reboot the
+  // board mid-push. Targets are embedded in the KYBER,LOCAL command, not in MAESTRO.
+  if (kyberChanged && config.kyber.mode === 'local') {
+    let cmd = `KYBER,LOCAL,S${config.kyber.port || 2}`;
+    if (config.kyber.targets?.length > 0)
+      cmd += ',' + config.kyber.targets.map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).join(',');
+    add(cmd);
   }
 
   // ── ETM ──
@@ -1563,8 +1688,9 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
   }
 
   // ── Mappings ──
+  // Compared as the board stores them (_mappingsKey): the rows' UI-only `bidir` made every mapping look changed.
   const mappingsChanged = fullPush || !baseline ||
-    JSON.stringify(baseline.mappings) !== JSON.stringify(config.mappings);
+    _mappingsKey(baseline.mappings) !== _mappingsKey(config.mappings);
   if (mappingsChanged) {
     for (const m of config.mappings) {
       let cmd = `MAP,${m.type.toUpperCase()},S${m.sourcePort}`;
@@ -1619,12 +1745,31 @@ function buildSystemFile(system) {
 
   for (const board of system.boards) {
     lines.push(`[WCB${board.wcbNumber}]`);
-    const boardWithQty = { ...board, wcbQuantity: system.general.wcbQuantity };
-    lines.push(buildCommandString(boardWithQty, null, true, FILE_OPTS));
+    // Each board as parseSystemFile reads it back, General's shared fields winning (applyGeneralToBoard) - as every
+    // push writes them too. Written from the board's own copy, a slot General never reached (a client slot, a board
+    // WDP added after the General fields were set) carried other values, and a reload put General's in (W-17).
+    const boardOut = { ...board };
+    applyGeneralToBoard(system.general, boardOut);
+    let chain = buildCommandString(boardOut, null, true, FILE_OPTS);
+    // A client slot (a WCB_Client device: a card, never pushed) keeps its type and alias through the file as the
+    // Wizard-only ?CLIENT token; without it the slot reloaded as a WCB with no clientAlias. The slot's WCB config
+    // still rides along, as the slot keeps it for a flip back to WCB. Last in the chain, so a Wizard from before the
+    // token reads the rest as it always did and ignores it (parseToken's default case).
+    if (board.type === 'client') chain += `^?CLIENT,${_escapeFileText(board.clientAlias ?? '')}`;
+    lines.push(chain);
     lines.push('');
   }
 
   return lines.join('\n');
+}
+
+// Wizard-only free text inside a system file's ?-chain (the client alias): '%' and '^' are percent-encoded, so no
+// value can hold the '^?' the chain is split on (extractChainedTokens). Decoding leaves anything else alone.
+function _escapeFileText(s) {
+  return String(s).replace(/[%^]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+function _unescapeFileText(s) {
+  return String(s).replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
 // ─────────────────────────────────────────────
@@ -1643,7 +1788,15 @@ function diffConfigs(configA, configB) {
   }
 
   check('hwVersion',      configA.hwVersion,      configB.hwVersion);
+  check('statusLedPin',   configA.statusLedPin ?? 38, configB.statusLedPin ?? 38);
   check('wcbNumber',      configA.wcbNumber,       configB.wcbNumber);
+  // Every field the builder writes has to be compared here, or a builder that drops it passes every round-trip test.
+  // These six were missing, and a disabled controller's custom id was lost on every full push unnoticed (W-3).
+  check('alias',          configA.alias ?? '',     configB.alias ?? '');
+  check('specialPeer',    !!configA.specialPeer,   !!configB.specialPeer);
+  check('specialPeerId',  configA.specialPeerId ?? 20, configB.specialPeerId ?? 20);
+  check('wdpEnabled',     configA.wdpEnabled  !== false, configB.wdpEnabled  !== false);
+  check('wdpAutoJoin',    configA.wdpAutoJoin !== false, configB.wdpAutoJoin !== false);
   check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
   check('meshChannel',    configA.meshChannel ?? 1, configB.meshChannel ?? 1);
   check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
@@ -1652,17 +1805,20 @@ function diffConfigs(configA, configB) {
   check('delimiter',      configA.delimiter,       configB.delimiter);
   check('funcChar',       configA.funcChar,        configB.funcChar);
   check('cmdChar',        configA.cmdChar,         configB.cmdChar);
-  check('kyber',          configA.kyber,           configB.kyber);
+  check('kyber',          _kyberKey(configA.kyber), _kyberKey(configB.kyber));   // targets as a set (W-20)
   check('mp3',            configA.mp3,             configB.mp3);
   check('hcr',            configA.hcr,             configB.hcr);
+  check('dfp',            configA.dfp,             configB.dfp);
   check('wleds',          configA.wleds,           configB.wleds);
   check('etm',            configA.etm,             configB.etm);
   check('maestros',       configA.maestros,        configB.maestros);
-  check('mappings',       configA.mappings,        configB.mappings);
+  if (_mappingsKey(configA.mappings) !== _mappingsKey(configB.mappings))
+    diffs.push({ path: 'mappings', from: configA.mappings, to: configB.mappings });
   check('sequences',      configA.sequences,       configB.sequences);
   check('variables',      configA.variables ?? [], configB.variables ?? []);
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
   check('broadcastToS0',  configA.broadcastToS0 ?? false, configB.broadcastToS0 ?? false);
+  check('wifi',           configA.wifi ?? { mode: 'off' }, configB.wifi ?? { mode: 'off' });
 
   for (let i = 0; i < 5; i++) {
     const pa = configA.serialPorts[i];
@@ -1708,41 +1864,350 @@ function getNestedValue(obj, path) {
   return path.split('.').reduce((acc, key) => acc?.[key], obj);
 }
 
+// Mappings as the board stores them, for comparing. syncMappingsToConfig (app.js) adds the UI-only `bidir` (the
+// "mirror on the destination board" toggle, which the firmware never sees) and builds its keys in its own order, so
+// raw JSON said every mapping had changed after any touch of a mapping row. The push then re-sent them all, and a
+// re-sent PWM input mapping reboots the board (addPWMMapping, WCB_PWM.cpp) for nothing.
+function _mappingsKey(list) {
+  return JSON.stringify((list ?? []).map(m => ({
+    type:         String(m.type ?? '').toUpperCase(),
+    sourcePort:   m.sourcePort,
+    rawMode:      !!m.rawMode,
+    destinations: (m.destinations ?? []).map(d => ({ wcbNumber: d.wcbNumber, port: d.port })),
+  })));
+}
+
+// A local Kyber's targets as a set, for comparing. The board forwards to each target whatever the list's order
+// (forwardDataFromKyber walks kyberTargets[] per byte, WCB.ino), and the order differs by source: a pull lists the
+// Maestro table's proxies before the KYBER line's own (collectConfigCommands, WCB.ino, claims the Kyber late), and
+// autoComputeKyberTargets (app.js) puts the live boards' Maestros first. Compared in order, the same targets were a
+// change: a no-edit push re-sent ?KYBER,CLEAR and ?KYBER,LOCAL, and a KYBER line reboots the board (W-20).
+function _kyberTargetsKey(targets) {
+  return (targets ?? []).map(t => `M${t.id}:W${t.wcb}S${t.port}:${t.baud}`).sort().join(',');
+}
+const _kyberKey = (k) => (k ? { ...k, targets: _kyberTargetsKey(k.targets) } : k);
+
+// ─────────────────────────────────────────────
+// Command characters: what the firmware accepts
+// ─────────────────────────────────────────────
+// field is 'delimiter' | 'funcChar' | 'cmdChar'; chars holds all three. Returns '' when chars[field] is acceptable
+// next to the other two, else a sentence saying why not - the General inputs and the setup wizard show it, and a
+// push refuses to SET a character that fails it. Every character is one printable, non-space ASCII byte: the
+// setters take exactly one byte (args.length() == 1, WCB.ino) and prefixCharOk refuses space and control bytes.
+// The three must differ: a delimiter equal to a prefix splits every line at its own first character, and two equal
+// prefixes swallow a whole command family (prefixCharOk). The delimiter is also punctuation, and never ',' - every
+// command separates its fields with commas, so a ',' delimiter tears each one apart. The firmware refuses ',',
+// letters, digits and either prefix as the delimiter; a board still on ',' from an older firmware keeps it (the
+// parser reads it, and nothing here re-sends a character that did not change).
+const _CHAR_NAMES = { delimiter: 'Command Delimiter', funcChar: 'Local Function Identifier', cmdChar: 'Command Character' };
+function commandCharProblem(field, chars) {
+  const c = chars?.[field];
+  const name = _CHAR_NAMES[field];
+  if (!name) return `unknown command character field ${field}`;
+  if (typeof c !== 'string' || c.length !== 1 || c < '!' || c > '~')
+    return `The ${name} must be one printable character (not a space)`;
+  if (field === 'delimiter') {
+    if (c === ',') return "',' cannot be the Command Delimiter: every command separates its fields with commas";
+    if (/[A-Za-z0-9]/.test(c)) return 'The Command Delimiter must be a punctuation character such as ^ | ~ or #';
+  }
+  for (const other of Object.keys(_CHAR_NAMES)) {
+    if (other !== field && chars[other] === c) return `'${c}' is already the ${_CHAR_NAMES[other]}: pick a different ${name}`;
+  }
+  return '';
+}
+
+// The commands a push changes the characters with, in the order it sends them, or why it cannot. A push sends
+// DELIM, then CMDCHAR, then FUNCCHAR, each as its own line behind the function identifier the board still has
+// (FUNCCHAR last: the board switches its parser the moment it lands), ahead of everything else (boardGo,
+// boardGoRemote). The board checks each against its LIVE characters at that moment - delimCharOk a new delimiter
+// against the current function identifier and command character, prefixCharOk a new prefix against the current other
+// prefix and the current delimiter (WCB.ino) - so a legal end state is not enough. Checked only at the end, function
+// identifier '!' then delimiter '?' sent ?DELIM,? while '?' was still the function identifier: the board refused it,
+// took ?FUNCCHAR,!, and ran the rest of the relay push, joined with '?', as ONE command, and the Wizard reported
+// success. What a push cannot do in its order it refuses, saying how to do it in two.
+// A board still on ',' (older firmware took it) splits every line at its commas before reading it, ?DELIM,x included,
+// so nothing reaches it intact until its delimiter changes, and only the two-character legacy <func>D<x> (no comma)
+// does that.
+// current: the board's characters (its pulled baseline; null = a fresh board's defaults). target: what the push sets.
+// -> { problem, commands }: problem '' and the commands to send in order, or problem saying why not (no period).
+const _CHAR_DEFAULTS = { delimiter: '^', funcChar: '?', cmdChar: ';' };
+const _CHAR_PUSH_ORDER = [['delimiter', 'DELIM', ['funcChar', 'cmdChar']],
+                          ['cmdChar', 'CMDCHAR', ['funcChar', 'delimiter']],
+                          ['funcChar', 'FUNCCHAR', ['cmdChar', 'delimiter']]];
+function planCommandCharChange(current, target) {
+  const cur = {}, tgt = {};
+  for (const f of Object.keys(_CHAR_DEFAULTS)) {
+    cur[f] = current?.[f] || _CHAR_DEFAULTS[f];
+    tgt[f] = target?.[f]  || _CHAR_DEFAULTS[f];
+  }
+  if (cur.delimiter === ',' && tgt.delimiter === ',') {
+    return { problem: "The board's Command Delimiter is ',', and it splits every command it reads at its commas, so " +
+                      'nothing would arrive intact. Pick another Command Delimiter in General Settings (^ is the ' +
+                      'default) and push again: the push changes it first', commands: [] };
+  }
+  for (const f of Object.keys(_CHAR_DEFAULTS)) {
+    if (tgt[f] === cur[f]) continue;
+    const why = commandCharProblem(f, tgt);
+    if (why) return { problem: why, commands: [] };
+  }
+  const live = { ...cur };
+  const commands = [];
+  for (const [f, verb, against] of _CHAR_PUSH_ORDER) {
+    if (tgt[f] === cur[f]) continue;
+    const c = tgt[f];
+    const clash = against.find(o => live[o] === c);
+    if (clash) {
+      // '<c>' is still the board's <clash> when this step lands (<clash> is always a prefix that is changing: any other
+      // clash is an illegal end state, refused above). When moving <clash> on its own and then the rest are two pushes
+      // the board takes, say so. Otherwise (a swap, a rotation) the two pushes that always work: every changing prefix
+      // to an unused character - and the delimiter too on a ',' board, which takes nothing else until it has moved -
+      // then the new characters. No step of the second push can meet a character the board is still using.
+      const N = _CHAR_NAMES;
+      const alone = { ...cur, [clash]: tgt[clash] };
+      if (!planCommandCharChange(cur, alone).problem && !planCommandCharChange(alone, tgt).problem) {
+        return { commands: [], problem: `The push sets the ${N[f]} before the ${N[clash]}, and '${c}' is still the ` +
+                 `board's ${N[clash]} at that point, so the board would refuse it. Push the new ${N[clash]} first, ` +
+                 `then the ${N[f]}` };
+      }
+      const moving = Object.keys(_CHAR_DEFAULTS)
+        .filter(p => (p === 'delimiter' ? cur.delimiter === ',' : tgt[p] !== cur[p]))
+        .map(p => `the ${N[p]}`);
+      const list = moving.length > 1 ? `${moving.slice(0, -1).join(', ')} and ${moving.at(-1)}` : moving[0];
+      return { commands: [], problem: `'${c}' is still the board's ${N[clash]} when the push sets the new ${N[f]}, ` +
+               `and these characters cannot all change in one push. Set ${list} to unused ` +
+               `character${moving.length > 1 ? 's' : ''} and push, then set the new ones and push again` };
+    }
+    commands.push(f === 'delimiter' && live.delimiter === ',' ? `${live.funcChar}D${c}` : `${live.funcChar}${verb},${c}`);
+    live[f] = c;
+  }
+  return { problem: '', commands };
+}
+
+// ─────────────────────────────────────────────
+// Remote config pull (?MGMT,PULL through a relay) — the pure pieces, here so node --test reaches them
+// ─────────────────────────────────────────────
+// A relay prints one line per message it reassembles, and picks the tag from the ESP-NOW packet type the TARGET
+// sent it in, never from the text:
+//   [MGMT:CONFIG,<n>]<reply>                  a whole reply of 2912 characters or less (16 frags x 182), the only
+//                                             form every firmware before F13 sends
+//   [MGMT:CFGPART,<n>]P<id>,<k>,<K>:<data>~   part k of K of a longer reply. Only for a request that asked for
+//                                             parts (?MGMT,PULL,<n>,P); a target never sends parts unasked
+//   [MGMT:CFGERR,<n>]<CODE>,<detail>          the target could not send its config; never any config text
+// <reply> is [VER:<fw>] + the ?-chain + ^?CHK<8 hex>, the CRC-32 of the chain between them (configPullWalk,
+// WCB.ino). The data of parts 1..K, joined in order, is that same reply, cut on byte offsets the target backs off
+// so no UTF-8 character is split.
+// The new tags differ from CONFIG BEFORE the comma on purpose. An old Wizard (including the copy frozen inside
+// every Intellex install) matches '[MGMT:CONFIG,' and stores ANY non-empty body under it as the board's config AND
+// the baseline the next push diffs against, with no CRC check - so a part or an error must never arrive under it.
+// This Wizard checks a CONFIG body like a join (createPullCollector) and stores nothing that fails.
+
+// CRC-32: reflected, poly 0xEDB88320, init and final XOR 0xFFFFFFFF - the firmware's calculateCRC32/crc32Update
+// (WCB.ino) and zlib's. Over UTF-8 BYTES: a string is encoded first, because the firmware sums the raw bytes of
+// aliases, labels and sequence values that can hold multi-byte characters. Returns an unsigned 32-bit number.
+const _CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(input) {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = _CRC32_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Bytes in, trimmed non-empty lines out: THE line splitter for both serial transports, BoardConnection's direct
+// reader (_startReading) and its shared-hub path (connectShared). One TextDecoder in stream mode, so a multi-byte
+// character split across two reads decodes whole. The direct reader used to decode every read on its own, which
+// turned such a character into two U+FFFD: silently stored as config by a legacy pull, and a CRC failure on every
+// parts pull. Reads end wherever the USB transfer does (Intellex forwards reads of 'in_waiting or 1' bytes), so a
+// 2.9 KB part line crosses a dozen boundaries. A throw from onLine propagates, but only after the buffer has moved
+// past that line, so it is never delivered twice.
+function makeLineSplitter(onLine) {
+  const decoder = new TextDecoder();
+  let buf = '';
+  return function feed(bytes) {
+    buf += decoder.decode(bytes, { stream: true });
+    let start = 0;
+    try {
+      let nl;
+      while ((nl = buf.indexOf('\n', start)) !== -1) {
+        const line = buf.slice(start, nl).replace(/\r$/, '').trim();
+        start = nl + 1;
+        if (line) onLine(line);
+      }
+    } finally {
+      if (start) buf = buf.slice(start);
+    }
+  };
+}
+
+// A part's body (after its [MGMT:CFGPART,<n>] tag): P<id>,<k>,<K>:<data>~ -> { id, k, K, data } or null.
+// id is 4 upper-case hex digits, random per target job; k is 1-based and k <= K. Strict, trailing '~' included: the
+// '~' is framing, because every line is trimmed on the way in and a part ending in a space (a label, a sequence
+// value) would otherwise lose it at the join. A line that another print landed on after the '~' is null too -
+// the part is lost and the attempt retries, which is safe; a guessed repair is not.
+const _CFG_PART_RE = /^P([0-9A-F]{4}),([1-9][0-9]?),([1-9][0-9]?):([\s\S]+)~$/;
+function parseConfigPart(body) {
+  const m = _CFG_PART_RE.exec(typeof body === 'string' ? body : '');
+  if (!m) return null;
+  const k = Number(m[2]);
+  const K = Number(m[3]);
+  if (k > K) return null;
+  return { id: m[1], k, K, data: m[4] };
+}
+
+// An error's body (after its [MGMT:CFGERR,<n>] tag; the relay strips the leading 'E'): <CODE>,<detail>.
+// -> { code, detail, retryable, reason }. NOMEM (heap too fragmented for the reply buffer, which comes and goes
+// with load) and CHANGED (the config changed between the target's walks) are worth another attempt, and so is
+// NOPARTS (a reply over 2912 characters for a request that did not ask for parts): this Wizard always asks with
+// ,P, so a NOPARTS only means every type-19 copy of the request was lost while a type-5 copy got through.
+// TOOBIG (more than 16 parts) is not.
+// A code this Wizard does not know is treated as permanent: its detail is shown at once rather than after three
+// more requests to a target that already said no.
+const _CFGERR_CODES = {
+  NOMEM:   { retryable: true,  text: 'target is out of memory for the reply' },
+  CHANGED: { retryable: true,  text: 'config changed while the target was sending it' },
+  NOPARTS: { retryable: true,  text: 'config is too large for one reply and the request for parts did not arrive' },
+  TOOBIG:  { retryable: false, text: 'config is too large to pull' },
+};
+function parseConfigError(body) {
+  const s = String(body ?? '').trim();
+  const m = /^([A-Z][A-Z0-9_]*)(?:,([\s\S]*))?$/.exec(s);
+  const code = m ? m[1] : 'UNKNOWN';
+  const detail = m ? (m[2] ?? '').trim() : s;
+  const known = Object.prototype.hasOwnProperty.call(_CFGERR_CODES, code) ? _CFGERR_CODES[code] : null;
+  const text = known ? known.text : `target error ${code}`;
+  return { code, detail, retryable: !!known?.retryable, reason: detail ? `${text} (${detail})` : text };
+}
+
+// A whole reply: [VER:<fw>] head, ^?CHK<8 hex> tail, and the CRC-32 of the chain between them. -> { ok, reason,
+// ver }. The tail is taken from the END: a sequence value can legitimately hold an earlier '^?CHK' (WCB.ino looks
+// for the checksum with lastIndexOf for the same reason).
+// unpaddedCrc: accept 1-8 hex digits, for a legacy [MGMT:CONFIG,n] reply. 6.0.x printed the CRC with
+// String(crc, HEX), which drops leading zeros (about one config in 16); it is still compared as a full 32-bit number.
+// Parts only ever come from firmware that pads, so a join keeps the strict form.
+function verifyConfigReply(str, { unpaddedCrc = false } = {}) {
+  if (typeof str !== 'string') return { ok: false, reason: 'no reply text' };
+  const head = /^\[VER:([^\]]*)\]/.exec(str);
+  if (!head) return { ok: false, reason: 'no [VER:] head' };
+  const tail = (unpaddedCrc ? /\^\?CHK([0-9A-Fa-f]{1,8})$/ : /\^\?CHK([0-9A-Fa-f]{8})$/).exec(str);
+  if (!tail || tail.index < head[0].length) return { ok: false, reason: 'no ^?CHK tail' };
+  const want = parseInt(tail[1], 16) >>> 0;
+  const got = crc32(str.slice(head[0].length, tail.index));
+  if (got !== want) {
+    return { ok: false, reason: `checksum ${got.toString(16).toUpperCase().padStart(8, '0')} != ${tail[1].toUpperCase()}` };
+  }
+  return { ok: true, reason: '', ver: head[1] };
+}
+
+// The pull listener's state machine, one per pull: feed(line) -> { kind, src, ... } with kind
+//   'ignored'   not a pull reply for wantWCB (another board's, another tag, a malformed part: reason says which)
+//   'legacy'    [MGMT:CONFIG,n] with a body that verifies: { body } (trimmed), the whole reply as it is stored
+//   'empty'     [MGMT:CONFIG,n] with no body: the target ran out of memory building a legacy reply
+//   'partial'   a part of the current id: { id, k, K, have, progress } - progress false for a duplicate
+//   'complete'  all K parts of one id, joined and CRC-checked: { id, K, text, ver }
+//   'crcFail'   all K parts in, but the join fails verifyConfigReply: { id, K, reason }; or a legacy body that fails
+//               it: { reason } (no id or K)
+//   'error'     a CFGERR ({ code, detail, retryable, reason }), or code NOTUTF8 when a failed join or legacy body
+//               holds U+FFFD (with the join's { id, K }; a legacy body gets an id of its own, 'L<n>')
+// A legacy body is verified like a join, [VER:] head, ^?CHK tail and CRC, with the tail's leading zeros optional
+// (verifyConfigReply, unpaddedCrc). The Wizard used to store it unchecked as the config AND the baseline the next
+// push diffs against (CLAUDE.md rule 15), so a body cut short or corrupted on the way was written back to the board
+// as a change. A failure is retried like a failed join. Every legacy reply is a job of its own: the target rebuilds
+// it for each request.
+// The tag is matched strictly: digits right up to the ']'. The old listener read the number with parseInt, so
+// '[MGMT:CONFIG,3,1/3]' counted as board 3 and '[MGMT:CONFIG,X]' (NaN) as every board.
+// Parts collect per id: a part of another id (a new target job - a retry, or a job restarted because the config
+// changed) starts over, since two builds' parts must never be joined; the CRC would catch it, but only after the
+// last part. A U+FFFD in a join that fails the CRC is NOTUTF8, and retryable, because one join cannot tell its two
+// causes apart: a byte lost in transport inside a multi-byte character (random: the next job arrives whole), or bytes
+// stored in NVS that are not UTF-8 (a label typed from a Latin-1 terminal: every job decodes them to U+FFFD, which
+// re-encodes as EF BF BD, so it never verifies). A second job is what tells them apart, so the caller stops on the
+// second NOTUTF8 of a pull from a new id (app.js _pullNotUtf8).
+const _MGMT_PULL_TAG_RE = /^\[MGMT:(CONFIG|CFGPART|CFGERR),(\d+)\]/;
+const _NOTUTF8_REASON  = 'config text is not valid UTF-8 (a byte lost on the way, or stored that way on the target)';
+function createPullCollector(wantWCB) {
+  const want = Number(wantWCB);
+  let cur = null;   // { id, K, parts: [data | undefined] x K, have }
+  let legacyJobs = 0;
+  return {
+    feed(line) {
+      const m = _MGMT_PULL_TAG_RE.exec(typeof line === 'string' ? line : '');
+      if (!m) return { kind: 'ignored' };
+      const src = Number(m[2]);
+      if (src !== want) return { kind: 'ignored', src, reason: `a reply from WCB${src}` };
+      const body = line.slice(m[0].length);
+      if (m[1] === 'CONFIG') {
+        const text = body.trim();
+        if (!text) return { kind: 'empty', src };
+        const v = verifyConfigReply(text, { unpaddedCrc: true });
+        if (v.ok) return { kind: 'legacy', src, body: text };
+        if (text.includes('�')) {
+          return { kind: 'error', src, id: `L${++legacyJobs}`, code: 'NOTUTF8', detail: v.reason, retryable: true,
+                   reason: _NOTUTF8_REASON };
+        }
+        return { kind: 'crcFail', src, reason: v.reason };
+      }
+      if (m[1] === 'CFGERR') return { kind: 'error', src, ...parseConfigError(body) };
+      const p = parseConfigPart(body);
+      if (!p) return { kind: 'ignored', src, reason: 'a malformed part' };
+      if (!cur || cur.id !== p.id || cur.K !== p.K) cur = { id: p.id, K: p.K, parts: new Array(p.K), have: 0 };
+      if (cur.parts[p.k - 1] !== undefined) {
+        return { kind: 'partial', src, id: p.id, k: p.k, K: p.K, have: cur.have, progress: false };
+      }
+      cur.parts[p.k - 1] = p.data;
+      cur.have++;
+      if (cur.have < cur.K) return { kind: 'partial', src, id: p.id, k: p.k, K: p.K, have: cur.have, progress: true };
+      const text = cur.parts.join('');
+      cur = null;
+      const v = verifyConfigReply(text);
+      if (v.ok) return { kind: 'complete', src, id: p.id, K: p.K, text, ver: v.ver };
+      if (text.includes('\uFFFD')) {
+        return { kind: 'error', src, id: p.id, K: p.K, code: 'NOTUTF8', detail: v.reason, retryable: true,
+                 reason: _NOTUTF8_REASON };
+      }
+      return { kind: 'crcFail', src, id: p.id, K: p.K, reason: v.reason };
+    },
+  };
+}
+
 // ─────────────────────────────────────────────
 // Exports — available to app.js and parser.test.js
 // ─────────────────────────────────────────────
-if (typeof module !== 'undefined' && typeof module.exports !== 'undefined' && typeof window === 'undefined') {
-  // Node.js / test environment only (not browser)
-  module.exports = {
-    createDefaultBoardConfig,
-    createDefaultSystemConfig,
-    parseBackupString,
-    parseSystemFile,
-    buildCommandString,
-    buildSystemFile,
-    diffConfigs,
-    collectAllMaestros,
-    getAvailablePorts,
-    evaluatePortClaims,
-    HW_VERSION_MAP,
-    hwValueToDisplay,
-    hwValueToBinary,
-  };
-} else {
-  // Browser environment — attach to window
-  window.WCBParser = {
-    createDefaultBoardConfig,
-    createDefaultSystemConfig,
-    parseBackupString,
-    parseSystemFile,
-    buildCommandString,
-    buildSystemFile,
-    diffConfigs,
-    collectAllMaestros,
-    getAvailablePorts,
-    evaluatePortClaims,
-    HW_VERSION_MAP,
-    hwValueToDisplay,
-    hwValueToBinary,
-  };
+// ONE object for both worlds. They used to be two hand-kept lists, and a function added to the Node one only
+// passed every unit test and then threw 'WCBParser.x is not a function' in the page. Two independent ifs, so a
+// test that loads this file with a stub window and module (unit/pull.test.js) sees both and can compare them.
+const WCB_PARSER_API = {
+  createDefaultBoardConfig,
+  createDefaultSystemConfig,
+  parseBackupString,
+  parseSystemFile,
+  buildCommandString,
+  buildSystemFile,
+  diffConfigs,
+  collectAllMaestros,
+  getAvailablePorts,
+  evaluatePortClaims,
+  commandCharProblem,
+  planCommandCharChange,
+  HW_VERSION_MAP,
+  hwValueToDisplay,
+  hwValueToBinary,
+  crc32,
+  makeLineSplitter,
+  parseConfigPart,
+  parseConfigError,
+  verifyConfigReply,
+  createPullCollector,
+};
+if (typeof module !== 'undefined' && module && module.exports) {
+  module.exports = WCB_PARSER_API;   // Node: node --test, the harness's wizard.parser
+}
+if (typeof window !== 'undefined') {
+  window.WCBParser = WCB_PARSER_API; // the browser: app.js reaches every parser function as WCBParser.x
 }

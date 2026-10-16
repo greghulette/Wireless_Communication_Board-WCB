@@ -144,17 +144,17 @@
           <div class="field">
             <label>Command Delimiter <span class="wiz-hint" data-tip="Character that separates commands in a batch string. Default is ^. Must be identical on every board.">i</span></label>
             <input type="text" id="g-delimiter" value="^" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
           <div class="field">
             <label>Local Function Identifier <span class="wiz-hint" data-tip="Prefix character for commands processed only by this board and not relayed to others. Default is ?.">i</span></label>
             <input type="text" id="g-funcchar" value="?" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
           <div class="field">
             <label>Command Character <span class="wiz-hint" data-tip="Character that identifies a command string on the serial line. Default is ;. Must match across all boards.">i</span></label>
             <input type="text" id="g-cmdchar" value=";" maxlength="1" spellcheck="false"
-              oninput="onGeneralCmdCharChange()">
+              oninput="onGeneralCmdCharChange(this)">
           </div>
         </div>
 
@@ -172,7 +172,7 @@
           <div class="field-group">
             <div class="field"><label>Timeout (ms) <span class="wiz-hint" data-tip="Milliseconds to wait before declaring a board unresponsive after it misses too many heartbeats.">i</span></label><input type="number" id="g-etm-timeout" value="500" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Heartbeat Interval (sec) <span class="wiz-hint" data-tip="How often (in seconds) each board broadcasts a heartbeat signal to the others.">i</span></label><input type="number" id="g-etm-hb" value="10" oninput="onGeneralETMChange()"></div>
-            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="3" oninput="onGeneralETMChange()"></div>
+            <div class="field"><label>Missed Heartbeats <span class="wiz-hint" data-tip="Number of consecutive missed heartbeats before a board is declared offline.">i</span></label><input type="number" id="g-etm-miss" value="5" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Boot Heartbeat (sec) <span class="wiz-hint" data-tip="Extra grace period in seconds for a board to send its first heartbeat after powering on.">i</span></label><input type="number" id="g-etm-boot" value="2" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Message Count <span class="wiz-hint" data-tip="?ETM,CHAR benchmark only: messages sent per board per phase. The firmware clamps this to 10-200.">i</span></label><input type="number" id="g-etm-count" value="20" min="10" max="200" oninput="onGeneralETMChange()"></div>
             <div class="field"><label>Message Delay (ms) <span class="wiz-hint" data-tip="Delay in milliseconds between each repeated offline alert message.">i</span></label><input type="number" id="g-etm-delay" value="100" oninput="onGeneralETMChange()"></div>
@@ -610,6 +610,44 @@
       </table>
       </div>
 
+      <!-- WiFi — PER BOARD. Advanced-only: most builders never need it, and an
+           access point on a droid is a decision worth making deliberately. -->
+      <div class="subsection advanced-only hidden" style="--rail:#00d4ff">
+      <hr class="divider">
+      <div class="subsection-title">WiFi <span class="wiz-hint" data-tip="Optional. Lets this board host an access point, or join one, so the mesh can be managed without a USB cable. Off by default.">i</span></div>
+      <div class="field-group">
+        <div class="field">
+          <label>Mode <span class="wiz-hint" data-tip="Off: ESP-NOW only (default). Host AP: this board runs its own access point. Join: this board connects to an existing network, e.g. a NaviCore's AP.">i</span></label>
+          <div class="radio-group">
+            <label><input type="radio" name="b{N}-wifi" value="off" checked onchange="onWifiModeChange({N})"><span>Off</span></label>
+            <label><input type="radio" name="b{N}-wifi" value="ap" onchange="onWifiModeChange({N})"><span>Host AP</span></label>
+            <label><input type="radio" name="b{N}-wifi" value="join" onchange="onWifiModeChange({N})"><span>Join</span></label>
+          </div>
+        </div>
+      </div>
+      <div id="b{N}-wifi-ap" class="field-group" style="display:none">
+        <div class="field">
+          <label>Network Name (SSID) <span class="wiz-hint" data-tip="Leave blank and the board derives WCB-<alias>, or WCB-<number> if it has no alias.">i</span></label>
+          <input type="text" id="b{N}-wifi-ap-ssid" maxlength="32" placeholder="blank = WCB-&lt;alias&gt;" oninput="onWifiFieldChange({N})">
+        </div>
+        <div class="field">
+          <label>Password <span class="wiz-hint" data-tip="Required, 8 characters minimum. This interface accepts commands for the whole mesh with no credential of its own, so the firmware refuses to start an open access point.">i</span></label>
+          <input type="password" id="b{N}-wifi-ap-pass" maxlength="63" placeholder="required, 8+ characters" oninput="onWifiFieldChange({N})">
+        </div>
+      </div>
+      <div id="b{N}-wifi-join" class="field-group" style="display:none">
+        <div class="field">
+          <label>Network to Join</label>
+          <input type="text" id="b{N}-wifi-join-ssid" maxlength="32" placeholder="e.g. NaviCore-20" oninput="onWifiFieldChange({N})">
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="b{N}-wifi-join-pass" maxlength="63" oninput="onWifiFieldChange({N})">
+        </div>
+      </div>
+      <div id="b{N}-wifi-note" class="hint" style="display:none"></div>
+      </div>
+
       <!-- Kyber section (shown only when Controller = Kyber) -->
       <div id="b{N}-kyber-section" class="subsection" style="--rail:#ff5d6c;display:none">
       <hr class="divider">
@@ -626,13 +664,11 @@
           </div>
         </div>
         <div class="field" id="b{N}-kyber-port-wrap" style="display:none">
-          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to.">i</span></label>
+          <label>Kyber Maestro Port <span class="wiz-hint" data-tip="The serial port on this board that the Kyber receiver is physically connected to. Serial 1 or 2 only: Serial 3-5 are software serial and cannot receive the Kyber at 115,200, and a port with a local Maestro can't also be the Kyber port.">i</span></label>
+          <!-- Rebuilt by updateKyberPortDropdown() (app.js), which offers S1/S2 minus claimed ports. -->
           <select id="b{N}-kyber-port" onchange="onKyberPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2" selected>Serial 2</option>
-            <option value="3">Serial 3</option>
-            <option value="4">Serial 4</option>
-            <option value="5">Serial 5</option>
           </select>
         </div>
         <div class="field" id="b{N}-kyber-baud-wrap" style="display:none">
@@ -739,9 +775,18 @@
 
       <!-- Stored Sequences -->
       <div class="subsection" style="--rail:#b07cff">
-      <div class="flex items-center gap-8 mb-12">
+      <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <input type="search" class="seq-filter" id="b{N}-seq-filter" placeholder="Filter by name or contents"
+               spellcheck="false" oninput="seqPagerFilter({N}, this.value)"
+               title="Show only the sequences whose name or commands contain this text (not case-sensitive)">
+        <label class="seq-page-size" title="How many sequences one page shows (remembered in this browser)">Show
+          <select id="b{N}-seq-size" onchange="seqPagerSize({N}, this.value)">
+            <option value="5">5</option><option value="10">10</option><option value="25">25</option>
+            <option value="50">50</option><option value="0">All</option>
+          </select>
+        </label>
         <label class="seq-test-scope" style="margin-left:auto">
           <input type="checkbox" id="b{N}-seq-test-mesh"> Test mesh-wide
           <span class="wiz-hint tip-left" data-tip="Off (default): TEST fires this board only (;SEQkey,L). On: TEST fires the sequence on EVERY board that has the same key (;SEQkey) — the real mesh-wide trigger.">i</span>
@@ -757,6 +802,7 @@
         </thead>
         <tbody id="b{N}-seq-tbody"></tbody>
       </table>
+      <div class="seq-pager" id="b{N}-seq-pager"></div>
       </div>
 
       <!-- Variables -->
@@ -819,8 +865,8 @@
         <div class="field" id="b{N}-mp3-baud-wrap" style="display:none">
           <label>Baud Rate <span class="wiz-hint" data-tip="Must match MP3TRIGR.INI on the SD card if present. Serial 3–5 are capped at 57,600.">i</span></label>
           <!-- ONLY 9600 / 38400: the firmware rejects anything else outright and discards the whole
-               ?MP3 config line (Code/WCB/WCB_MP3.cpp:287). S3-S5 are additionally blocked above 9600
-               because they are software serial (:292). -->
+               ?MP3 config line (Code/WCB/WCB_MP3.cpp, the ?MP3 handler). Both rates are allowed on S3-S5 too:
+               software serial receives exactly through 57600 there, so the MP3 handler has no S3-S5 block. -->
           <select id="b{N}-mp3-baud" onchange="onMP3BaudChange({N})">
             <option value="9600" selected>9,600</option>
             <option value="38400">38,400</option>
@@ -850,7 +896,7 @@
           <select id="b{N}-hcr-remote-wcb" onchange="onHCRChange({N})"></select>
         </div>
         <div class="field" id="b{N}-hcr-port-wrap" style="display:none">
-          <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 9600 baud.">i</span></label>
+          <label>HCR Port <span class="wiz-hint" data-tip="Serial port the HCR is wired to. Reserved exclusively — broadcast disabled. Prefer a hardware port (S1/S2); S3–S5 are limited to 57,600 baud.">i</span></label>
           <select id="b{N}-hcr-port" onchange="onHCRPortChange({N})">
             <option value="1">Serial 1</option>
             <option value="2">Serial 2</option>
@@ -860,7 +906,7 @@
           </select>
         </div>
         <div class="field" id="b{N}-hcr-baud-wrap" style="display:none">
-          <label>Baud Rate <span class="wiz-hint" data-tip="HCR serial baud. S3–S5 (software serial) are limited to 9600.">i</span></label>
+          <label>Baud Rate <span class="wiz-hint" data-tip="HCR serial baud. S3–S5 (software serial) allow up to 57,600; 115,200 needs S1 or S2.">i</span></label>
           <select id="b{N}-hcr-baud" onchange="onHCRBaudChange({N})">
             <option value="9600" selected>9,600</option>
             <option value="19200">19,200</option>

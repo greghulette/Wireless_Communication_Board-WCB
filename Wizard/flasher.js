@@ -92,6 +92,132 @@ function loadScript(src) {
   });
 }
 
+// ─── BEGIN gh-explain: why a firmware download from GitHub failed ──────
+// The SAME block is in the WCB Wizard (Wizard/flasher.js) and the NaviCore config
+// tool (config_tool/flasher.js). Keep the two byte-identical: the WCB repo's
+// nctool.fw_gh_explain_same_code test compares them.
+//
+// The firmware comes from GitHub (the file list from api.github.com, the bytes from
+// raw.githubusercontent.com). When GitHub is down, throttled or out of reach, a flash
+// fails for a reason nobody at the bench can fix, and "HTTP 503" does not say so.
+// ghExplain(err) turns such a failure into one sentence that says whose problem it
+// is. It runs only AFTER a failure: a download that works makes no extra request.
+//   1. no internet  navigator.onLine is false, or neither GitHub nor its status page answers
+//   2. rate limit   403/429 with x-ratelimit-remaining: 0, or GitHub's rate-limit message
+//   3. GitHub down  githubstatus.com reports Git Operations, API Requests or Pages as not operational
+//   4. GitHub error a 5xx (or no answer) while the status page says all is well
+//   5. not found    a 404 is ours, not GitHub's (the branch has no such image):
+//                   ghExplain returns null and the caller keeps its own message
+// Under Intellex the page's GitHub calls are answered by the host (/_api/gh/*), which
+// works out why on its side and sends the sentence as `explain`; that is used as it is.
+const GH_STATUS_URL        = 'https://www.githubstatus.com/api/v2/components.json';
+const GH_STATUS_TIMEOUT_MS = 4000;    // the status page answers in well under a second
+const GH_STATUS_CACHE_MS   = 60000;   // one look a minute, however many downloads fail
+const GH_STATUS_PARTS      = ['Git Operations', 'API Requests', 'Pages'];
+let _ghStatusCache = null;            // { at, trouble }: the last answer the status page gave
+
+// The error to throw for a GitHub reply that was not ok. `message` is the technical
+// detail (it stays in the log); `.gh` is what ghExplain() reads.
+async function ghHttpError(resp, message) {
+  const e = new Error(message);
+  const hdr = (k) => { try { return resp.headers.get(k); } catch (_) { return null; } };
+  let body = '';
+  try { body = (await resp.clone().text()).slice(0, 4000); } catch (_) { /* unreadable body */ }
+  let hostExplain = '';
+  try {
+    // Only a same-origin reply can carry an explanation: that is the Intellex host.
+    if (new URL(resp.url, location.href).origin === location.origin) {
+      const j = JSON.parse(body);
+      if (j && typeof j.explain === 'string') hostExplain = j.explain.trim();
+    }
+  } catch (_) { /* not JSON, or no location */ }
+  const reset = parseInt(hdr('x-ratelimit-reset') || '', 10);
+  const after = parseInt(hdr('retry-after') || '', 10);
+  e.gh = {
+    status: resp.status,
+    timeout: false,
+    rateLimited: (resp.status === 403 || resp.status === 429)
+                 && (hdr('x-ratelimit-remaining') === '0' || /rate limit/i.test(body)),
+    resetAt: reset > 0 ? reset * 1000 : (after >= 0 ? Date.now() + after * 1000 : 0),
+    hostExplain,
+  };
+  return e;
+}
+
+// fetch() for a GitHub URL: a request that gets no answer at all throws an error
+// ghExplain() can read. A reply that is not ok is returned; the caller words it.
+async function ghFetch(url, what, init) {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const e = new Error(`no answer from GitHub for ${what}: ${(err && err.message) || err}`);
+    const name = err && err.name;
+    e.gh = { status: 0, timeout: name === 'TimeoutError' || name === 'AbortError',
+             rateLimited: false, resetAt: 0, hostExplain: '' };
+    throw e;
+  }
+}
+
+// The download-related parts githubstatus.com reports as not operational, worded:
+// [] when all of them are fine, null when the status page could not be read.
+async function ghStatusTrouble() {
+  if (_ghStatusCache && Date.now() - _ghStatusCache.at < GH_STATUS_CACHE_MS) return _ghStatusCache.trouble;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), GH_STATUS_TIMEOUT_MS);
+  try {
+    const r = await fetch(GH_STATUS_URL, { cache: 'no-store', signal: ctl.signal });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j || !Array.isArray(j.components)) return null;
+    const want = GH_STATUS_PARTS.map((s) => s.toLowerCase());
+    const trouble = j.components
+      .filter((c) => c && typeof c.name === 'string' && want.includes(c.name.trim().toLowerCase())
+                     && typeof c.status === 'string' && c.status !== 'operational')
+      .map((c) => `${c.name.trim()}: ${c.status.replace(/_/g, ' ')}`);
+    _ghStatusCache = { at: Date.now(), trouble };
+    return trouble;
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const GH_MSG_OFFLINE = "Can't reach the internet - check this computer's connection.";
+function ghMsgRateLimit(resetAt) {
+  const when = resetAt > 0
+    ? `It resets at ${new Date(resetAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`
+    : 'It resets within the hour.';
+  return "GitHub's download limit for this network is used up (60 requests an hour without signing in). "
+    + `${when} This is GitHub's limit, not a fault in the WCB tools.`;
+}
+function ghMsgTrouble(trouble) {
+  return `GitHub is having problems right now (${trouble.join('; ')}). The firmware download depends on GitHub, `
+    + "so this isn't something on your side or in the WCB tools - try again once GitHub recovers. "
+    + 'Live status: githubstatus.com';
+}
+function ghMsgServer(code) {
+  return `GitHub's servers answered with an error (${code}). That's usually a short-lived problem on GitHub's side `
+    + '- try again in a few minutes. If it keeps happening, check githubstatus.com.';
+}
+
+// One sentence for the user about a failed GitHub fetch, or null when the failure is
+// not GitHub's (a 404, a file missing from the list, anything not from ghFetch /
+// ghHttpError): the caller then keeps its own message.
+async function ghExplain(err) {
+  const g = err && err.gh;
+  if (!g) return null;
+  if (g.hostExplain) return g.hostExplain;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return GH_MSG_OFFLINE;
+  if (g.status === 404) return null;
+  if (g.rateLimited) return ghMsgRateLimit(g.resetAt);
+  const trouble = await ghStatusTrouble();
+  if (trouble && trouble.length) return ghMsgTrouble(trouble);
+  if (!g.status) return trouble ? ghMsgServer(g.timeout ? 'timeout' : 'no response') : GH_MSG_OFFLINE;
+  return ghMsgServer(g.status);
+}
+// ─── END gh-explain ─────────────────────────────────────────────────────
+
 // ─── Binary fetching ──────────────────────────────────────────────
 // Fetches bootloader(s), partition table, and app from GitHub Contents API.
 // Returns { images, boot, hasBootPart }:
@@ -120,8 +246,8 @@ async function getBinaryData(binaryType, onLog) {
     if (GITHUB_BRANCH !== GITHUB_BRANCH_DEFAULT)
       onLog(`⚠ Firmware source branch: ${GITHUB_BRANCH} (NOT released 'main')`);
     onLog(`Scanning ${GITHUB_BIN_PATH}/ on GitHub (${GITHUB_BRANCH})…`);
-    const listResp = await fetch(apiUrl);
-    if (!listResp.ok) throw new Error(`GitHub API: HTTP ${listResp.status}`);
+    const listResp = await ghFetch(apiUrl, 'the firmware list');
+    if (!listResp.ok) throw await ghHttpError(listResp, `GitHub API: HTTP ${listResp.status}`);
     const files = await listResp.json();
 
     // Find a file by suffix and fetch its binary content
@@ -129,8 +255,8 @@ async function getBinaryData(binaryType, onLog) {
       const match = files.find(f => f.type === 'file' && f.name.endsWith(suffix));
       if (!match) throw new Error(`No file ending with "${suffix}" found in ${GITHUB_BIN_PATH}/`);
       onLog(`Found: ${match.name}`);
-      const r = await fetch(match.download_url);
-      if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${match.name}`);
+      const r = await ghFetch(match.download_url, match.name);
+      if (!r.ok) throw await ghHttpError(r, `HTTP ${r.status} fetching ${match.name}`);
       const buf = await r.arrayBuffer();
       if (buf.byteLength === 0) throw new Error(`${match.name} is empty`);
       return buf;
@@ -184,7 +310,17 @@ async function getBinaryData(binaryType, onLog) {
     return { images, boot, hasBootPart };
 
   } catch (e) {
-    onLog(`GitHub fetch failed: ${e.message}`);
+    onLog(`GitHub fetch failed: ${e.message}`);   // the technical detail, always
+    // GitHub down, throttled or out of reach: say whose problem it is, in one
+    // sentence. The caller shows it once (boardGo's "Flash failed: …", the OTA
+    // toasts), so no toast here as well.
+    const why = await ghExplain(e);
+    if (why) {
+      onLog(`✕ ${why}`);
+      const err = new Error(why);
+      err.gh = e.gh;
+      throw err;
+    }
     showToast(`Could not fetch firmware from GitHub: ${e.message}`, 'error');
     throw new Error(`GitHub fetch failed: ${e.message}`);
   }
