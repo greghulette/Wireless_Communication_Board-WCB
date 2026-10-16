@@ -494,7 +494,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?MAESTRO,CLEAR,ALL                  - Remove all configs"));
         Serial.println(F("\nTriggering a Maestro at runtime (;M commands):"));
         Serial.println(F("  ;M<id><seq>            Restart script at subroutine (NO comma)"));
-        Serial.println(F("                           id 1-8 = a Maestro ; seq = 0-255"));
+        Serial.println(F("                           id 1-8 = a Maestro ; seq = 0-127"));
         Serial.println(F("                           ;M11 = Maestro1 sub1 ; ;M25 = M2 sub5"));
         Serial.println(F("                           ;M0<seq> = ALL Maestros (e.g. ;M02)"));
         Serial.println(F("                           ;M9<seq> = all LOCAL Maestros (this board)"));
@@ -506,7 +506,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    setAccel,<ch>,<val>    channel acceleration (0-255)"));
         Serial.println(F("    goHome                 all channels to home"));
         Serial.println(F("    stopScript             stop the running Maestro script"));
-        Serial.println(F("    sub,<n>[,<param>]      run subroutine <n> 0-255 [+param 0-16383]"));
+        Serial.println(F("    sub,<n>[,<param>]      run subroutine <n> 0-127 [+param 0-16383]"));
         Serial.println(F("    getPosition,<ch>       -> RAM var m<dev>pos<ch>  (0-16383)"));
         Serial.println(F("    getMovingState         -> RAM var m<dev>moving   (0 or 1)"));
         Serial.println(F("    getErrors              -> RAM var m<dev>err (clears on read)"));
