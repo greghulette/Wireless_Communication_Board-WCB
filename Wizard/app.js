@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.12:07.R.OCT.2026';
+const UI_VERSION = '20.19:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -4832,6 +4832,7 @@ function updateSeqValCount(rowId, n) {
     const delim = boardConfigs[n]?.delimiter ?? '^';
     el.textContent = _seqRowValue(row, ta, delim).length;
   }
+  window.SeqBuilder?.scheduleThumb(n, rowId);   // the row's timing strip follows the text (seq-builder.js)
 }
 
 function addSequenceRow(n) {
@@ -5035,8 +5036,12 @@ function appendSequenceRow(n, key, value) {
                 oninput="autoResizeTextarea(this); updateSeqValCount('${rowId}',${n})"
                 >${escHtml(lines)}</textarea>
       <div class="seq-char-count" id="${rowId}-val-count">${valLen}</div>
+      <div class="seq-thumb" id="${rowId}-thumb" role="button" tabindex="0" hidden
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();SeqBuilder.open(${n},'${rowId}')}"></div>
     </td>
     <td class="seq-action-cell">
+      <button class="btn btn-ghost btn-sm" title="Open on a timeline"
+              onclick="SeqBuilder.open(${n},'${rowId}')">TIMELINE</button>
       <button class="btn btn-primary btn-sm" title="Test"
               onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
       <button class="btn btn-primary btn-sm" title="Save/Update"
@@ -5055,6 +5060,7 @@ function appendSequenceRow(n, key, value) {
   // (';w2 ***note' -> ';w2***note', 'a^^b' -> 'a^b', the spaces around a ^), and each rewrite was a ?SEQ,SAVE the
   // user never asked for on the next push (W-10). An edited row is read from its text exactly as before.
   tr._seqLoaded = { value, text: ta ? ta.value : lines, delim };
+  window.SeqBuilder?.renderRowThumb(n, rowId);
 
   updateSequencePlayButtons(n);
   // NB: the "⇄ also on Wx" hint is populated by the caller — populateUIFromConfig runs one

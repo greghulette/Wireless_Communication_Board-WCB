@@ -1,0 +1,1598 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo DomeControlFirmware (Roam-A-Dome) — :DP motion + #DP config (consolidated)",
+  "enums": {
+    "rad.onOff": {
+      "label": "State",
+      "values": [
+        {
+          "code": "0",
+          "label": "Off / Disabled"
+        },
+        {
+          "code": "1",
+          "label": "On / Enabled"
+        }
+      ]
+    },
+    "rad.pin": {
+      "label": "Digital Pin",
+      "values": [
+        {
+          "code": "1",
+          "label": "Pin 1"
+        },
+        {
+          "code": "2",
+          "label": "Pin 2"
+        },
+        {
+          "code": "3",
+          "label": "Pin 3"
+        },
+        {
+          "code": "4",
+          "label": "Pin 4"
+        },
+        {
+          "code": "5",
+          "label": "Pin 5"
+        },
+        {
+          "code": "6",
+          "label": "Pin 6"
+        },
+        {
+          "code": "7",
+          "label": "Pin 7"
+        },
+        {
+          "code": "8",
+          "label": "Pin 8"
+        }
+      ]
+    },
+    "rad.baudBasic": {
+      "label": "Baud",
+      "values": [
+        {
+          "code": "2400",
+          "label": "2400"
+        },
+        {
+          "code": "9600",
+          "label": "9600"
+        },
+        {
+          "code": "19200",
+          "label": "19200"
+        },
+        {
+          "code": "38400",
+          "label": "38400"
+        }
+      ]
+    },
+    "rad.baudFull": {
+      "label": "Baud",
+      "values": [
+        {
+          "code": "2400",
+          "label": "2400"
+        },
+        {
+          "code": "9600",
+          "label": "9600"
+        },
+        {
+          "code": "19200",
+          "label": "19200"
+        },
+        {
+          "code": "38400",
+          "label": "38400"
+        },
+        {
+          "code": "57600",
+          "label": "57600"
+        },
+        {
+          "code": "115200",
+          "label": "115200"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "roam-a-dome",
+      "name": "Roam-A-Dome",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "RDH (DomeControlFirmware)",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "categories": [
+        "Movement",
+        "Sequences",
+        "Modes",
+        "Timing",
+        "Serial",
+        "I/O",
+        "Setup",
+        "WiFi/Remote",
+        "Power",
+        "System"
+      ],
+      "commands": [
+        {
+          "id": "rad.rotate.abs",
+          "name": "Rotate to Absolute",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPA{deg}",
+          "params": [
+            {
+              "name": "deg",
+              "type": "int",
+              "min": -359,
+              "max": 359,
+              "required": true,
+              "default": 180
+            }
+          ],
+          "examples": [
+            ":DPA90",
+            ":DPA270",
+            ":DPA-90"
+          ],
+          "commentLabel": "RAD rotate absolute",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.rotate.absRamp",
+          "name": "Rotate to Absolute (speed ramp)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPA{deg},{speed},{maxspeed}",
+          "params": [
+            {
+              "name": "deg",
+              "type": "int",
+              "min": -359,
+              "max": 359,
+              "required": true,
+              "default": 90
+            },
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 20
+            },
+            {
+              "name": "maxspeed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 100
+            }
+          ],
+          "examples": [
+            ":DPA90,20,100",
+            ":DPA180,40,80"
+          ],
+          "commentLabel": "RAD rotate absolute + ramp",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.rotate.absRandom",
+          "name": "Rotate to Random Absolute",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPAR",
+          "params": [],
+          "examples": [
+            ":DPAR"
+          ],
+          "commentLabel": "RAD rotate random absolute",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.rotate.rel",
+          "name": "Rotate Relative",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPD{deg}",
+          "params": [
+            {
+              "name": "deg",
+              "type": "int",
+              "min": -360,
+              "max": 360,
+              "required": true,
+              "default": 90
+            }
+          ],
+          "examples": [
+            ":DPD90",
+            ":DPD-90",
+            ":DPD45"
+          ],
+          "commentLabel": "RAD rotate relative (+ CCW / - CW)",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.rotate.relRandom",
+          "name": "Rotate Random Relative",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPDR",
+          "params": [],
+          "examples": [
+            ":DPDR"
+          ],
+          "commentLabel": "RAD rotate random relative",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.spin",
+          "name": "Spin Continuous",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPR{speed}",
+          "params": [
+            {
+              "name": "speed",
+              "type": "int",
+              "min": -100,
+              "max": 100,
+              "required": true,
+              "default": 30
+            }
+          ],
+          "examples": [
+            ":DPR30",
+            ":DPR-30",
+            ":DPR0"
+          ],
+          "commentLabel": "RAD spin (- CW, 0 = stop)",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.home",
+          "name": "Home",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPH",
+          "params": [],
+          "examples": [
+            ":DPH"
+          ],
+          "commentLabel": "RAD home",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.wait",
+          "name": "Wait Seconds",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":DPW{seconds}",
+          "params": [
+            {
+              "name": "seconds",
+              "type": "int",
+              "min": 1,
+              "max": 600,
+              "required": true,
+              "default": 2
+            }
+          ],
+          "examples": [
+            ":DPW2",
+            ":DPW60"
+          ],
+          "commentLabel": "RAD wait",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.waitRandom",
+          "name": "Wait Random Range",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":DPWR{min},{max}",
+          "params": [
+            {
+              "name": "min",
+              "type": "int",
+              "min": 1,
+              "max": 600,
+              "required": true,
+              "default": 10
+            },
+            {
+              "name": "max",
+              "type": "int",
+              "min": 1,
+              "max": 600,
+              "required": true,
+              "default": 20
+            }
+          ],
+          "examples": [
+            ":DPWR10,20"
+          ],
+          "commentLabel": "RAD wait random range",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.playSeq",
+          "name": "Play Stored Sequence",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":DPS{number}",
+          "params": [
+            {
+              "name": "number",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 1
+            }
+          ],
+          "examples": [
+            ":DPS1",
+            ":DPS0"
+          ],
+          "commentLabel": "RAD play sequence",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.togglePin",
+          "name": "Toggle Pin",
+          "safety": "power",
+          "encoder": "template",
+          "template": ":DPT{pin}",
+          "params": [
+            {
+              "name": "pin",
+              "type": "int",
+              "min": 1,
+              "max": 8,
+              "required": true,
+              "default": 1
+            }
+          ],
+          "examples": [
+            ":DPT3",
+            ":DPT1"
+          ],
+          "commentLabel": "RAD toggle pin",
+          "category": "Power"
+        },
+        {
+          "id": "rad.cfg.zero",
+          "name": "Reset Dome Settings",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPZERO",
+          "params": [],
+          "examples": [
+            "#DPZERO"
+          ],
+          "commentLabel": "RAD reset settings",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.factory",
+          "name": "Factory Reset",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPFACTORY",
+          "params": [],
+          "examples": [
+            "#DPFACTORY"
+          ],
+          "commentLabel": "RAD factory reset",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.restart",
+          "name": "Reboot",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPRESTART",
+          "params": [],
+          "examples": [
+            "#DPRESTART"
+          ],
+          "commentLabel": "RAD reboot",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.status",
+          "name": "Print Status",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#DPSTATUS",
+          "params": [],
+          "examples": [
+            "#DPSTATUS"
+          ],
+          "commentLabel": "RAD print status",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.config",
+          "name": "Dump Config",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#DPCONFIG",
+          "params": [],
+          "examples": [
+            "#DPCONFIG"
+          ],
+          "commentLabel": "RAD dump config",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.setupVelocity",
+          "name": "Setup Velocity",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSETUPVELOCITY{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 1000,
+              "required": true,
+              "default": 100
+            }
+          ],
+          "examples": [
+            "#DPSETUPVELOCITY100"
+          ],
+          "commentLabel": "RAD setup velocity",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.setup",
+          "name": "Auto-Calibrate",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "#DPSETUP",
+          "params": [],
+          "examples": [
+            "#DPSETUP"
+          ],
+          "commentLabel": "RAD auto-calibrate",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.maxspeed",
+          "name": "Max Speed",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPMAXSPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 50
+            }
+          ],
+          "examples": [
+            "#DPMAXSPEED50"
+          ],
+          "commentLabel": "RAD max speed",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.homespeed",
+          "name": "Home Speed",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOMESPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 40
+            }
+          ],
+          "examples": [
+            "#DPHOMESPEED40"
+          ],
+          "commentLabel": "RAD home speed",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.autospeed",
+          "name": "Auto Speed",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTOSPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 30
+            }
+          ],
+          "examples": [
+            "#DPAUTOSPEED30"
+          ],
+          "commentLabel": "RAD auto speed",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.targetspeed",
+          "name": "Target Speed",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPTARGETSPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 100
+            }
+          ],
+          "examples": [
+            "#DPTARGETSPEED100"
+          ],
+          "commentLabel": "RAD target speed",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.minspeed",
+          "name": "Min Speed",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPMINSPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 15
+            }
+          ],
+          "examples": [
+            "#DPMINSPEED15"
+          ],
+          "commentLabel": "RAD min speed",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.inputspeed",
+          "name": "Input Speed Scale",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPINPUTSPEED{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 100
+            }
+          ],
+          "examples": [
+            "#DPINPUTSPEED100"
+          ],
+          "commentLabel": "RAD input speed scale",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.autoleft",
+          "name": "Auto Left Limit",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTOLEFT{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 180,
+              "required": true,
+              "default": 80
+            }
+          ],
+          "examples": [
+            "#DPAUTOLEFT80"
+          ],
+          "commentLabel": "RAD auto left limit",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.autoright",
+          "name": "Auto Right Limit",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTORIGHT{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 180,
+              "required": true,
+              "default": 80
+            }
+          ],
+          "examples": [
+            "#DPAUTORIGHT80"
+          ],
+          "commentLabel": "RAD auto right limit",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.fudge",
+          "name": "Position Tolerance",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPFUDGE{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 20,
+              "required": true,
+              "default": 5
+            }
+          ],
+          "examples": [
+            "#DPFUDGE5"
+          ],
+          "commentLabel": "RAD position tolerance",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.homePosHere",
+          "name": "Set Home Here",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOMEPOS",
+          "params": [],
+          "examples": [
+            "#DPHOMEPOS"
+          ],
+          "commentLabel": "RAD set home here",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.homePos",
+          "name": "Set Home Position",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOMEPOS{deg}",
+          "params": [
+            {
+              "name": "deg",
+              "type": "int",
+              "min": 0,
+              "max": 359,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#DPHOMEPOS90"
+          ],
+          "commentLabel": "RAD set home position",
+          "category": "Setup"
+        },
+        {
+          "id": "rad.cfg.automin",
+          "name": "Auto Min Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTOMIN{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 6
+            }
+          ],
+          "examples": [
+            "#DPAUTOMIN6"
+          ],
+          "commentLabel": "RAD auto min delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.automax",
+          "name": "Auto Max Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTOMAX{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 8
+            }
+          ],
+          "examples": [
+            "#DPAUTOMAX8"
+          ],
+          "commentLabel": "RAD auto max delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.homemin",
+          "name": "Home Min Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOMEMIN{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 6
+            }
+          ],
+          "examples": [
+            "#DPHOMEMIN6"
+          ],
+          "commentLabel": "RAD home min delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.homemax",
+          "name": "Home Max Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOMEMAX{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 8
+            }
+          ],
+          "examples": [
+            "#DPHOMEMAX8"
+          ],
+          "commentLabel": "RAD home max delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.targetmin",
+          "name": "Target Min Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPTARGETMIN{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#DPTARGETMIN0"
+          ],
+          "commentLabel": "RAD target min delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.targetmax",
+          "name": "Target Max Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPTARGETMAX{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 1
+            }
+          ],
+          "examples": [
+            "#DPTARGETMAX1"
+          ],
+          "commentLabel": "RAD target max delay",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.timeout",
+          "name": "Movement Timeout",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPTIMEOUT{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 30,
+              "required": true,
+              "default": 5
+            }
+          ],
+          "examples": [
+            "#DPTIMEOUT5"
+          ],
+          "commentLabel": "RAD movement timeout",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.report",
+          "name": "Position Report Interval",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPREPORT{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#DPREPORT100"
+          ],
+          "commentLabel": "RAD position report interval",
+          "category": "Timing"
+        },
+        {
+          "id": "rad.cfg.home",
+          "name": "Home Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPHOME{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPHOME1"
+          ],
+          "commentLabel": "RAD home mode",
+          "category": "Modes"
+        },
+        {
+          "id": "rad.cfg.auto",
+          "name": "Auto Random Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTO{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPAUTO1"
+          ],
+          "commentLabel": "RAD auto random mode",
+          "category": "Modes"
+        },
+        {
+          "id": "rad.cfg.autosafety",
+          "name": "Auto-Safety Interlock",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTOSAFETY{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPAUTOSAFETY1"
+          ],
+          "commentLabel": "RAD auto-safety interlock",
+          "category": "Modes"
+        },
+        {
+          "id": "rad.cfg.autorestart",
+          "name": "Auto Restart",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPAUTORESTART{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPAUTORESTART1"
+          ],
+          "commentLabel": "RAD auto restart",
+          "category": "Modes"
+        },
+        {
+          "id": "rad.cfg.invert",
+          "name": "Invert Motor Direction",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPINVERT{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPINVERT1"
+          ],
+          "commentLabel": "RAD invert",
+          "category": "Modes"
+        },
+        {
+          "id": "rad.cfg.scale",
+          "name": "Speed Ramping",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSCALE{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPSCALE1"
+          ],
+          "commentLabel": "RAD speed ramping",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.ascale",
+          "name": "Acceleration Scale",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPASCALE{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 20
+            }
+          ],
+          "examples": [
+            "#DPASCALE20"
+          ],
+          "commentLabel": "RAD acceleration scale",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.dscale",
+          "name": "Deceleration Scale",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPDSCALE{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 50
+            }
+          ],
+          "examples": [
+            "#DPDSCALE50"
+          ],
+          "commentLabel": "RAD deceleration scale",
+          "category": "Movement"
+        },
+        {
+          "id": "rad.cfg.serialin",
+          "name": "Packet-Serial Input",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSERIALIN{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPSERIALIN1"
+          ],
+          "commentLabel": "RAD packet-serial input",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.serialout",
+          "name": "Packet-Serial Output",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSERIALOUT{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPSERIALOUT1"
+          ],
+          "commentLabel": "RAD packet-serial output",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.serialbaud",
+          "name": "Command Serial Baud",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSERIALBAUD{baud}",
+          "params": [
+            {
+              "name": "baud",
+              "enum": "rad.baudBasic",
+              "required": true,
+              "default": "9600"
+            }
+          ],
+          "examples": [
+            "#DPSERIALBAUD9600"
+          ],
+          "commentLabel": "RAD serial baud",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.syrenbaud",
+          "name": "Syren Baud",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSYRENBAUD{baud}",
+          "params": [
+            {
+              "name": "baud",
+              "enum": "rad.baudFull",
+              "required": true,
+              "default": "9600"
+            }
+          ],
+          "examples": [
+            "#DPSYRENBAUD9600"
+          ],
+          "commentLabel": "RAD syren baud",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.syrenaddrin",
+          "name": "Syren Input Address",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSYRENADDRIN{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 129
+            }
+          ],
+          "examples": [
+            "#DPSYRENADDRIN129"
+          ],
+          "commentLabel": "RAD syren input address",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.syrenaddrout",
+          "name": "Syren Output Address",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSYRENADDROUT{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 129
+            }
+          ],
+          "examples": [
+            "#DPSYRENADDROUT129"
+          ],
+          "commentLabel": "RAD syren output address",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.syrenaddr",
+          "name": "Syren Address (both)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSYRENADDR{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 255,
+              "required": true,
+              "default": 129
+            }
+          ],
+          "examples": [
+            "#DPSYRENADDR129"
+          ],
+          "commentLabel": "RAD syren address (both)",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.sensorbaud",
+          "name": "Sensor Baud",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPSENSORBAUD{baud}",
+          "params": [
+            {
+              "name": "baud",
+              "enum": "rad.baudFull",
+              "required": true,
+              "default": "115200"
+            }
+          ],
+          "examples": [
+            "#DPSENSORBAUD115200"
+          ],
+          "commentLabel": "RAD sensor baud",
+          "category": "Serial"
+        },
+        {
+          "id": "rad.cfg.pwmin",
+          "name": "PWM Input",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMIN{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPPWMIN1"
+          ],
+          "commentLabel": "RAD PWM input",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmout",
+          "name": "PWM Output",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMOUT{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPPWMOUT1"
+          ],
+          "commentLabel": "RAD PWM output",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmarc",
+          "name": "PWM Arc Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMARC{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPPWMARC1"
+          ],
+          "commentLabel": "RAD PWM arc mode",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmmin",
+          "name": "PWM Min Pulse",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMMIN{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 801,
+              "max": 2199,
+              "required": true,
+              "default": 1000
+            }
+          ],
+          "examples": [
+            "#DPPWMMIN1000"
+          ],
+          "commentLabel": "RAD PWM min pulse",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmmax",
+          "name": "PWM Max Pulse",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMMAX{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 801,
+              "max": 2199,
+              "required": true,
+              "default": 2000
+            }
+          ],
+          "examples": [
+            "#DPPWMMAX2000"
+          ],
+          "commentLabel": "RAD PWM max pulse",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmneutral",
+          "name": "PWM Neutral Pulse",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMNEUTRAL{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 801,
+              "max": 2199,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            "#DPPWMNEUTRAL1500"
+          ],
+          "commentLabel": "RAD PWM neutral pulse",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pwmdeadband",
+          "name": "PWM Deadband %",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPWMDEADBAND{value}",
+          "params": [
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 50,
+              "required": true,
+              "default": 5
+            }
+          ],
+          "examples": [
+            "#DPPWMDEADBAND5"
+          ],
+          "commentLabel": "RAD PWM deadband %",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.pin",
+          "name": "Set Pin Default",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPPIN{pin}{value}",
+          "params": [
+            {
+              "name": "pin",
+              "enum": "rad.pin",
+              "required": true,
+              "default": "1"
+            },
+            {
+              "name": "value",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPPIN10",
+            "#DPPIN21"
+          ],
+          "commentLabel": "RAD pin default",
+          "category": "I/O"
+        },
+        {
+          "id": "rad.cfg.wifi",
+          "name": "WiFi Enable",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPWIFI{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPWIFI1"
+          ],
+          "commentLabel": "RAD WiFi enable",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.remote",
+          "name": "Droid Remote Enable",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPREMOTE{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#DPREMOTE1"
+          ],
+          "commentLabel": "RAD droid remote enable",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.rname",
+          "name": "Droid Remote Name",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPRNAME{name}",
+          "params": [
+            {
+              "name": "name",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "#DPRNAMEMyDome"
+          ],
+          "commentLabel": "RAD remote name (free text)",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.rsecret",
+          "name": "Droid Remote Secret",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPRSECRET{secret}",
+          "params": [
+            {
+              "name": "secret",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "#DPRSECRETAstromech"
+          ],
+          "commentLabel": "RAD remote secret (free text)",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.pair",
+          "name": "Start Pairing",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPPAIR",
+          "params": [],
+          "examples": [
+            "#DPPAIR"
+          ],
+          "commentLabel": "RAD start pairing",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.unpair",
+          "name": "Clear Pairing",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#DPUNPAIR",
+          "params": [],
+          "examples": [
+            "#DPUNPAIR"
+          ],
+          "commentLabel": "RAD clear pairing",
+          "category": "WiFi/Remote"
+        },
+        {
+          "id": "rad.cfg.listSeq",
+          "name": "List Sequences",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#DPL",
+          "params": [],
+          "examples": [
+            "#DPL"
+          ],
+          "commentLabel": "RAD list sequences",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.cfg.deleteSeq",
+          "name": "Delete Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPD{slot}",
+          "params": [
+            {
+              "name": "slot",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#DPD0"
+          ],
+          "commentLabel": "RAD delete sequence",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.cfg.storeSeq",
+          "name": "Store Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPS{slot}:{body}",
+          "params": [
+            {
+              "name": "slot",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 1
+            },
+            {
+              "name": "body",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "#DPS3:D50:W2:D-50"
+          ],
+          "commentLabel": "RAD store sequence (body: Z/R/A/D/W/H steps, colon-separated)",
+          "category": "Sequences"
+        },
+        {
+          "id": "rad.cfg.debug",
+          "name": "Verbose Debug",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#DPDEBUG{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "rad.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#DPDEBUG1"
+          ],
+          "commentLabel": "RAD verbose debug",
+          "category": "System"
+        },
+        {
+          "id": "rad.cfg.joy",
+          "name": "VT100 Joystick",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#DPJOY",
+          "params": [],
+          "examples": [
+            "#DPJOY"
+          ],
+          "commentLabel": "RAD VT100 joystick",
+          "category": "System"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "droidnet-command-library/catalog/v1",
+  "libraryVersion": "1.0.0",
+  "schemaVersion": "v1",
+  "generatedFrom": "WCB firmware 7.0 (Code/WCB) + WcbCmd 0.9.1 (2026-10)",
+  "boards": [
+    {
+      "id": "wcb-builder",
+      "file": "wcb-builder.json",
+      "name": "WCB boards the DroidNet snapshot lacks",
+      "confidence": "high"
+    }
+  ]
+}

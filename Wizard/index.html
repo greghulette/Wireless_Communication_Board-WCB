@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="seq-builder.css">
 </head>
 <body>
 
@@ -778,6 +779,8 @@
       <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <button class="btn btn-ghost btn-sm" onclick="SeqBuilder.openNew({N})"
+                title="Build a new sequence on a timeline, from the command library">+ Timeline</button>
         <input type="search" class="seq-filter" id="b{N}-seq-filter" placeholder="Filter by name or contents"
                spellcheck="false" oninput="seqPagerFilter({N}, this.value)"
                title="Show only the sequences whose name or commands contain this text (not case-sensitive)">
@@ -1101,6 +1104,7 @@
 <script src="device-labels.js"></script>
 <script src="serial-hub.js"></script>
 <script src="app.js"></script>
+<script src="seq-builder.js"></script>
 
 </body>
 </html>

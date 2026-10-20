@@ -410,6 +410,21 @@ for _key, _title in _SEQ_PAGER:
     test(f"wizard.{_key}", f"{_title} (no board: a fake board's sequences in the page)")(_seq_pager)
 
 
+# The sequence builder (2026-10-20, Greg: build sequences from the command library on a timeline, adjustable to the ms,
+# and show them graphically): a stored sequence on a timeline, written back into its row. Spec:
+# specs/seq_builder_fake.spec.js (Wizard/seq-builder.js, docs/SEQUENCE_BUILDER.md).
+_SEQ_BUILDER = (
+    ("seq_builder_open", "A stored sequence opens as it is: a lane per device, each step decoded through the command library, the same value out; the row shows a timing strip"),
+    ("seq_builder_edit", "A step moves to the ms in the inspector and by dragging (snapped), its fields re-encode it, undo/redo, and Apply writes the row a push sends"),
+    ("seq_builder_library", "The library lists the WCB group first; a command is set up in the composer and added at the playhead or dragged on; a device command goes to the port labelled for it; Apply makes a new row"),
+    ("seq_builder_rules", "Warnings where the board would not run it as drawn (a timed sequence started mid-way, a self-recall), an IF written after its delay, Save & Test saves and runs it"),
+)
+for _key, _title in _SEQ_BUILDER:
+    def _seq_builder(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: a fake board in the page)")(_seq_builder)
+
+
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how
 # the harness reads and restores it. Each writes only throwaway labels, sequences, a variable and a serial mapping, and
 # ?HW with W1's own value, and puts back what it wrote in a finally before config_guard's check; the specs check their

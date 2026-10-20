@@ -1,0 +1,199 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "rseries.effect": {
+      "label": "Effect",
+      "values": [
+        { "code": "0", "label": "Normal" },
+        { "code": "1", "label": "Alarm" },
+        { "code": "2", "label": "Failure" },
+        { "code": "3", "label": "Leia" },
+        { "code": "4", "label": "March" },
+        { "code": "5", "label": "Solid Color" },
+        { "code": "6", "label": "Flash Color" },
+        { "code": "7", "label": "Flip Flop Color" },
+        { "code": "8", "label": "Flip Flop Alt Color" },
+        { "code": "9", "label": "Color Swap" },
+        { "code": "10", "label": "Rainbow" },
+        { "code": "11", "label": "Red Alert" },
+        { "code": "12", "label": "Mic Bright" },
+        { "code": "13", "label": "Mic Rainbow" },
+        { "code": "14", "label": "Lights Out" },
+        { "code": "15", "label": "Text" },
+        { "code": "16", "label": "Text Scroll Left" },
+        { "code": "17", "label": "Text Scroll Right" },
+        { "code": "18", "label": "Text Scroll Up" },
+        { "code": "19", "label": "Roaming Pixel" },
+        { "code": "20", "label": "Horizontal Scan" },
+        { "code": "21", "label": "Vertical Scan" },
+        { "code": "22", "label": "Fire" },
+        { "code": "23", "label": "PSI Color Wipe" },
+        { "code": "24", "label": "Pulse" },
+        { "code": "99", "label": "Random" },
+        { "code": "100", "label": "SD Bitmap (custom)" },
+        { "code": "101", "label": "Plasma (custom)" },
+        { "code": "102", "label": "MetaBalls (custom)" },
+        { "code": "103", "label": "Fractal (custom)" },
+        { "code": "104", "label": "Fade and Scroll (custom)" },
+        { "code": "105", "label": "Color Wheel (custom)" }
+      ]
+    },
+    "rseries.color": {
+      "label": "Color",
+      "values": [
+        { "code": "0", "label": "Default" },
+        { "code": "1", "label": "Red" },
+        { "code": "2", "label": "Orange" },
+        { "code": "3", "label": "Yellow" },
+        { "code": "4", "label": "Green" },
+        { "code": "5", "label": "Cyan" },
+        { "code": "6", "label": "Blue" },
+        { "code": "7", "label": "Purple" },
+        { "code": "8", "label": "Magenta" },
+        { "code": "9", "label": "Pink" }
+      ]
+    },
+    "rseries.target": {
+      "label": "Display",
+      "values": [
+        { "code": "", "label": "All" },
+        { "code": "1", "label": "Front" },
+        { "code": "2", "label": "Rear" }
+      ]
+    },
+    "logicTextAddress": {
+      "label": "Display",
+      "values": [
+        { "code": "1", "label": "Top Front" },
+        { "code": "2", "label": "Bottom Front" },
+        { "code": "3", "label": "Rear" }
+      ]
+    },
+    "logicFont": {
+      "label": "Font",
+      "values": [
+        { "code": "60", "label": "Latin" },
+        { "code": "61", "label": "Aurabesh" }
+      ]
+    },
+    "logicToggle": {
+      "label": "State",
+      "values": [
+        { "code": "", "label": "Toggle" },
+        { "code": "0", "label": "Off" },
+        { "code": "1", "label": "On" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "rseries-logic",
+      "name": "RSeriesLogic (Logic Displays)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "Reeltwo WLogicEngine32 (C2B5)",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "rseries.effect",
+          "name": "Logic Effect",
+          "safety": "cosmetic",
+          "encoder": "rseries-le",
+          "params": [
+            { "name": "effect", "enum": "rseries.effect", "required": true },
+            { "name": "color", "enum": "rseries.color", "default": "0" },
+            { "name": "speed", "type": "int", "min": 0, "max": 9, "default": 0 },
+            { "name": "seconds", "type": "int", "min": 0, "max": 99, "default": 0 },
+            { "name": "target", "enum": "rseries.target", "default": "" }
+          ],
+          "examples": ["~RTLE51000", "~RTLE10590", "~RTLE213000"],
+          "commentLabel": "Logics {target} — {effect}[ · {color}]",
+          "category": "Lighting"
+        },
+        {
+          "id": "rseries.text",
+          "name": "Set Logic Text",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{address}M{text}",
+          "params": [
+            { "name": "address", "enum": "logicTextAddress", "required": true },
+            { "name": "text", "label": "Text", "pattern": ".+", "required": true }
+          ],
+          "examples": ["@1MHELLO", "@3MR2-D2"],
+          "commentLabel": "Logics {address} text",
+          "category": "Text"
+        },
+        {
+          "id": "rseries.font",
+          "name": "Set Logic Font",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{address}P{font}",
+          "params": [
+            { "name": "address", "enum": "logicTextAddress", "required": true },
+            { "name": "font", "enum": "logicFont", "default": "60" }
+          ],
+          "examples": ["@1P60", "@3P61"],
+          "commentLabel": "Logics {address} font — {font}",
+          "category": "Text"
+        },
+        {
+          "id": "rseries.cfg.wifi",
+          "name": "WiFi Enable",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#LEWIFI{state}",
+          "params": [
+            { "name": "state", "enum": "logicToggle", "default": "" }
+          ],
+          "examples": ["#LEWIFI1", "#LEWIFI0", "#LEWIFI"],
+          "commentLabel": "Logics WiFi — {state}",
+          "category": "Config"
+        },
+        {
+          "id": "rseries.cfg.remote",
+          "name": "Remote Enable",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#LEREMOTE{state}",
+          "params": [
+            { "name": "state", "enum": "logicToggle", "default": "" }
+          ],
+          "examples": ["#LEREMOTE1", "#LEREMOTE0", "#LEREMOTE"],
+          "commentLabel": "Logics remote — {state}",
+          "category": "Config"
+        },
+        {
+          "id": "rseries.sys.restart",
+          "name": "Restart",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#LERESTART",
+          "params": [],
+          "examples": ["#LERESTART"],
+          "commentLabel": "Logics restart",
+          "category": "System"
+        },
+        {
+          "id": "rseries.sys.zero",
+          "name": "Factory Reset",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#LEZERO",
+          "params": [],
+          "examples": ["#LEZERO"],
+          "commentLabel": "Logics factory reset",
+          "category": "System"
+        }
+      ],
+      "categories": ["Lighting", "Text", "Config", "System"]
+    }
+  ]
+}

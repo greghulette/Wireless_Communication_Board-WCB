@@ -1,0 +1,162 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {},
+  "components": [
+    {
+      "id": "wcb-wled",
+      "name": "WCB · WLED Lighting",
+      "kind": "wcb-verb",
+      "confidence": "high",
+      "firmware": "WCB WCB_WLED",
+      "routing": {
+        "class": "wcb-verb"
+      },
+      "commands": [
+        {
+          "id": "wled.on",
+          "name": "Lights on",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},ON",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true }
+          ],
+          "examples": [";L1,ON"],
+          "commentLabel": "WLED on",
+          "category": "Power"
+        },
+        {
+          "id": "wled.off",
+          "name": "Lights off",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},OFF",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true }
+          ],
+          "examples": [";L1,OFF"],
+          "commentLabel": "WLED off",
+          "category": "Power"
+        },
+        {
+          "id": "wled.toggle",
+          "name": "Toggle",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},TOGGLE",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true }
+          ],
+          "examples": [";L1,TOGGLE"],
+          "commentLabel": "WLED toggle",
+          "category": "Power"
+        },
+        {
+          "id": "wled.bri",
+          "name": "Set brightness",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},BRI,{level}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "level", "label": "Brightness (0-255)", "type": "int", "min": 0, "max": 255, "default": 128, "required": true }
+          ],
+          "examples": [";L1,BRI,128"],
+          "commentLabel": "WLED bri",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.preset",
+          "name": "Recall preset",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},PS,{preset}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "preset", "label": "Preset #", "type": "int", "min": 0, "max": 250, "default": 1, "required": true }
+          ],
+          "examples": [";L1,PS,3"],
+          "commentLabel": "WLED preset",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.color",
+          "name": "Set color",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},COL,{color}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "color", "label": "Color (RRGGBB or RRGGBBWW)", "default": "FF0000", "pattern": "[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", "required": true }
+          ],
+          "examples": [";L1,COL,FF0000"],
+          "commentLabel": "WLED color",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.fx",
+          "name": "Set effect",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},FX,{index}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "index", "label": "Effect #", "type": "int", "min": 0, "max": 255, "default": 0, "required": true }
+          ],
+          "examples": [";L1,FX,9"],
+          "commentLabel": "WLED fx",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.fxfull",
+          "name": "Set effect + speed/intensity",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},FX,{index},{speed},{intensity}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "index", "label": "Effect #", "type": "int", "min": 0, "max": 255, "default": 0, "required": true },
+            { "name": "speed", "label": "Speed (0-255)", "type": "int", "min": 0, "max": 255, "default": 128, "required": true },
+            { "name": "intensity", "label": "Intensity (0-255)", "type": "int", "min": 0, "max": 255, "default": 128, "required": true }
+          ],
+          "examples": [";L1,FX,9,128,200"],
+          "commentLabel": "WLED fx full",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.pal",
+          "name": "Set palette",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},PAL,{index}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "index", "label": "Palette #", "type": "int", "min": 0, "max": 255, "default": 0, "required": true }
+          ],
+          "examples": [";L1,PAL,5"],
+          "commentLabel": "WLED palette",
+          "category": "Lighting"
+        },
+        {
+          "id": "wled.json",
+          "name": "Raw JSON (escape hatch)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";L{wledId},JSON,{payload}",
+          "params": [
+            { "name": "wledId", "label": "WLED ID (1-9)", "type": "int", "min": 1, "max": 9, "default": 1, "required": true },
+            { "name": "payload", "label": "WLED /json/state document", "default": "{\"bri\":128}", "pattern": ".+", "required": true }
+          ],
+          "examples": [";L1,JSON,{\"bri\":128}"],
+          "commentLabel": "WLED json",
+          "category": "Advanced"
+        }
+      ],
+      "categories": [
+        "Power",
+        "Lighting",
+        "Advanced"
+      ]
+    }
+  ]
+}
