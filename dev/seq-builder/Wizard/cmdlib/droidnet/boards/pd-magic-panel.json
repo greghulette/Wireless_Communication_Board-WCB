@@ -1,0 +1,377 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "pd.pattern": {
+      "label": "Pattern",
+      "values": [
+        { "code": "0", "label": "Off" },
+        { "code": "1", "label": "On (Indefinite)" },
+        { "code": "2", "label": "On (2s)" },
+        { "code": "3", "label": "On (5s)" },
+        { "code": "4", "label": "On (10s)" },
+        { "code": "5", "label": "Toggle" },
+        { "code": "6", "label": "Alert (4s)" },
+        { "code": "7", "label": "Alert (10s)" },
+        { "code": "8", "label": "Trace Up Fill" },
+        { "code": "9", "label": "Trace Up Line" },
+        { "code": "10", "label": "Trace Down Fill" },
+        { "code": "11", "label": "Trace Down Line" },
+        { "code": "12", "label": "Trace Right Fill" },
+        { "code": "13", "label": "Trace Right Line" },
+        { "code": "14", "label": "Trace Left Fill" },
+        { "code": "15", "label": "Trace Left Line" },
+        { "code": "16", "label": "Expand Fill" },
+        { "code": "17", "label": "Expand Ring" },
+        { "code": "18", "label": "Compress Fill" },
+        { "code": "19", "label": "Compress Ring" },
+        { "code": "20", "label": "Cross" },
+        { "code": "21", "label": "Cylon (Column)" },
+        { "code": "22", "label": "Cylon (Row)" },
+        { "code": "23", "label": "Eye Scan" },
+        { "code": "24", "label": "Fade Out/In" },
+        { "code": "25", "label": "Fade Out" },
+        { "code": "26", "label": "Flash All" },
+        { "code": "27", "label": "Flash Vertical" },
+        { "code": "28", "label": "Flash Quadrants" },
+        { "code": "29", "label": "Two Loop" },
+        { "code": "30", "label": "One Loop" },
+        { "code": "31", "label": "Test Fill" },
+        { "code": "32", "label": "Test Pixel" },
+        { "code": "33", "label": "AI Logo" },
+        { "code": "34", "label": "2GWD Logo" },
+        { "code": "35", "label": "Quadrant Sequence (Type 1)" },
+        { "code": "36", "label": "Quadrant Sequence (Type 2)" },
+        { "code": "37", "label": "Quadrant Sequence (Type 3)" },
+        { "code": "38", "label": "Quadrant Sequence (Type 4)" },
+        { "code": "39", "label": "Random Pixel" },
+        { "code": "40", "label": "Countdown from 9" },
+        { "code": "41", "label": "Countdown from 3" },
+        { "code": "42", "label": "Random Alert (4s)" },
+        { "code": "43", "label": "Random Alert (8s)" },
+        { "code": "44", "label": "Smiley Face" },
+        { "code": "45", "label": "Sad Face" },
+        { "code": "46", "label": "Heart" },
+        { "code": "47", "label": "Checkerboard" },
+        { "code": "48", "label": "Compress In Fill" },
+        { "code": "49", "label": "Compress In Clear" },
+        { "code": "50", "label": "Explode Out Fill" },
+        { "code": "51", "label": "Explode Out Clear" },
+        { "code": "52", "label": "VU Meter (Type 1)" },
+        { "code": "53", "label": "VU Meter (Type 2)" },
+        { "code": "54", "label": "VU Meter (Type 3)" },
+        { "code": "55", "label": "VU Meter (Type 4)" },
+        { "code": "56", "label": "Animated Heart" },
+        { "code": "57", "label": "Rainbow Cycle" },
+        { "code": "58", "label": "Fire Effect" },
+        { "code": "59", "label": "Twinkle" },
+        { "code": "60", "label": "Plasma" },
+        { "code": "61", "label": "Game of Life" },
+        { "code": "62", "label": "Matrix Rain" },
+        { "code": "63", "label": "Rotating 3D Cube" },
+        { "code": "64", "label": "Kaleidoscope" },
+        { "code": "65", "label": "Raindrops" },
+        { "code": "66", "label": "Drip Effect" },
+        { "code": "67", "label": "Pac-Man Animation" },
+        { "code": "68", "label": "Space Invaders Animation" },
+        { "code": "80", "label": "Bouncing Text" },
+        { "code": "97", "label": "Text Scroll (English)" },
+        { "code": "98", "label": "Text Scroll (Aurebesh)" },
+        { "code": "99", "label": "Test All" }
+      ]
+    },
+    "pd.color": {
+      "label": "Color",
+      "values": [
+        { "code": "0", "label": "Preset 0" },
+        { "code": "1", "label": "Preset 1" },
+        { "code": "2", "label": "Preset 2" },
+        { "code": "3", "label": "Preset 3" },
+        { "code": "4", "label": "Preset 4" },
+        { "code": "5", "label": "Preset 5" },
+        { "code": "6", "label": "Preset 6" },
+        { "code": "7", "label": "Preset 7" },
+        { "code": "8", "label": "Preset 8" },
+        { "code": "9", "label": "Rainbow" }
+      ]
+    },
+    "pd.mode": {
+      "label": "Operating Mode",
+      "values": [
+        { "code": "0", "label": "Timed" },
+        { "code": "1", "label": "AlwaysOn" }
+      ]
+    },
+    "pd.font": {
+      "label": "Font",
+      "values": [
+        { "code": "0", "label": "Standard" },
+        { "code": "1", "label": "Aurebesh" }
+      ]
+    },
+    "pd.toggle": {
+      "label": "State",
+      "values": [
+        { "code": "0", "label": "Disabled" },
+        { "code": "1", "label": "Enabled" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "pd-magic-panel",
+      "name": "PD MagicPanel",
+      "kind": "device-native",
+      "confidence": "community",
+      "vendor": "Printed Droid",
+      "firmware": "MP32-Wireless v2.2+",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "notes": "Printed Droid Magic Panel 32 Wireless. Serial at 115200 / I2C addr 20, commands terminated with a carriage return by the transport. Wire strings here are the bare commands; the \\r terminator and any MarcDuino '%' wrapper are added by the controller (same convention as every other device-native board).",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "categories": [
+        "Patterns",
+        "Lighting",
+        "Text",
+        "Sequences",
+        "Setup",
+        "Config",
+        "Power"
+      ],
+      "commands": [
+        {
+          "id": "pdmp.pattern",
+          "name": "Run Pattern",
+          "safety": "cosmetic",
+          "template": "T{pattern}",
+          "params": [
+            { "name": "pattern", "enum": "pd.pattern", "required": true }
+          ],
+          "examples": ["T57", "T21"],
+          "commentLabel": "PD MP {pattern}",
+          "category": "Patterns"
+        },
+        {
+          "id": "pdmp.pattern.timed",
+          "name": "Run Pattern (timed)",
+          "safety": "cosmetic",
+          "template": "T{pattern}:{duration}",
+          "params": [
+            { "name": "pattern", "enum": "pd.pattern", "required": true },
+            { "name": "duration", "type": "int", "min": 1, "max": 3600, "required": true }
+          ],
+          "examples": ["T57:30", "T21:5"],
+          "commentLabel": "PD MP {pattern} ({duration}s)",
+          "category": "Patterns"
+        },
+        {
+          "id": "pdmp.demo",
+          "name": "Smart Demo",
+          "safety": "cosmetic",
+          "template": "DEMO",
+          "examples": ["DEMO"],
+          "commentLabel": "PD MP demo",
+          "category": "Patterns"
+        },
+        {
+          "id": "pdmp.brightness",
+          "name": "Brightness",
+          "safety": "cosmetic",
+          "template": "B{level}",
+          "params": [
+            { "name": "level", "type": "int", "min": 0, "max": 255, "required": true }
+          ],
+          "examples": ["B128", "B255"],
+          "commentLabel": "PD MP brightness {level}",
+          "category": "Lighting"
+        },
+        {
+          "id": "pdmp.speed",
+          "name": "Speed",
+          "safety": "cosmetic",
+          "template": "V{speed}",
+          "params": [
+            { "name": "speed", "type": "int", "min": 1, "max": 100, "required": true }
+          ],
+          "examples": ["V50"],
+          "commentLabel": "PD MP speed {speed}",
+          "category": "Lighting"
+        },
+        {
+          "id": "pdmp.color",
+          "name": "Preset Color",
+          "safety": "cosmetic",
+          "template": "C {color}",
+          "params": [
+            { "name": "color", "enum": "pd.color", "required": true }
+          ],
+          "examples": ["C 9", "C 3"],
+          "commentLabel": "PD MP color {color}",
+          "category": "Lighting"
+        },
+        {
+          "id": "pdmp.rgb",
+          "name": "Custom RGB",
+          "safety": "cosmetic",
+          "template": "C {r},{g},{b}",
+          "params": [
+            { "name": "r", "type": "int", "min": 0, "max": 255, "required": true },
+            { "name": "g", "type": "int", "min": 0, "max": 255, "required": true },
+            { "name": "b", "type": "int", "min": 0, "max": 255, "required": true }
+          ],
+          "examples": ["C 255,100,0"],
+          "commentLabel": "PD MP RGB {r},{g},{b}",
+          "category": "Lighting"
+        },
+        {
+          "id": "pdmp.transition",
+          "name": "Transitions",
+          "safety": "cosmetic",
+          "template": "TRANSITION {state}",
+          "params": [
+            { "name": "state", "enum": "pd.toggle", "required": true }
+          ],
+          "examples": ["TRANSITION 1", "TRANSITION 0"],
+          "commentLabel": "PD MP transitions {state}",
+          "category": "Lighting"
+        },
+        {
+          "id": "pdmp.text",
+          "name": "Scroll Text",
+          "safety": "cosmetic",
+          "template": "TEXT:{message}",
+          "params": [
+            { "name": "message", "pattern": ".+", "required": true }
+          ],
+          "examples": ["TEXT:HELLO"],
+          "commentLabel": "PD MP text: {message}",
+          "category": "Text"
+        },
+        {
+          "id": "pdmp.text.bounce",
+          "name": "Bounce Text",
+          "safety": "cosmetic",
+          "template": "TEXT_BOUNCE:{message}",
+          "params": [
+            { "name": "message", "pattern": ".+", "required": true }
+          ],
+          "examples": ["TEXT_BOUNCE:HI"],
+          "commentLabel": "PD MP bounce: {message}",
+          "category": "Text"
+        },
+        {
+          "id": "pdmp.text.save",
+          "name": "Save Text Slot",
+          "safety": "config",
+          "template": "TEXTSAVE{slot}:{message}",
+          "params": [
+            { "name": "slot", "type": "int", "min": 0, "max": 9, "required": true },
+            { "name": "message", "pattern": ".+", "required": true }
+          ],
+          "examples": ["TEXTSAVE3:HELLO"],
+          "commentLabel": "PD MP save text slot {slot}",
+          "category": "Text"
+        },
+        {
+          "id": "pdmp.text.load",
+          "name": "Load Text Slot",
+          "safety": "cosmetic",
+          "template": "TEXTLOAD{slot}",
+          "params": [
+            { "name": "slot", "type": "int", "min": 0, "max": 9, "required": true }
+          ],
+          "examples": ["TEXTLOAD3"],
+          "commentLabel": "PD MP load text slot {slot}",
+          "category": "Text"
+        },
+        {
+          "id": "pdmp.font",
+          "name": "Font",
+          "safety": "cosmetic",
+          "template": "FONT {font}",
+          "params": [
+            { "name": "font", "enum": "pd.font", "required": true }
+          ],
+          "examples": ["FONT 1", "FONT 0"],
+          "commentLabel": "PD MP font {font}",
+          "category": "Text"
+        },
+        {
+          "id": "pdmp.playlist",
+          "name": "Run Playlist",
+          "safety": "cosmetic",
+          "template": "PLAYLIST_RUN:{ids}",
+          "params": [
+            { "name": "ids", "label": "Pattern IDs (comma-separated)", "pattern": "[0-9]+(?:,[0-9]+)*", "required": true }
+          ],
+          "examples": ["PLAYLIST_RUN:1,2,3"],
+          "commentLabel": "PD MP playlist {ids}",
+          "category": "Sequences"
+        },
+        {
+          "id": "pdmp.startup",
+          "name": "Set Startup Pattern",
+          "safety": "config",
+          "template": "START {pattern}",
+          "params": [
+            { "name": "pattern", "enum": "pd.pattern", "required": true }
+          ],
+          "examples": ["START 5"],
+          "commentLabel": "PD MP startup pattern {pattern}",
+          "category": "Setup"
+        },
+        {
+          "id": "pdmp.mode",
+          "name": "Operating Mode",
+          "safety": "cosmetic",
+          "template": "P{mode}",
+          "params": [
+            { "name": "mode", "enum": "pd.mode", "required": true }
+          ],
+          "examples": ["P1", "P0"],
+          "commentLabel": "PD MP mode {mode}",
+          "category": "Setup"
+        },
+        {
+          "id": "pdmp.save",
+          "name": "Save Settings",
+          "safety": "config",
+          "template": "SAVE",
+          "examples": ["SAVE"],
+          "commentLabel": "PD MP save settings",
+          "category": "Config"
+        },
+        {
+          "id": "pdmp.load",
+          "name": "Load Settings",
+          "safety": "config",
+          "template": "LOAD",
+          "examples": ["LOAD"],
+          "commentLabel": "PD MP load settings",
+          "category": "Config"
+        },
+        {
+          "id": "pdmp.on",
+          "name": "Panel On",
+          "safety": "cosmetic",
+          "template": "ON",
+          "examples": ["ON"],
+          "commentLabel": "PD MP on",
+          "category": "Power"
+        },
+        {
+          "id": "pdmp.off",
+          "name": "Panel Off",
+          "safety": "cosmetic",
+          "template": "OFF",
+          "examples": ["OFF"],
+          "commentLabel": "PD MP off",
+          "category": "Power"
+        }
+      ]
+    }
+  ]
+}

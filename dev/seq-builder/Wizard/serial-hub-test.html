@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WcbSerialHub — 2-tab test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; max-width: 820px; }
+  h1 { font-size: 1.15rem; margin: 0 0 .25rem; }
+  .sub { color: #888; font-size: .85rem; margin: 0 0 1rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: .5rem 0; }
+  button { padding: .5rem 1rem; font-size: .9rem; border-radius: 6px; border: none; cursor: pointer;
+           color: #fff; font-weight: 600; }
+  button:disabled { background: #555 !important; color: #bbb; cursor: default; }
+  #join  { background: #1b7f3b; }   /* green */
+  #pick  { background: #2563eb; }   /* blue  */
+  #leave { background: #a33; }      /* red   */
+  #send  { background: #2563eb; }   /* blue  */
+  input[type=text] { flex: 1; min-width: 12rem; padding: .5rem; font: inherit; border-radius: 6px; border: 1px solid #888; }
+  .pill { display: inline-block; padding: .15rem .6rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
+  .pill.leader   { background: #1b7f3b; color: #fff; }
+  .pill.follower { background: #b7791f; color: #fff; }
+  .pill.idle     { background: #666; color: #fff; }
+  .pill.open  { background: #1b7f3b; color: #fff; }
+  .pill.shut  { background: #a33; color: #fff; }
+  #log { background: #111; color: #b6f0c0; font-family: ui-monospace, monospace; font-size: .8rem;
+         padding: .6rem; border-radius: 6px; height: 340px; overflow-y: auto; white-space: pre-wrap; }
+  .sys { color: #8ab4ff; }
+  .rx  { color: #b6f0c0; }
+  code { background: #8882; padding: .05rem .3rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>WcbSerialHub — 2-tab port sharing test</h1>
+<p class="sub">Open this page in <b>two tabs of the same origin</b>. Click <b>Join</b> in both.
+Then click <b>Pick Port</b> in <i>one</i> tab and choose your MgmtRelay/WCB — that tab becomes the
+<b>LEADER</b> (a tab holding no port never campaigns for the lock, so picking is what promotes it).
+The other stays <b>FOLLOWER</b>. Type in <i>either</i> tab → it reaches the one port; the board's
+replies appear in <b>both</b>. Close the leader tab → the follower auto-promotes and re-opens the port.</p>
+
+<div class="row">
+  <button id="join">Join</button>
+  <button id="pick" disabled>Pick Port</button>
+  <button id="leave" disabled>Leave</button>
+  <span>role: <span id="role" class="pill idle">idle</span></span>
+  <span>shared port: <span id="port" class="pill shut">closed</span></span>
+</div>
+
+<div class="row">
+  <input id="tx" type="text" placeholder="type a command, e.g.  ?WCB   or   :PING   (CR appended)" disabled>
+  <button id="send" disabled>Send</button>
+  <label style="font-size:.8rem"><input id="crlf" type="checkbox" checked> append CR</label>
+</div>
+
+<div id="log"></div>
+
+<script src="serial-hub.js"></script>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const logEl = $('log');
+  const dec = new TextDecoder();
+  let lineBuf = '';
+
+  function log(msg, cls) {
+    const at = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
+    const span = document.createElement('span');
+    span.className = cls || '';
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    if (at) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  if (!WcbSerialHub.supported) {
+    log('This browser lacks WebSerial / Web Locks / BroadcastChannel — use Chrome or Edge.', 'sys');
+    $('join').disabled = true;
+    return;
+  }
+
+  const hub = new WcbSerialHub({ baudRate: 115200 });
+
+  hub.on('log',  m => log('· ' + m, 'sys'));
+  hub.on('role', r => log('role → ' + r, 'sys'));
+
+  hub.on('state', st => {
+    const roleEl = $('role');
+    roleEl.textContent = st.role;
+    roleEl.className = 'pill ' + st.role;
+    const portEl = $('port');
+    portEl.textContent = st.portOpen ? 'open' : 'closed';
+    portEl.className = 'pill ' + (st.portOpen ? 'open' : 'shut');
+    // Any JOINED tab may pick the port. Gating on role==="leader" made this button
+    // permanently dead: since 581d939 a portless tab never campaigns for the lock, so
+    // no tab can reach leader until one already HAS a port — and picking one is the
+    // only way to get there. requestPort() is safe from a follower; it opens the device
+    // only once this tab actually holds the lock.
+    $('pick').disabled = st.role === 'idle';
+    const canSend = st.portOpen && (st.role === 'leader' || st.role === 'follower');
+    $('tx').disabled = !canSend;
+    $('send').disabled = !canSend;
+  });
+
+  // Inbound bytes → decode + line-split, exactly like the real tools do.
+  hub.on('data', u8 => {
+    lineBuf += dec.decode(u8, { stream: true });
+    let nl;
+    while ((nl = lineBuf.indexOf('\n')) !== -1) {
+      const line = lineBuf.slice(0, nl).replace(/\r$/, '');
+      lineBuf = lineBuf.slice(nl + 1);
+      if (line) log('◄ ' + line, 'rx');
+    }
+  });
+
+  $('join').onclick = () => {
+    hub.join();
+    $('join').disabled = true;
+    $('leave').disabled = false;
+  };
+  $('pick').onclick = async () => {
+    try { await hub.requestPort(); }
+    catch (e) { log('pick cancelled: ' + (e && e.message || e), 'sys'); }
+  };
+  $('leave').onclick = async () => {
+    await hub.leave();
+    $('join').disabled = false;
+    $('leave').disabled = true;
+    $('pick').disabled = true;
+    $('tx').disabled = true;
+    $('send').disabled = true;
+  };
+  function doSend() {
+    const v = $('tx').value;
+    if (!v) return;
+    hub.send($('crlf').checked ? v + '\r' : v);
+    log('► ' + v, 'sys');
+    $('tx').value = '';
+  }
+  $('send').onclick = doSend;
+  $('tx').addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
+
+  window.addEventListener('beforeunload', () => { try { hub.leave(); } catch (_) {} });
+})();
+</script>
+</body>
+</html>

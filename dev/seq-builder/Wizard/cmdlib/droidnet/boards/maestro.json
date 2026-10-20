@@ -1,0 +1,64 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "maestro.id": {
+      "label": "Maestro",
+      "values": [
+        {
+          "code": "0",
+          "label": "All"
+        },
+        {
+          "code": "1",
+          "label": "#1"
+        },
+        {
+          "code": "2",
+          "label": "#2"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "maestro",
+      "name": "Maestro (sequence trigger)",
+      "kind": "wcb-verb",
+      "confidence": "high",
+      "routing": {
+        "class": "wcb-verb"
+      },
+      "commands": [
+        {
+          "id": "maestro.trigger",
+          "name": "Run Sequence",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ";M{id}{seq}",
+          "params": [
+            {
+              "name": "id",
+              "enum": "maestro.id",
+              "required": true
+            },
+            {
+              "name": "seq",
+              "type": "int",
+              "min": 0,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";M11"
+          ],
+          "commentLabel": "Maestro seq",
+          "category": "Sequences"
+        }
+      ],
+      "categories": [
+        "Sequences"
+      ]
+    }
+  ]
+}

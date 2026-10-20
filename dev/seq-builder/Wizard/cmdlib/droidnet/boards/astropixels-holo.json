@@ -1,0 +1,969 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo AstroPixelsPlus MarcduinoHolo.h (* / @6-8 aliases) + Reeltwo HoloLights.h (native HP grammar)",
+  "enums": {
+    "ap.hpDevice": {
+      "label": "Holo",
+      "values": [
+        {
+          "code": "F",
+          "label": "Front"
+        },
+        {
+          "code": "R",
+          "label": "Rear"
+        },
+        {
+          "code": "T",
+          "label": "Top"
+        },
+        {
+          "code": "X",
+          "label": "Front+Rear"
+        },
+        {
+          "code": "Y",
+          "label": "Front+Top"
+        },
+        {
+          "code": "Z",
+          "label": "Rear+Top"
+        },
+        {
+          "code": "D",
+          "label": "Radar Eye"
+        },
+        {
+          "code": "O",
+          "label": "Other HP"
+        },
+        {
+          "code": "A",
+          "label": "All"
+        }
+      ]
+    },
+    "ap.hpColor": {
+      "label": "Color",
+      "values": [
+        {
+          "code": "0",
+          "label": "Random"
+        },
+        {
+          "code": "1",
+          "label": "Red"
+        },
+        {
+          "code": "2",
+          "label": "Orange"
+        },
+        {
+          "code": "3",
+          "label": "Yellow"
+        },
+        {
+          "code": "4",
+          "label": "Green"
+        },
+        {
+          "code": "5",
+          "label": "Cyan"
+        },
+        {
+          "code": "6",
+          "label": "Blue"
+        },
+        {
+          "code": "7",
+          "label": "Purple"
+        },
+        {
+          "code": "8",
+          "label": "Magenta"
+        },
+        {
+          "code": "9",
+          "label": "White"
+        }
+      ]
+    },
+    "ap.hpPosition": {
+      "label": "Position",
+      "values": [
+        {
+          "code": "0",
+          "label": "Down"
+        },
+        {
+          "code": "1",
+          "label": "Center"
+        },
+        {
+          "code": "2",
+          "label": "Up"
+        },
+        {
+          "code": "3",
+          "label": "Left"
+        },
+        {
+          "code": "4",
+          "label": "Upper Left"
+        },
+        {
+          "code": "5",
+          "label": "Lower Left"
+        },
+        {
+          "code": "6",
+          "label": "Right"
+        },
+        {
+          "code": "7",
+          "label": "Upper Right"
+        },
+        {
+          "code": "8",
+          "label": "Lower Right"
+        }
+      ]
+    },
+    "ap.hpClearMode": {
+      "label": "Clear / Auto Mode",
+      "values": [
+        {
+          "code": "96",
+          "label": "Clear · Auto Off"
+        },
+        {
+          "code": "971",
+          "label": "Clear · Auto Default"
+        },
+        {
+          "code": "972",
+          "label": "Clear · Auto Random"
+        },
+        {
+          "code": "98",
+          "label": "Clear · Off-Color · Auto Off"
+        },
+        {
+          "code": "991",
+          "label": "Clear · Off-Color · Auto Default"
+        },
+        {
+          "code": "992",
+          "label": "Clear · Off-Color · Auto Random"
+        }
+      ]
+    },
+    "ap.hpTwitch": {
+      "label": "Auto Twitch",
+      "values": [
+        {
+          "code": "98",
+          "label": "Disable"
+        },
+        {
+          "code": "99",
+          "label": "Enable"
+        }
+      ]
+    },
+    "ap.hpSeq": {
+      "label": "Sequence",
+      "values": [
+        {
+          "code": "S1",
+          "label": "Leia Mode"
+        },
+        {
+          "code": "S2",
+          "label": "OLED Anim 1"
+        },
+        {
+          "code": "S3",
+          "label": "OLED Anim 2"
+        },
+        {
+          "code": "S4",
+          "label": "Clear + Disable"
+        },
+        {
+          "code": "S5",
+          "label": "Clear + Enable Default"
+        },
+        {
+          "code": "S7",
+          "label": "Clear + Disable (off-color)"
+        },
+        {
+          "code": "S8",
+          "label": "Clear + Enable Default (off-color)"
+        },
+        {
+          "code": "S9",
+          "label": "Clear + Enable Random"
+        }
+      ]
+    },
+    "ap.hpAlias3": {
+      "label": "Holo",
+      "values": [
+        {
+          "code": "01",
+          "label": "Front"
+        },
+        {
+          "code": "02",
+          "label": "Rear"
+        },
+        {
+          "code": "03",
+          "label": "Top"
+        }
+      ]
+    },
+    "ap.hpAliasOff": {
+      "label": "Holo",
+      "values": [
+        {
+          "code": "01",
+          "label": "Front"
+        },
+        {
+          "code": "02",
+          "label": "Rear"
+        },
+        {
+          "code": "03",
+          "label": "Top"
+        },
+        {
+          "code": "04",
+          "label": "Radar Eye"
+        }
+      ]
+    },
+    "ap.hpRadar": {
+      "label": "Radar Effect",
+      "values": [
+        {
+          "code": "3",
+          "label": "Dim Pulse"
+        },
+        {
+          "code": "R",
+          "label": "Dim Pulse (Red)"
+        },
+        {
+          "code": "4",
+          "label": "Cycle"
+        },
+        {
+          "code": "6",
+          "label": "Rainbow"
+        }
+      ]
+    },
+    "ap.hpLegacyDev": {
+      "label": "Holo (legacy)",
+      "values": [
+        {
+          "code": "6",
+          "label": "Front"
+        },
+        {
+          "code": "7",
+          "label": "Top"
+        },
+        {
+          "code": "8",
+          "label": "Rear"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "astropixels-holo",
+      "name": "AstroPixelsPlus (Holo)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "AstroPixelsPlus",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": true,
+          "sep": "|",
+          "unit": "seconds"
+        }
+      },
+      "commands": [
+        {
+          "id": "ap.hp.on",
+          "name": "HP On",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*ON{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*ON01",
+            "*ON03"
+          ],
+          "commentLabel": "AP HP on",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.off",
+          "name": "HP Off",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*OF{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAliasOff",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*OF01",
+            "*OF04"
+          ],
+          "commentLabel": "AP HP off",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.resetAll",
+          "name": "Reset All HPs",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*ST00",
+          "params": [],
+          "supportsDuration": false,
+          "examples": [
+            "*ST00"
+          ],
+          "commentLabel": "AP reset all HPs",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.random",
+          "name": "Random Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "*RD{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*RD01"
+          ],
+          "commentLabel": "AP HP random",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.dimPulse",
+          "name": "Dim Pulse",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*HPS3{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HPS301"
+          ],
+          "commentLabel": "AP HP dim pulse",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.rainbow",
+          "name": "Rainbow",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*HPS6{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HPS601"
+          ],
+          "commentLabel": "AP HP rainbow",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.position",
+          "name": "Move to Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "*HP{pos}{dev}",
+          "params": [
+            {
+              "name": "pos",
+              "enum": "ap.hpPosition",
+              "required": true,
+              "default": "1"
+            },
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HP001",
+            "*HP401"
+          ],
+          "commentLabel": "AP HP position",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.wag",
+          "name": "Wag L/R",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "*HW{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HW01"
+          ],
+          "commentLabel": "AP HP wag",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.nod",
+          "name": "Nod U/D",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "*HN{dev}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpAlias3",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HN01"
+          ],
+          "commentLabel": "AP HP nod",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.radar",
+          "name": "Radar Eye Effect",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "*HRS{mode}",
+          "params": [
+            {
+              "name": "mode",
+              "enum": "ap.hpRadar",
+              "required": true,
+              "default": "3"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "*HRS3",
+            "*HRSR"
+          ],
+          "commentLabel": "AP radar eye",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.legacyOn",
+          "name": "Legacy HP On",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{ldev}T1",
+          "params": [
+            {
+              "name": "ldev",
+              "enum": "ap.hpLegacyDev",
+              "required": true,
+              "default": "6"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@6T1",
+            "@8T1"
+          ],
+          "commentLabel": "AP legacy HP on",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.legacyOff",
+          "name": "Legacy HP Off",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{ldev}D",
+          "params": [
+            {
+              "name": "ldev",
+              "enum": "ap.hpLegacyDev",
+              "required": true,
+              "default": "6"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@6D",
+            "@8D"
+          ],
+          "commentLabel": "AP legacy HP off",
+          "category": "Friendly"
+        },
+        {
+          "id": "ap.hp.native.leia",
+          "name": "Leia",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}001",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF001",
+            "@HPA001|30"
+          ],
+          "commentLabel": "AP native Leia",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.colorproj",
+          "name": "Color Projector",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}002{color}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "color",
+              "enum": "ap.hpColor",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF0025"
+          ],
+          "commentLabel": "AP native color projector",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.dimpulse",
+          "name": "Dim Pulse",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}003{color}{speed}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "color",
+              "enum": "ap.hpColor",
+              "required": true,
+              "default": "0"
+            },
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 9,
+              "required": true,
+              "default": 5
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF00355"
+          ],
+          "commentLabel": "AP native dim pulse",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.cycle",
+          "name": "Cycle",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}004{color}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "color",
+              "enum": "ap.hpColor",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF0045"
+          ],
+          "commentLabel": "AP native cycle",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.solid",
+          "name": "Solid Color",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}005{color}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "color",
+              "enum": "ap.hpColor",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF0051"
+          ],
+          "commentLabel": "AP native solid color",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.rainbow",
+          "name": "Rainbow",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}006",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF006",
+            "@HPA006|30"
+          ],
+          "commentLabel": "AP native rainbow",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.shortcircuit",
+          "name": "Short Circuit",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}007{color}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "color",
+              "enum": "ap.hpColor",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "@HPF0070"
+          ],
+          "commentLabel": "AP native short circuit",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.clearauto",
+          "name": "Clear / Auto",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@HP{dev}0{mode}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "A"
+            },
+            {
+              "name": "mode",
+              "enum": "ap.hpClearMode",
+              "required": true,
+              "default": "96"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPA096",
+            "@HPF0971"
+          ],
+          "commentLabel": "AP native clear/auto",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.hp.native.preset",
+          "name": "Preset Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}101{position}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "position",
+              "enum": "ap.hpPosition",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF1011",
+            "@HPA1010"
+          ],
+          "commentLabel": "AP native preset position",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.rcLR",
+          "name": "RC Control L/R",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}102",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF102"
+          ],
+          "commentLabel": "AP native RC L/R",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.rcUD",
+          "name": "RC Control U/D",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}103",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF103"
+          ],
+          "commentLabel": "AP native RC U/D",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.randomPos",
+          "name": "Random Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}104",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF104"
+          ],
+          "commentLabel": "AP native random position",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.wag",
+          "name": "Wag L/R",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}105",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF105"
+          ],
+          "commentLabel": "AP native wag",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.nod",
+          "name": "Nod U/D",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}106",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF106"
+          ],
+          "commentLabel": "AP native nod",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.autotwitch",
+          "name": "Auto Twitch On/Off",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{dev}1{mode}",
+          "params": [
+            {
+              "name": "dev",
+              "enum": "ap.hpDevice",
+              "required": true,
+              "default": "F"
+            },
+            {
+              "name": "mode",
+              "enum": "ap.hpTwitch",
+              "required": true,
+              "default": "99"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPF199",
+            "@HPA198"
+          ],
+          "commentLabel": "AP native auto twitch",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.hp.native.sequence",
+          "name": "HP Sequence Mode",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "@HP{seq}",
+          "params": [
+            {
+              "name": "seq",
+              "enum": "ap.hpSeq",
+              "required": true,
+              "default": "S1"
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "@HPS1",
+            "@HPS4"
+          ],
+          "commentLabel": "AP native HP sequence",
+          "category": "Sequences"
+        }
+      ],
+      "categories": [
+        "Friendly",
+        "Lighting",
+        "Movement",
+        "Sequences"
+      ]
+    }
+  ]
+}

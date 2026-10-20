@@ -1,0 +1,91 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "iamp.mode": {
+      "label": "Mode",
+      "values": [
+        {
+          "code": "0",
+          "label": "Off"
+        },
+        {
+          "code": "6",
+          "label": "Scream"
+        },
+        {
+          "code": "18",
+          "label": "Compress"
+        },
+        {
+          "code": "23",
+          "label": "Eye Scan"
+        },
+        {
+          "code": "25",
+          "label": "Fade Out"
+        },
+        {
+          "code": "35",
+          "label": "Quadrant"
+        },
+        {
+          "code": "44",
+          "label": "Happy Face"
+        },
+        {
+          "code": "45",
+          "label": "Sad Face"
+        },
+        {
+          "code": "46",
+          "label": "Heart"
+        },
+        {
+          "code": "52",
+          "label": "VU Meter"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "ia-magic-panel",
+      "name": "IA MagicPanel",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "C2B5",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "iamp.mode",
+          "name": "Run Mode",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "T{mode}",
+          "params": [
+            {
+              "name": "mode",
+              "enum": "iamp.mode",
+              "required": true
+            }
+          ],
+          "examples": [
+            "T52",
+            "T0"
+          ],
+          "commentLabel": "IA MP mode",
+          "category": "Patterns"
+        }
+      ],
+      "categories": [
+        "Patterns"
+      ]
+    }
+  ]
+}
