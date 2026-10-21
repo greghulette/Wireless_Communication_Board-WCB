@@ -286,4 +286,24 @@ test('library: DroidNet\'s Maestro trigger is @A<name> out Serial 0 (USB)', () =
   const d = decode(';S0@AMonsterMash');
   assert.deepStrictEqual([d.board, d.cmd, d.values, d.route], ['wcb-maestro', 'wcbmaestro.droidnet', { name: 'MonsterMash' }, { wcb: 0, port: 0, alias: false }]);
   assert.strictEqual(decode(';W2,;S0@AMonsterMash').cmd, 'wcbmaestro.droidnet');
+  assert.deepStrictEqual(decode(';S0@aMonsterMash').values, { name: 'MonsterMash' });   // either case of @A
+});
+
+// The Wizard presents the library NaviCore's config tool does: its two folders are copies of NaviCore's, byte for
+// byte (the WCB boards are kept in NaviCore, beside the DroidNet snapshot). Skipped where NaviCore is not checked out
+// beside this repo (CI).
+test('library: Wizard/cmdlib is the same as NaviCore\'s config_tool/cmdlib (droidnet and wcb)', (t) => {
+  const nc = path.join(WIZ, '..', '..', 'NaviCore', 'config_tool', 'cmdlib');
+  if (!fs.existsSync(nc)) { t.skip('NaviCore is not beside this repo'); return; }
+  const files = (dir) => fs.readdirSync(dir, { recursive: true }).filter((f) => fs.statSync(path.join(dir, f)).isFile())
+    .map((f) => f.split(path.sep).join('/')).sort();
+  for (const vendor of ['droidnet', 'wcb']) {
+    const a = path.join(WIZ, 'cmdlib', vendor), b = path.join(nc, vendor);
+    assert.deepStrictEqual(files(a), files(b), `${vendor}: the two folders list different files`);
+    for (const f of files(a)) {
+      const ab = fs.readFileSync(path.join(a, f), 'utf8').replace(/\r\n/g, '\n');
+      const bb = fs.readFileSync(path.join(b, f), 'utf8').replace(/\r\n/g, '\n');
+      assert.ok(ab === bb, `${vendor}/${f} differs from NaviCore's: copy NaviCore's config_tool/cmdlib/${vendor} over Wizard/cmdlib/${vendor}`);
+    }
+  }
 });

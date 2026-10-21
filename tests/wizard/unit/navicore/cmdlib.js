@@ -1,5 +1,5 @@
-// The config tool's command library as the page builds it at startup (NC_CMDLIB_SEED, then the vendored
-// cmdlib/droidnet and cmdlib/navicore manifests through _cmdlibMergeLibraryData, then _cmdlibNormalize), built in a
+// The config tool's command library as the page builds it at startup (NC_CMDLIB_SEED, then the
+// cmdlib/droidnet, cmdlib/wcb and cmdlib/navicore manifests through _cmdlibMergeLibraryData, then _cmdlibNormalize), built in a
 // node sandbox from the page's own functions, plus the codec (ncEncodeCommand / ncDecodeCommand) bound to it.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -24,7 +24,7 @@ function loadManifest(rel) {
 function buildLibrary() {
   const window = {};
   const sb = sandbox(NAMES, { window });
-  for (const rel of ['cmdlib/droidnet/manifest.json', 'cmdlib/navicore/manifest.json']) {
+  for (const rel of ['cmdlib/droidnet/manifest.json', 'cmdlib/wcb/manifest.json', 'cmdlib/navicore/manifest.json']) {
     for (const data of loadManifest(rel)) sb._cmdlibMergeLibraryData(data);
     sb._cmdlibNormalize();
   }

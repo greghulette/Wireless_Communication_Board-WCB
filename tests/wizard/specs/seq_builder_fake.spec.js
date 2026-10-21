@@ -11,7 +11,12 @@ const { board, pullFake, push } = require('../lib/fake');
 const { setup } = require('../lib/rescan');
 
 const SHOTS = process.env.SB_SHOTS || '';
-const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }); };
+// Toasts are hidden for the picture: they cover the corner of the builder and are not what a shot is for.
+const shot = async (page, name) => {
+  if (!SHOTS) return;
+  await page.addStyleTag({ content: '.toast-container{display:none!important}' });
+  await page.screenshot({ path: path.join(SHOTS, `${name}.png`) });
+};
 
 const SHOW = ';M11^;A,PLAY,5^;T1250^;S3A001***holos^;T2750^;M12';
 // Notes: one first, one inline, one on its own between steps, one after the last step.
@@ -137,7 +142,7 @@ test('wizard.seq_builder_edit a step moves to the millisecond in the inspector a
 test('wizard.seq_builder_library the library lists the WCB group first as NaviCore does; a picked command is set up in the composer and added at the playhead, or dragged onto the timeline; a device command goes to the port labelled for it', async ({ page }) => {
   await setup(page);
   await pullFake(page, 1, W1);
-  await page.click('button[onclick="SeqBuilder.openNew(1)"]');
+  await page.click('button[onclick*="openNew(1)"]');
   await page.evaluate(() => SeqBuilder.ready());
   await expect(page.locator('#sb-lib .sb-libsec').first()).toBeVisible();
   expect((await page.locator('#sb-lib-list > .sb-libsec > summary .sb-libsec-name').allTextContents())[0]).toBe('WCB');
@@ -275,7 +280,7 @@ test('wizard.seq_builder_lineup other sequences line up above this one: picked f
 test('wizard.seq_builder_droidnet a DroidNet Maestro sequence runs by name: @A<name> out this board\'s Serial 0 (USB), where DroidNet listens, in a lane of its own', async ({ page }) => {
   await setup(page);
   await pullFake(page, 1, W1);
-  await page.click('button[onclick="SeqBuilder.openNew(1)"]');
+  await page.click('button[onclick*="openNew(1)"]');
   await page.evaluate(() => SeqBuilder.ready());
   await page.fill('#sb-lib-search', 'droidnet');
   await page.locator('.sb-libitem[data-c="wcbmaestro.droidnet"]').click();

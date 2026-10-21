@@ -119,14 +119,22 @@ playhead**. The composer's preview, or any command in the list, can also be drag
 back to the list as it was (the search, the open sections, the scroll): the new step is selected, and the inspector
 has the same fields to finish it with.
 
-**Where it comes from.** `cmdlib/droidnet/` is a byte-for-byte copy of NaviCore's vendored snapshot, local
-modifications included. Refresh it by copying NaviCore's over it, so the two tools keep presenting the same library.
-`cmdlib/wcb/` is ours: Maestro at the firmware's ranges, DFPlayer, variables, PWM, serial text, and DroidNet's trigger
-for a Maestro sequence it holds by name, `@A<name>`, which DroidNet reads on the WCB's Serial 0 (USB). That one is a
-device string, so it is written `;S0@A<name>`, or `;W<n>,;S0@A<name>` for DroidNet on another board. Three fields on a
-command are builder hints that DroidNet's schema does not have, and a consumer that does not know them ignores them:
-`defaultPort` (the port a new step goes to), `laneName` (its lane's name, in place of its board's) and `shortName` (what
-its steps are called on the timeline). Both load at page start through `sbLoadManifest` (same-origin `fetch`, so the Wizard has to be
+**Where it comes from: one library, kept in NaviCore.** Both folders under `Wizard/cmdlib/` are byte-for-byte copies
+of NaviCore's `config_tool/cmdlib/`, so the WCB Wizard, NaviCore's config tool and Intellex (which bundles that tool)
+present the same library:
+
+- `droidnet/`: the vendored DroidNet snapshot, NaviCore's local modifications included.
+- `wcb/`: the WCB's own boards. Maestro at the firmware's ranges, DFPlayer, variables, PWM and serial text, plus
+  DroidNet's trigger for a Maestro sequence it holds by name, `@A<name>`, which DroidNet reads on the WCB's Serial 0
+  (USB). That trigger is a device string, so it is written `;S0@A<name>`, or `;W<n>,;S0@A<name>` for DroidNet on
+  another board. It is recognised in either case (`@a…` too).
+
+Change them in NaviCore and copy NaviCore's folders over these: `tests/wizard/unit/seq_builder.test.js` fails while
+they differ, wherever NaviCore is checked out beside this repo (`Wizard/cmdlib/README.md`; `cmdlib/wcb/NOTICE.md` says
+the same from NaviCore's side). A few command fields are tool hints that DroidNet's schema does not have, and a
+consumer that does not know them ignores them: `defaultPort` (the port a new step goes to), `caseInsensitive` (the
+fixed text matches in either case), and `laneName` and `shortName` (the step's lane name and what its steps are
+called on the timeline). Both load at page start through `sbLoadManifest` (same-origin `fetch`, so the Wizard has to be
 served over http; under `file://` the panel says so). "Check online for a newer library" runs the same loader against
 DroidNet's GitHub manifest, for this session only. **Import…** adds a DroidNet board file and keeps it in this browser
 (`wcbWizard.cmdlibCustom`). Boards a user imported into NaviCore's tool are read too (`nc_cmdlib_custom_v1`). Both tools
@@ -201,7 +209,21 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   again once the library has loaded. Commands at one moment stack as parts of one tick. Clicking it opens the
   builder.
 
-## 6. Tests
+## 6. Shipping it
+
+The builder is on branch `seq-builder` (preview: `dev/seq-builder/Wizard/` on Pages). Releasing it touches more than
+this repo:
+
+- **Intellex bundles the Wizard from a fixed file list** (`Intellex/tools/fetch_webui.py`, `WCB_FILES`), which
+  must gain `seq-builder.js`, `seq-builder.css` and the manifests under `cmdlib/` once production has them. Until it
+  does, Intellex's Wizard has no builder: the TIMELINE and + Timeline buttons call `window.SeqBuilder?.…` and do
+  nothing rather than throw.
+- **NaviCore** loads `cmdlib/wcb/` from its own copy; Intellex fetches NaviCore's library folders from
+  `CMDLIB_VENDORS`, which lists `wcb`.
+- **The wiki** (`Sequence-Builder.md`, linked from the sidebar, Stored Commands and Config Tool) is written and
+  waits, committed and unpushed, for the release.
+
+## 7. Tests
 
 | Test | Covers |
 |---|---|
@@ -214,7 +236,8 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
+| 2026-10-20 | (this commit) | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
+| 2026-10-20 | `6b85763` | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
 | 2026-10-20 | `5f31672` | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |
 | 2026-10-20 | `e2d2b09` | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |
 | 2026-10-20 | `b9d0f88` | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
