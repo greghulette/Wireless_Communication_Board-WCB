@@ -91,13 +91,14 @@ body.sb-noscroll { overflow: hidden; }
 .sb-lib-err  { margin: 6px 10px; padding: 6px 8px; border: 1px solid var(--red2); border-radius: var(--radius); color: var(--red); font-size: 11px; }
 .sb-lib-list { flex: 1; overflow-y: auto; padding: 2px 10px 10px; }
 .sb-lib-none { color: var(--text3); padding: 14px 4px; font-size: 12px; }
-/* Each board wears the colour its device's lane takes on the timeline: an edge, a swatch and a wash on its row, an edge
-   on each of its commands. A group shows its members' swatches. */
+/* Each board wears the colour its device's lane takes on the timeline: an edge and a swatch on its row, an edge on each
+   of its commands. No wash behind the row - colour stays on the edges, where it marks without filling the box (Greg,
+   2026-10-20). A group shows its members' swatches. */
 .sb-libsec > summary {
   list-style: none; cursor: pointer; user-select: none;
   display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px;
   border: 1px solid var(--border); border-left: 4px solid var(--fam, var(--border2)); border-radius: 8px;
-  background: color-mix(in srgb, var(--fam, transparent) 14%, var(--bg3));
+  background: var(--bg3);
 }
 .sb-libsec > summary::-webkit-details-marker { display: none; }
 .sb-libsec > summary:hover { border-color: color-mix(in srgb, var(--fam, var(--border2)) 70%, transparent); border-left-color: var(--fam, var(--border2)); }
@@ -235,12 +236,13 @@ input[type="number"].sb-in { width: 96px; }
 .sb-mk.sel { background: rgba(255,208,32,0.32); outline: 1px solid var(--yellow); }
 
 .sb-lane { display: flex; border-bottom: 1px solid var(--border); }
-/* Each lane is a band of its colour: a coloured edge and swatch on its label, a faint wash along its track. */
+/* Each lane wears its colour on the edge and swatch of its label, with the barest wash along its track to tell the
+   bands apart; the label itself is not filled. */
 .sb-lane-label {
   position: sticky; left: 0; z-index: 3; width: 184px; flex: none;
   display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 7px; align-content: start;
   padding: 5px 10px 5px 7px;
-  background: color-mix(in srgb, var(--fam, transparent) 16%, var(--bg2));
+  background: var(--bg2);
   border-right: 1px solid var(--border); border-left: 4px solid var(--fam, transparent);
   font-size: 11px; line-height: 1.3; color: var(--text2);
 }
@@ -249,7 +251,7 @@ input[type="number"].sb-in { width: 96px; }
 .sb-ln-sub  { grid-column: 2; color: var(--text3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-lane-track {
   position: relative; flex: none;
-  background-color: color-mix(in srgb, var(--fam, transparent) 10%, transparent);
+  background-color: color-mix(in srgb, var(--fam, transparent) 4%, transparent);
   background-image: linear-gradient(to right, var(--bg3) 1px, transparent 1px);
 }
 .sb-empty-hint { color: var(--text3); font-size: 12px; padding: 22px 16px; min-height: 120px; }

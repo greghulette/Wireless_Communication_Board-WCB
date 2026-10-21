@@ -169,8 +169,9 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   Every check passes. Four light-mode slots sit under 3:1 contrast, so identity never rests on colour: every lane and
   step is labelled. Each library board has a home colour (`SB_BOARD_SLOT`; a board the table does not list hashes its
   id to one). The WCB devices used together most (Maestro, MP3, HCR, WLED, sequences) sit on different colours, and
-  the two HCR boards share one. The library shows each board in its colour (row edge, swatch and wash; an edge on each
-  command; a group shows its members' swatches), and that device's lane wears it on the timeline. A lane takes its
+  the two HCR boards share one. The library shows each board in its colour on edges only (a row edge and swatch; an edge
+  on each command; no wash behind the row), and that device's lane wears it on the timeline, again on its label's
+  edge and swatch, with the barest wash along its track. A lane takes its
   board's home colour unless another lane on screen holds it; then it takes the first free one, so lanes on screen
   never share a colour (`sbColorOf`). Lanes are assigned in order of first appearance in time, which is also the row
   strip's order, so a sequence opens in the colours its strip shows. A lane keeps its colour while the builder is
@@ -213,7 +214,8 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |
+| 2026-10-20 | (this commit) | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
+| 2026-10-20 | `5f31672` | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |
 | 2026-10-20 | `e2d2b09` | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |
 | 2026-10-20 | `b9d0f88` | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
 | 2026-10-20 | `bdd8c87` | Page written with the feature: timeline ↔ chain rules, warnings, routing, the vendored library and its normalization | Greg: build sequences from the command library on a timeline adjustable to the ms, and show sequences graphically |
