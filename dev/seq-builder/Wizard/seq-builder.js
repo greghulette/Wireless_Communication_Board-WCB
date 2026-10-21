@@ -760,7 +760,8 @@ function sbAllSequences() {
 }
 
 // ─── Builder state ───────────────────────────────────────────────
-const SB_GUTTER   = 184;          // lane label column, px
+const SB_GUTTER   = 192;          // where time 0 is drawn, px: the 184 px lane label column + an 8 px lead-in, so a
+                                  // step at 0 shows its whole trigger dot (seq-builder.css .sb-lane-track margin)
 const SB_ROW_H    = 30;           // one row of steps in a lane
 const SB_PPS_MIN  = 10;           // zoom, px per second ...
 const SB_PPS_MAX  = 5000;         // ... 5000 = 5 px per ms
@@ -1053,7 +1054,7 @@ function sbBuild() {
     </header>
     <div class="sb-keys" id="sb-keys" hidden>
       <div><b>Drag</b> a command from the library onto the timeline, or click it, set it up and press <b>Add</b>.</div>
-      <div><b>Drag</b> a step to move it (snaps to the grid; hold <b>Alt</b> for 1 ms). <b>Shift</b>-click adds to the selection.</div>
+      <div><b>Drag</b> a step to move it (snaps to the grid; hold <b>Alt</b> for 1 ms). <b>Shift</b>-click adds to the selection; with two or more selected, <b>Align</b> lines them up. A step fires at its dot.</div>
       <div><b>←/→</b> nudge 10 ms · <b>Shift</b> 100 ms · <b>Alt</b> 1 ms &nbsp; <b>Del</b> remove &nbsp; <b>Ctrl+D</b> duplicate &nbsp; <b>Ctrl+C/V</b> copy, paste at the playhead</div>
       <div><b>Space</b> preview from the playhead &nbsp; <b>Home</b> playhead to 0 &nbsp; <b>Ctrl+Z / Ctrl+Y</b> undo, redo &nbsp; <b>Ctrl+wheel</b> or <b>+/−</b> zoom &nbsp; <b>F</b> fit</div>
       <div>Click the ruler or an empty spot to move the playhead. <b>Line up with…</b> shows other sequences above yours; drag one sideways to move it.</div>
@@ -2076,20 +2077,60 @@ function sbInspectMany(box, sel) {
     <div class="sb-insp-row">
       <span class="sb-insp-title">${sel.length} steps</span>
       <span class="sb-muted">${esc(sbFmt(t0))} to ${esc(sbFmt(t1))}</span>
-      <label class="sb-field sb-inline"><span>Move by</span><input type="number" class="sb-in" id="sbm-by" step="1" value="100"><small>ms</small></label>
-      <button type="button" class="btn btn-ghost btn-sm" id="sbm-later">Later</button>
-      <button type="button" class="btn btn-ghost btn-sm" id="sbm-earlier">Earlier</button>
-      <button type="button" class="btn btn-ghost btn-sm" id="sbm-align" title="Move them together so the first one is at the playhead">First one to the playhead</button>
+      <span class="sb-btngroup" role="group" aria-label="Align">
+        <span class="sb-muted">Align</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-al-first" title="Every selected step to the time of the earliest">to first</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-al-last" title="Every selected step to the time of the latest">to last</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-al-ph" title="Every selected step to the playhead">to playhead</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-spread"${sel.length < 3 ? ' disabled' : ''} title="Keep the first and last where they are and space the ones between them evenly">space evenly</button>
+      </span>
+      <span class="sb-btngroup">
+        <label class="sb-field sb-inline"><span>Move by</span><input type="number" class="sb-in" id="sbm-by" step="1" value="100"><small>ms</small></label>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-later">Later</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-earlier">Earlier</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="sbm-align" title="Move them together, keeping their spacing, so the first one is at the playhead">First one to the playhead</button>
+      </span>
       <span class="sb-spacer"></span>
       <button type="button" class="btn btn-ghost btn-sm" id="sbm-dup">Duplicate</button>
       <button type="button" class="btn btn-danger btn-sm" id="sbm-del">Remove</button>
     </div>`;
   const by = () => parseInt($('sbm-by').value, 10) || 0;
+  $('sbm-al-first').onclick = () => sbAlignSel(t0);
+  $('sbm-al-last').onclick = () => sbAlignSel(t1);
+  $('sbm-al-ph').onclick = () => sbAlignSel(S.playhead);
+  $('sbm-spread').onclick = () => sbSpreadSel();
   $('sbm-later').onclick = () => sbShiftSel(by());
   $('sbm-earlier').onclick = () => sbShiftSel(-by());
   $('sbm-align').onclick = () => sbShiftSel(S.playhead - t0);
   $('sbm-dup').onclick = () => sbDuplicate();
   $('sbm-del').onclick = () => sbDelete();
+}
+
+// Align: every selected step fires at one time. Steps at one time run in array order (sbCompile), so the aligned set
+// goes in, earliest first, where the first of them was in the array: it runs in the order it was laid out, and the
+// steps not selected keep their order among themselves and against it.
+function sbAlignSel(t) {
+  const sel = S.events.filter(e => S.sel.has(e.id));
+  if (sel.length < 2) return;
+  const at = Math.max(0, Math.round(t));
+  const order = sel.slice().sort((a, b) => (a.t - b.t) || (S.events.indexOf(a) - S.events.indexOf(b)));
+  sbCommit(() => {
+    for (const e of sel) e.t = at;
+    const out = [];
+    for (const e of S.events) {
+      if (!S.sel.has(e.id)) out.push(e);
+      else if (e === sel[0]) out.push(...order);
+    }
+    S.events = out;
+  });
+}
+// Space evenly: the first and last selected steps stay; the ones between go to equal gaps, in their current order.
+function sbSpreadSel() {
+  const sel = S.events.filter(e => S.sel.has(e.id))
+    .sort((a, b) => (a.t - b.t) || (S.events.indexOf(a) - S.events.indexOf(b)));
+  if (sel.length < 3) return;
+  const t0 = sel[0].t, t1 = sel[sel.length - 1].t;
+  sbCommit(() => { sel.forEach((e, i) => { e.t = Math.round(t0 + (t1 - t0) * i / (sel.length - 1)); }); });
 }
 
 function sbInspectRef(box, r) {
