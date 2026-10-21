@@ -444,22 +444,42 @@ function sbDecodeCmd(lib, cmd, chars) {
   return { route, body, hit };
 }
 
-// Which lane a command draws in: the device it reaches. ctx: { chars, self, boardName(w), portLabel(w, p) }.
-// fam picks the colour; order sorts the lanes.
-function sbLaneOf(cmd, ctx) {
+// A library board's name as a lane name: "WCB · " and any parenthetical dropped ("HCR Vocalizer (native <…>)" →
+// "HCR Vocalizer").
+const sbShortName = (name) => String(name || '').replace(/^WCB\s*·\s*/i, '').replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+
+// Which lane a command draws in: the device it reaches. ctx: { chars, self, boardName(w), portLabel(w, p) }. dev: the
+// library board a device string decoded to ({ id, name }), so two devices on one port get a lane each - one per port
+// put every unlabelled device in one "S1" lane. Returns { key, label, name, sub, fam, order }: label is name and sub
+// on one line, the lane shows them on two; key is absolute (board numbers, not "this board"), so a device keeps its
+// colour across sequences on different boards; order sorts the lanes.
+function sbLaneOf(cmd, ctx, dev) {
   const ch = sbChars(ctx.chars);
   const { route, body } = sbSplitRoute(cmd, ch);
   const on = (route.wcb && route.wcb !== ctx.self) ? route.wcb : 0;
+  const bname = (w) => (ctx.boardName ? ctx.boardName(w) : 'WCB ' + w);
+  const isText = !route.alias && body[0] !== ch.cmd && body[0] !== ch.func;
+  if (dev && (route.port != null || isText)) {
+    const w = on || ctx.self;
+    const where = route.port != null ? `${on ? bname(on) : 'This board'} · S${route.port}${route.port === 0 ? ' (USB)' : ''}`
+                : on ? `every port on ${bname(on)}` : 'every port (broadcast)';
+    const name = sbShortName(dev.name) || dev.id;
+    return { key: `D:${dev.id}:${route.port != null ? `W${w}S${route.port}` : on ? 'W' + on : 'B'}`,
+             label: `${name} · ${where}`, name, sub: where, fam: 'serial',
+             order: 50 + (w === ctx.self ? 0 : w) / 100 + (route.port != null ? route.port : 9) / 1000 };
+  }
   if (route.port != null) {
     const w = on || ctx.self;
     const lbl = ctx.portLabel ? ctx.portLabel(w, route.port) : '';
-    const where = on ? (ctx.boardName ? ctx.boardName(on) : 'WCB ' + on) : 'This board';
-    return { key: `S:${w}:${route.port}`, label: `${where} · S${route.port}${lbl ? ' · ' + lbl : ''}`, fam: 'serial',
+    const where = on ? bname(on) : 'This board';
+    return { key: `S:${w}:${route.port}`, label: `${where} · S${route.port}${lbl ? ' · ' + lbl : ''}`,
+             name: `S${route.port}${lbl ? ' · ' + lbl : ''}`, sub: where, fam: 'serial',
              order: 50 + (w === ctx.self ? 0 : w) / 100 + route.port / 1000 };   // all ports together, this board's first
   }
-  const pre  = on ? (ctx.boardName ? ctx.boardName(on) : 'WCB ' + on) + ' · ' : '';
+  const pre  = on ? bname(on) + ' · ' : '';
   const kpre = on ? 'W' + on + ':' : '';
-  const lane = (key, label, fam, order) => ({ key: kpre + key, label: pre + label, fam, order: order + (on ? 0.5 : 0) });
+  const lane = (key, label, fam, order) => ({ key: kpre + key, label: pre + label, name: label, sub: on ? 'on ' + bname(on) : '',
+                                              fam, order: order + (on ? 0.5 : 0) });
   if (route.alias) return lane('alias', 'Routed by board name', 'other', 90);
   if (body[0] === ch.cmd && body.length > 1) {
     const v = body[1].toUpperCase();
@@ -572,6 +592,48 @@ function sbLibCmd(ref) {
   const cmd = board && (board.commands || []).find(c => c.id === ref.c);
   return cmd ? { board, cmd } : null;
 }
+
+// The device a command's library board is, when the command is that device's own string: what gives it a lane of its
+// own (sbLaneOf). Serial text is no device. Cached per command text, because every row's timing strip asks for every
+// one of its commands and the library holds ~400 templates; the cache resets when the library changes.
+const sbDevCache = new Map();
+let sbDevCacheGen = -1;
+// A command may name its own lane (laneName: wcbmaestro.droidnet is "Maestro via DroidNet", not its board's "Maestro").
+function sbDevOfLib(L) {
+  if (!L || L.cmd.id === 'wcb.serialText' || sbModeOf(L.board, L.cmd) !== 'device') return null;
+  return L.cmd.laneName ? { id: L.board.id + ':' + L.cmd.id, name: L.cmd.laneName } : { id: L.board.id, name: L.board.name };
+}
+function sbDevOfCmd(cmd, chars) {
+  if (sbDevCacheGen !== sbLib.gen) { sbDevCache.clear(); sbDevCacheGen = sbLib.gen; }
+  const k = chars.delim + chars.cmd + chars.func + cmd;
+  if (!sbDevCache.has(k)) {
+    const d = sbDecodeCmd(sbLib, cmd, chars);
+    sbDevCache.set(k, d.hit ? sbDevOfLib({ board: d.hit.board, cmd: d.hit.cmd }) : null);
+  }
+  return sbDevCache.get(k);
+}
+
+// ─── Colour ──────────────────────────────────────────────────────
+// Each lane's colour is one of the eight categorical slots (seq-builder.css --sb-c1..8: the dataviz reference palette,
+// validated on the Wizard's own timeline surfaces in both themes). Slots go in fixed order to lanes by first appearance
+// (in time order), so a sequence's timing strip and its timeline open in the same colours. A slot then stays with its
+// lane while the builder is open: a lane that appears or goes never repaints the others. A ninth lane is grey and its
+// name still says which; identity is never colour alone (every lane and step is labelled).
+const SB_SLOTS = 8;
+function sbColorMap() { return new Map(); }
+// present: the lanes on screen now. With every slot taken, one held by a lane that is gone is reused.
+function sbColorOf(map, key, present) {
+  if (map.has(key) && map.get(key) >= 0) return map.get(key);
+  const used = new Set(map.values());
+  let slot = -1;
+  for (let i = 0; i < SB_SLOTS; i++) if (!used.has(i)) { slot = i; break; }
+  if (slot < 0 && present) {
+    for (const [k, s] of map) if (s >= 0 && !present.has(k)) { slot = s; map.delete(k); break; }
+  }
+  map.set(key, slot);
+  return slot;
+}
+const sbColorClass = (slot) => (slot >= 0 ? 'sbc' + slot : 'sbcx');
 
 // Device labels (Wizard/device-labels.js vocabulary) each board corresponds to: a step from that board is sent to the
 // port a board has under that label. A copy of NaviCore's NC_BOARD_DEVICE_LABELS, minus NaviCore's own boards.
@@ -686,8 +748,91 @@ const S = {
   undo: [], redo: [], dirty: false,
   play: null, composer: null, replacing: null, libFilter: '', clip: null,
   importWarnings: [], closeArmed: 0,
+  colors: sbColorMap(),      // lane key → colour slot, for this session (sbColorOf)
+  refs: [], selRef: null,    // reference tracks: other sequences to line this one up against (view only, never saved)
 };
 try { const v = parseInt(localStorage.getItem(SB_SNAP_KEY), 10); if (SB_SNAPS.includes(v)) S.snap = v; } catch (_) { /* default */ }
+
+// ─── Reference tracks ────────────────────────────────────────────
+// "Line up with…" puts other sequences beside this one, read only: one line each, its steps in their devices' colours.
+// A reference starts where this sequence runs it (a ;C/;SEQ step for that key, on this board) or else with this one,
+// until it is dragged or given a start of its own. Snapping (sbPlace) makes this sequence's steps stick to its steps.
+// Which references a sequence had is remembered in this browser, per board and key.
+const SB_REFS_KEY = 'wcbWizard.seqBuilderRefs';
+let sbRefSeq = 1;
+function sbRefAnchor(r) {
+  if (r.wcb !== S.ctx.self) return null;
+  let best = null;
+  for (const e of S.events) if (sbRecallKey(e.cmd, S.ctx.chars) === r.key && (!best || e.t < best.t)) best = e;
+  return best;
+}
+function sbRefStart(r) {
+  if (r.offset != null) return r.offset;
+  const a = sbRefAnchor(r);
+  return a ? a.t : 0;
+}
+function sbRefsLoad() {
+  if (!S.key) return [];
+  try { return (JSON.parse(localStorage.getItem(SB_REFS_KEY) || '{}')[`${S.ctx.self}/${S.key}`]) || []; } catch (_) { return []; }
+}
+function sbRefsSave() {
+  if (!S.key) return;
+  try {
+    const all = JSON.parse(localStorage.getItem(SB_REFS_KEY) || '{}');
+    const k = `${S.ctx.self}/${S.key}`;
+    if (S.refs.length) all[k] = S.refs.map(r => ({ wcb: r.wcb, key: r.key, offset: r.offset }));
+    else delete all[k];
+    localStorage.setItem(SB_REFS_KEY, JSON.stringify(all));
+  } catch (_) { /* not remembered */ }
+}
+// A reference from what the board's table holds now. Its lanes are worked out from its own board, so a device on WCB 2
+// keeps the colour it has in this sequence.
+function sbMakeRef(spec) {
+  const r = { id: 'r' + (sbRefSeq++), wcb: spec.wcb, key: spec.key, offset: spec.offset != null ? spec.offset : null,
+              events: [], missing: true };
+  const seq = sbAllSequences().find(s => s.wcb === spec.wcb && s.key === spec.key);
+  if (!seq) return r;
+  const ctx = sbCtx(seq.slot);
+  r.missing = false;
+  r.events = sbParse(seq.value, ctx.chars).events.map((e, i) => {
+    const d = sbDecodeCmd(sbLib, e.cmd, ctx.chars);
+    const L = d.hit ? { board: d.hit.board, cmd: d.hit.cmd } : null;
+    return { i, t: e.t, cmd: e.cmd, label: sbLabelOf(L, d.hit ? d.hit.values : {}, e.cmd),
+             lane: sbLaneOf(e.cmd, ctx, sbDevOfLib(L)) };
+  });
+  return r;
+}
+
+// ─── Placing a time ──────────────────────────────────────────────
+// A time being placed sticks, within 8 px, to a step, a reference step, a note or the playhead - so steps line up with
+// what they are timed against - and otherwise snaps to the grid. Alt places it to the millisecond. Returns
+// { t, to }: `to` is what it stuck to, for the guide line. exclude: step ids being moved (a moving step is no target,
+// nor a reference that follows one); refId: a reference being moved; playhead: false while moving the playhead.
+const SB_MAGNET_PX = 8;
+function sbPlace(t, free, { exclude = null, refId = null, playhead = true } = {}) {
+  if (free) return { t: Math.max(0, Math.round(t)), to: null };
+  const lim = SB_MAGNET_PX * 1000 / S.pps;
+  let best = null;
+  const consider = (c) => { const d = Math.abs(c - t); if (d <= lim && (!best || d < best.d)) best = { c, d }; };
+  for (const e of S.events) if (!exclude || !exclude.has(e.id)) consider(e.t);
+  for (const r of S.refs) {
+    if (r.id === refId) continue;
+    const a = r.offset == null ? sbRefAnchor(r) : null;
+    if (a && exclude && exclude.has(a.id)) continue;
+    const s = sbRefStart(r);
+    for (const e of r.events) consider(s + e.t);
+  }
+  for (const m of S.markers) consider(m.t);
+  if (playhead) consider(S.playhead);
+  if (best) return { t: Math.max(0, Math.round(best.c)), to: Math.max(0, Math.round(best.c)) };
+  return { t: sbSnapT(t, false), to: null };
+}
+function sbGuide(to) {
+  const g = $('sb-guide');
+  if (!g) return;
+  g.hidden = to == null;
+  if (to != null) g.style.left = (SB_GUTTER + to * S.pps / 1000) + 'px';
+}
 
 const sbSnapT = (t, free) => {
   t = Math.max(0, Math.round(t));
@@ -805,14 +950,13 @@ function sbEventProblems(ev) {
 }
 
 // What a step reads as on the timeline. The lane already names the device, so ids are left out.
-function sbEvLabel(ev) {
-  const L = sbLibCmd(ev.lib);
-  if (!L) return ev.cmd || '(type a command)';
-  if (L.cmd.id === 'wcb.serialText') return ev.values.text || '(empty)';
+function sbLabelOf(L, values, cmd) {
+  if (!L) return cmd || '(type a command)';
+  if (L.cmd.id === 'wcb.serialText') return values.text || '(empty)';
   const vals = [];
   for (const p of L.cmd.params || []) {
     if (p.name === 'maestroId' || p.name === 'wledId') continue;
-    const v = ev.values[p.name];
+    const v = values[p.name];
     if (v == null || v === '') continue;
     if (p.enum) {
       const en = sbLib.enums[p.enum];
@@ -821,9 +965,11 @@ function sbEvLabel(ev) {
     } else if (p.unit === 'servoPulse') vals.push(Math.round(+v / 4) + ' µs');
     else vals.push(String(v).length > 18 ? String(v).slice(0, 17) + '…' : v);
   }
-  if (ev.values.__dur) vals.push(ev.values.__dur + ' s');
-  return L.cmd.name + (vals.length ? ' · ' + vals.join(' · ') : '');
+  if (values.__dur) vals.push(values.__dur + ' s');
+  return (L.cmd.shortName || L.cmd.name) + (vals.length ? ' · ' + vals.join(' · ') : '');
 }
+const sbEvLabel = (ev) => sbLabelOf(sbLibCmd(ev.lib), ev.values, ev.cmd);
+const sbEvLane = (ev) => sbLaneOf(ev.cmd, S.ctx, sbDevOfLib(sbLibCmd(ev.lib)));
 // How long a step visibly lasts: a duration suffix, or the length of the timed sequence it starts. 0 = a moment.
 function sbEvSpan(ev) {
   const L = sbLibCmd(ev.lib);
@@ -854,6 +1000,7 @@ function sbEndT() {
   let end = 0;
   for (const e of S.events) end = Math.max(end, e.t + sbEvSpan(e));
   for (const m of S.markers) end = Math.max(end, m.t);
+  for (const r of S.refs) for (const e of r.events) end = Math.max(end, sbRefStart(r) + e.t);
   return end;
 }
 
@@ -879,7 +1026,8 @@ function sbBuild() {
       <div><b>Drag</b> a step to move it (snaps to the grid; hold <b>Alt</b> for 1 ms). <b>Shift</b>-click adds to the selection.</div>
       <div><b>←/→</b> nudge 10 ms · <b>Shift</b> 100 ms · <b>Alt</b> 1 ms &nbsp; <b>Del</b> remove &nbsp; <b>Ctrl+D</b> duplicate &nbsp; <b>Ctrl+C/V</b> copy, paste at the playhead</div>
       <div><b>Space</b> preview from the playhead &nbsp; <b>Home</b> playhead to 0 &nbsp; <b>Ctrl+Z / Ctrl+Y</b> undo, redo &nbsp; <b>Ctrl+wheel</b> or <b>+/−</b> zoom &nbsp; <b>F</b> fit</div>
-      <div>Click the ruler or an empty spot to move the playhead.</div>
+      <div>Click the ruler or an empty spot to move the playhead. <b>Line up with…</b> shows other sequences above yours; drag one sideways to move it.</div>
+      <div>A step you drag sticks to a step, a reference step, a note or the playhead within a few pixels; a dashed line shows what it stuck to.</div>
     </div>
     <div class="sb-body">
       <aside class="sb-lib" id="sb-lib" aria-label="Command library"></aside>
@@ -890,6 +1038,13 @@ function sbBuild() {
           <span class="sb-clock" id="sb-clock" title="Playhead">0.000 s</span>
           <span class="sb-now" id="sb-now"></span>
           <span class="sb-spacer"></span>
+          <span class="sb-refpick-wrap">
+            <button type="button" class="btn btn-ghost btn-sm" id="sb-ref-add" aria-expanded="false" title="Show other sequences beside this one, to time it against them">⇆ Line up with…</button>
+            <div class="sb-refpick" id="sb-refpick" hidden>
+              <input type="search" id="sb-refpick-q" placeholder="Find a sequence…" spellcheck="false" autocomplete="off">
+              <div class="sb-refpick-list" id="sb-refpick-list"></div>
+            </div>
+          </span>
           <button type="button" class="btn btn-ghost btn-sm" id="sb-custom" title="Add a command you type yourself, at the playhead">+ Custom</button>
           <button type="button" class="btn btn-ghost btn-sm" id="sb-marker" title="Add a note to the timeline at the playhead (stored as a *** comment)">+ Note</button>
           <label class="sb-snap" title="Steps you drag land on this grid (hold Alt to place to the millisecond)">Snap
@@ -905,6 +1060,8 @@ function sbBuild() {
           <div class="sb-tl-inner" id="sb-tl-inner">
             <div class="sb-ruler" id="sb-ruler"></div>
             <div class="sb-lanes" id="sb-lanes"></div>
+            <div class="sb-guides" id="sb-guides"></div>
+            <div class="sb-guide sb-guide-snap" id="sb-guide" hidden></div>
             <div class="sb-playhead" id="sb-playhead"></div>
             <div class="sb-dropline" id="sb-dropline" hidden></div>
             <div class="sb-tip" id="sb-tip" hidden></div>
@@ -955,6 +1112,17 @@ function sbWire() {
   $('sb-fit').onclick = () => sbFit();
   $('sb-undo').onclick = () => sbUndo();
   $('sb-redo').onclick = () => sbRedo();
+  $('sb-ref-add').onclick = () => sbRefPick(!!$('sb-refpick').hidden);
+  $('sb-refpick-q').addEventListener('input', sbRenderRefPick);
+  $('sb-refpick-list').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-refadd]');
+    if (!b || b.disabled) return;
+    const [wcb, ...rest] = b.dataset.refadd.split('/');
+    sbAddRef(+wcb, rest.join('/'));
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if ($('sb-refpick') && !$('sb-refpick').hidden && !e.target.closest('.sb-refpick-wrap')) sbRefPick(false);
+  });
 
   const tl = $('sb-tl');
   tl.addEventListener('wheel', (e) => {
@@ -1013,7 +1181,12 @@ async function open(n, rowId) {
   }
   $('sb-overlay').classList.add('open');
   document.body.classList.add('sb-noscroll');
+  sbRefPick(false);
   S.events = parsed.events.map(sbMakeEvent);   // decoded as far as the library has loaded
+  const refSpecs = sbRefsLoad();
+  S.refs = refSpecs.map(sbMakeRef);
+  S.selRef = null;
+  sbSeedColors();
   sbRenderLib();
   sbRender();
   sbFit();
@@ -1021,8 +1194,18 @@ async function open(n, rowId) {
   await sbLibReady;
   if (!sbIsOpen() || S.n !== n || S.rowId !== (rowId || null)) return;
   for (const ev of S.events) sbDecodeInto(ev);   // again, now the whole library is in
+  S.refs = S.refs.map(r => Object.assign(sbMakeRef(r), { id: r.id }));
+  sbSeedColors();
   sbRenderLib();
   sbRender();
+}
+
+// Colours by first appearance in time order, this sequence's lanes first and then its references' - the order its
+// timing strip uses, so the two match on opening.
+function sbSeedColors() {
+  S.colors = sbColorMap();
+  for (const ev of S.events.slice().sort((a, b) => a.t - b.t)) sbColorOf(S.colors, sbEvLane(ev).key);
+  for (const r of S.refs) for (const e of r.events) sbColorOf(S.colors, e.lane.key);
 }
 
 function sbClose(force) {
@@ -1175,41 +1358,51 @@ function sbTickLabel(ms, step) {
   return Math.floor(ms / 60000) + ':' + ((ms % 60000) / 1000).toFixed(d).padStart(d ? d + 3 : 2, '0');
 }
 
-function sbLayout() {
-  const lanes = new Map();
-  for (const ev of S.events) {
-    const ln = sbLaneOf(ev.cmd, S.ctx);
-    if (!lanes.has(ln.key)) lanes.set(ln.key, Object.assign(ln, { evs: [] }));
-    lanes.get(ln.key).evs.push(ev);
-  }
-  const list = [...lanes.values()].sort((a, b) => (a.order - b.order) || a.label.localeCompare(b.label));
-  const place = (ln, compact) => {
+// Stack a lane's steps into rows where their labels would overlap; past three rows, steps too close to label at this
+// zoom shrink to markers (their tooltip still names them). items: { at (ms), label, span (px), hasIf }.
+function sbStack(items) {
+  const place = (compact) => {
     const ends = [];
-    const evs = ln.evs.slice().sort((a, b) => a.t - b.t);
-    for (const ev of evs) {
-      const x = ev.t * S.pps / 1000;
-      const span = sbEvSpan(ev) * S.pps / 1000;
-      ev._label = sbEvLabel(ev);
-      const labelW = compact ? 14 : Math.min(190, 26 + ev._label.length * 6.4 + (ev.conds.length ? 22 : 0));
-      const w = Math.max(labelW, span);
+    for (const it of items.slice().sort((a, b) => a.at - b.at)) {
+      const x = it.at * S.pps / 1000;
+      const w = compact ? 14 : Math.min(190, 26 + it.label.length * 6.4 + (it.hasIf ? 22 : 0));
       let r = ends.findIndex(end => end + 3 <= x);
       if (r < 0) { r = ends.length; ends.push(0); }
-      ends[r] = x + w;
-      Object.assign(ev, { _row: r, _x: x, _w: labelW, _span: span, _compact: compact });
+      ends[r] = x + Math.max(w, it.span);
+      Object.assign(it, { row: r, x, w, compact });
     }
     return Math.max(1, ends.length);
   };
-  for (const ln of list) {
-    ln.rows = place(ln, false);
-    if (ln.rows > 3) ln.rows = place(ln, true);   // steps too close to label at this zoom: markers only
+  const rows = place(false);
+  return rows > 3 ? place(true) : rows;
+}
+
+// This sequence's lanes (one per device) and its reference tracks, placed and coloured.
+function sbLayout() {
+  const lanes = new Map();
+  for (const ev of S.events) {
+    const ln = sbEvLane(ev);
+    if (!lanes.has(ln.key)) lanes.set(ln.key, Object.assign(ln, { items: [] }));
+    ev._label = sbEvLabel(ev);
+    lanes.get(ln.key).items.push({ ev, at: ev.t, label: ev._label, span: sbEvSpan(ev) * S.pps / 1000, hasIf: ev.conds.length > 0 });
   }
-  return list;
+  const list = [...lanes.values()].sort((a, b) => (a.order - b.order) || a.label.localeCompare(b.label));
+  const present = new Set(list.map(l => l.key));
+  for (const r of S.refs) for (const e of r.events) present.add(e.lane.key);
+  for (const ln of list) { ln.slot = sbColorOf(S.colors, ln.key, present); ln.rows = sbStack(ln.items); }
+  const refs = S.refs.map(r => {
+    const start = sbRefStart(r);
+    const items = r.events.map(e => ({ r, e, at: start + e.t, label: e.label, span: 0, hasIf: false,
+                                       slot: sbColorOf(S.colors, e.lane.key, present) }));
+    return { r, start, items, rows: items.length ? sbStack(items) : 1 };
+  });
+  return { lanes: list, refs };
 }
 
 function sbRenderTimeline() {
   const tl = $('sb-tl');
   if (!tl) return;
-  const lanes = sbLayout();
+  const { lanes, refs } = sbLayout();
   const endT = Math.max(sbEndT(), S.playhead);
   const trackW = Math.max(tl.clientWidth - SB_GUTTER - 2, endT * S.pps / 1000 + 260);
   const inner = $('sb-tl-inner');
@@ -1234,34 +1427,64 @@ function sbRenderTimeline() {
   $('sb-ruler').innerHTML = `<div class="sb-corner">${S.events.length} step${S.events.length === 1 ? '' : 's'}</div>
     <div class="sb-ruler-track" style="width:${trackW}px">${ticks}${mks}</div>`;
 
-  // Lanes, with a faint grid line at each major tick.
+  // Lanes, with a faint grid line at each major tick: the reference tracks first, then this sequence's.
   const grid = `background-size:${step * S.pps / 1000}px 100%`;
+  const pos = (it) => `left:${it.x}px;top:${it.row * SB_ROW_H + 3}px;width:${it.w}px`;
+  const laneLabel = (name, sub, title, extra = '') =>
+    `<div class="sb-lane-label" title="${esc(title)}"${extra}><i></i><span class="sb-ln-name">${esc(name)}</span>`
+    + (sub ? `<span class="sb-ln-sub">${esc(sub)}</span>` : '');
   let html = '';
+  for (const { r, start, items, rows } of refs) {
+    const anchor = r.offset == null ? sbRefAnchor(r) : null;
+    const sub = r.missing ? `not on ${sbBoardName(r.wcb)} any more`
+      : `${r.wcb === S.ctx.self ? 'this board' : sbBoardName(r.wcb)} · from ${sbFmt(start)}${anchor ? ', run by this one' : ''}`;
+    let pills = '';
+    for (const it of items) {
+      pills += `<div class="sb-ev sb-rev ${sbColorClass(it.slot)}${it.compact ? ' compact' : ''}" data-rev="${r.id}:${it.e.i}" style="${pos(it)}"`
+        + ` title="${esc([sbFmt(it.at), it.label, it.e.cmd, `(${r.key}, ${sbFmt(it.e.t)} into it)`].join('\n'))}">`
+        + (it.compact ? '' : `<span class="sb-ev-label">${esc(it.label)}</span>`) + '</div>';
+    }
+    html += `<div class="sb-lane sb-ref${S.selRef === r.id ? ' sel' : ''}" style="height:${rows * SB_ROW_H + 6}px">`
+      + laneLabel('⇆ ' + r.key, sub, `${r.key} on ${sbBoardName(r.wcb)}: drag its line to move it; click to select`, ` data-refsel="${r.id}"`)
+      + `<button type="button" class="sb-ref-x" data-refx="${r.id}" title="Stop showing ${esc(r.key)}" aria-label="Stop showing ${esc(r.key)}">✕</button></div>`
+      + `<div class="sb-lane-track" data-reftrack="${r.id}" style="width:${trackW}px;${grid}">${pills}</div></div>`;
+  }
+  if (refs.length) {
+    html += `<div class="sb-lane sb-divider"><div class="sb-lane-label"><span class="sb-ln-name">${esc(S.key || 'This sequence')}</span></div>`
+      + `<div class="sb-lane-track" style="width:${trackW}px"></div></div>`;
+  }
   if (!S.events.length) {
-    html = `<div class="sb-lane sb-lane-empty"><div class="sb-lane-label">—</div>
+    html += `<div class="sb-lane sb-lane-empty"><div class="sb-lane-label">—</div>
       <div class="sb-lane-track sb-empty-hint" style="width:${trackW}px;${grid}">Drag a command here from the library, or click one and press Add.</div></div>`;
   }
   const problems = new Set(S.events.filter(ev => sbEventProblems(ev).length || !String(ev.cmd).trim()).map(ev => ev.id));
   for (const ln of lanes) {
     let pills = '';
-    for (const ev of ln.evs) {
-      const cls = ['sb-ev', 'fam-' + ln.fam];
+    for (const it of ln.items) {
+      const ev = it.ev;
+      const cls = ['sb-ev', sbColorClass(ln.slot)];
       if (S.sel.has(ev.id)) cls.push('sel');
-      if (ev._compact) cls.push('compact');
+      if (it.compact) cls.push('compact');
       if (problems.has(ev.id)) cls.push('bad');
-      const tip = [sbFmt(ev.t), ev._label, ev.cmd, ev.conds.length ? 'IF ' + ev.conds.join(' and ') : '', ev.note ? '*** ' + ev.note : '']
+      const tip = [sbFmt(ev.t), it.label, ev.cmd, ev.conds.length ? 'IF ' + ev.conds.join(' and ') : '', ev.note ? '*** ' + ev.note : '']
         .filter(Boolean).join('\n');
-      pills += `<div class="${cls.join(' ')}" data-ev="${ev.id}" style="left:${ev._x}px;top:${ev._row * SB_ROW_H + 3}px;width:${ev._w}px" title="${esc(tip)}">`
-        + (ev._span > ev._w ? `<div class="sb-ev-span" style="width:${ev._span}px"></div>` : '')
+      pills += `<div class="${cls.join(' ')}" data-ev="${ev.id}" style="${pos(it)}" title="${esc(tip)}">`
+        + (it.span > it.w ? `<div class="sb-ev-span" style="width:${it.span}px"></div>` : '')
         + (ev.conds.length ? '<b class="sb-if">IF</b>' : '')
-        + (ev._compact ? '' : `<span class="sb-ev-label">${esc(ev._label)}</span>`)
+        + (it.compact ? '' : `<span class="sb-ev-label">${esc(it.label)}</span>`)
         + '</div>';
     }
-    html += `<div class="sb-lane fam-${ln.fam}" style="height:${ln.rows * SB_ROW_H + 6}px">
-      <div class="sb-lane-label" title="${esc(ln.label)}"><i></i><span>${esc(ln.label)}</span></div>
-      <div class="sb-lane-track" style="width:${trackW}px;${grid}">${pills}</div></div>`;
+    html += `<div class="sb-lane ${sbColorClass(ln.slot)}" style="height:${ln.rows * SB_ROW_H + 6}px">`
+      + laneLabel(ln.name || ln.label, ln.sub, ln.label) + '</div>'
+      + `<div class="sb-lane-track" style="width:${trackW}px;${grid}">${pills}</div></div>`;
   }
   $('sb-lanes').innerHTML = html;
+
+  // A selected reference draws its steps' times through every lane, to line steps up by eye.
+  const sel = refs.find(x => x.r.id === S.selRef);
+  $('sb-guides').innerHTML = sel
+    ? sel.items.map(it => `<div class="sb-guide ${sbColorClass(it.slot)}" style="left:${SB_GUTTER + it.x}px"></div>`).join('')
+    : '';
   sbPlacePlayhead();
 }
 
@@ -1291,6 +1514,8 @@ function sbDestOptions(mode, cur) {
         const l = sbPortLabel(w, p);
         opts.push({ v: `W${w}S${p}`, t: `${w === self ? 'This board' : sbBoardName(w)} · Serial ${p}${l ? ' · ' + l : ''}`, g: w === self ? 'This board' : sbBoardName(w) });
       }
+      // Serial 0 is the USB port: what DroidNet listens on (wcbmaestro.droidnet).
+      opts.push({ v: `W${w}S0`, t: `${w === self ? 'This board' : sbBoardName(w)} · Serial 0 (USB)`, g: w === self ? 'This board' : sbBoardName(w) });
     }
     opts.push({ v: 'bcast', t: 'Every port, every board (broadcast)', g: 'Broadcast' });
     for (const w of sbBoards(self)) if (w !== self) opts.push({ v: 'W' + w, t: `Every port on ${sbBoardName(w)}`, g: 'Broadcast' });
@@ -1527,6 +1752,7 @@ function sbDefaults(L) {
 // device's label. _guessed marks a fallback the user should check.
 function sbDefaultDest(L) {
   if (sbModeOf(L.board, L.cmd) !== 'device') return { dest: 'auto', guessed: false };
+  if (L.cmd.defaultPort != null) return { dest: `W${S.ctx.self}S${L.cmd.defaultPort}`, guessed: false };   // e.g. DroidNet: S0
   const home = L.board.dest && parseInt(L.board.dest.target, 10);
   if (L.board.deliver === 'wcb' && home > 0) return { dest: 'W' + home, guessed: false };
   const want = (SB_DEVICE_LABELS[L.board.id] || L.board.labels || []).map(sbNorm);
@@ -1682,6 +1908,8 @@ function sbRenderInspectorBody(box) {
   if (S.selMarker != null) return sbInspectMarker(box);
   if (sel.length === 1) return sbInspectEvent(box, sel[0]);
   if (sel.length > 1) return sbInspectMany(box, sel);
+  const ref = S.refs.find(r => r.id === S.selRef);
+  if (ref) return sbInspectRef(box, ref);
   box.innerHTML = `
     <div class="sb-insp-row">
       <span class="sb-insp-title">Playhead ${esc(sbFmt(S.playhead))}</span>
@@ -1810,6 +2038,31 @@ function sbInspectMany(box, sel) {
   $('sbm-del').onclick = () => sbDelete();
 }
 
+function sbInspectRef(box, r) {
+  const start = sbRefStart(r);
+  const anchor = sbRefAnchor(r);
+  const end = r.events.reduce((m, e) => Math.max(m, e.t), 0);
+  const how = r.offset != null ? 'moved by hand'
+    : anchor ? `started by this sequence's step at ${sbFmt(anchor.t)}` : 'starts with this sequence';
+  box.innerHTML = `
+    <div class="sb-insp-row">
+      <span class="sb-insp-title">⇆ ${esc(r.key)}</span>
+      <span class="sb-muted">${esc(r.wcb === S.ctx.self ? 'this board' : sbBoardName(r.wcb))} · ${r.events.length} cmd${r.events.length === 1 ? '' : 's'}${end ? ' · ' + esc(sbFmt(end)) + ' long' : ''}</span>
+      <label class="sb-field sb-inline"><span>Starts at</span><input type="number" class="sb-in sb-time" id="sbr-t" min="0" step="1" value="${start}"><small>ms</small></label>
+      <span class="sb-muted">${esc(how)}</span>
+      ${anchor && r.offset != null ? '<button type="button" class="btn btn-ghost btn-sm" id="sbr-auto" title="Follow the step that runs it again">Start with its step</button>' : ''}
+      <button type="button" class="btn btn-ghost btn-sm" id="sbr-ph">Start at the playhead</button>
+      <span class="sb-spacer"></span>
+      <button type="button" class="btn btn-danger btn-sm" id="sbr-del">Stop showing it</button>
+    </div>
+    <div class="sb-muted sb-pad">Shown for timing only: nothing here changes "${esc(r.key)}". While it is selected its steps' times run through every lane, and a step you drag sticks to them.</div>`;
+  const set = (v) => { r.offset = v; sbRefsSave(); sbRender(); };
+  $('sbr-t').addEventListener('change', () => set(Math.max(0, Math.round(+$('sbr-t').value || 0))));
+  if ($('sbr-auto')) $('sbr-auto').onclick = () => set(null);
+  $('sbr-ph').onclick = () => set(S.playhead);
+  $('sbr-del').onclick = () => sbRemoveRef(r.id);
+}
+
 function sbInspectMarker(box) {
   const m = S.markers.find(x => x.id === S.selMarker);
   if (!m) { S.selMarker = null; return sbRenderInspectorBody(box); }
@@ -1895,6 +2148,12 @@ function sbFit() {
 
 function sbOnPointerDown(e) {
   if (e.button !== 0) return;
+  const refX = e.target.closest('[data-refx]');
+  if (refX) { e.preventDefault(); return sbRemoveRef(refX.dataset.refx); }
+  const refSel = e.target.closest('[data-refsel]');
+  if (refSel) return sbSelectRef(refSel.dataset.refsel);
+  const refTrack = e.target.closest('[data-reftrack]');
+  if (refTrack) return sbDragRef(e, refTrack.dataset.reftrack);
   const pill = e.target.closest('.sb-ev');
   const mk = e.target.closest('.sb-mk');
   const onLabel = !!e.target.closest('.sb-lane-label, .sb-corner');
@@ -1902,9 +2161,9 @@ function sbOnPointerDown(e) {
   if (mk) return sbDragMarker(e, +mk.dataset.mk);
   if (onLabel || !e.target.closest('#sb-tl-inner')) return;
   // The ruler or an empty spot: move the playhead, and scrub while the button is held.
-  if (!e.shiftKey) { S.sel.clear(); S.selMarker = null; }
+  if (!e.shiftKey) { S.sel.clear(); S.selMarker = null; S.selRef = null; }
   const tl = $('sb-tl');
-  const move = (ev) => sbSetPlayhead(sbSnapT(sbTimeAt(ev.clientX), ev.altKey));
+  const move = (ev) => sbSetPlayhead(sbPlace(sbTimeAt(ev.clientX), ev.altKey, { playhead: false }).t);
   move(e);
   sbRender({ insp: true });
   tl.setPointerCapture(e.pointerId);
@@ -1928,7 +2187,9 @@ function sbDragSteps(e, id) {
     return;
   }
   if (!S.sel.has(id)) { S.sel = new Set([id]); }
+  S.selRef = null;
   const moving = [...S.sel].map(sbEv).filter(Boolean);
+  const movingIds = new Set(moving.map(m => m.id));
   const orig = new Map(moving.map(m => [m.id, m.t]));
   const minOrig = Math.min(...orig.values());
   const startX = e.clientX;
@@ -1940,7 +2201,9 @@ function sbDragSteps(e, id) {
     const dx = pe.clientX - startX;
     if (!moved && Math.abs(dx) < 4) return;
     if (!moved) { moved = true; snap = sbSnapshot(); }
-    const want = sbSnapT(orig.get(id) + dx * 1000 / S.pps, pe.altKey);
+    const pl = sbPlace(orig.get(id) + dx * 1000 / S.pps, pe.altKey, { exclude: movingIds });
+    sbGuide(pl.to);
+    const want = pl.t;
     const delta = Math.max(-minOrig, want - orig.get(id));
     for (const m of moving) {
       m.t = orig.get(m.id) + delta;
@@ -1959,6 +2222,7 @@ function sbDragSteps(e, id) {
     tl.removeEventListener('pointerup', onUp);
     tl.removeEventListener('pointercancel', onUp);
     tip.hidden = true;
+    sbGuide(null);
     if (moved && moving.some(m => m.t !== orig.get(m.id))) {
       S.undo.push(snap);
       S.redo = [];
@@ -2007,7 +2271,7 @@ function sbOnDragOver(e) {
   if (!types || ![...types].includes('text/plain')) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
-  const t = sbSnapT(sbTimeAt(e.clientX), e.altKey);
+  const t = sbPlace(sbTimeAt(e.clientX), e.altKey).t;
   const line = $('sb-dropline');
   line.hidden = false;
   line.style.left = (SB_GUTTER + t * S.pps / 1000) + 'px';
@@ -2018,7 +2282,7 @@ function sbOnDrop(e) {
   $('sb-dropline').hidden = true;
   if (!data.startsWith('sbcmd:') && !data.startsWith('sbcomposer:')) return;
   e.preventDefault();
-  const t = sbSnapT(sbTimeAt(e.clientX), e.altKey);
+  const t = sbPlace(sbTimeAt(e.clientX), e.altKey).t;
   if (data.startsWith('sbcomposer:')) { sbComposerCommit(t); return; }
   const [b, c] = data.slice(6).split('|');
   const L = sbLibCmd({ b, c });
@@ -2033,6 +2297,102 @@ function sbOnDrop(e) {
   });
   const first = $('sbi-fields') && $('sbi-fields').querySelector('input,select');
   if (first) first.focus();
+}
+
+// ─── Reference tracks: picking, moving, removing ─────────────────
+function sbRefPick(show) {
+  const box = $('sb-refpick');
+  if (!box) return;
+  box.hidden = !show;
+  $('sb-ref-add').setAttribute('aria-expanded', String(!!show));
+  if (!show) return;
+  $('sb-refpick-q').value = '';
+  sbRenderRefPick();
+  $('sb-refpick-q').focus();
+}
+// Every other sequence the loaded boards hold, by board; the one being edited is left out.
+function sbRenderRefPick() {
+  const q = ($('sb-refpick-q').value || '').trim().toLowerCase();
+  const have = new Set(S.refs.map(r => `${r.wcb}/${r.key}`));
+  const byBoard = new Map();
+  for (const s of sbAllSequences()) {
+    if (s.wcb === S.ctx.self && s.key === S.baseKey && !S.isNew) continue;
+    if (q && !s.key.toLowerCase().includes(q) && !s.value.toLowerCase().includes(q)) continue;
+    if (!byBoard.has(s.wcb)) byBoard.set(s.wcb, []);
+    byBoard.get(s.wcb).push(s);
+  }
+  let html = '';
+  for (const w of [...byBoard.keys()].sort((a, b) => (a === S.ctx.self ? -1 : b === S.ctx.self ? 1 : a - b))) {
+    html += `<div class="sb-refpick-board">${esc(w === S.ctx.self ? 'This board · ' + sbBoardName(w) : sbBoardName(w))}</div>`;
+    for (const s of byBoard.get(w)) {
+      const p = sbParse(s.value, sbCtx(s.slot).chars);
+      const end = p.events.reduce((m, e) => Math.max(m, e.t), 0);
+      const meta = `${p.events.length} cmd${p.events.length === 1 ? '' : 's'}${end ? ' · ' + sbFmt(end) : ''}`;
+      const added = have.has(`${s.wcb}/${s.key}`);
+      html += `<button type="button" class="sb-refpick-item" data-refadd="${esc(s.wcb + '/' + s.key)}"${added ? ' disabled' : ''}>`
+        + `<span>${esc(s.key)}</span><small>${added ? 'shown' : esc(meta)}</small></button>`;
+    }
+  }
+  $('sb-refpick-list').innerHTML = html || '<div class="sb-refpick-none">No other sequences on the loaded boards.</div>';
+}
+function sbAddRef(wcb, key) {
+  if (S.refs.some(r => r.wcb === wcb && r.key === key)) return;
+  const r = sbMakeRef({ wcb, key });
+  S.refs.push(r);
+  for (const e of r.events) sbColorOf(S.colors, e.lane.key);
+  S.selRef = r.id;
+  S.sel.clear(); S.selMarker = null;
+  sbRefPick(false);
+  sbRefsSave();
+  sbRender();
+}
+function sbRemoveRef(id) {
+  S.refs = S.refs.filter(r => r.id !== id);
+  if (S.selRef === id) S.selRef = null;
+  sbRefsSave();
+  sbRender();
+}
+function sbSelectRef(id) {
+  S.selRef = S.selRef === id ? null : id;
+  S.sel.clear(); S.selMarker = null;
+  sbRender();
+}
+// Drag a reference's line to move it in time; it sticks to this sequence's steps, notes and the playhead. A click
+// without moving selects it, and on one of its steps also puts the playhead there.
+function sbDragRef(e, id) {
+  const r = S.refs.find(x => x.id === id);
+  if (!r) return;
+  const start0 = sbRefStart(r), startX = e.clientX, tl = $('sb-tl');
+  const pill = e.target.closest('.sb-rev');
+  let moved = false;
+  tl.setPointerCapture(e.pointerId);
+  const onMove = (pe) => {
+    const dx = pe.clientX - startX;
+    if (!moved && Math.abs(dx) < 4) return;
+    moved = true;
+    // Stick the reference's step under the pointer (or its start) to what this sequence has there.
+    const ev = pill ? r.events[+pill.dataset.rev.split(':')[1]] : null;
+    const lead = ev ? ev.t : 0;
+    const pl = sbPlace(start0 + lead + dx * 1000 / S.pps, pe.altKey, { refId: r.id });
+    sbGuide(pl.to);
+    r.offset = Math.max(0, pl.t - lead);
+    S.selRef = r.id;
+    sbRenderTimeline();
+  };
+  const onUp = () => {
+    tl.removeEventListener('pointermove', onMove);
+    tl.removeEventListener('pointerup', onUp);
+    tl.removeEventListener('pointercancel', onUp);
+    sbGuide(null);
+    if (moved) { sbRefsSave(); sbRender(); return; }
+    S.selRef = r.id;
+    S.sel.clear(); S.selMarker = null;
+    if (pill) sbSetPlayhead(start0 + r.events[+pill.dataset.rev.split(':')[1]].t);
+    sbRender();
+  };
+  tl.addEventListener('pointermove', onMove);
+  tl.addEventListener('pointerup', onUp);
+  tl.addEventListener('pointercancel', onUp);
 }
 
 // ─── Edits ───────────────────────────────────────────────────────
@@ -2076,6 +2436,7 @@ function sbDuplicate() {
   });
 }
 function sbDelete() {
+  if (!S.sel.size && S.selMarker == null && S.selRef) return sbRemoveRef(S.selRef);
   if (S.selMarker != null) {
     sbCommit(() => { S.markers = S.markers.filter(m => m.id !== S.selMarker); S.selMarker = null; });
     return;
@@ -2110,8 +2471,9 @@ function sbOnKey(e) {
   if ((tag === 'BUTTON' || tag === 'SUMMARY') && (e.key === ' ' || e.key === 'Enter')) return;   // the control's own
   if (e.key === 'Escape') {
     if (typing) { e.target.blur(); return; }
+    if (!$('sb-refpick').hidden) { sbRefPick(false); return; }
     if (S.composer) { S.composer = null; sbRenderLib(); return; }
-    if (S.sel.size || S.selMarker != null) { S.sel.clear(); S.selMarker = null; sbRender(); return; }
+    if (S.sel.size || S.selMarker != null || S.selRef) { S.sel.clear(); S.selMarker = null; S.selRef = null; sbRender(); return; }
     return;
   }
   if (typing) return;
@@ -2162,7 +2524,13 @@ function sbTogglePlay() {
   const end = sbEndT();
   if (!S.events.length) return;
   const t0 = S.playhead >= end ? 0 : S.playhead;
-  S.play = { t0, start: performance.now(), end: end + 400, fired: new Set(S.events.filter(e => e.t < t0).map(e => e.id)) };
+  // Every step of this sequence and of its reference tracks, at its time on the timeline.
+  const cues = S.events.map(ev => ({ k: 'e' + ev.id, t: ev.t, sel: `.sb-ev[data-ev="${ev.id}"]`, label: () => ev._label || sbEvLabel(ev) }));
+  for (const r of S.refs) {
+    const s = sbRefStart(r);
+    for (const e of r.events) cues.push({ k: `r${r.id}:${e.i}`, t: s + e.t, sel: `.sb-rev[data-rev="${r.id}:${e.i}"]`, label: () => `${r.key}: ${e.label}` });
+  }
+  S.play = { t0, start: performance.now(), end: end + 400, fired: new Set(cues.filter(c => c.t < t0).map(c => c.k)) };
   $('sb-play').textContent = '■ Stop';
   const tick = () => {
     if (!S.play) return;
@@ -2172,12 +2540,12 @@ function sbTogglePlay() {
     const tl = $('sb-tl');
     const x = SB_GUTTER + now * S.pps / 1000;
     if (x > tl.scrollLeft + tl.clientWidth - 60) tl.scrollLeft = x - SB_GUTTER - 60;
-    for (const ev of S.events) {
-      if (ev.t > now || S.play.fired.has(ev.id)) continue;
-      S.play.fired.add(ev.id);
-      const el = document.querySelector(`.sb-ev[data-ev="${ev.id}"]`);
+    for (const c of cues) {
+      if (c.t > now || S.play.fired.has(c.k)) continue;
+      S.play.fired.add(c.k);
+      const el = document.querySelector(c.sel);
       if (el) { el.classList.remove('firing'); void el.offsetWidth; el.classList.add('firing'); }
-      $('sb-now').textContent = '▸ ' + (ev._label || sbEvLabel(ev));
+      $('sb-now').textContent = '▸ ' + c.label();
     }
     if (now >= S.play.end) { sbStop(); return; }
     S.play.raf = requestAnimationFrame(tick);
@@ -2210,12 +2578,24 @@ function renderRowThumb(n, rowId) {
     return;
   }
   const end = p.events.reduce((m, e) => Math.max(m, e.t), 0);
-  const moments = new Set(p.events.map(e => e.t)).size;
-  let ticks = '';
+  // One colour per lane, by first appearance (sbSeedColors does the same, so the timeline opens in these colours);
+  // commands at one moment stack, each a part of the tick, so none hides another.
+  const colors = sbColorMap();
+  const byT = new Map();
   for (const e of p.events) {
-    const pct = end ? (e.t / end) * 100 : 0;
-    ticks += `<i class="fam-${sbLaneOf(e.cmd, ctx).fam}" style="left:${pct.toFixed(2)}%"></i>`;
+    const slot = sbColorOf(colors, sbLaneOf(e.cmd, ctx, sbDevOfCmd(e.cmd, ctx.chars)).key);
+    if (!byT.has(e.t)) byT.set(e.t, []);
+    byT.get(e.t).push(slot);
   }
+  let ticks = '';
+  for (const [t, slots] of byT) {
+    const pct = end ? (t / end) * 100 : 0;
+    const h = 12 / slots.length;
+    slots.forEach((slot, i) => {
+      ticks += `<i class="${sbColorClass(slot)}" style="left:${pct.toFixed(2)}%;height:${h.toFixed(1)}px;bottom:${(i * h).toFixed(1)}px"></i>`;
+    });
+  }
+  const moments = byT.size;
   const meta = end
     ? `${sbFmt(end)} · ${p.events.length} cmd${p.events.length === 1 ? '' : 's'} · ${moments} moments`
     : `${p.events.length} cmd${p.events.length === 1 ? '' : 's'} at once`;
@@ -2227,6 +2607,14 @@ function scheduleThumb(n, rowId) {
   clearTimeout(sbThumbTimers[rowId]);
   sbThumbTimers[rowId] = setTimeout(() => { delete sbThumbTimers[rowId]; renderRowThumb(n, rowId); }, 150);
 }
+// Strips drawn before the library loaded had no device lanes: draw them all again once it has.
+sbLibReady.then(() => {
+  document.querySelectorAll('.seq-thumb[id$="-thumb"]').forEach(el => {
+    const rowId = el.id.slice(0, -'-thumb'.length);
+    const m = /^seq-row-(\d+)-/.exec(rowId);
+    if (m) renderRowThumb(+m[1], rowId);
+  });
+});
 
 window.SeqBuilder = Object.assign({}, SB_CORE, {
   open: (n, rowId) => open(n, rowId),
