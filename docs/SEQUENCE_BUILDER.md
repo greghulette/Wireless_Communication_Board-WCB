@@ -188,10 +188,13 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   labels harder to read. Reference steps are dashed and fainter. A
   library group (WCB, AstroPixels) has no colour of its own: its edge is striped in its members' colours, with their
   swatches beside its name.
-- **A step fires at its dot.** Each step has a dot in its colour centred on its left edge (`.sb-ev::before`), at the
-  exact time it fires; a reference step's dot is hollow. The box after the dot is only the step's label: a command
-  fires at an instant, and a box with a thick left edge read as how long it runs. Time 0 is drawn 8 px after the
-  label column (`SB_GUTTER` 192, the tracks' `margin-left`), so a step at 0 shows its whole dot.
+- **A step fires at its dot.** Each step has a dot in its colour exactly at the time it fires (`.sb-ev::before`;
+  a reference step's is hollow), and its box, which is only its label, stands apart from it, `SB_EV_GAP` (10 px)
+  to the right: a command fires at an instant, and a box starting at that time read as how long it runs. The
+  step's `left` is still its time (dragging writes it); the box's `margin-left` makes the gap, and `sbStack` counts
+  the dot and the gap when it stacks steps into rows. Grabbing the dot drags the step; selection rings the box only,
+  so the two never touch. A marker (`.compact`) has no gap. Time 0 is drawn 8 px after the label column
+  (`SB_GUTTER` 192, the tracks' `margin-left`), so a step at 0 shows its whole dot.
 - **Lining up with other sequences.** "Line up with…" lists the other sequences on every loaded board and draws the
   ones picked as reference tracks above this sequence's lanes. Each is one line, its steps in their devices'
   colours, read only. A reference starts where this sequence runs it (a `;C`/`;SEQ` step for that key, unrouted, on
@@ -245,7 +248,8 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-21 | (this commit) | Align (to first, last, playhead) and Space evenly for a multi-selection; a dot marks each step's firing time in place of the thick left edge, and time 0 moves 8 px off the label column so its dot shows; the builder sets `color-scheme` from the Wizard's theme | Greg: "an align button if i choose more than 2 commands"; "a dot/star on each command to represent the trigger ... someone could potentially think the command takes the whole box duration"; "formatting isn't following light mode vs dark mode" |
+| 2026-10-21 | (this commit) | A step's box stands apart from its dot, `SB_EV_GAP` (10 px) to the right; the dot alone sits at the time | Greg: "move the text off to the right slightly of the dot. not connected" |
+| 2026-10-21 | `a44875d` | Align (to first, last, playhead) and Space evenly for a multi-selection; a dot marks each step's firing time in place of the thick left edge, and time 0 moves 8 px off the label column so its dot shows; the builder sets `color-scheme` from the Wizard's theme | Greg: "an align button if i choose more than 2 commands"; "a dot/star on each command to represent the trigger ... someone could potentially think the command takes the whole box duration"; "formatting isn't following light mode vs dark mode" |
 | 2026-10-20 | `0f625d5` | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
 | 2026-10-20 | `6b85763` | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
 | 2026-10-20 | `5f31672` | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |

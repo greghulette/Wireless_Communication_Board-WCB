@@ -762,6 +762,7 @@ function sbAllSequences() {
 // ─── Builder state ───────────────────────────────────────────────
 const SB_GUTTER   = 192;          // where time 0 is drawn, px: the 184 px lane label column + an 8 px lead-in, so a
                                   // step at 0 shows its whole trigger dot (seq-builder.css .sb-lane-track margin)
+const SB_EV_GAP   = 10;           // a step's box starts this far right of its time, clear of its dot (.sb-ev margin-left)
 const SB_ROW_H    = 30;           // one row of steps in a lane
 const SB_PPS_MIN  = 10;           // zoom, px per second ...
 const SB_PPS_MAX  = 5000;         // ... 5000 = 5 px per ms
@@ -1390,16 +1391,17 @@ function sbTickLabel(ms, step) {
 }
 
 // Stack a lane's steps into rows where their labels would overlap; past three rows, steps too close to label at this
-// zoom shrink to markers (their tooltip still names them). items: { at (ms), label, span (px), hasIf }.
+// zoom shrink to markers (their tooltip still names them). items: { at (ms), label, span (px), hasIf }. A labelled
+// step takes its dot (6px either side of its time) and its box, SB_EV_GAP after its time; a marker has no gap.
 function sbStack(items) {
   const place = (compact) => {
     const ends = [];
     for (const it of items.slice().sort((a, b) => a.at - b.at)) {
       const x = it.at * S.pps / 1000;
-      const w = compact ? 14 : Math.min(190, 26 + it.label.length * 6.4 + (it.hasIf ? 22 : 0));
-      let r = ends.findIndex(end => end + 3 <= x);
+      const w = compact ? 14 : Math.min(190, 24 + it.label.length * 6.4 + (it.hasIf ? 22 : 0));
+      let r = ends.findIndex(end => end + (compact ? 3 : 8) <= x);
       if (r < 0) { r = ends.length; ends.push(0); }
-      ends[r] = x + Math.max(w, it.span);
+      ends[r] = x + Math.max((compact ? 0 : SB_EV_GAP) + w, it.span);
       Object.assign(it, { row: r, x, w, compact });
     }
     return Math.max(1, ends.length);
@@ -1497,10 +1499,11 @@ function sbRenderTimeline() {
       if (S.sel.has(ev.id)) cls.push('sel');
       if (it.compact) cls.push('compact');
       if (problems.has(ev.id)) cls.push('bad');
+      const lead = it.compact ? 0 : SB_EV_GAP;   // the box's offset from the step's time: a duration bar ends at time + span
       const tip = [sbFmt(ev.t), it.label, ev.cmd, ev.conds.length ? 'IF ' + ev.conds.join(' and ') : '', ev.note ? '*** ' + ev.note : '']
         .filter(Boolean).join('\n');
       pills += `<div class="${cls.join(' ')}" data-ev="${ev.id}" style="${pos(it)}" title="${esc(tip)}">`
-        + (it.span > it.w ? `<div class="sb-ev-span" style="left:${it.w - 4}px;width:${it.span - it.w}px"></div>` : '')
+        + (it.span > lead + it.w ? `<div class="sb-ev-span" style="left:${it.w - 4}px;width:${it.span - lead - it.w}px"></div>` : '')
         + (ev.conds.length ? '<b class="sb-if">IF</b>' : '')
         + (it.compact ? '' : `<span class="sb-ev-label">${esc(it.label)}</span>`)
         + '</div>';

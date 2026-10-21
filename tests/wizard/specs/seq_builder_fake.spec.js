@@ -64,11 +64,14 @@ async function at(page, t, lane = 0) {
 async function dragStep(page, label, toT) {
   const pill = page.locator('.sb-ev', { hasText: label }).first();
   const b = await pill.boundingBox();
+  // Grabbed 3 px into its box, which starts a little right of its time (its dot): drop it that far right of toT.
+  const timeX = await pill.evaluate(el => el.closest('.sb-lane-track').getBoundingClientRect().left + parseFloat(el.style.left));
+  const grab = b.x + 3 - timeX;
   const to = await at(page, toT);
   await page.mouse.move(b.x + 3, b.y + b.height / 2);
   await page.mouse.down();
   await page.mouse.move(b.x + 20, b.y + b.height / 2, { steps: 3 });
-  await page.mouse.move(to.x + 3, b.y + b.height / 2, { steps: 6 });
+  await page.mouse.move(to.x + grab, b.y + b.height / 2, { steps: 6 });
   await page.mouse.up();
 }
 
@@ -308,12 +311,16 @@ test('wizard.seq_builder_align with two or more steps selected, Align puts them 
   const pick = (label, shift) => page.locator('.sb-ev:not(.sb-rev)', { hasText: label }).first()
     .click(shift ? { modifiers: ['Shift'] } : {});
   await openRow(page, 'mixed');                                  // Rotate @0, Leia @500, HCR @1000, all on S1
-  // Each step fires at its dot: 12 px, centred on the step's left edge (its 2 px border + 6 px), which is its time.
-  const dot = await page.locator('.sb-ev:not(.sb-rev)', { hasText: 'Rotate' }).first().evaluate(el => {
-    const s = getComputedStyle(el, '::before');
-    return [s.width, s.left, getComputedStyle(el).borderLeftWidth];
+  // Each step fires at its dot: centred on the step's time (Rotate's is 0, the track's left edge), and the box with
+  // its label stands clear of it, to the right.
+  const g = await page.locator('.sb-ev:not(.sb-rev)', { hasText: 'Rotate' }).first().evaluate(el => {
+    const s = getComputedStyle(el, '::before'), box = el.getBoundingClientRect();
+    const track = el.closest('.sb-lane-track').getBoundingClientRect();
+    const dotL = box.left + parseFloat(getComputedStyle(el).borderLeftWidth) + parseFloat(s.left);
+    return { centre: dotL + parseFloat(s.width) / 2 - track.left, gap: box.left - (dotL + parseFloat(s.width)) };
   });
-  expect(dot).toEqual(['12px', '-8px', '2px']);
+  expect(Math.abs(g.centre)).toBeLessThan(0.5);
+  expect(g.gap).toBeGreaterThanOrEqual(3);
   await pick('Rotate');
   await pick('Leia', true);
   await pick('Overload', true);
