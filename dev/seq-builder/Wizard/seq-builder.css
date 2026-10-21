@@ -5,36 +5,30 @@
    Lane colours: the dataviz reference palette's eight categorical slots in its fixed order, each stepped for its theme
    and validated on the timeline's own surface with the skill's validate_palette.js (dark on #0d0f12, light on #f0f2f5:
    every check passes; four light slots sit under 3:1, which is why every lane and every step carries a text label).
-   seq-builder.js gives each lane a slot (sbColorOf); the lane, its steps, the steps it has on reference tracks and the
-   row's timing strip all wear it. .sbcx is a ninth lane. */
-/* --sb-iN: the ink for text on a step filled with --sb-cN, whichever of near-black and white reads better on it
-   (WCAG contrast worked out per step: near-black 4.5-9.1:1 on all but green, and the light theme's violet, where
-   white is 5.0 / 5.8:1). */
+   seq-builder.js gives each library board and each lane a slot (sbBoardSlot, sbColorOf); the board's library row, its
+   lane, that lane's steps, its steps on reference tracks and the row's timing strip all wear it. .sbcx is a ninth
+   lane. Text stays in the theme's ink everywhere: colour sits on edges, swatches and washes. */
 :root {
   --sb-c1: #3987e5; --sb-c2: #d95926; --sb-c3: #199e70; --sb-c4: #c98500;
   --sb-c5: #d55181; --sb-c6: #008300; --sb-c7: #9085e9; --sb-c8: #e66767;
   --sb-cx: #6e7d94;
-  --sb-i1: #0b0b0b; --sb-i2: #0b0b0b; --sb-i3: #0b0b0b; --sb-i4: #0b0b0b;
-  --sb-i5: #0b0b0b; --sb-i6: #ffffff; --sb-i7: #0b0b0b; --sb-i8: #0b0b0b;
-  --sb-ix: #ffffff;
   --sb-if: #ff7ac6;
 }
 :root.light {
   --sb-c1: #2a78d6; --sb-c2: #eb6834; --sb-c3: #1baf7a; --sb-c4: #eda100;
   --sb-c5: #e87ba4; --sb-c6: #008300; --sb-c7: #6250d6; --sb-c8: #e34948;
   --sb-cx: #7a8494;
-  --sb-i7: #ffffff;
   --sb-if: #c02679;
 }
-.sbc0 { --fam: var(--sb-c1); --ink: var(--sb-i1); }
-.sbc1 { --fam: var(--sb-c2); --ink: var(--sb-i2); }
-.sbc2 { --fam: var(--sb-c3); --ink: var(--sb-i3); }
-.sbc3 { --fam: var(--sb-c4); --ink: var(--sb-i4); }
-.sbc4 { --fam: var(--sb-c5); --ink: var(--sb-i5); }
-.sbc5 { --fam: var(--sb-c6); --ink: var(--sb-i6); }
-.sbc6 { --fam: var(--sb-c7); --ink: var(--sb-i7); }
-.sbc7 { --fam: var(--sb-c8); --ink: var(--sb-i8); }
-.sbcx { --fam: var(--sb-cx); --ink: var(--sb-ix); }
+.sbc0 { --fam: var(--sb-c1); }
+.sbc1 { --fam: var(--sb-c2); }
+.sbc2 { --fam: var(--sb-c3); }
+.sbc3 { --fam: var(--sb-c4); }
+.sbc4 { --fam: var(--sb-c5); }
+.sbc5 { --fam: var(--sb-c6); }
+.sbc6 { --fam: var(--sb-c7); }
+.sbc7 { --fam: var(--sb-c8); }
+.sbcx { --fam: var(--sb-cx); }
 .sb-sw { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 3px; background: var(--fam, var(--border2)); }
 
 body.sb-noscroll { overflow: hidden; }
@@ -107,9 +101,18 @@ body.sb-noscroll { overflow: hidden; }
 }
 .sb-libsec > summary::-webkit-details-marker { display: none; }
 .sb-libsec > summary:hover { border-color: color-mix(in srgb, var(--fam, var(--border2)) 70%, transparent); border-left-color: var(--fam, var(--border2)); }
-.sb-libgrp > summary { border-left-color: var(--accent2); }
+/* A group has no colour of its own, so its edge is striped in its members' colours (--grp, set by seq-builder.js) and
+   their swatches sit beside its name. */
+.sb-libgrp > summary {
+  position: relative; border-left: 6px solid transparent;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--text3) 10%, var(--bg3)), var(--bg3) 70%);
+}
+.sb-libgrp > summary::before {
+  content: ''; position: absolute; left: -6px; top: -1px; bottom: -1px; width: 6px;
+  border-radius: 8px 0 0 8px; background: var(--grp, var(--accent2));
+}
 .sb-sws { display: inline-flex; gap: 3px; }
-.sb-sws .sb-sw { width: 8px; height: 8px; border-radius: 2px; }
+.sb-sws .sb-sw { width: 10px; height: 10px; border-radius: 3px; }
 .sb-caret { color: var(--text3); font-size: 11px; transition: transform var(--transition); }
 .sb-libsec[open] > summary > .sb-caret { transform: rotate(90deg); }
 .sb-libsec-name { flex: 1; font-weight: 600; font-size: 12px; }
@@ -267,29 +270,30 @@ input[type="number"].sb-in { width: 96px; }
 .sb-divider .sb-lane-label { padding-top: 4px; }
 .sb-divider .sb-ln-name { grid-column: 1 / span 2; color: var(--text3); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
 
-/* A step is filled with its lane's colour, its text in that colour's ink (--ink, seq-builder.css top); the darker left
-   edge marks the exact time it fires. Reference steps stay outlined, so they read as context, not as steps of yours. */
+/* A step is outlined in its lane's colour - a bright 2px border, a thicker left edge at the exact time it fires, a light
+   wash inside - with its text in the normal ink, so the colour is strong and the label stays easy to read (a solid fill
+   made it harder: Greg, 2026-10-20). Reference steps are dashed and fainter, so they read as context. A step too close
+   to label at this zoom (.compact) is a solid marker. */
 .sb-ev {
   position: absolute; height: 24px; box-sizing: border-box;
-  display: flex; align-items: center; gap: 4px; padding: 0 7px 0 6px;
-  border: none; border-left: 4px solid color-mix(in srgb, var(--fam) 55%, #000);
-  border-radius: 3px 5px 5px 3px;
-  background: var(--fam);
-  color: var(--ink, var(--text)); font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; gap: 4px; padding: 0 7px 0 5px;
+  border: 2px solid var(--fam); border-left-width: 5px; border-radius: 3px 6px 6px 3px;
+  background: color-mix(in srgb, var(--fam) 20%, var(--bg));
+  color: var(--text); font-size: 11px; font-weight: 600;
   cursor: grab; user-select: none; overflow: visible; white-space: nowrap;
-  transition: box-shadow 120ms ease, filter 120ms ease;
+  transition: box-shadow 120ms ease, background-color 120ms ease;
 }
-.sb-ev:hover { filter: brightness(1.12); }
+.sb-ev:hover { background: color-mix(in srgb, var(--fam) 34%, var(--bg)); }
 .sb-ev:active { cursor: grabbing; }
 .sb-ev.sel { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text), 0 2px 12px rgba(0,0,0,0.45); z-index: 2; }
 .sb-ev.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red); }
 .sb-ev.sel.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red), 0 2px 12px rgba(0,0,0,0.45); }
-.sb-ev.compact { padding: 0; border-radius: 2px; }
+.sb-ev.compact { padding: 0; border-radius: 2px; border-width: 0 0 0 4px; background: var(--fam); }
 .sb-rev {
   border: 1px dashed var(--fam); border-left: 4px solid var(--fam);
-  background: color-mix(in srgb, var(--fam) 20%, var(--bg2)); color: var(--text); font-weight: 500; cursor: ew-resize;
+  background: color-mix(in srgb, var(--fam) 10%, var(--bg)); color: var(--text2); font-weight: 500; cursor: ew-resize;
 }
-.sb-rev:hover { filter: none; background: color-mix(in srgb, var(--fam) 32%, var(--bg2)); }
+.sb-rev:hover { background: color-mix(in srgb, var(--fam) 22%, var(--bg)); }
 .sb-ev-label { overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
 /* How long a step runs, from its right edge on (left and width come inline). */
 .sb-ev-span {
@@ -297,7 +301,7 @@ input[type="number"].sb-in { width: 96px; }
   background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fam) 70%, transparent) 0 4px, transparent 4px 8px);
 }
 .sb-if {
-  font-size: 9px; font-weight: 700; color: var(--ink, var(--sb-if)); border: 1px solid currentColor;
+  font-size: 9px; font-weight: 700; color: var(--sb-if); border: 1px solid currentColor;
   border-radius: 3px; padding: 0 3px; line-height: 13px; position: relative; z-index: 1;
 }
 .sb-ev.firing { animation: sb-fire 420ms ease-out; }
