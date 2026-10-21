@@ -109,3 +109,46 @@ test('wizard.flasher_fake_helpers the flasher: a detected chip overrides the HW 
                             [true, false, false, false, false, true]]);
   expect(page.wizErrors).toEqual([]);
 });
+
+// The fake loader's calls on the last flash, in order: main() with its mode and why it failed, the DTR/RTS changes,
+// the post-flash reset and the disconnect.
+const espCalls = (page) => page.evaluate(() => globalThis.__wcbEsp.calls
+  .filter((c) => ['main', 'dtr', 'rts', 'afterFlash', 'disconnect'].includes(c.op))
+  .map((c) => (c.op === 'main' ? `main:${c.mode ?? ''}${c.failed ? `!${c.failed}` : ''}`
+    : c.op === 'dtr' || c.op === 'rts' ? `${c.op}:${c.v}` : c.op)));
+
+test('wizard.flasher_fake_reset_tap an automatic reset that never syncs becomes a request to tap RESET: the flasher holds GPIO0 low (DTR asserted, RTS released), retries with no reset of its own until the chip answers, releases GPIO0 before anything resets the board, and flashes; a window with no tap, a lost port, or a failure that is not a missed sync stops it with advice for that board', async ({ page }) => {
+  await setup(page);
+
+  // Missed by the automatic reset, answered on the third try after the request.
+  let r = await flash(page, { chip: 'ESP32-D0WD-V3', noSync: 3 }, 24);
+  expect(r.error).toBe(null);
+  expect(await espCalls(page)).toEqual(['main:!nosync', 'rts:false', 'dtr:true', 'main:no_reset!nosync',
+                                        'main:no_reset!nosync', 'main:no_reset', 'dtr:false', 'afterFlash', 'disconnect']);
+  const log = r.logs.join('\n');
+  expect(log).toContain('The automatic reset did not reach bootloader mode');
+  expect(log).toContain('► Tap the RESET button on the board now');
+  expect(log).toContain('Bootloader mode entered after the RESET tap');
+  expect(hex(r.writes)).toEqual(['0x1000:C1', '0x8000:B1', '0xe000:FF', '0x10000:A1']);
+
+  // No tap inside the window: nothing written, GPIO0 released, and the advice fits the board.
+  await page.evaluate(() => { BOOTLOADER_ASSIST_MS = 700; });
+  r = await flash(page, { chip: 'ESP32-D0WD-V3', noSync: 999 }, 24);
+  expect([r.error, r.writes]).toEqual([expect.stringContaining('Bootloader connection failed: no RESET tap was seen'), []]);
+  expect(r.error).toContain('RESET is its only button');
+  const c = await espCalls(page);
+  expect([c.slice(0, 3), c.slice(-2)]).toEqual([['main:!nosync', 'rts:false', 'dtr:true'], ['dtr:false', 'disconnect']]);
+  r = await flash(page, { chip: 'ESP32-S3', noSync: 999 }, 32);
+  expect(r.error).toContain('holding BOOT while you tap RESET');
+
+  // The board drops off USB while it waits.
+  r = await flash(page, { chip: 'ESP32-D0WD-V3', noSync: 999, dropOnDtr: true }, 24);
+  expect([r.error, r.writes]).toEqual([expect.stringContaining('the board dropped off USB'), []]);
+  await page.evaluate(() => { BOOTLOADER_ASSIST_MS = 60000; });
+
+  // A port that would not open is not a missed sync: no request, the lines untouched.
+  r = await flash(page, { chip: 'ESP32-D0WD-V3', mainError: "Failed to execute 'open' on 'SerialPort': Failed to open serial port." }, 24);
+  expect(r.error).toContain("Bootloader connection failed: Failed to execute 'open'");
+  expect((await espCalls(page)).filter((x) => /^(dtr|rts):/.test(x))).toEqual([]);
+  expect(page.wizErrors).toEqual([]);
+});

@@ -3,13 +3,15 @@
 // and chip.CHIP_NAME, getFlashSize() in KB or readFlashId(), readFlash(), writeFlash(), afterFlash(), and the
 // Transport's disconnect/setDTR/setRTS. Nothing here touches a port. Each test configures it through
 // globalThis.__wcbEsp = { chip, flashKB, flashId, flash: { <address>: [bytes] }, calls: [] } before calling
-// flashFirmware; a size source left null is absent, as on a loader that lacks it.
+// flashFirmware; a size source left null is absent, as on a loader that lacks it. For entering the bootloader:
+// noSync = how many main() calls fail as esptool's does when the chip never syncs, mainError = a different
+// error for the first call, dropOnDtr = the port is lost (readable null) when DTR is asserted.
 const S = () => globalThis.__wcbEsp || (globalThis.__wcbEsp = { calls: [] });
 
 export class Transport {
   constructor(device, tracing) { S().calls.push({ op: 'transport', tracing }); this.device = device; }
   async disconnect() { S().calls.push({ op: 'disconnect' }); }
-  async setDTR(v) { S().calls.push({ op: 'dtr', v }); }
+  async setDTR(v) { S().calls.push({ op: 'dtr', v }); if (v && S().dropOnDtr) this.device.readable = null; }
   async setRTS(v) { S().calls.push({ op: 'rts', v }); }
 }
 
@@ -21,9 +23,20 @@ export class ESPLoader {
     if (cfg.flashKB != null) this.getFlashSize = async () => cfg.flashKB;
     if (cfg.flashId != null) this.readFlashId = async () => cfg.flashId;
   }
-  async main() {
+  async main(mode) {
     const cfg = S();
-    cfg.calls.push({ op: 'main' });
+    if (cfg.mainError) {
+      const m = cfg.mainError;
+      cfg.mainError = null;
+      cfg.calls.push({ op: 'main', mode, failed: m });
+      throw new Error(m);
+    }
+    if (cfg.noSync > 0) {
+      cfg.noSync--;
+      cfg.calls.push({ op: 'main', mode, failed: 'nosync' });
+      throw new Error('Failed to connect with the device');
+    }
+    cfg.calls.push({ op: 'main', mode });
     this.chip = { CHIP_NAME: cfg.chip };
     return cfg.chip;
   }

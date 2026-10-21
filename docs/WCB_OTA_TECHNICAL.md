@@ -26,6 +26,7 @@ A device updates itself by writing the **inactive** OTA app slot through the ESP
 - `esp_ota_get_next_update_partition()` returns the **inactive** slot; if the table has no spare OTA slot it returns `NULL` → OTA is impossible. **NaviCore must be on a 2‑OTA‑slot table** (one‑time full flash if it currently uses a single‑app/huge‑app scheme).
 - App image ceiling ≈ each slot's size (~1.9 MB here).
 - `nvs`/`otadata` offsets here are identical to the stock Arduino `default` scheme, so config survives switching schemes (as long as NVS isn't erased).
+- **Only a USB flash writes the partition table; OTA never does.** A board keeps the table its last USB flash wrote, whatever version it reports now. Releases before 6.1.0, and an Arduino IDE upload on the `Default` scheme, write the default table, whose app slots are `0x140000` (1,310,720 B). Such a board OTAs up to 6.2.1 (1,299,424 B, inside by 11 KB) and refuses 7.x at `BEGIN` (7.0.1's ESP32 app is 1,455,168 B). One USB **Update FW** fixes it: the flasher's migration check rewrites boot + table + app and keeps NVS (`Wizard/flasher.js`). The Wizard says so when a `BEGIN` is refused for size: over USB from the board's `exceeds partition` line (`boardOtaSerial`), over a relay, whose ACK carries a status but no reason, whenever the image is past the legacy slot (`boardOtaRelay`).
 
 ---
 
@@ -297,6 +298,7 @@ if (len == sizeof(espnow_struct_ota_data)) { enqueueOtaPacket(data, len); return
 |---|---|
 | Chip‑family mismatch | `BEGIN` rejected (brick guard) — current app intact |
 | No inactive OTA slot | `BEGIN` rejected — wrong partition table |
+| Image larger than the inactive slot | `BEGIN` rejected (`exceeds partition`) — usually the legacy default table (§1); current app intact |
 | Out‑of‑order / dup chunk | `otaWrite` no‑op; ACK stale cursor → sender resends |
 | Image overrun / `esp_ota_write` error mid-stream | session torn down; ACK `OTA_ST_ERR` → host fails fast; current app intact |
 | SHA/magic verify fail at `END` | image rejected; current app intact |
@@ -330,6 +332,7 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-19 | — | §1: only a USB flash writes the partition table, and 7.x no longer fits the legacy default table's 1.25 MB slots; §8: the size rejection. The Wizard names the one‑time USB update when `BEGIN` is refused for size. | A user's three V2.4s on 6.2.1: one took 7.0.1 by OTA, two were refused (`app0` 1,310,720 B). They had reached 6.2.1 by OTA from a table an older USB flash wrote, so the version they reported said nothing about the layout. Trap: a board's firmware version does not tell you its partition table. |
 | 2026-09-22 | — | Relay `DATA`: the ACK status is read after `otaWrite`, so the frame whose own write tears the session down (image overrun, `esp_ota_write` error) is ACKed `OTA_ST_ERR`+`0`, not `OTA_ST_OK`+`0`. Same change in `navicore_ota.h`. | HIL `ota.relay_teardown_frame_err` (tracker #70). The 2026-08-06 change captured the in-session flag before the write and reused it for the status, so only the frames after the teardown got `ERR`. Hosts recovered one round trip late: the Wizard by resending, NaviCore's tool by treating `OK`+`0` as stale. Trap: a status that the call itself can change must be read after the call. |
 | 2026-09-22 | — | A rejected local `BEGIN` restores the USB rate to 115200 after its `[OTA:BEGIN,ERR]` marker (`processOtaLocalCommand`), and the transfer‑baud bullet lists every restore path. | HIL `ota.local_baud_rejected_rebegin_restores` (tracker #61): `otaBegin` tears a live session down before its guards run, so a refused re‑`BEGIN` at 921600 left no session. The idle reaper and `BAUD` both need one, so W1 stayed at 921600 until reset. The earlier claim that "the 30 s idle timeout owns the restore" was false on that path. |
 | 2026-08-27 | — | Relay `DATA` accepts an optional CRC‑32 suffix on the offset field (`<offset>:<crc32>` over `"<offset>,<b64>"`) and DROPS a line that fails it; `Serial.setRxBufferSize` 2048 → 8192; new `serialRxOverflows` counter fed by `Serial.onReceiveError`. Backward compatible both directions (`String::toInt()` stops at the `:`). | A UART RX overflow drops a run of bytes from the MIDDLE of a line. Inside the base64 field, with the newline intact, the remainder is still valid base64 and still decodes `rc == 0` — to re‑phased garbage written at a valid offset. The cursor advances and the only symptom is SHA‑256 failing at 100%, after minutes of apparently healthy progress. The 8‑line send window (2272 B) could not fit the old 2 KB ring at all. |
