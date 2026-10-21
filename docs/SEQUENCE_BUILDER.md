@@ -184,10 +184,14 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   never share a colour (`sbColorOf`). Lanes are assigned in order of first appearance in time, which is also the row
   strip's order, so a sequence opens in the colours its strip shows. A lane keeps its colour while the builder is
   open, so a lane that comes or goes repaints no other. A ninth lane is grey. A step is outlined in its lane's colour
-  (a 2px border, a thicker left edge at the exact time it fires, a light wash inside), and its text stays in the
-  theme's ink. A solid fill was tried and made the labels harder to read. Reference steps are dashed and fainter. A
+  (a 2px border, a light wash inside), and its text stays in the theme's ink. A solid fill was tried and made the
+  labels harder to read. Reference steps are dashed and fainter. A
   library group (WCB, AstroPixels) has no colour of its own: its edge is striped in its members' colours, with their
   swatches beside its name.
+- **A step fires at its dot.** Each step has a dot in its colour centred on its left edge (`.sb-ev::before`), at the
+  exact time it fires; a reference step's dot is hollow. The box after the dot is only the step's label: a command
+  fires at an instant, and a box with a thick left edge read as how long it runs. Time 0 is drawn 8 px after the
+  label column (`SB_GUTTER` 192, the tracks' `margin-left`), so a step at 0 shows its whole dot.
 - **Lining up with other sequences.** "Line up with…" lists the other sequences on every loaded board and draws the
   ones picked as reference tracks above this sequence's lanes. Each is one line, its steps in their devices'
   colours, read only. A reference starts where this sequence runs it (a `;C`/`;SEQ` step for that key, unrouted, on
@@ -199,8 +203,13 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   never written into anything.
 - **Moving steps.** Drag a step to move it, snapped to the grid (Alt for 1 ms); Shift-click adds to the selection; the
   arrow keys nudge (10 ms, Shift 100, Alt 1). The inspector takes an exact time in ms, with ±1/10/100 buttons. A
-  multi-selection moves by an amount, or so its first step sits at the playhead. Insert gap and Close gap shift
-  everything after the playhead.
+  multi-selection moves by an amount, or so its first step sits at the playhead. With two or more selected, Align
+  puts them all at the time of the first, of the last, or of the playhead (`sbAlignSel`); with three or more, Space
+  evenly keeps the first and last and spaces the ones between equally (`sbSpreadSel`). Each is one undo step. Steps at
+  one time run in the order they sit in the timeline's list, so an aligned set goes into it, earliest first, where its
+  first step was: it runs in the order it was laid out. Insert gap and Close gap shift everything after the playhead.
+- **Theme.** The builder follows the Wizard's theme, which is its own toggle (the `light` class on `<html>`), not the
+  system's. The overlay sets `color-scheme` from it, so native dropdown lists, number spinners and scrollbars match.
 - **Preview** runs the playhead in real time in the browser and flashes each step, references' included, as it passes.
   **Save & Test** applies the timeline, then runs the row's own `updateSequence` and `playSequence` (TEST, this board
   only), and starts the preview alongside the board.
@@ -228,7 +237,7 @@ this repo:
 | Test | Covers |
 |---|---|
 | `tests/wizard/unit/seq_builder.test.js` (`npm run unit`, CI) | compile, parse and both round trips; the firmware rules above; routes and recall keys; `sbAnalyze`; the real `cmdlib/` files: normalization, decode specificity, encode/decode inverse for every visible command |
-| `tests/wizard/specs/seq_builder_fake.spec.js` (CI; HIL `wizard.seq_builder_*`) | in the real page against a fake board: opening a sequence as is (its strip and timeline in the same colours), editing and dragging, the composer and drag-and-drop from the library, label routing, a new sequence, the warnings, Save & Test's wire, device lanes on one port, lining up with another sequence (start, drag, sticking, remembered), the DroidNet trigger. `SB_SHOTS=<dir>` saves a screenshot at each step |
+| `tests/wizard/specs/seq_builder_fake.spec.js` (CI; HIL `wizard.seq_builder_*`) | in the real page against a fake board: opening a sequence as is (its strip and timeline in the same colours), editing and dragging, the composer and drag-and-drop from the library, label routing, a new sequence, the warnings, Save & Test's wire, device lanes on one port, lining up with another sequence (start, drag, sticking, remembered), the DroidNet trigger, Align and Space evenly. `SB_SHOTS=<dir>` saves a screenshot at each step, in the light theme with `SB_THEME=light` |
 
 ## Revision log
 
@@ -236,7 +245,8 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
+| 2026-10-21 | (this commit) | Align (to first, last, playhead) and Space evenly for a multi-selection; a dot marks each step's firing time in place of the thick left edge, and time 0 moves 8 px off the label column so its dot shows; the builder sets `color-scheme` from the Wizard's theme | Greg: "an align button if i choose more than 2 commands"; "a dot/star on each command to represent the trigger ... someone could potentially think the command takes the whole box duration"; "formatting isn't following light mode vs dark mode" |
+| 2026-10-20 | `0f625d5` | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
 | 2026-10-20 | `6b85763` | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
 | 2026-10-20 | `5f31672` | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |
 | 2026-10-20 | `e2d2b09` | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |

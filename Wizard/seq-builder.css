@@ -37,7 +37,9 @@ body.sb-noscroll { overflow: hidden; }
   position: fixed; inset: 0; z-index: 600;
   background: rgba(0,0,0,0.6);
   display: none; padding: 14px;
+  color-scheme: dark;   /* native dropdown lists, number spinners and scrollbars in the builder's theme */
 }
+:root.light .sb-overlay { color-scheme: light; }
 .sb-overlay.open { display: flex; }
 .sb-overlay [hidden] { display: none !important; }
 .sb-shell {
@@ -223,7 +225,7 @@ input[type="number"].sb-in { width: 96px; }
   background: var(--bg3); border-right: 1px solid var(--border);
   font-size: 10px; color: var(--text3); padding: 8px 10px; text-transform: uppercase; letter-spacing: 0.6px;
 }
-.sb-ruler-track { position: relative; flex: none; cursor: col-resize; }
+.sb-ruler-track { position: relative; flex: none; cursor: col-resize; margin-left: 8px; }
 .sb-tick { position: absolute; bottom: 0; width: 1px; height: 5px; background: var(--border2); }
 .sb-tick-major { height: 30px; background: var(--border); }
 .sb-tick-major span { position: absolute; left: 4px; top: 3px; font-size: 10px; color: var(--text3); white-space: nowrap; }
@@ -250,7 +252,7 @@ input[type="number"].sb-in { width: 96px; }
 .sb-ln-name { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-ln-sub  { grid-column: 2; color: var(--text3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-lane-track {
-  position: relative; flex: none;
+  position: relative; flex: none; margin-left: 8px;   /* the lead-in before time 0 (SB_GUTTER) */
   background-color: color-mix(in srgb, var(--fam, transparent) 4%, transparent);
   background-image: linear-gradient(to right, var(--bg3) 1px, transparent 1px);
 }
@@ -278,21 +280,30 @@ input[type="number"].sb-in { width: 96px; }
    to label at this zoom (.compact) is a solid marker. */
 .sb-ev {
   position: absolute; height: 24px; box-sizing: border-box;
-  display: flex; align-items: center; gap: 4px; padding: 0 7px 0 5px;
-  border: 2px solid var(--fam); border-left-width: 5px; border-radius: 3px 6px 6px 3px;
+  display: flex; align-items: center; gap: 4px; padding: 0 7px 0 9px;
+  border: 2px solid var(--fam); border-radius: 3px 6px 6px 3px;
   background: color-mix(in srgb, var(--fam) 20%, var(--bg));
   color: var(--text); font-size: 11px; font-weight: 600;
   cursor: grab; user-select: none; overflow: visible; white-space: nowrap;
   transition: box-shadow 120ms ease, background-color 120ms ease;
 }
+/* The trigger: a dot centred on the step's left edge, exactly at the time it fires. The box after it is only its label,
+   not how long it runs (Greg, 2026-10-21: the box could be read as a duration). A step's left edge is at its time and
+   its 2px border sits inside that, so the dot's centre is 2px + 6px left of the padding box. */
+.sb-ev::before {
+  content: ''; position: absolute; left: -8px; top: 50%; width: 12px; height: 12px; margin-top: -6px;
+  border-radius: 50%; background: var(--fam); box-shadow: 0 0 0 2px var(--bg); z-index: 2; pointer-events: none;
+}
+.sb-rev::before { background: var(--bg); border: 2px solid var(--fam); box-sizing: border-box; }
 .sb-ev:hover { background: color-mix(in srgb, var(--fam) 34%, var(--bg)); }
 .sb-ev:active { cursor: grabbing; }
 .sb-ev.sel { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text), 0 2px 12px rgba(0,0,0,0.45); z-index: 2; }
 .sb-ev.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red); }
 .sb-ev.sel.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red), 0 2px 12px rgba(0,0,0,0.45); }
-.sb-ev.compact { padding: 0; border-radius: 2px; border-width: 0 0 0 4px; background: var(--fam); }
+.sb-ev.compact { padding: 0; border-radius: 2px; border-width: 0; background: color-mix(in srgb, var(--fam) 35%, var(--bg)); }
+.sb-ev.compact::before { left: -6px; }
 .sb-rev {
-  border: 1px dashed var(--fam); border-left: 4px solid var(--fam);
+  border: 1px dashed var(--fam);
   background: color-mix(in srgb, var(--fam) 10%, var(--bg)); color: var(--text2); font-weight: 500; cursor: ew-resize;
 }
 .sb-rev:hover { background: color-mix(in srgb, var(--fam) 22%, var(--bg)); }
@@ -347,6 +358,7 @@ input[type="number"].sb-in { width: 96px; }
 .sb-insp > .sb-fields { padding: 4px 12px 8px; }
 .sb-insp-title { font-weight: 600; font-size: 12px; }
 .sb-nudge { display: inline-flex; gap: 2px; }
+.sb-btngroup { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius); }
 .sb-nudge .btn { padding: 3px 6px; }
 .sb-order { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text2); }
 .sb-cmdtext { padding: 0 12px 10px; }
@@ -401,5 +413,6 @@ li.lvl-error { color: var(--red); }
   .sb-shell { border-radius: 0; }
   .sb-body { flex-direction: column; }
   .sb-lib { width: auto; max-height: 34vh; border-right: none; border-bottom: 1px solid var(--border); }
-  /* The label column stays 184px at every width: seq-builder.js maps pointer x to time with SB_GUTTER. */
+  /* The label column stays 184px at every width, and the tracks start 8px after it: seq-builder.js maps pointer x to
+     time with SB_GUTTER (192). */
 }

@@ -421,6 +421,7 @@ _SEQ_BUILDER = (
     ("seq_builder_devices", "Three devices sent to one unlabelled port get a lane and a colour each, named by device with the port underneath"),
     ("seq_builder_lineup", "Other sequences line up above this one: started where this one runs them or dragged, a dragged step sticks to their steps, remembered, and they change nothing"),
     ("seq_builder_droidnet", "DroidNet's Maestro trigger by name: @A<name> out this board's Serial 0 (USB), or another board's, in a lane of its own"),
+    ("seq_builder_align", "Selected steps line up on the first, the last or the playhead, or spread evenly, in one undo; each step marks its firing time with a dot"),
 )
 for _key, _title in _SEQ_BUILDER:
     def _seq_builder(bench, _id=f"wizard.{_key}"):

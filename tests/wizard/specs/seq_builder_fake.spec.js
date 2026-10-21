@@ -12,9 +12,14 @@ const { setup } = require('../lib/rescan');
 
 const SHOTS = process.env.SB_SHOTS || '';
 // Toasts are hidden for the picture: they cover the corner of the builder and are not what a shot is for.
+// SB_THEME=light takes the shots in the Wizard's light theme (its toggle: the `light` class on <html>).
 const shot = async (page, name) => {
   if (!SHOTS) return;
   await page.addStyleTag({ content: '.toast-container{display:none!important}' });
+  if (process.env.SB_THEME === 'light') {
+    await page.evaluate(() => document.documentElement.classList.add('light'));
+    await page.waitForTimeout(400);   // buttons and steps fade their colours (150 ms transitions)
+  }
   await page.screenshot({ path: path.join(SHOTS, `${name}.png`) });
 };
 
@@ -295,4 +300,41 @@ test('wizard.seq_builder_droidnet a DroidNet Maestro sequence runs by name: @A<n
   await page.selectOption('#sbi-dest', 'W2S0');                         // DroidNet on another board's USB
   expect(await out(page)).toBe(';W2,;S0@AMonsterMash');
   await shot(page, '10-droidnet');
+});
+
+test('wizard.seq_builder_align with two or more steps selected, Align puts them all at the first one\'s time, the last one\'s or the playhead, keeping the order they ran in; Space evenly keeps the first and last and spreads the rest', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, W1);
+  const pick = (label, shift) => page.locator('.sb-ev:not(.sb-rev)', { hasText: label }).first()
+    .click(shift ? { modifiers: ['Shift'] } : {});
+  await openRow(page, 'mixed');                                  // Rotate @0, Leia @500, HCR @1000, all on S1
+  // Each step fires at its dot: 12 px, centred on the step's left edge (its 2 px border + 6 px), which is its time.
+  const dot = await page.locator('.sb-ev:not(.sb-rev)', { hasText: 'Rotate' }).first().evaluate(el => {
+    const s = getComputedStyle(el, '::before');
+    return [s.width, s.left, getComputedStyle(el).borderLeftWidth];
+  });
+  expect(dot).toEqual(['12px', '-8px', '2px']);
+  await pick('Rotate');
+  await pick('Leia', true);
+  await pick('Overload', true);
+  await expect(page.locator('#sbm-al-first')).toBeVisible();
+  await page.click('#sbm-al-last');
+  expect(await out(page)).toBe(';T1000^;S1:DPA180^;S1F001^;S1<SE>');
+  await shot(page, '11-aligned');
+  await page.keyboard.press('Control+z');
+  expect(await out(page)).toBe(MIXED);
+  await page.click('#sbm-al-ph');                                // the playhead is at 0
+  expect(await out(page)).toBe(';S1:DPA180^;S1F001^;S1<SE>');
+  await page.keyboard.press('Control+z');
+  await page.click('#sbm-al-first');
+  expect(await out(page)).toBe(';S1:DPA180^;S1F001^;S1<SE>');
+  await page.click('#sb-cancel');
+  await page.click('#sb-cancel');                                // "Discard changes?"
+
+  await openRow(page, 'show');                                   // Maestro 1 @0, Play @0, Leia @1250, Maestro 2 @4000
+  await pick('Run subroutine · 1');
+  await pick('Leia', true);
+  await pick('Run subroutine · 2', true);
+  await page.click('#sbm-spread');
+  expect(await out(page)).toBe(';M11^;A,PLAY,5^;T2000^;S3A001***holos^;T2000^;M12');
 });
