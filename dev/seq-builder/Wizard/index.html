@@ -779,7 +779,7 @@
       <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
-        <button class="btn btn-ghost btn-sm" onclick="SeqBuilder.openNew({N})"
+        <button class="btn btn-ghost btn-sm" onclick="window.SeqBuilder?.openNew({N})"
                 title="Build a new sequence on a timeline, from the command library">+ Timeline</button>
         <input type="search" class="seq-filter" id="b{N}-seq-filter" placeholder="Filter by name or contents"
                spellcheck="false" oninput="seqPagerFilter({N}, this.value)"

@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '21.00:18.R.OCT.2026';
+const UI_VERSION = '21.00:44.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -1826,6 +1826,17 @@ const OTA_XFER_FALLBACKS = [460800];       // tried in order when a faster rate 
 let OTA_SESSION_TIMEOUT_MS = 30000;        // the board's session timeout, from BEGIN (WCB_OTA.cpp); a spec shortens it
 const OTA_BAUD_PROOF_MS = 1500;            // how long the board gets to answer STATUS at a raised rate
 
+// A board's partition table is whatever its last USB flash wrote. OTA carries a new version
+// onto the board without touching the table, so the version it reports says nothing about it.
+// Releases before 6.1.0 shipped ESP32's default table (two 1.25 MB app slots), and so does an
+// Arduino IDE upload on the Default scheme: such a board can OTA its way to 6.2.1 (which fit,
+// by 11 KB) and then refuse 7.x at BEGIN. Only a USB flash rewrites the table - the flasher's
+// migration check does it and keeps NVS - so say that, not the raw size line.
+const OTA_LEGACY_SLOT_BYTES = 0x140000;    // the default table's app slot (1310720)
+const _otaMB = (b) => (b / 1048576).toFixed(2);
+const OTA_LEGACY_FIX = 'OTA cannot change a board\'s partition layout: update it once over USB with Update FW ' +
+                       '(its config is kept). OTA works again after that.';
+
 function _otaBaudKey(conn) {
   try {
     const i = conn?.port?.getInfo?.() || {};
@@ -1892,8 +1903,14 @@ async function boardOtaSerial(n) {
     let beganAt = 0;
     const begin = async () => {
       const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
-      if (!/\[OTA:BEGIN,OK,/.test(beginResp))
-        throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+      if (!/\[OTA:BEGIN,OK,/.test(beginResp)) {
+        const why  = beginResp.match(/\[OTA\][^\r\n]*/)?.[0];
+        const slot = parseInt(why?.match(/exceeds partition '[^']*' \((\d+) B\)/)?.[1], 10);
+        if (slot > 0 && total > slot)
+          throw new Error(`this board has the old partition layout: ${_otaMB(slot)} MB firmware slots, too small ` +
+                          `for this ${_otaMB(total)} MB image. ${OTA_LEGACY_FIX}`);
+        throw new Error('board rejected OTA BEGIN — ' + (why || 'see terminal'));
+      }
       beganAt = performance.now();   // the board's session timeout runs from here
     };
     await begin();
@@ -2141,7 +2158,14 @@ async function boardOtaRelay(n) {
     setFlashStatus(n, 'Starting OTA…');
     const beginAck = await _otaRelayAwaitAck(relayConn, cmd(`BEGIN,${targetWcb},${session},${total},${family}`), targetWcb, session, 8000);
     if (!beginAck)              throw new Error(`no response from WCB${targetWcb} via relay — is it online & on this firmware?`);
-    if (beginAck.status !== 0)  throw new Error(`WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
+    // The relay ACK carries a status, not the reason. Past the legacy slot the likely reason is
+    // the old partition layout (see OTA_LEGACY_SLOT_BYTES); the family above comes from the HW
+    // version setting, so a wrong one stays the other suspect.
+    if (beginAck.status !== 0)  throw new Error(total > OTA_LEGACY_SLOT_BYTES
+      ? `WCB${targetWcb} rejected OTA BEGIN. The likely cause is the old partition layout, whose ` +
+        `${_otaMB(OTA_LEGACY_SLOT_BYTES)} MB firmware slots can't hold this ${_otaMB(total)} MB image. ` +
+        `${OTA_LEGACY_FIX} If that isn't it, check its HW version (chip family).`
+      : `WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
 
     // Stream 192-byte ESP-NOW frames, ACK-paced (target reports its write cursor).
     const CHUNK = 192;
@@ -5037,11 +5061,11 @@ function appendSequenceRow(n, key, value) {
                 >${escHtml(lines)}</textarea>
       <div class="seq-char-count" id="${rowId}-val-count">${valLen}</div>
       <div class="seq-thumb" id="${rowId}-thumb" role="button" tabindex="0" hidden
-           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();SeqBuilder.open(${n},'${rowId}')}"></div>
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.SeqBuilder?.open(${n},'${rowId}')}"></div>
     </td>
     <td class="seq-action-cell">
       <button class="btn btn-ghost btn-sm" title="Open on a timeline"
-              onclick="SeqBuilder.open(${n},'${rowId}')">TIMELINE</button>
+              onclick="window.SeqBuilder?.open(${n},'${rowId}')">TIMELINE</button>
       <button class="btn btn-primary btn-sm" title="Test"
               onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
       <button class="btn btn-primary btn-sm" title="Save/Update"

@@ -375,7 +375,9 @@ function sbPattern(lib, cmd) {
     if (isFree) free++;
   }
   re += '$';
-  const regex = (ambiguous || !cmd.template || lit === 0) ? null : new RegExp(re);
+  // caseInsensitive: the device takes its fixed text in either case (DroidNet's @A / @a). A template with no fixed text
+  // decodes only when nothing in it is free text (flthy-hps's lone enum "{special}" does; serial text's "{text}" not).
+  const regex = (ambiguous || !cmd.template || (lit === 0 && free > 0)) ? null : new RegExp(re, cmd.caseInsensitive ? 'i' : '');
   return (cmd.__sbRe = { gen: lib.gen, regex, order, lit, free });
 }
 

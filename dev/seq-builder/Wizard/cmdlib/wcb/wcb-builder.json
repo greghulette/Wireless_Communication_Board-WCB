@@ -36,7 +36,7 @@
       "name": "WCB · Maestro",
       "kind": "wcb-verb",
       "routing": { "class": "wcb-verb" },
-      "notes": "Ranges from WcbCmd/src/WcbMaestro.cpp: subroutine 0-127 (a 7-bit data byte), channel 0-127, target/speed/parameter 0-16383, accel 0-255. The Maestro id is the WCB slot id: 1-8 a device, 0 every Maestro, 9 every Maestro on this board. Supersedes the vendored `maestro` board, whose ranges are narrower than the firmware's. wcbmaestro.droidnet is DroidNet's own trigger for a Maestro sequence it holds by name (@A<name>), which DroidNet reads on the WCB's Serial 0 (USB): a device string, so it is written as ;S0@A<name> (processSerialMessage prints it on USB). defaultPort, laneName and shortName are builder hints (Wizard/seq-builder.js): the port a new step goes to, the name of its lane, and what its steps are called on the timeline.",
+      "notes": "Ranges from WcbCmd/src/WcbMaestro.cpp: subroutine 0-127 (a 7-bit data byte), channel 0-127, target/speed/parameter 0-16383, accel 0-255. The Maestro id is the WCB slot id: 1-8 a device, 0 every Maestro, 9 every Maestro on this board. Supersedes the vendored `maestro` board, whose ranges are narrower than the firmware's. wcbmaestro.droidnet is DroidNet's own trigger for a Maestro sequence it holds by name (@A<name>), which DroidNet reads on the WCB's Serial 0 (USB): a device string, so it is written as ;S0@A<name> (processSerialMessage prints it on USB). defaultPort, laneName and shortName are builder hints: the port a new step goes to, the name of its lane, and what its steps are called on the timeline. caseInsensitive: the command is recognised whatever the case of its fixed text (@A or @a); new steps are written as the template spells it.",
       "commands": [
         { "id": "wcbmaestro.run", "name": "Run subroutine", "safety": "movement", "encoder": "template", "category": "Script",
           "template": ";M{maestroId}{sequence}",
@@ -61,7 +61,7 @@
           "examples": [";M1,stopScript"], "commentLabel": "Maestro stop" },
         { "id": "wcbmaestro.droidnet", "name": "Run a DroidNet sequence (by name)", "safety": "movement", "encoder": "template", "category": "Script",
           "template": "@A{name}",
-          "defaultPort": 0, "laneName": "Maestro via DroidNet", "shortName": "Run",
+          "defaultPort": 0, "laneName": "Maestro via DroidNet", "shortName": "Run", "caseInsensitive": true,
           "params": [
             { "name": "name", "label": "Sequence name in DroidNet (e.g. MonsterMash)", "pattern": "^\\S(.*\\S)?$", "required": true }
           ],
@@ -167,26 +167,12 @@
       "name": "WCB · Actions",
       "kind": "wcb-verb",
       "routing": { "class": "wcb-verb" },
-      "notes": "The WCB's own verbs that are actions rather than setup. ;V,/;VP, from WCB_Variables.cpp processSetVariable (volatile / persistent). ;P<port><us> from WCB.ino processPWMOutput: port 1-5, 500-2500 us, refused on a port another device uses. Serial text has no leading command character, so the builder routes it out a serial port like any device-native string.",
+      "notes": "The WCB's own verbs that are actions rather than setup. ;V,/;VP, from WCB_Variables.cpp processSetVariable (volatile / persistent). ;P<port><us> from WCB.ino processPWMOutput: port 1-5, 500-2500 us, refused on a port another device uses. Serial text has no leading command character, so it goes out a serial port like any device-native string; being nothing but one free field, it is never decoded (it would match anything). The variable commands with fixed words (TOGGLE, INC, DEC) come before the general set, so a decoder that takes the first match names them right.",
       "commands": [
         { "id": "wcb.serialText", "name": "Send text to a serial port", "safety": "cosmetic", "encoder": "template", "category": "Serial",
           "template": "{text}",
           "params": [ { "name": "text", "label": "Text (the device's own command)", "default": "", "required": true } ],
           "examples": [":PP100"], "commentLabel": "Serial text" },
-        { "id": "wcb.varSet", "name": "Set a variable", "safety": "config", "encoder": "template", "category": "Variables",
-          "template": ";V,{name},{value}",
-          "params": [
-            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
-            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
-          ],
-          "examples": [";V,mode,2"], "commentLabel": "Set var" },
-        { "id": "wcb.varSetPersist", "name": "Set a variable and save it", "safety": "config", "encoder": "template", "category": "Variables",
-          "template": ";VP,{name},{value}",
-          "params": [
-            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
-            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
-          ],
-          "examples": [";VP,mode,2"], "commentLabel": "Save var" },
         { "id": "wcb.varToggle", "name": "Toggle a variable (0 ↔ 1)", "safety": "config", "encoder": "template", "category": "Variables",
           "template": ";V,{name},TOGGLE",
           "params": [ { "name": "name", "label": "Variable", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true } ],
@@ -205,6 +191,20 @@
             { "name": "step", "label": "By", "type": "int", "min": 1, "max": 32767, "default": 1, "required": true }
           ],
           "examples": [";V,count,DEC,1"], "commentLabel": "Dec var" },
+        { "id": "wcb.varSet", "name": "Set a variable", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";V,{name},{value}",
+          "params": [
+            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
+          ],
+          "examples": [";V,mode,2"], "commentLabel": "Set var" },
+        { "id": "wcb.varSetPersist", "name": "Set a variable and save it", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";VP,{name},{value}",
+          "params": [
+            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
+          ],
+          "examples": [";VP,mode,2"], "commentLabel": "Save var" },
         { "id": "wcb.pwmPulse", "name": "PWM pulse out a serial port", "safety": "movement", "encoder": "template", "category": "PWM",
           "template": ";P{port}{us}",
           "params": [
