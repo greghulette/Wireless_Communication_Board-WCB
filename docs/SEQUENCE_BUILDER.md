@@ -115,7 +115,9 @@ A command that already exists is never rewritten until its fields or Send to cha
 The library is the one NaviCore's config tool presents (NaviCore `docs/CONFIG_TOOL.md` §6). The picker matches it: the
 same groups (WCB pinned first, AstroPixels), collapsed sections with counts, and a search that opens every section with a
 match. A command opens in a composer with its fields and a live preview of the command, plus Send to and **Add at the
-playhead**. The composer's preview, or any command in the list, can also be dragged onto the timeline.
+playhead**. The composer's preview, or any command in the list, can also be dragged onto the timeline. Adding goes
+back to the list as it was (the search, the open sections, the scroll): the new step is selected, and the inspector
+has the same fields to finish it with.
 
 **Where it comes from.** `cmdlib/droidnet/` is a byte-for-byte copy of NaviCore's vendored snapshot, local
 modifications included. Refresh it by copying NaviCore's over it, so the two tools keep presenting the same library.
@@ -162,13 +164,19 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   in one colour. Steps too close to label at the current zoom stack into rows, and past three rows they shrink to
   markers (tooltip only). A step that starts a timed sequence, or carries a duration suffix, draws a hatched bar for
   how long it runs.
-- **Colour.** Each lane gets one of eight categorical colours: the dataviz skill's reference palette, in its fixed
+- **Colour is the device.** There are eight categorical colours: the dataviz skill's reference palette, in its fixed
   order, validated with its `validate_palette.js` on the timeline's own surfaces (dark `#0d0f12`, light `#f0f2f5`).
   Every check passes. Four light-mode slots sit under 3:1 contrast, so identity never rests on colour: every lane and
-  step is labelled. Slots go to lanes in order of first appearance in time (`sbColorOf`). A lane keeps its slot while
-  the builder is open, so a lane that appears or goes repaints no other. A ninth lane is grey. The lane band, its
-  steps, its steps on reference tracks and the row's timing strip all wear the same colour. The strip assigns in the
-  same order, so a sequence opens in the colours its strip shows.
+  step is labelled. Each library board has a home colour (`SB_BOARD_SLOT`; a board the table does not list hashes its
+  id to one). The WCB devices used together most (Maestro, MP3, HCR, WLED, sequences) sit on different colours, and
+  the two HCR boards share one. The library shows each board in its colour (row edge, swatch and wash; an edge on each
+  command; a group shows its members' swatches), and that device's lane wears it on the timeline. A lane takes its
+  board's home colour unless another lane on screen holds it; then it takes the first free one, so lanes on screen
+  never share a colour (`sbColorOf`). Lanes are assigned in order of first appearance in time, which is also the row
+  strip's order, so a sequence opens in the colours its strip shows. A lane keeps its colour while the builder is
+  open, so a lane that comes or goes repaints no other. A ninth lane is grey. Steps are filled with their lane's
+  colour, with text in near-black or white, whichever reads better on that colour (`--sb-iN`: worked out per step,
+  4.4:1 or better). Reference steps stay outlined, so they read as context.
 - **Lining up with other sequences.** "Line up with…" lists the other sequences on every loaded board and draws the
   ones picked as reference tracks above this sequence's lanes. Each is one line, its steps in their devices'
   colours, read only. A reference starts where this sequence runs it (a `;C`/`;SEQ` step for that key, unrouted, on
@@ -203,5 +211,6 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
+| 2026-10-20 | (this commit) | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |
+| 2026-10-20 | `b9d0f88` | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
 | 2026-10-20 | `bdd8c87` | Page written with the feature: timeline ↔ chain rules, warnings, routing, the vendored library and its normalization | Greg: build sequences from the command library on a timeline adjustable to the ms, and show sequences graphically |

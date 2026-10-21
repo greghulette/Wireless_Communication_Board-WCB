@@ -152,8 +152,14 @@ test('wizard.seq_builder_library the library lists the WCB group first as NaviCo
   await page.mouse.click(p.x, (await page.locator('#sb-ruler').boundingBox()).y + 15);
   await expect(page.locator('#sb-clock')).toHaveText('0.500 s');
   await page.click('#sb-comp-add');
+  // Add goes back to the list as it was, the search kept; the new step is selected in the inspector.
+  await expect(page.locator('#sb-lib-search')).toHaveValue('play track');
+  await expect(page.locator('.sb-libitem[data-c="mp3.play"]')).toBeVisible();
+  await expect(page.locator('#sbi-p0')).toHaveValue('7');
   await shot(page, '05-composer');
-  await page.click('#sb-comp-back');
+  // A device's colour is the same in the library and on the timeline (the MP3 board's home colour).
+  const libSlot = await page.locator('.sb-libitem[data-c="mp3.play"]').evaluate((e) => [...e.classList].find((c) => /^sbc/.test(c)));
+  expect((await laneSlots(page))[0]).toBe(libSlot);
 
   // Drag and drop: FlthyHPs "Leia" lands on the S3 port labelled Flthy HP Controller.
   await page.fill('#sb-lib-search', 'leia');
@@ -244,6 +250,9 @@ test('wizard.seq_builder_lineup other sequences line up above this one: picked f
   await page.fill('#sbi-cmd', ';Csub');
   await page.press('#sbi-cmd', 'Tab');
   await expect(page.locator('.sb-ref .sb-ln-sub')).toHaveText('this board · from 2.000 s, run by this one');
+  // The new Sequences lane wears the Stored Sequences board's colour, though the step was another lane while typed.
+  const seqLib = await page.locator('.sb-libsec[data-sec="b:wcb-sequences"]').evaluate((e) => [...e.classList].find((c) => /^sbc/.test(c)));
+  expect((await laneSlots(page))[0]).toBe(seqLib);
 
   // Given a start of its own off the grid, a step dragged near one of its steps sticks to it, not to the grid.
   await page.locator('.sb-ref .sb-lane-label').click();

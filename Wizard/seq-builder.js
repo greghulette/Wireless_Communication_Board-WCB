@@ -465,7 +465,7 @@ function sbLaneOf(cmd, ctx, dev) {
                 : on ? `every port on ${bname(on)}` : 'every port (broadcast)';
     const name = sbShortName(dev.name) || dev.id;
     return { key: `D:${dev.id}:${route.port != null ? `W${w}S${route.port}` : on ? 'W' + on : 'B'}`,
-             label: `${name} · ${where}`, name, sub: where, fam: 'serial',
+             label: `${name} · ${where}`, name, sub: where, fam: 'serial', board: String(dev.id).split(':')[0],
              order: 50 + (w === ctx.self ? 0 : w) / 100 + (route.port != null ? route.port : 9) / 1000 };
   }
   if (route.port != null) {
@@ -478,25 +478,26 @@ function sbLaneOf(cmd, ctx, dev) {
   }
   const pre  = on ? bname(on) + ' · ' : '';
   const kpre = on ? 'W' + on + ':' : '';
-  const lane = (key, label, fam, order) => ({ key: kpre + key, label: pre + label, name: label, sub: on ? 'on ' + bname(on) : '',
-                                              fam, order: order + (on ? 0.5 : 0) });
+  // board: the library board whose colour the lane wears (sbBoardSlot), the one its verb belongs to.
+  const lane = (key, label, fam, order, board = null) => ({ key: kpre + key, label: pre + label, name: label,
+                                                            sub: on ? 'on ' + bname(on) : '', fam, order: order + (on ? 0.5 : 0), board });
   if (route.alias) return lane('alias', 'Routed by board name', 'other', 90);
   if (body[0] === ch.cmd && body.length > 1) {
     const v = body[1].toUpperCase();
     if (v === 'M') {
       const id = /\d/.test(body[2] || '') ? body[2] : '';
-      return lane('M' + id, id === '0' ? 'All Maestros' : id === '9' ? "This board's Maestros" : 'Maestro ' + (id || '?'), 'servo', 10);
+      return lane('M' + id, id === '0' ? 'All Maestros' : id === '9' ? "This board's Maestros" : 'Maestro ' + (id || '?'), 'servo', 10, 'wcb-maestro');
     }
-    if (v === 'A') return lane('A', 'MP3 Trigger', 'sound', 20);
-    if (v === 'D') return lane('D', 'DFPlayer', 'sound', 21);
-    if (v === 'H') return lane('H', 'HCR Vocalizer', 'voice', 22);
+    if (v === 'A') return lane('A', 'MP3 Trigger', 'sound', 20, 'wcb-mp3');
+    if (v === 'D') return lane('D', 'DFPlayer', 'sound', 21, 'wcb-dfplayer');
+    if (v === 'H') return lane('H', 'HCR Vocalizer', 'voice', 22, 'wcb-hcr');
     if (v === 'L') {
       const id = (/^\d+/.exec(body.slice(2)) || [''])[0];
-      return lane('L' + id, id ? 'WLED ' + id : "This board's WLED", 'light', 30);
+      return lane('L' + id, id ? 'WLED ' + id : "This board's WLED", 'light', 30, 'wcb-wled');
     }
-    if (v === 'C' || /^seq/i.test(body.slice(1))) return lane('C', 'Sequences', 'seq', 5);
-    if (v === 'V') return lane('V', 'Variables', 'var', 40);
-    if (v === 'P') return lane('P' + (body[2] || ''), 'PWM · S' + (body[2] || '?'), 'pwm', 45);
+    if (v === 'C' || /^seq/i.test(body.slice(1))) return lane('C', 'Sequences', 'seq', 5, 'wcb-sequences');
+    if (v === 'V') return lane('V', 'Variables', 'var', 40, 'wcb-actions');
+    if (v === 'P') return lane('P' + (body[2] || ''), 'PWM · S' + (body[2] || '?'), 'pwm', 45, 'wcb-actions');
     return lane('X', 'Other commands', 'other', 95);
   }
   if (body[0] === ch.func) return lane('F', 'Board settings', 'board', 85);
@@ -614,19 +615,45 @@ function sbDevOfCmd(cmd, chars) {
 }
 
 // ─── Colour ──────────────────────────────────────────────────────
-// Each lane's colour is one of the eight categorical slots (seq-builder.css --sb-c1..8: the dataviz reference palette,
-// validated on the Wizard's own timeline surfaces in both themes). Slots go in fixed order to lanes by first appearance
-// (in time order), so a sequence's timing strip and its timeline open in the same colours. A slot then stays with its
-// lane while the builder is open: a lane that appears or goes never repaints the others. A ninth lane is grey and its
-// name still says which; identity is never colour alone (every lane and step is labelled).
+// Colour is the device. Each library board has a home slot among the eight categorical colours (seq-builder.css
+// --sb-c1..8: the dataviz reference palette, validated on the Wizard's own timeline surfaces in both themes): the
+// library shows a board in it, and a lane for that board's device wears it. The WCB devices used together most -
+// Maestro, MP3, HCR, WLED, sequences - sit on different slots, and the two HCR boards share one, being one device.
+// A lane takes its board's home slot unless a lane already on the timeline has it, then the first free slot, so lanes
+// on screen never share a colour; lanes are assigned by first appearance in time, so a row's timing strip and its
+// timeline open alike. A slot then stays with its lane while the builder is open: a lane that comes or goes repaints
+// no other. A ninth lane is grey, and identity is never colour alone: every lane and step is labelled.
 const SB_SLOTS = 8;
+const SB_BOARD_SLOT = {
+  'wcb-maestro': 0, 'wcb-mp3': 1, 'wcb-sequences': 2, 'wcb-wled': 3, 'wcb-hcr': 4, 'wcb-dfplayer': 5,
+  'wcb-actions': 6, 'wcb-native': 6,
+  'hcr-native': 4, 'chirp': 1, 'flthy-hps': 7, 'psi-pro': 3, 'rseries-logic': 6, 'ia-magic-panel': 2,
+  'pd-magic-panel': 5, 'r2uppityspinner-alt': 0, 'roam-a-dome': 1, 'maestro': 0, 'maestro-native': 0,
+  'astropixels-plus': 2, 'astropixels-sound': 1, 'astropixels-psi': 3, 'astropixels-logics': 6,
+  'astropixels-holo': 7, 'astropixels-servo': 0,
+};
+// A board's home slot: from the table, else the same slot every time for the same id (custom and new boards).
+function sbBoardSlot(id) {
+  if (id == null) return -1;
+  if (SB_BOARD_SLOT[id] != null) return SB_BOARD_SLOT[id];
+  let h = 2166136261;
+  for (const c of String(id)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return (h >>> 0) % SB_SLOTS;
+}
 function sbColorMap() { return new Map(); }
-// present: the lanes on screen now. With every slot taken, one held by a lane that is gone is reused.
-function sbColorOf(map, key, present) {
+// present: the lanes on screen now. With every slot taken, one held by a lane that is gone is reused. home: the slot
+// the lane's board would have (sbBoardSlot), taken when no other lane holds it.
+function sbColorOf(map, key, present, home = -1) {
   if (map.has(key) && map.get(key) >= 0) return map.get(key);
   const used = new Set(map.values());
   let slot = -1;
-  for (let i = 0; i < SB_SLOTS; i++) if (!used.has(i)) { slot = i; break; }
+  if (home >= 0) {
+    // Its home slot, if free - or held only by a lane that is gone (a step half typed was briefly another lane).
+    const holder = [...map].find(([, s]) => s === home);
+    if (!holder) slot = home;
+    else if (present && !present.has(holder[0])) { map.delete(holder[0]); used.delete(home); slot = home; }
+  }
+  for (let i = 0; slot < 0 && i < SB_SLOTS; i++) if (!used.has(i)) slot = i;
   if (slot < 0 && present) {
     for (const [k, s] of map) if (s >= 0 && !present.has(k)) { slot = s; map.delete(k); break; }
   }
@@ -747,6 +774,7 @@ const S = {
   playhead: 0, pps: 200, snap: 10,
   undo: [], redo: [], dirty: false,
   play: null, composer: null, replacing: null, libFilter: '', clip: null,
+  libOpen: new Set(), libScroll: null,   // the library list's open sections and scroll, kept across the composer
   importWarnings: [], closeArmed: 0,
   colors: sbColorMap(),      // lane key → colour slot, for this session (sbColorOf)
   refs: [], selRef: null,    // reference tracks: other sequences to line this one up against (view only, never saved)
@@ -1204,8 +1232,8 @@ async function open(n, rowId) {
 // timing strip uses, so the two match on opening.
 function sbSeedColors() {
   S.colors = sbColorMap();
-  for (const ev of S.events.slice().sort((a, b) => a.t - b.t)) sbColorOf(S.colors, sbEvLane(ev).key);
-  for (const r of S.refs) for (const e of r.events) sbColorOf(S.colors, e.lane.key);
+  for (const ev of S.events.slice().sort((a, b) => a.t - b.t)) { const ln = sbEvLane(ev); sbColorOf(S.colors, ln.key, null, sbBoardSlot(ln.board)); }
+  for (const r of S.refs) for (const e of r.events) sbColorOf(S.colors, e.lane.key, null, sbBoardSlot(e.lane.board));
 }
 
 function sbClose(force) {
@@ -1389,11 +1417,11 @@ function sbLayout() {
   const list = [...lanes.values()].sort((a, b) => (a.order - b.order) || a.label.localeCompare(b.label));
   const present = new Set(list.map(l => l.key));
   for (const r of S.refs) for (const e of r.events) present.add(e.lane.key);
-  for (const ln of list) { ln.slot = sbColorOf(S.colors, ln.key, present); ln.rows = sbStack(ln.items); }
+  for (const ln of list) { ln.slot = sbColorOf(S.colors, ln.key, present, sbBoardSlot(ln.board)); ln.rows = sbStack(ln.items); }
   const refs = S.refs.map(r => {
     const start = sbRefStart(r);
     const items = r.events.map(e => ({ r, e, at: start + e.t, label: e.label, span: 0, hasIf: false,
-                                       slot: sbColorOf(S.colors, e.lane.key, present) }));
+                                       slot: sbColorOf(S.colors, e.lane.key, present, sbBoardSlot(e.lane.board)) }));
     return { r, start, items, rows: items.length ? sbStack(items) : 1 };
   });
   return { lanes: list, refs };
@@ -1469,7 +1497,7 @@ function sbRenderTimeline() {
       const tip = [sbFmt(ev.t), it.label, ev.cmd, ev.conds.length ? 'IF ' + ev.conds.join(' and ') : '', ev.note ? '*** ' + ev.note : '']
         .filter(Boolean).join('\n');
       pills += `<div class="${cls.join(' ')}" data-ev="${ev.id}" style="${pos(it)}" title="${esc(tip)}">`
-        + (it.span > it.w ? `<div class="sb-ev-span" style="width:${it.span}px"></div>` : '')
+        + (it.span > it.w ? `<div class="sb-ev-span" style="left:${it.w - 4}px;width:${it.span - it.w}px"></div>` : '')
         + (ev.conds.length ? '<b class="sb-if">IF</b>' : '')
         + (it.compact ? '' : `<span class="sb-ev-label">${esc(it.label)}</span>`)
         + '</div>';
@@ -1672,19 +1700,23 @@ function sbRenderLib() {
   sbRenderLibList();
 }
 
+// A section stays open across redraws (S.libOpen) - going to the composer and back, or a search cleared.
+const sbSecOpen = (key, f) => (f || S.libOpen.has(key) ? ' open' : '');
+
 function sbBoardSection(board, f, label) {
   const matches = (board.commands || []).filter(c => c && c.template && !SB_HIDDEN_CMDS.has(c.id)
     && (!f || (c.name + ' ' + (c.category || '') + ' ' + c.template + ' ' + board.name).toLowerCase().includes(f)));
   if (!matches.length) return { html: '', count: 0 };
   const cnt = matches.length;
   const cntLabel = f ? `${cnt} match${cnt === 1 ? '' : 'es'}` : `${cnt} cmd${cnt === 1 ? '' : 's'}`;
-  let html = `<details class="sb-libsec"${f ? ' open' : ''}><summary><span class="sb-caret">▸</span>`
+  const col = sbColorClass(sbBoardSlot(board.id));   // the colour this device's lane takes on the timeline
+  let html = `<details class="sb-libsec ${col}" data-sec="b:${esc(board.id)}"${sbSecOpen('b:' + board.id, f)}><summary><span class="sb-caret">▸</span><i class="sb-sw"></i>`
     + `<span class="sb-libsec-name">${esc(label || board.name)}${board.custom ? ' <em>· custom</em>' : ''}</span><span class="sb-libsec-cnt">${cntLabel}</span></summary><div class="sb-libsec-body">`;
   for (const c of matches) {
-    html += `<button type="button" class="sb-libitem" draggable="true" data-b="${esc(board.id)}" data-c="${esc(c.id)}" title="Click to set it up, or drag it onto the timeline">`
+    html += `<button type="button" class="sb-libitem ${col}" draggable="true" data-b="${esc(board.id)}" data-c="${esc(c.id)}" title="Click to set it up, or drag it onto the timeline">`
       + `<div class="sb-libitem-name">${esc(c.name)}</div><div class="sb-libitem-tpl">${esc(c.template)}</div></button>`;
   }
-  return { html: html + '</div></details>', count: cnt };
+  return { html: html + '</div></details>', count: cnt, slot: sbBoardSlot(board.id) };
 }
 
 function sbRenderLibList() {
@@ -1703,24 +1735,36 @@ function sbRenderLibList() {
   for (const e of entries) {
     if (e.board) { html += sbBoardSection(e.board, f).html; continue; }
     let inner = '', total = 0;
+    const slots = [];
     for (const b of e.boards) {
       const r = sbBoardSection(b, f, e.group.sub(b.name));
       inner += r.html; total += r.count;
+      if (r.html && !slots.includes(r.slot)) slots.push(r.slot);
     }
     if (!inner) continue;
     const cnt = f ? `${total} match${total === 1 ? '' : 'es'}` : `${total} cmds · ${e.boards.length} libraries`;
-    html += `<details class="sb-libsec"${f ? ' open' : ''}><summary><span class="sb-caret">▸</span><span class="sb-libsec-name">${esc(e.group.name)}</span>`
+    // A group shows its members' colours.
+    const sw = slots.map(s => `<i class="sb-sw ${sbColorClass(s)}"></i>`).join('');
+    html += `<details class="sb-libsec sb-libgrp" data-sec="g:${esc(e.group.id)}"${sbSecOpen('g:' + e.group.id, f)}><summary><span class="sb-caret">▸</span>`
+      + `<span class="sb-libsec-name">${esc(e.group.name)}</span><span class="sb-sws">${sw}</span>`
       + `<span class="sb-libsec-cnt">${cnt}</span></summary><div class="sb-libgroup">${inner}</div></details>`;
   }
   if (!html) html = sbLib.boards.length
     ? '<div class="sb-lib-none">No commands match. Use + Custom to type one.</div>'
     : '<div class="sb-lib-none">Loading the command library…</div>';
   list.innerHTML = html;
+  // Remember what is open (not while a search opens everything), and come back to where the list was scrolled.
+  list.querySelectorAll('details[data-sec]').forEach(d => d.addEventListener('toggle', () => {
+    if (S.libFilter.trim()) return;
+    if (d.open) S.libOpen.add(d.dataset.sec); else S.libOpen.delete(d.dataset.sec);
+  }));
+  if (S.libScroll != null) { list.scrollTop = S.libScroll; S.libScroll = null; }
   list.querySelectorAll('.sb-libitem').forEach(btn => {
     btn.addEventListener('click', () => {
       // "Change…" in the inspector armed S.replacing: this pick replaces that step and keeps its time.
       const replace = S.replacing != null && sbEv(S.replacing) ? S.replacing : undefined;
       S.replacing = null;
+      S.libScroll = list.scrollTop;   // the list comes back scrolled here
       sbOpenComposer({ b: btn.dataset.b, c: btn.dataset.c }, replace);
     });
     btn.addEventListener('dragstart', (e) => {
@@ -1798,10 +1842,10 @@ function sbRenderComposer() {
   const mode = sbModeOf(L.board, L.cmd);
   const replacing = c.replaceId != null && sbEv(c.replaceId);
   box.innerHTML = `
-    <div class="sb-comp">
-      <button type="button" class="btn btn-ghost btn-sm sb-back" id="sb-comp-back">← Back</button>
+    <div class="sb-comp ${sbColorClass(sbBoardSlot(L.board.id))}">
+      <button type="button" class="btn btn-ghost btn-sm sb-back" id="sb-comp-back">← Back to the list</button>
       <div class="sb-comp-title">${esc(L.cmd.name)}</div>
-      <div class="sb-comp-board">${esc(L.board.name)}</div>
+      <div class="sb-comp-board"><i class="sb-sw"></i>${esc(L.board.name)}</div>
       <div class="sb-fields" id="sb-comp-fields">${sbFieldsHtml('sbc', L, c.values)}</div>
       <label class="sb-field" for="sb-comp-dest"><span>Send to</span><select class="sb-in sb-wide" id="sb-comp-dest">${sbDestOptions(mode, c.dest)}</select>
         <em class="sb-why" id="sb-comp-dest-why">${c.guessed ? 'No board has a port labelled for this device: pick the one it is wired to.' : ''}</em></label>
@@ -1846,8 +1890,10 @@ function sbComposerCommit(t) {
     S.sel = new Set([ev.id]);
     S.selMarker = null;
   });
-  if (c.replaceId != null) { S.composer = null; sbRenderLib(); }
-  else sbRenderComposer();   // stays open: the same command is often placed several times
+  // Back to the list as it was (search, open sections, scroll): the new step is selected, and the inspector below has
+  // the same fields to finish it with.
+  S.composer = null;
+  sbRenderLib();
 }
 
 async function sbImportFile(e) {
@@ -2339,7 +2385,7 @@ function sbAddRef(wcb, key) {
   if (S.refs.some(r => r.wcb === wcb && r.key === key)) return;
   const r = sbMakeRef({ wcb, key });
   S.refs.push(r);
-  for (const e of r.events) sbColorOf(S.colors, e.lane.key);
+  for (const e of r.events) sbColorOf(S.colors, e.lane.key, null, sbBoardSlot(e.lane.board));
   S.selRef = r.id;
   S.sel.clear(); S.selMarker = null;
   sbRefPick(false);
@@ -2583,7 +2629,8 @@ function renderRowThumb(n, rowId) {
   const colors = sbColorMap();
   const byT = new Map();
   for (const e of p.events) {
-    const slot = sbColorOf(colors, sbLaneOf(e.cmd, ctx, sbDevOfCmd(e.cmd, ctx.chars)).key);
+    const ln = sbLaneOf(e.cmd, ctx, sbDevOfCmd(e.cmd, ctx.chars));
+    const slot = sbColorOf(colors, ln.key, null, sbBoardSlot(ln.board));
     if (!byT.has(e.t)) byT.set(e.t, []);
     byT.get(e.t).push(slot);
   }
