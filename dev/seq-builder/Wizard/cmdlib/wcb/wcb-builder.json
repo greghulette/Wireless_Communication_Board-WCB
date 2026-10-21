@@ -38,13 +38,6 @@
       "routing": { "class": "wcb-verb" },
       "notes": "Ranges from WcbCmd/src/WcbMaestro.cpp: subroutine 0-127 (a 7-bit data byte), channel 0-127, target/speed/parameter 0-16383, accel 0-255. The Maestro id is the WCB slot id: 1-8 a device, 0 every Maestro, 9 every Maestro on this board. Supersedes the vendored `maestro` board, whose ranges are narrower than the firmware's. wcbmaestro.droidnet is DroidNet's own trigger for a Maestro sequence it holds by name (@A<name>), which DroidNet reads on the WCB's Serial 0 (USB): a device string, so it is written as ;S0@A<name> (processSerialMessage prints it on USB). defaultPort, laneName and shortName are builder hints (Wizard/seq-builder.js): the port a new step goes to, the name of its lane, and what its steps are called on the timeline.",
       "commands": [
-        { "id": "wcbmaestro.droidnet", "name": "Run a DroidNet sequence (by name)", "safety": "movement", "encoder": "template", "category": "DroidNet",
-          "template": "@A{name}",
-          "defaultPort": 0, "laneName": "Maestro via DroidNet", "shortName": "Run",
-          "params": [
-            { "name": "name", "label": "Sequence name in DroidNet (e.g. MonsterMash)", "pattern": "^\\S(.*\\S)?$", "required": true }
-          ],
-          "examples": ["@AMonsterMash"], "commentLabel": "DroidNet Maestro" },
         { "id": "wcbmaestro.run", "name": "Run subroutine", "safety": "movement", "encoder": "template", "category": "Script",
           "template": ";M{maestroId}{sequence}",
           "params": [
@@ -66,6 +59,13 @@
             { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true }
           ],
           "examples": [";M1,stopScript"], "commentLabel": "Maestro stop" },
+        { "id": "wcbmaestro.droidnet", "name": "Run a DroidNet sequence (by name)", "safety": "movement", "encoder": "template", "category": "Script",
+          "template": "@A{name}",
+          "defaultPort": 0, "laneName": "Maestro via DroidNet", "shortName": "Run",
+          "params": [
+            { "name": "name", "label": "Sequence name in DroidNet (e.g. MonsterMash)", "pattern": "^\\S(.*\\S)?$", "required": true }
+          ],
+          "examples": ["@AMonsterMash"], "commentLabel": "DroidNet Maestro" },
         { "id": "wcbmaestro.setTarget", "name": "Set servo position", "safety": "movement", "encoder": "template", "category": "Servo",
           "template": ";M{maestroId},setTarget,{channel},{position}",
           "params": [
