@@ -418,6 +418,9 @@ _SEQ_BUILDER = (
     ("seq_builder_edit", "A step moves to the ms in the inspector and by dragging (snapped), its fields re-encode it, undo/redo, and Apply writes the row a push sends"),
     ("seq_builder_library", "The library lists the WCB group first; a command is set up in the composer and added at the playhead or dragged on; a device command goes to the port labelled for it; Apply makes a new row"),
     ("seq_builder_rules", "Warnings where the board would not run it as drawn (a timed sequence started mid-way, a self-recall), an IF written after its delay, Save & Test saves and runs it"),
+    ("seq_builder_devices", "Three devices sent to one unlabelled port get a lane and a colour each, named by device with the port underneath"),
+    ("seq_builder_lineup", "Other sequences line up above this one: started where this one runs them or dragged, a dragged step sticks to their steps, remembered, and they change nothing"),
+    ("seq_builder_droidnet", "DroidNet's Maestro trigger by name: @A<name> out this board's Serial 0 (USB), or another board's, in a lane of its own"),
 )
 for _key, _title in _SEQ_BUILDER:
     def _seq_builder(bench, _id=f"wizard.{_key}"):

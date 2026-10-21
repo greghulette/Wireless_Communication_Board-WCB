@@ -269,3 +269,21 @@ test('lanes: by the device each command reaches', () => {
   assert.strictEqual(lane('?ETM,ON').fam, 'board');
   assert.strictEqual(lane(':PP100').label, 'Broadcast to every port');
 });
+
+test('lanes: a device string the library knows gets its device\'s lane, so two devices on one port are two lanes', () => {
+  const ctx = { chars: {}, self: 1, boardName: (w) => 'WCB ' + w, portLabel: () => '' };
+  const flthy = SB.sbLaneOf(';S1F001', ctx, { id: 'flthy-hps', name: 'FlthyHPs Holoprojectors' });
+  const dome = SB.sbLaneOf(';S1:DPA180', ctx, { id: 'roam-a-dome', name: 'Roam-A-Dome' });
+  assert.deepStrictEqual([flthy.key, flthy.name, flthy.sub], ['D:flthy-hps:W1S1', 'FlthyHPs Holoprojectors', 'This board · S1']);
+  assert.notStrictEqual(flthy.key, dome.key);
+  const hcr = SB.sbLaneOf(';W2,;S4<SE>', ctx, { id: 'hcr-native', name: 'HCR Vocalizer (native <…>)' });
+  assert.deepStrictEqual([hcr.key, hcr.name, hcr.sub], ['D:hcr-native:W2S4', 'HCR Vocalizer', 'WCB 2 · S4']);
+  assert.strictEqual(SB.sbLaneOf(';S0@AMonsterMash', ctx, { id: 'x', name: 'Maestro via DroidNet' }).sub, 'This board · S0 (USB)');
+  assert.strictEqual(SB.sbLaneOf(';S1F001', ctx).key, 'S:1:1');   // no device known: the port's lane
+});
+
+test('library: DroidNet\'s Maestro trigger is @A<name> out Serial 0 (USB)', () => {
+  const d = decode(';S0@AMonsterMash');
+  assert.deepStrictEqual([d.board, d.cmd, d.values, d.route], ['wcb-maestro', 'wcbmaestro.droidnet', { name: 'MonsterMash' }, { wcb: 0, port: 0, alias: false }]);
+  assert.strictEqual(decode(';W2,;S0@AMonsterMash').cmd, 'wcbmaestro.droidnet');
+});

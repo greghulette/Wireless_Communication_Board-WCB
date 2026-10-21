@@ -99,7 +99,9 @@ Each step has a **Send to**, from its command's mode (`sbModeOf`, NaviCore's `_c
   `;S<p><text>` on this board, `;W<n>,;S<p><text>` on another. "Broadcast" writes it bare, which the board sends to every
   port and the mesh, or `;W<n>,<text>` for every port on board n. A new step goes to the first port, on any loaded board,
   whose label (or configured device) matches the device (`SB_DEVICE_LABELS`, a copy of NaviCore's
-  `NC_BOARD_DEVICE_LABELS`). Failing that it goes to this board's Serial 1, with a warning.
+  `NC_BOARD_DEVICE_LABELS`). A command can name its own port instead (`defaultPort`, §4). Failing both it goes to this
+  board's Serial 1, with a warning. Every board's Serial 0, its USB port, is offered too: `;S0<text>` prints the line
+  on USB (`processSerialMessage`, `WCB.ino:8207`).
 
 The comma form `;W<n>,` is written for every board number because it is valid for 1-20; the one-digit form is valid
 only for 1-9 (`processWCBMessage`, `WCB.ino:8256`). Both forms are read. `;S<p>` strips one comma after the port digit
@@ -117,7 +119,12 @@ playhead**. The composer's preview, or any command in the list, can also be drag
 
 **Where it comes from.** `cmdlib/droidnet/` is a byte-for-byte copy of NaviCore's vendored snapshot, local
 modifications included. Refresh it by copying NaviCore's over it, so the two tools keep presenting the same library.
-`cmdlib/wcb/` is ours. Both load at page start through `sbLoadManifest` (same-origin `fetch`, so the Wizard has to be
+`cmdlib/wcb/` is ours: Maestro at the firmware's ranges, DFPlayer, variables, PWM, serial text, and DroidNet's trigger
+for a Maestro sequence it holds by name, `@A<name>`, which DroidNet reads on the WCB's Serial 0 (USB). That one is a
+device string, so it is written `;S0@A<name>`, or `;W<n>,;S0@A<name>` for DroidNet on another board. Three fields on a
+command are builder hints that DroidNet's schema does not have, and a consumer that does not know them ignores them:
+`defaultPort` (the port a new step goes to), `laneName` (its lane's name, in place of its board's) and `shortName` (what
+its steps are called on the timeline). Both load at page start through `sbLoadManifest` (same-origin `fetch`, so the Wizard has to be
 served over http; under `file://` the panel says so). "Check online for a newer library" runs the same loader against
 DroidNet's GitHub manifest, for this session only. **Import…** adds a DroidNet board file and keeps it in this browser
 (`wcbWizard.cmdlibCustom`). Boards a user imported into NaviCore's tool are read too (`nc_cmdlib_custom_v1`). Both tools
@@ -148,28 +155,47 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
 
 ## 5. On the page
 
-- **Timeline.** Each lane is the device a command reaches (`sbLaneOf`): a Maestro id, the MP3 Trigger, a WLED id, a
-  serial port with its label, Sequences, Variables, and so on. Lane, step and row strip share one colour per device
-  family. Steps too close to label at the current zoom stack into rows, and past three rows they shrink to markers
-  (tooltip only). A step that starts a timed sequence, or carries a duration suffix, draws a hatched bar for how long it
-  runs.
+- **Lanes.** Each lane is the device a command reaches (`sbLaneOf`): a Maestro id, the MP3 Trigger, a WLED id,
+  Sequences, Variables, and so on. A device string the library knows is its device's lane, named by the device with
+  the port underneath ("FlthyHPs Holoprojectors / This board · S1"), so two devices on one port are two lanes. Only a
+  string the library does not know shares a lane by port. A lane per port put every unlabelled device in one "S1" lane
+  in one colour. Steps too close to label at the current zoom stack into rows, and past three rows they shrink to
+  markers (tooltip only). A step that starts a timed sequence, or carries a duration suffix, draws a hatched bar for
+  how long it runs.
+- **Colour.** Each lane gets one of eight categorical colours: the dataviz skill's reference palette, in its fixed
+  order, validated with its `validate_palette.js` on the timeline's own surfaces (dark `#0d0f12`, light `#f0f2f5`).
+  Every check passes. Four light-mode slots sit under 3:1 contrast, so identity never rests on colour: every lane and
+  step is labelled. Slots go to lanes in order of first appearance in time (`sbColorOf`). A lane keeps its slot while
+  the builder is open, so a lane that appears or goes repaints no other. A ninth lane is grey. The lane band, its
+  steps, its steps on reference tracks and the row's timing strip all wear the same colour. The strip assigns in the
+  same order, so a sequence opens in the colours its strip shows.
+- **Lining up with other sequences.** "Line up with…" lists the other sequences on every loaded board and draws the
+  ones picked as reference tracks above this sequence's lanes. Each is one line, its steps in their devices'
+  colours, read only. A reference starts where this sequence runs it (a `;C`/`;SEQ` step for that key, unrouted, on
+  this board), or else with this sequence. Dragging its line, or a start time in its inspector, overrides that, and
+  "Start with its step" goes back. A selected reference draws its step times as guide lines through every lane. While
+  you drag a step (or drop one from the library, or move the playhead), it sticks to a step, a reference step, a note
+  or the playhead within 8 px, and a dashed line shows what it stuck to (`sbPlace`). Alt places it to the ms. Which
+  references a sequence had is kept in this browser per board and key (`wcbWizard.seqBuilderRefs`). References are
+  never written into anything.
 - **Moving steps.** Drag a step to move it, snapped to the grid (Alt for 1 ms); Shift-click adds to the selection; the
   arrow keys nudge (10 ms, Shift 100, Alt 1). The inspector takes an exact time in ms, with ±1/10/100 buttons. A
   multi-selection moves by an amount, or so its first step sits at the playhead. Insert gap and Close gap shift
   everything after the playhead.
-- **Preview** runs the playhead in real time in the browser and flashes each step as it passes. **Save & Test** applies
-  the timeline, then runs the row's own `updateSequence` and `playSequence` (TEST, this board only), and starts the
-  preview alongside the board.
+- **Preview** runs the playhead in real time in the browser and flashes each step, references' included, as it passes.
+  **Save & Test** applies the timeline, then runs the row's own `updateSequence` and `playSequence` (TEST, this board
+  only), and starts the preview alongside the board.
 - **Undo/redo** keep one step per discrete change, and one per field edit.
 - **Timing strip.** `renderRowThumb` parses the row's current value. It is re-drawn 150 ms after the text changes, and
-  clicking it opens the builder.
+  again once the library has loaded. Commands at one moment stack as parts of one tick. Clicking it opens the
+  builder.
 
 ## 6. Tests
 
 | Test | Covers |
 |---|---|
 | `tests/wizard/unit/seq_builder.test.js` (`npm run unit`, CI) | compile, parse and both round trips; the firmware rules above; routes and recall keys; `sbAnalyze`; the real `cmdlib/` files: normalization, decode specificity, encode/decode inverse for every visible command |
-| `tests/wizard/specs/seq_builder_fake.spec.js` (CI; HIL `wizard.seq_builder_*`) | in the real page against a fake board: opening a sequence as is, editing and dragging, the composer and drag-and-drop from the library, label routing, a new sequence, the warnings, Save & Test's wire. `SB_SHOTS=<dir>` saves a screenshot at each step |
+| `tests/wizard/specs/seq_builder_fake.spec.js` (CI; HIL `wizard.seq_builder_*`) | in the real page against a fake board: opening a sequence as is (its strip and timeline in the same colours), editing and dragging, the composer and drag-and-drop from the library, label routing, a new sequence, the warnings, Save & Test's wire, device lanes on one port, lining up with another sequence (start, drag, sticking, remembered), the DroidNet trigger. `SB_SHOTS=<dir>` saves a screenshot at each step |
 
 ## Revision log
 
@@ -177,4 +203,5 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | Page written with the feature: timeline ↔ chain rules, warnings, routing, the vendored library and its normalization | Greg: build sequences from the command library on a timeline adjustable to the ms, and show sequences graphically |
+| 2026-10-20 | (this commit) | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
+| 2026-10-20 | `bdd8c87` | Page written with the feature: timeline ↔ chain rules, warnings, routing, the vendored library and its normalization | Greg: build sequences from the command library on a timeline adjustable to the ms, and show sequences graphically |

@@ -16,9 +16,11 @@ const shot = async (page, name) => { if (SHOTS) await page.screenshot({ path: pa
 const SHOW = ';M11^;A,PLAY,5^;T1250^;S3A001***holos^;T2750^;M12';
 // Notes: one first, one inline, one on its own between steps, one after the last step.
 const NOTES = '***intro^;M11***wave^;T500^^***half^;M12^^***end';
+// Three devices on one unlabelled port, as in Greg's 2026-10-20 screenshot: once one "This board · S1" lane.
+const MIXED = ';S1:DPA180^;T500^;S1F001^;T500^;S1<SE>';
 const W1 = board(['LABEL,S3,Flthy HP Controller', 'MP3,S2:9600:V0',
                   `SEQ,SAVE,show,${SHOW}`, 'SEQ,SAVE,sub,;M13^;T500^;M14', 'SEQ,SAVE,flat,;M11^;M12',
-                  `SEQ,SAVE,notes,${NOTES}`]);
+                  `SEQ,SAVE,notes,${NOTES}`, `SEQ,SAVE,mixed,${MIXED}`]);
 
 const rowOf = (page, key) => page.evaluate((key) => [...document.querySelectorAll('#b1-seq-tbody tr')]
   .find((r) => r.querySelector('.seq-key-input').value === key)?.id, key);
@@ -27,8 +29,11 @@ const rowValue = (page, rowId) => page.evaluate((rowId) => {
   return _seqRowValue(r, r.querySelector('.seq-val-textarea'), '^');
 }, rowId);
 const out = (page) => page.locator('#sb-out').textContent();
-const labels = (page) => page.locator('.sb-ev .sb-ev-label').allTextContents();
+const labels = (page) => page.locator('.sb-ev:not(.sb-rev) .sb-ev-label').allTextContents();
 const warnings = (page) => page.locator('#sb-warn li').allTextContents();
+// Each of this sequence's lanes' colour class (sbc0..sbc7), top to bottom.
+const laneSlots = (page) => page.locator('#sb-lanes > .sb-lane:not(.sb-ref):not(.sb-divider):not(.sb-lane-empty)')
+  .evaluateAll((els) => els.map((e) => [...e.classList].find((c) => /^sbc/.test(c))));
 
 async function openRow(page, key) {
   const rowId = await rowOf(page, key);
@@ -69,11 +74,17 @@ test('wizard.seq_builder_open a stored sequence opens on the timeline as it is: 
   await page.locator('#b1-seq-tbody').scrollIntoViewIfNeeded();
   await shot(page, '01-table');
 
+  const thumbColours = await thumb.locator('.seq-thumb-track i').evaluateAll((els) => els.map((e) => e.className));
   await openRow(page, 'show');
   await shot(page, '02-open');
   expect(await out(page)).toBe(SHOW);
-  expect(await page.locator('.sb-lane-label').allTextContents())
-    .toEqual(['Maestro 1', 'MP3 Trigger', 'This board · S3 · Flthy HP Controller']);
+  expect(await page.locator('.sb-lane-label .sb-ln-name').allTextContents())
+    .toEqual(['Maestro 1', 'MP3 Trigger', 'FlthyHPs Holoprojectors']);
+  expect(await page.locator('.sb-lane-label .sb-ln-sub').allTextContents()).toEqual(['This board · S3']);
+  // A colour per lane, the same ones the row's timing strip used (Maestro, MP3, FlthyHPs, Maestro in time order).
+  const laneColours = await laneSlots(page);
+  expect(new Set(laneColours).size).toBe(3);
+  expect(thumbColours).toEqual([laneColours[0], laneColours[1], laneColours[2], laneColours[0]]);
   expect((await labels(page)).sort()).toEqual(['Leia · All', 'Play Track · 5', 'Run subroutine · 1', 'Run subroutine · 2']);
   await expect(page.locator('#sb-stats')).toHaveText('4 commands · 3 moments · 4.000 s');
   // Nothing changed: Apply leaves the row exactly as it was.
@@ -193,4 +204,81 @@ test('wizard.seq_builder_rules the builder warns where the board would not run i
   ]);
   expect(await rowValue(page, rowId)).toBe(';M11^;A,PLAY,5^;T1250^;S3A001***holos^;T2750^IF,mode=2^;M12');
   await expect(page.locator('#sb-play')).toHaveText('■ Stop');   // the preview runs alongside the board
+});
+
+test('wizard.seq_builder_devices three devices sent to one unlabelled port get a lane and a colour each, named by device with the port underneath', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, W1);
+  await openRow(page, 'mixed');
+  await shot(page, '08-devices');
+  expect((await page.locator('.sb-lane-label .sb-ln-name').allTextContents()).sort())
+    .toEqual(['FlthyHPs Holoprojectors', 'HCR Vocalizer', 'Roam-A-Dome']);
+  expect(await page.locator('.sb-lane-label .sb-ln-sub').allTextContents()).toEqual(['This board · S1', 'This board · S1', 'This board · S1']);
+  expect(new Set(await laneSlots(page)).size).toBe(3);
+  expect(await out(page)).toBe(MIXED);
+});
+
+test('wizard.seq_builder_lineup other sequences line up above this one: picked from the loaded boards, drawn in their devices\' colours, started where this one runs them or where they are dragged; a dragged step sticks to their steps; remembered next time; they change nothing', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, W1);
+  const rowId = await openRow(page, 'show');
+  await page.click('#sb-ref-add');
+  await expect(page.locator('#sb-refpick')).toBeVisible();
+  const keys = await page.locator('.sb-refpick-item span').allTextContents();
+  expect(keys).toEqual(expect.arrayContaining(['sub', 'flat', 'notes', 'mixed']));
+  expect(keys).not.toContain('show');                                  // not the one being edited
+  await page.locator('.sb-refpick-item[data-refadd="1/sub"]').click();
+  await expect(page.locator('.sb-ref')).toHaveCount(1);
+  await expect(page.locator('.sb-rev')).toHaveCount(2);
+  await expect(page.locator('.sb-ref .sb-ln-sub')).toHaveText('this board · from 0.000 s');
+  expect(await out(page)).toBe(SHOW);
+  // sub's steps are Maestro 1's, so they wear the Maestro 1 lane's colour.
+  const revSlot = await page.locator('.sb-rev').first().evaluate((e) => [...e.classList].find((c) => /^sbc/.test(c)));
+  expect(revSlot).toBe((await laneSlots(page))[0]);
+  await expect(page.locator('#sb-guides .sb-guide')).toHaveCount(2);  // selected: its times run through the lanes
+
+  // A step that runs "sub" at 2 s: the reference starts there.
+  const p = await at(page, 2000);
+  await page.mouse.click(p.x, (await page.locator('#sb-ruler').boundingBox()).y + 15);
+  await page.click('#sb-custom');
+  await page.fill('#sbi-cmd', ';Csub');
+  await page.press('#sbi-cmd', 'Tab');
+  await expect(page.locator('.sb-ref .sb-ln-sub')).toHaveText('this board · from 2.000 s, run by this one');
+
+  // Given a start of its own off the grid, a step dragged near one of its steps sticks to it, not to the grid.
+  await page.locator('.sb-ref .sb-lane-label').click();
+  await page.fill('#sbr-t', '2503');
+  await page.press('#sbr-t', 'Enter');
+  await expect(page.locator('.sb-ref .sb-ln-sub')).toHaveText('this board · from 2.503 s');
+  await shot(page, '09-lineup');
+  await dragStep(page, 'Leia', 3001);                                   // sub's second step: 2503 + 500
+  expect(await out(page)).toBe(';M11^;A,PLAY,5^;T2000^;Csub^;T1003^;S3A001***holos^;T997^;M12');
+
+  // Remembered in this browser for this sequence.
+  await page.click('#sb-apply');
+  await openRow(page, 'show');
+  await expect(page.locator('.sb-ref .sb-ln-sub')).toHaveText('this board · from 2.503 s');
+  await page.click('.sb-ref-x');
+  await expect(page.locator('.sb-ref')).toHaveCount(0);
+  expect(await rowValue(page, rowId)).toBe(';M11^;A,PLAY,5^;T2000^;Csub^;T1003^;S3A001***holos^;T997^;M12');
+});
+
+test('wizard.seq_builder_droidnet a DroidNet Maestro sequence runs by name: @A<name> out this board\'s Serial 0 (USB), where DroidNet listens, in a lane of its own', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, W1);
+  await page.click('button[onclick="SeqBuilder.openNew(1)"]');
+  await page.evaluate(() => SeqBuilder.ready());
+  await page.fill('#sb-lib-search', 'droidnet');
+  await page.locator('.sb-libitem[data-c="wcbmaestro.droidnet"]').click();
+  await page.fill('#sbc-p0', 'MonsterMash');
+  await expect(page.locator('#sb-comp-dest')).toHaveValue('W1S0');
+  await expect(page.locator('#sb-comp-prev')).toHaveText(';S0@AMonsterMash');
+  await page.click('#sb-comp-add');
+  expect(await out(page)).toBe(';S0@AMonsterMash');
+  expect(await page.locator('.sb-lane-label .sb-ln-name').allTextContents()).toEqual(['Maestro via DroidNet']);
+  expect(await labels(page)).toEqual(['Run · MonsterMash']);
+  expect(await page.locator('.sb-lane-label .sb-ln-sub').allTextContents()).toEqual(['This board · S0 (USB)']);
+  await page.selectOption('#sbi-dest', 'W2S0');                         // DroidNet on another board's USB
+  expect(await out(page)).toBe(';W2,;S0@AMonsterMash');
+  await shot(page, '10-droidnet');
 });

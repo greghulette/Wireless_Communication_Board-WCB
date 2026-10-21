@@ -1,35 +1,33 @@
 /* ─── Sequence builder (seq-builder.js) ─────────────────────────
    A full-window editor over the Wizard. Built from the Wizard's own tokens (styles.css :root / :root.light), so it
-   follows the theme toggle. Device families colour the lanes, steps and the row timing strips alike. */
+   follows the theme toggle.
+
+   Lane colours: the dataviz reference palette's eight categorical slots in its fixed order, each stepped for its theme
+   and validated on the timeline's own surface with the skill's validate_palette.js (dark on #0d0f12, light on #f0f2f5:
+   every check passes; four light slots sit under 3:1, which is why every lane and every step carries a text label).
+   seq-builder.js gives each lane a slot (sbColorOf); the lane, its steps, the steps it has on reference tracks and the
+   row's timing strip all wear it. .sbcx is a ninth lane. */
 :root {
-  --sb-servo:  var(--accent);
-  --sb-sound:  var(--orange);
-  --sb-voice:  #ff7ac6;
-  --sb-light:  var(--yellow);
-  --sb-serial: #b07cff;
-  --sb-seq:    var(--green);
-  --sb-var:    #7aa2ff;
-  --sb-pwm:    #2ee6c8;
-  --sb-board:  var(--text3);
-  --sb-other:  #8a94a6;
+  --sb-c1: #3987e5; --sb-c2: #d95926; --sb-c3: #199e70; --sb-c4: #c98500;
+  --sb-c5: #d55181; --sb-c6: #008300; --sb-c7: #9085e9; --sb-c8: #e66767;
+  --sb-cx: #6e7d94;
+  --sb-if: #ff7ac6;
 }
 :root.light {
-  --sb-voice:  #c02679;
-  --sb-serial: #7c3aed;
-  --sb-var:    #2f5fd0;
-  --sb-pwm:    #0f9488;
-  --sb-other:  #5b6474;
+  --sb-c1: #2a78d6; --sb-c2: #eb6834; --sb-c3: #1baf7a; --sb-c4: #eda100;
+  --sb-c5: #e87ba4; --sb-c6: #008300; --sb-c7: #6250d6; --sb-c8: #e34948;
+  --sb-cx: #7a8494;
+  --sb-if: #c02679;
 }
-.fam-servo  { --fam: var(--sb-servo); }
-.fam-sound  { --fam: var(--sb-sound); }
-.fam-voice  { --fam: var(--sb-voice); }
-.fam-light  { --fam: var(--sb-light); }
-.fam-serial { --fam: var(--sb-serial); }
-.fam-seq    { --fam: var(--sb-seq); }
-.fam-var    { --fam: var(--sb-var); }
-.fam-pwm    { --fam: var(--sb-pwm); }
-.fam-board  { --fam: var(--sb-board); }
-.fam-other  { --fam: var(--sb-other); }
+.sbc0 { --fam: var(--sb-c1); }
+.sbc1 { --fam: var(--sb-c2); }
+.sbc2 { --fam: var(--sb-c3); }
+.sbc3 { --fam: var(--sb-c4); }
+.sbc4 { --fam: var(--sb-c5); }
+.sbc5 { --fam: var(--sb-c6); }
+.sbc6 { --fam: var(--sb-c7); }
+.sbc7 { --fam: var(--sb-c8); }
+.sbcx { --fam: var(--sb-cx); }
 
 body.sb-noscroll { overflow: hidden; }
 
@@ -158,9 +156,33 @@ input[type="number"].sb-in { width: 96px; }
 /* Main column */
 .sb-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .sb-toolbar {
+  position: relative; z-index: 10;   /* the reference picker drops over the timeline */
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--bg2);
 }
+.sb-refpick-wrap { position: relative; }
+.sb-refpick {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; width: 320px; max-height: 380px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius2);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+.sb-refpick input {
+  background: var(--bg); border: 1px solid var(--border2); border-radius: var(--radius); color: var(--text);
+  font-family: var(--mono); font-size: 12px; padding: 6px 8px;
+}
+.sb-refpick input:focus { outline: none; border-color: var(--accent); }
+.sb-refpick-list { overflow-y: auto; min-height: 0; }
+.sb-refpick-board { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.6px; margin: 8px 2px 3px; }
+.sb-refpick-item {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px; width: 100%; text-align: left;
+  padding: 5px 8px; border: 1px solid transparent; border-radius: var(--radius);
+  background: none; color: var(--text); font-family: var(--mono); font-size: 12px; cursor: pointer;
+}
+.sb-refpick-item:hover { background: var(--bg3); border-color: var(--border2); }
+.sb-refpick-item small { color: var(--text3); font-size: 10px; white-space: nowrap; }
+.sb-refpick-item:disabled { opacity: 0.5; cursor: default; }
+.sb-refpick-none { color: var(--text3); font-size: 12px; padding: 10px 4px; }
 .sb-clock { font-weight: 600; font-size: 13px; min-width: 76px; color: var(--accent); }
 .sb-now   { color: var(--text2); font-size: 11px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-snap  { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text2); }
@@ -195,44 +217,64 @@ input[type="number"].sb-in { width: 96px; }
 .sb-mk.sel { background: rgba(255,208,32,0.32); outline: 1px solid var(--yellow); }
 
 .sb-lane { display: flex; border-bottom: 1px solid var(--border); }
+/* Each lane is a band of its colour: a coloured edge and swatch on its label, a faint wash along its track. */
 .sb-lane-label {
   position: sticky; left: 0; z-index: 3; width: 184px; flex: none;
-  display: flex; align-items: flex-start; gap: 7px; padding: 5px 10px;
-  background: var(--bg2); border-right: 1px solid var(--border);
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 7px; align-content: start;
+  padding: 5px 10px 5px 7px;
+  background: var(--bg2); border-right: 1px solid var(--border); border-left: 3px solid var(--fam, transparent);
   font-size: 11px; line-height: 1.3; color: var(--text2);
 }
-.sb-lane-label span {
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word;
-}
-.sb-lane-label i { width: 8px; height: 8px; border-radius: 2px; flex: none; margin-top: 3px; background: var(--fam); }
+.sb-lane-label i { grid-row: 1 / span 2; width: 10px; height: 10px; border-radius: 3px; margin-top: 2px; background: var(--fam, transparent); }
+.sb-ln-name { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-ln-sub  { grid-column: 2; color: var(--text3); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-lane-track {
   position: relative; flex: none;
+  background-color: color-mix(in srgb, var(--fam, transparent) 8%, transparent);
   background-image: linear-gradient(to right, var(--bg3) 1px, transparent 1px);
 }
 .sb-empty-hint { color: var(--text3); font-size: 12px; padding: 22px 16px; min-height: 120px; }
 .sb-lane-empty .sb-lane-label { min-height: 120px; }
 
+/* Reference tracks (read only) and the line between them and this sequence's lanes. */
+.sb-ref .sb-lane-label { background: var(--bg3); cursor: pointer; padding-right: 22px; }
+.sb-ref.sel .sb-lane-label { box-shadow: inset 0 0 0 1px var(--accent2); }
+.sb-ref .sb-lane-label i { display: none; }
+.sb-ref .sb-ln-name, .sb-ref .sb-ln-sub { grid-column: 1 / span 2; }
+.sb-ref .sb-lane-track { cursor: ew-resize; background-color: color-mix(in srgb, var(--text3) 5%, transparent); }
+.sb-ref-x {
+  position: absolute; right: 4px; top: 4px; padding: 0 4px; line-height: 1.2;
+  background: none; border: none; border-radius: 3px; color: var(--text3); font-size: 12px; cursor: pointer;
+}
+.sb-ref-x:hover { color: var(--text); background: var(--bg4); }
+.sb-divider { height: 22px; border-bottom-color: var(--border2); }
+.sb-divider .sb-lane-label { padding-top: 4px; }
+.sb-divider .sb-ln-name { grid-column: 1 / span 2; color: var(--text3); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
+
 .sb-ev {
   position: absolute; height: 24px; box-sizing: border-box;
   display: flex; align-items: center; gap: 4px; padding: 0 7px 0 6px;
-  border-left: 3px solid var(--fam); border-radius: 3px 5px 5px 3px;
-  background: color-mix(in srgb, var(--fam) 20%, var(--bg3));
+  border: 1px solid color-mix(in srgb, var(--fam) 55%, transparent); border-left: 4px solid var(--fam);
+  border-radius: 3px 5px 5px 3px;
+  background: color-mix(in srgb, var(--fam) 32%, var(--bg2));
   color: var(--text); font-size: 11px; cursor: grab; user-select: none; overflow: visible; white-space: nowrap;
   transition: box-shadow 120ms ease;
 }
-.sb-ev:hover { background: color-mix(in srgb, var(--fam) 32%, var(--bg3)); }
+.sb-ev:hover { background: color-mix(in srgb, var(--fam) 46%, var(--bg2)); }
 .sb-ev:active { cursor: grabbing; }
 .sb-ev.sel { box-shadow: 0 0 0 2px var(--accent), 0 2px 10px rgba(0,0,0,0.4); z-index: 2; }
 .sb-ev.bad { box-shadow: 0 0 0 1px var(--red); }
 .sb-ev.sel.bad { box-shadow: 0 0 0 2px var(--red); }
-.sb-ev.compact { padding: 0; border-radius: 2px; }
+.sb-ev.compact { padding: 0; border-radius: 2px; background: var(--fam); }
+.sb-rev { border-style: dashed; border-left-style: solid; background: color-mix(in srgb, var(--fam) 18%, var(--bg2)); cursor: ew-resize; }
+.sb-rev:hover { background: color-mix(in srgb, var(--fam) 28%, var(--bg2)); }
 .sb-ev-label { overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
 .sb-ev-span {
   position: absolute; left: -3px; top: 9px; height: 6px; border-radius: 3px; pointer-events: none;
   background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fam) 55%, transparent) 0 4px, transparent 4px 8px);
 }
 .sb-if {
-  font-size: 9px; font-weight: 700; color: var(--sb-voice); border: 1px solid var(--sb-voice);
+  font-size: 9px; font-weight: 700; color: var(--sb-if); border: 1px solid var(--sb-if);
   border-radius: 3px; padding: 0 3px; line-height: 13px; position: relative; z-index: 1;
 }
 .sb-ev.firing { animation: sb-fire 420ms ease-out; }
@@ -249,6 +291,13 @@ input[type="number"].sb-in { width: 96px; }
   content: ''; position: absolute; top: 0; left: -5px;
   border-left: 6px solid transparent; border-right: 6px solid transparent; border-top: 8px solid var(--red);
 }
+/* A selected reference's steps, through every lane; and the line a dragged step stuck to. */
+.sb-guides { position: absolute; top: 30px; left: 0; right: 0; bottom: 0; z-index: 1; pointer-events: none; }
+.sb-guide {
+  position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none;
+  border-left: 1px dashed color-mix(in srgb, var(--fam, var(--accent)) 75%, transparent);
+}
+.sb-guide-snap { top: 30px; z-index: 7; border-left: 2px dashed var(--accent); }
 .sb-dropline {
   position: absolute; top: 0; bottom: 0; width: 0; z-index: 7; border-left: 2px dashed var(--accent); pointer-events: none;
 }
@@ -286,7 +335,7 @@ input[type="number"].sb-in { width: 96px; }
   padding: 6px 9px; word-break: break-all; max-height: 74px; overflow-y: auto; color: var(--text);
 }
 .tk-delay { color: var(--accent); font-weight: 600; }
-.tk-if    { color: var(--sb-voice); font-weight: 600; }
+.tk-if    { color: var(--sb-if); font-weight: 600; }
 .tk-note  { color: var(--text3); font-style: italic; }
 .tk-delim { color: var(--text3); }
 .sb-warn { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; max-height: 84px; overflow-y: auto; }
@@ -313,8 +362,8 @@ li.lvl-error { color: var(--red); }
   border-bottom: 1px solid var(--border2);
 }
 .seq-thumb-track i {
-  position: absolute; bottom: 0; width: 3px; height: 12px; margin-left: -1px; border-radius: 1px;
-  background: var(--fam); opacity: 0.9;
+  position: absolute; bottom: 0; width: 4px; height: 12px; margin-left: -2px; border-radius: 1px;
+  background: var(--fam);   /* height and bottom come inline: commands at one moment stack */
 }
 .seq-thumb-meta { font-size: 10px; color: var(--text3); white-space: nowrap; }
 
