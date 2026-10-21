@@ -1743,9 +1743,15 @@ function sbRenderLibList() {
     }
     if (!inner) continue;
     const cnt = f ? `${total} match${total === 1 ? '' : 'es'}` : `${total} cmds · ${e.boards.length} libraries`;
-    // A group shows its members' colours.
+    // A group shows its members' colours: swatches, and its edge striped in them (--grp, seq-builder.css).
     const sw = slots.map(s => `<i class="sb-sw ${sbColorClass(s)}"></i>`).join('');
-    html += `<details class="sb-libsec sb-libgrp" data-sec="g:${esc(e.group.id)}"${sbSecOpen('g:' + e.group.id, f)}><summary><span class="sb-caret">▸</span>`
+    const stripe = slots.length
+      ? 'linear-gradient(to bottom,' + slots.map((s, i) => {
+          const c = s >= 0 ? `var(--sb-c${s + 1})` : 'var(--sb-cx)';
+          return `${c} ${(i * 100 / slots.length).toFixed(2)}% ${((i + 1) * 100 / slots.length).toFixed(2)}%`;
+        }).join(',') + ')'
+      : '';
+    html += `<details class="sb-libsec sb-libgrp" data-sec="g:${esc(e.group.id)}"${sbSecOpen('g:' + e.group.id, f)}><summary${stripe ? ` style="--grp:${stripe}"` : ''}><span class="sb-caret">▸</span>`
       + `<span class="sb-libsec-name">${esc(e.group.name)}</span><span class="sb-sws">${sw}</span>`
       + `<span class="sb-libsec-cnt">${cnt}</span></summary><div class="sb-libgroup">${inner}</div></details>`;
   }

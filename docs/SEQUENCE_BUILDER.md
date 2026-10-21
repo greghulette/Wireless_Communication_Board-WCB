@@ -174,9 +174,11 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   board's home colour unless another lane on screen holds it; then it takes the first free one, so lanes on screen
   never share a colour (`sbColorOf`). Lanes are assigned in order of first appearance in time, which is also the row
   strip's order, so a sequence opens in the colours its strip shows. A lane keeps its colour while the builder is
-  open, so a lane that comes or goes repaints no other. A ninth lane is grey. Steps are filled with their lane's
-  colour, with text in near-black or white, whichever reads better on that colour (`--sb-iN`: worked out per step,
-  4.4:1 or better). Reference steps stay outlined, so they read as context.
+  open, so a lane that comes or goes repaints no other. A ninth lane is grey. A step is outlined in its lane's colour
+  (a 2px border, a thicker left edge at the exact time it fires, a light wash inside), and its text stays in the
+  theme's ink. A solid fill was tried and made the labels harder to read. Reference steps are dashed and fainter. A
+  library group (WCB, AstroPixels) has no colour of its own: its edge is striped in its members' colours, with their
+  swatches beside its name.
 - **Lining up with other sequences.** "Line up with…" lists the other sequences on every loaded board and draws the
   ones picked as reference tracks above this sequence's lanes. Each is one line, its steps in their devices'
   colours, read only. A reference starts where this sequence runs it (a `;C`/`;SEQ` step for that key, unrouted, on
@@ -211,6 +213,7 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-20 | (this commit) | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |
+| 2026-10-20 | (this commit) | Steps outlined in their colour instead of filled; library groups get an edge striped in their members' colours | Greg: the filled boxes were harder to see; WCB and AstroPixels had no colour |
+| 2026-10-20 | `e2d2b09` | Colour follows the device: a home colour per library board, shown in the library and worn by that device's lane; steps filled solid with a legible ink; the composer goes back to the list after Add; the DroidNet trigger listed under "Stop the script" | Greg: "still super monotone", the library too; "does it make sense to go back to the main list after you select something?" |
 | 2026-10-20 | `b9d0f88` | Lanes per device rather than per port; a categorical colour per lane (validated palette) on lanes, steps and strips; reference tracks ("Line up with…") and sticking to their steps; every board's Serial 0 in Send to; DroidNet's `@A<name>` Maestro trigger and the `defaultPort`/`laneName`/`shortName` hints | Greg, on the first preview: unlabelled devices shared one "S1" lane in one colour beside a lone Maestro lane; "kind of busy and monotone"; a way to line sequences up; DroidNet triggers Maestro sequences by name on S0 |
 | 2026-10-20 | `bdd8c87` | Page written with the feature: timeline ↔ chain rules, warnings, routing, the vendored library and its normalization | Greg: build sequences from the command library on a timeline adjustable to the ms, and show sequences graphically |
