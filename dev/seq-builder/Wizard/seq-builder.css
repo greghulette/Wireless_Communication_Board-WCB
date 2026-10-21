@@ -274,33 +274,36 @@ input[type="number"].sb-in { width: 96px; }
 .sb-divider .sb-lane-label { padding-top: 4px; }
 .sb-divider .sb-ln-name { grid-column: 1 / span 2; color: var(--text3); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
 
-/* A step is outlined in its lane's colour - a bright 2px border, a thicker left edge at the exact time it fires, a light
-   wash inside - with its text in the normal ink, so the colour is strong and the label stays easy to read (a solid fill
-   made it harder: Greg, 2026-10-20). Reference steps are dashed and fainter, so they read as context. A step too close
-   to label at this zoom (.compact) is a solid marker. */
+/* A step is outlined in its lane's colour - a bright 2px border, a light wash inside - with its text in the normal ink,
+   so the colour is strong and the label stays easy to read (a solid fill made it harder: Greg, 2026-10-20). Reference
+   steps are dashed and fainter, so they read as context. A step too close to label at this zoom (.compact) is a solid
+   marker. */
 .sb-ev {
   position: absolute; height: 24px; box-sizing: border-box;
-  display: flex; align-items: center; gap: 4px; padding: 0 7px 0 9px;
-  border: 2px solid var(--fam); border-radius: 3px 6px 6px 3px;
+  margin-left: 10px;   /* SB_EV_GAP: the box starts clear of the dot (below) */
+  display: flex; align-items: center; gap: 4px; padding: 0 7px;
+  border: 2px solid var(--fam); border-radius: 6px;
   background: color-mix(in srgb, var(--fam) 20%, var(--bg));
   color: var(--text); font-size: 11px; font-weight: 600;
   cursor: grab; user-select: none; overflow: visible; white-space: nowrap;
   transition: box-shadow 120ms ease, background-color 120ms ease;
 }
-/* The trigger: a dot centred on the step's left edge, exactly at the time it fires. The box after it is only its label,
-   not how long it runs (Greg, 2026-10-21: the box could be read as a duration). A step's left edge is at its time and
-   its 2px border sits inside that, so the dot's centre is 2px + 6px left of the padding box. */
+/* The trigger: a dot exactly at the time the step fires, standing apart from the box, which is only its label, not how
+   long it runs (Greg, 2026-10-21: the box could be read as a duration; then "move the text off to the right slightly of
+   the dot. not connected"). The step's `left` is its time (the drag writes it), and the box sits SB_EV_GAP (10px) to
+   the right of it, so the dot's centre is 10px + the 2px border + 6px left of the padding box. The dot is part of the
+   step: grabbing it drags the step. */
 .sb-ev::before {
-  content: ''; position: absolute; left: -8px; top: 50%; width: 12px; height: 12px; margin-top: -6px;
-  border-radius: 50%; background: var(--fam); box-shadow: 0 0 0 2px var(--bg); z-index: 2; pointer-events: none;
+  content: ''; position: absolute; left: -18px; top: 50%; width: 12px; height: 12px; margin-top: -6px;
+  border-radius: 50%; background: var(--fam); box-shadow: 0 0 0 2px var(--bg); z-index: 2;
 }
-.sb-rev::before { background: var(--bg); border: 2px solid var(--fam); box-sizing: border-box; }
+.sb-rev::before { left: -17px; background: var(--bg); border: 2px solid var(--fam); box-sizing: border-box; }
 .sb-ev:hover { background: color-mix(in srgb, var(--fam) 34%, var(--bg)); }
 .sb-ev:active { cursor: grabbing; }
 .sb-ev.sel { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text), 0 2px 12px rgba(0,0,0,0.45); z-index: 2; }
 .sb-ev.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red); }
 .sb-ev.sel.bad { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--red), 0 2px 12px rgba(0,0,0,0.45); }
-.sb-ev.compact { padding: 0; border-radius: 2px; border-width: 0; background: color-mix(in srgb, var(--fam) 35%, var(--bg)); }
+.sb-ev.compact { margin-left: 0; padding: 0; border-radius: 2px; border-width: 0; background: color-mix(in srgb, var(--fam) 35%, var(--bg)); }
 .sb-ev.compact::before { left: -6px; }
 .sb-rev {
   border: 1px dashed var(--fam);
