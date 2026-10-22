@@ -35,6 +35,7 @@ Status values: `TODO`, `WIP`, `FIXED (unverified)`, `VERIFIED` (test green on ha
 
 | Date | What happened |
 |---|---|
+| 2026-10-22 | **#112 on the WCBs: cause named, recovered without a reboot** (branch `fix/espnow-tx-wedge`). W3 (ESP32-S3) wedged in `etm.char_legacy` on the Windows PC (2026-10-21/22), the third WCB after W2 (2026-10-06) and W1 (2026-10-12). The signature matches two open upstream reports against IDF 5.5 on ESP32 and ESP32-S3 (espressif/esp-idf #18682, #19269): the WiFi driver loses frames `esp_now_send` accepted - no send callback, the TX buffer never returned, ESP-NOW's insert into the driver's TX queue racing the driver's task - until every frame is refused `ESP_ERR_ESPNOW_NO_MEM`; only `esp_wifi_deinit`/`init` or a reboot cleared it there. `wcbEspNowService` now calls a wedge after 10 s of frames with no completion and restarts ESP-NOW, then on a board that booted with WiFi OFF the WiFi driver too; an AP or JOIN board says only a reboot clears it. `?DEBUG,FAULT,TXWEDGE[,1-3]` simulates it; `etm.tx_wedge_esp_now_restart`, `_wifi_restart`, `_only_reboot_clears` written, not yet run. FIXED (unverified). |
 | 2026-10-15 | **7.0.0 candidate, full run `20261015-145452`: 1441 PASS / 3 FAIL / 1 ERROR / 1 SKIP.** No WCB firmware failure: two were Chrome holding the SBUS/Kyber port (PASS on re-run), one SKIP was W3 sending 2 of 3 boot announces twice (6 of 6 on both re-runs; watch it), two were NaviCore's ipc1 boot panic. **D-NC77 reopened and fixed in NaviCore:** stale S4/S5 RX interrupts across a CPU-only restart (`c828bb3`, the WCB's #78 fix ported) plus a tick-synced registration (`c4d27b6`); 0 panics in 163 restarts. NaviCore `2f49370`: long USB answers paced right after boot. WCB `839e3e8`: Maestro help 0-127. VERIFIED: `20261015-214736`, `20261015-222607` (47/47). |
 | 2026-10-15 | **W1's silence reproduced, in the same test** (`intellex.*` run `20261015-091259`, `intellex.flash_navicore_app`, as on 10-14). W1's last line was config_guard's backup at the test's start; then nothing through NaviCore's reflash and after. Before touching it: its USB device present, NOT in the ROM bootloader (esptool --before no-reset: no sync), NaviCore did not hear it for 3+ min after its own reboot (the camera's view of its LED looks the same healthy, so it says nothing). Opening the port resets it, so the state is gone each time. Two explanations: HELD IN RESET (W1's WCH bridge on macOS's usbserial driver raising RTS = EN by itself) or HUNG firmware. The boot after the open said reason 1 (power-on); W1 released after being held in reset says 7 (watchdog, measured), so HUNG is likelier. New: `hil/silence.py` runs after every failed test - a silent USB WCB gets RTS/DTR written low again on the open handle (releases a held board: HELD IN RESET) and otherwise a reset pulse (HUNG), with a line saying which, and is brought back before the next test. `bench.silent_wcb_held_in_reset` (W1 held through RTS on purpose: diagnosed and back) and `bench.silence_unit` pass (`20261015-095557`). Not reproduced in 5 rounds (97 tests). Firmware `ba33a19` adds the loop watch ([HANG] lines: the step, the command verb, the loop task's state, the WS lock holder) and the runner notes them, so the next occurrence in a long run names where loop() stopped - or, if it was held in reset, the silence check says so. Open until it happens again. |
 | 2026-10-15 | **#112's watchdog, second cut.** Full run `20261014-173713` showed WCBClient 1.18.0 ending a wedge early on a heartbeat advert that arrived by chance. 1.18.1 (`0c5803e`) counts a probe answered only by an ACK or by adverts from two boards when two can answer, needs 2 answered probes to recover and goes straight to level 2 on a relapse within 3 min; NaviCore `f953dd2` requires it. VERIFIED: `ncmesh.tx_watchdog_*` pass on fix13 (`20261015-001634`). **New, open:** W1 went silent mid-run (~23:23, `intellex.flash_navicore_app`) - LED off, no output; the port open reset it as POWERON, so nothing is known of its state. Not reproduced. |
@@ -2390,6 +2391,19 @@ answers Windows' first request for the address it held last time (INIT-REBOOT).
 ESP_LOG_DEBUG)` on a debug build, or a capture on the PC), with the heap reading beside it. A user connecting a laptop
 or phone to the droid waits this long too, which reads as "the access point is broken".
 
+**2026-10-22, channel sync ruled out as the cause (not proven on the bench).** The PC's spare adapter took 35-55 s, and
+sometimes got no lease in 62 s, on the channel-sync build (run `20261022-072416`: `ws.client_slots`,
+`.stalled_client_costs_nothing`, `.ota_chunk`, `.token_wrong_closes` failed on it). The same PC took up to 46.7 s on
+2026-09-29, before channel sync existed. The Mac's Realtek adapter, moved to W1's access point by the harness, was
+proved there (associated, leased, a WebSocket connect and a `;S0` marker) about 8 s after the click on nearly every
+join in its runs from 10-07 to 10-15 (7.0.x); the few 40-53 s joins needed the second click. Channel sync cannot take
+W1's radio away during a DHCP exchange: a search starts only while no station is associated (`wcbWifiCanHop`,
+`WCB_WiFi.cpp`), and an AP board runs no full-band scan (JOIN only). Channel sync and the WebSocket token add 608 B of
+static RAM on the ESP32 (113,048 to 113,656 against `f733e1a`) and channel sync a 0.3 KB frame queue, so W1's heap is
+about 0.9 KB lower than before them, which the heap candidate above would feel; nothing shows that it does. Every
+`wifi_pc` join on W1 now notes whether W1's console showed a channel-sync search or move meanwhile
+(`_note_w1_radio_away`, s28), so the next PC run says whether one overlapped a slow lease.
+
 #### 111. With its access point up, a classic-ESP32 WCB's heap drops to within a few hundred bytes of empty
 
 | | |
@@ -2429,11 +2443,11 @@ cause.
 
 | | |
 |---|---|
-| **Status** | OPEN - diagnostic in place (`f748de6`), cause not found |
-| **Owner** | `WCB_firmware` (`WCB_EspNow.cpp`), probably the WiFi driver under #111's heap |
-| **Effort** | M (catching it again) |
-| **Tests** | `etm.char_per_board_clamp` (every WCB must transmit again after its load); the runner fails any test during which a WCB prints `[MESH] ESP-NOW transmit stalled` |
-| **Subsystem** | mesh / heap |
+| **Status** | FIXED (unverified) 2026-10-22 - the cause is the WiFi driver (upstream, open); the board now recovers by itself |
+| **Owner** | `WCB_firmware` (`WCB_EspNow.cpp`, `WCB.ino` `espNowRestartForWedge`); the bug itself is Espressif's |
+| **Effort** | M |
+| **Tests** | `etm.tx_wedge_esp_now_restart`, `etm.tx_wedge_wifi_restart`, `etm.tx_wedge_only_reboot_clears` (`?DEBUG,FAULT,TXWEDGE`); `etm.char_per_board_clamp` (every WCB must transmit again after its load); the runner fails any test during which a WCB prints `[MESH] ESP-NOW transmit stalled` or `... wedge` (not a simulated one) |
+| **Subsystem** | mesh / WiFi driver |
 
 **Evidence (full run `20261006-122850`).** During `etm.char_per_board_clamp`'s load W2 gave up frames ("the radio's
 queue stayed full", 252 in 10 s; its generator sent 42 frames where it sends ~100), and after the load it never sent
@@ -2450,9 +2464,55 @@ The flooding W1's low-water reached 1,780 bytes (#111).
 largest block and low-water when frames have been given up while none was accepted or completed for 5 s, every 30 s
 while it lasts, and `... recovered after <n>s`. The next occurrence names the heap state.
 
-**Fix (after the cause).** If the heap is to blame, #111's options. A board could also recover by itself: re-initialise
-ESP-NOW (`esp_now_deinit`/`init`, the callbacks, every peer `setup()` adds) or restart, once a stall passes some limit
-- Greg's call, as a restart has side effects.
+**More evidence (2026-10-22).** In `20261006-122850` probe2 sniffed the mesh (`MRX` lines): W2's last frame on the air
+was at 10772.508, 0.8 s into the load, and its first given-up frame 0.9 s later - an abrupt stop, not a heap draining
+away. On 2026-10-12 (runs `20261012-191438` to `-210958`, Mac) W1 (ESP32) wedged at 65 s into `-191438`'s
+`seq.command_formats` while an abandoned `?RTERM` session mirrored every console line over the mesh, and stayed wedged
+6,920 s: every stall line read `in flight 8` - eight frames accepted and never completed - and 9,883 frames given up.
+W3 (ESP32-S3, the board with the most heap) wedged in `etm.char_legacy` on the Windows PC (2026-10-21/22, channel-sync
+build), so neither the chip nor the heap decides it. The stall line's "internal heap free 45548, largest block 38900"
+was the wrong heap (MALLOC_CAP_INTERNAL counts the classic ESP32's IRAM, #58); it reads MALLOC_CAP_8BIT now.
+
+**Cause.** The WiFi driver's, reported upstream with the same signature on ESP32 and ESP32-S3 under IDF 5.5 and still
+open: espressif/esp-idf #19269 (IDFGH-18502; ESP32, APSTA, Arduino-ESP32 3.3.12) and #18682 (ESP32-S3, IDF 5.5.4-6.1).
+`esp_now_send` returns `ESP_OK`, the frame takes a sequence number and is never transmitted, its send callback never
+comes and its TX buffer is never recycled. #19269's disassembly finds ESP-NOW's insert into the shared TX queue
+(`ieee80211_post_hmac_tx` on the `esp_now_send` -> `ieee80211_send_action_vendor_spec` path) taken without
+`g_wifi_global_lock`, which the driver's own task holds to dequeue: a lost frame, or a tail pointer left inside one so
+every later frame is lost too, until `esp_wifi_init` rebuilds the queue. Once the pool is gone every send is refused
+`ESP_ERR_ESPNOW_NO_MEM`. Upstream, `esp_now_deinit`/`init` alone did not recover it (one report: 32 times, then not);
+`esp_wifi_stop` + `esp_wifi_deinit` + init + start did; a full reboot always does. More frames in flight means more
+inserts racing the dequeue, which fits a sustained ETM or mirror load.
+
+**Fix (`fix/espnow-tx-wedge`).** No code of ours can stop the driver losing frames, so the board finds the wedge and puts
+the radio back itself (`WCB_EspNow.h`, CLAUDE.md rule 16):
+- **Found** by completions, not by what `esp_now_send` accepted: at least 3 frames handed to the radio (accepted, or
+  given up) over 10 s and not one send callback. Printed once, ungated: `[MESH] ESP-NOW transmit wedged: N frame(s)
+  handed to the radio over Ns and none completed (in flight, frames counted out unfinished since boot, STA MAC,
+  channel, heap) - restarting ESP-NOW, no reboot (tracker #112)`.
+- **Remedy 1:** ESP-NOW restarted from `loop()` - `esp_now_deinit`/`init`, both callbacks, every peer from RAM
+  (`espNowRegisterPeersAgain`); every send is refused meanwhile (`wcbEspNowRestarting`).
+- **Remedy 2,** still wedged 10 s later: the WiFi driver too (`WiFi.mode(WIFI_OFF)` then `WIFI_STA`, i.e.
+  `esp_wifi_stop`/`deinit`/`init`/`start`; power save off, the region, channel sync's home channel, the mesh MAC),
+  only on a board that booted with WiFi OFF. An AP or JOIN board is never torn down under its clients
+  (docs/WIFI_DESIGN.md §4) and says `only a reboot clears it (?reboot)`, as does a board remedy 2 did not clear; the
+  ladder is tried again every 5 min while it lasts.
+- **Never** while the radio is away on another channel or a restart is pending (rules 18, 11).
+- **Ends** with `[MESH] ESP-NOW transmit wedge cleared after Ns: <which remedy>, frames complete again, no reboot`.
+  `?STATS` adds the frames the radio accepted and never completed, and the wedges and how many cleared.
+- **Power save** goes off through the core too (`WiFi.setSleep(false)` before `WiFi.mode`, docs/WIFI_DESIGN.md §4):
+  the core's STA_START handler could put modem sleep back after `setup()` turned it off, on an ESP-NOW-only board like
+  W3 (not on W1 or W2, whose access points keep the radio awake - so it is not the cause, at most a factor on W3). The
+  wedge line reports the power save in force.
+- **Simulated** by `?DEBUG,FAULT,TXWEDGE[,1-3]`: 8 frames "accepted" and never completed, then every one refused,
+  until remedy 1, remedy 2, or neither; every line it causes says `(simulated, ?DEBUG,FAULT,TXWEDGE)`, which the
+  runner's stall scan leaves alone.
+
+**Still open.** Whether remedy 1 or 2 clears the driver's real wedge: only a real one shows it (a full run's
+`[MESH] ESP-NOW transmit wedge cleared` without `(simulated`). `etm.char_legacy` alone does not reproduce it on demand
+(the 2026-10-06 replay did not). Whether pacing to fewer frames in flight makes it rarer (#18682's reporter held one in
+flight and saw no more) is a throughput trade-off to measure first. A board that runs an AP or a JOIN still needs a
+reboot - Greg's call whether it takes one by itself (NaviCore does at its level 2).
 
 #### 113. A WebSocket client that leaves without closing holds the WCB's heap until no client can connect
 
@@ -2481,3 +2541,8 @@ retries a vanished peer. Any phone or laptop that leaves W1's access point mid-s
 (`ARDUINO_EVENT_WIFI_AP_STADISCONNECTED`), every session from the AP's /24 is closed on the next `loop()`; httpd's
 send timeout is 2 s. On it the test drops the client 0.6 s after the PC left and the heap is back within 0.4 KB, and
 every s28 W1-access-point test passes (`20261007-142719`).
+
+**2026-10-22: the reset never happened.** The core's lwIP is built without `SO_LINGER` (`CONFIG_LWIP_SO_LINGER`
+unset), so the option was refused and every close was a FIN, or a reset only when the client's bytes were left unread.
+`wsClose` no longer sets it (WIFI_DESIGN.md §6a). What a vanished client never ACKed waits in lwIP until TCP gives up;
+the rest of this fix stands.

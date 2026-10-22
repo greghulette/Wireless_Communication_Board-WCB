@@ -107,6 +107,7 @@ void processWifiCommand(const String &args);
 bool wcbWifiJoinAssociated();            // the station is associated with an AP now: the AP owns the channel (F_PINNED)
 bool wcbWifiApUp();                      // this boot brought an access point up
 bool wcbWifiInterfaceUp();               // an AP is up, or the station is associated: a channel move needs a restart
+bool wcbWifiBootedOff();                 // this boot started no WiFi interface (?WIFI,OFF): ESP-NOW is all the driver runs
 bool wcbWifiCanHop(const char **why);    // may a search take the radio to other channels now? why = the reason not
 bool wcbWifiJoinScanning();              // a JOIN scan is running (the driver refuses a channel switch meanwhile)
 bool wcbWifiFullScanRunning();           // a JOIN full-band scan is running: the radio is off the mesh channel

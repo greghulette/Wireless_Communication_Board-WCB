@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "SoftwareSerial.h"
+#include <new>
 #include <Arduino.h>
 #if ESPSWSERIAL_LEVEL_RX
 #include "hal/gpio_ll.h"   // WCB patch (#78): gpio_ll_set_intr_type - one register write, inlined into the IRAM ISR
@@ -96,17 +97,32 @@ void UARTBase::begin(uint32_t baud, Config config,
 }
 
 void UARTBase::beginRx(bool hasPullUp, int bufCapacity, int isrBufCapacity) {
+    // WCB patch: a re-begin keeps queues of the same size (emptied) instead of freeing and allocating them again -
+    // a ?BAUD change (applyLiveBaud, WCB.ino) then needs no heap at all - and any queue it must allocate is nothrow:
+    // one that cannot be had leaves m_rxValid false, so available()/read()/peek() return nothing and enableRx() does
+    // not attach the ISR. A throwing new abort()ed the board (HIL run 20261014-021636, ?BAUD,S3 with W1's heap
+    // short). m_rxValid goes false first: a failed re-begin must not leave the old flag over freed queues.
+    m_rxValid = false;
     m_rxGPIOHasPullUp = hasPullUp;
     m_rxReg = portInputRegister(digitalPinToPort(m_rxPin));
     m_rxBitMask = digitalPinToBitMask(m_rxPin);
-    m_buffer.reset(new circular_queue<uint8_t>((bufCapacity > 0) ? bufCapacity : 64));
+    const size_t cap = (bufCapacity > 0) ? bufCapacity : 64;
+    if (m_buffer && m_buffer->capacity() == cap) m_buffer->flush();
+    else m_buffer.reset(new (std::nothrow) circular_queue<uint8_t>(cap));
+    if (m_buffer && !m_buffer->capacity()) m_buffer.reset();
     if (m_parityMode)
     {
-        m_parityBuffer.reset(new circular_queue<uint8_t>((m_buffer->capacity() + 7) / 8));
+        const size_t pcap = (cap + 7) / 8;
+        if (m_parityBuffer && m_parityBuffer->capacity() == pcap) m_parityBuffer->flush();
+        else m_parityBuffer.reset(new (std::nothrow) circular_queue<uint8_t>(pcap));
+        if (m_parityBuffer && !m_parityBuffer->capacity()) m_parityBuffer.reset();
         m_parityInPos = m_parityOutPos = 1;
     }
-    m_isrBuffer.reset(new circular_queue<uint32_t, UARTBase*>((isrBufCapacity > 0) ?
-        isrBufCapacity : m_buffer->capacity() * (2 + m_dataBits + static_cast<bool>(m_parityMode))));
+    const size_t icap = (isrBufCapacity > 0) ?
+        isrBufCapacity : cap * (2 + m_dataBits + static_cast<bool>(m_parityMode));
+    if (m_isrBuffer && m_isrBuffer->capacity() == icap) m_isrBuffer->flush();
+    else m_isrBuffer.reset(new (std::nothrow) circular_queue<uint32_t, UARTBase*>(icap));
+    if (m_isrBuffer && !m_isrBuffer->capacity()) m_isrBuffer.reset();
     if (m_buffer && (!m_parityMode || m_parityBuffer) && m_isrBuffer) {
         m_rxValid = true;
         setRxGPIOPinMode();

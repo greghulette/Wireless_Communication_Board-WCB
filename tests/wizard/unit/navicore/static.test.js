@@ -138,8 +138,8 @@ test('nctool.static: the bulk-transfer constants match WCB_Client', { skip }, (t
 });
 
 test('nctool.static: every top-level key rcConfigToJSON writes is read by applyConfig', { skip }, () => {
-  // 'String rcConfigToJSON(' and not '...()': since channel sync it takes forMesh (NaviCore ab762c1, rc_config.h:1355),
-  // and the keys it prints only for USB (wifiToken) are inside the same body.
+  // No closing paren: NaviCore's chansync gave it a parameter (rcConfigToJSON(bool forMesh = false), the mesh copy
+  // without wifiToken); rc_config.h holds its one definition and no declaration.
   const body = cBody(releaseOnly(read('rc_config.h')), 'String rcConfigToJSON(');
   const fwKeys = new Set([...body.matchAll(/\bdoc\["(\w+)"\]\s*=/g), ...body.matchAll(/\bdoc\.createNested(?:Object|Array)\("(\w+)"\)/g)].map((m) => m[1]));
   assert.ok(fwKeys.size >= 30, `found only ${fwKeys.size} top-level keys in rcConfigToJSON`);

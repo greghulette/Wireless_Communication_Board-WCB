@@ -106,10 +106,32 @@ This mirrors what `WCB_Client` had to handle when NaviCore began hosting an AP:
 `WCB_Client::begin()` inspects `WiFi.getMode()` and preserves an existing AP as
 `WIFI_AP_STA` rather than forcing `WIFI_STA` and tearing it down.
 
+**Power save goes off before the mode.** `setup()` calls `WiFi.setSleep(false)` before
+`WiFi.mode(WIFI_STA)`, then `esp_wifi_set_ps(WIFI_PS_NONE)`. The core's STA_START handler
+(arduino-esp32 3.3.4 `STA.cpp`) applies `WiFi.getSleep()` - modem sleep by default - on the
+event task, and could land after the direct call and undo it on a board with no AP up; this
+core builds with `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`, so an unassociated,
+ESP-NOW-only station can power-save too. Called before the mode it only records NONE, which
+the handler then applies. An AP or AP+STA board does not modem-sleep at all.
+
 **Settings apply at the next boot, not live.** Same discipline as
 `saveMeshChannelToPreferences()`. Bringing an interface up or down re-enters the WiFi
 driver underneath a running `esp_now`, and a config push arrives as a *stream* of
 commands — losing the radio midway would strand everything still queued behind it.
+
+**One runtime driver restart: the ESP-NOW transmit wedge** (tracker #112, `WCB_EspNow.h`).
+The WiFi driver can lose frames `esp_now_send` accepted until it refuses every one
+(espressif/esp-idf #18682, #19269), and upstream only `esp_wifi_deinit`/`init` or a reboot
+cleared it. When an ESP-NOW restart has not cleared a wedge, `espNowRestartForWedge`
+(`WCB.ino`) restarts the driver from `loop()`: `esp_now_deinit`, `WiFi.mode(WIFI_OFF)` and
+back to `WIFI_STA`, then the radio as `setup()` leaves it - power save off (`WiFi.setSleep(false)`
+too, or the core's STA_START handler puts modem sleep back), the region
+(`chanSyncReapplyRegion`), channel sync's home channel, the mesh MAC - and ESP-NOW with its
+peers. Only on a board that **booted** with WiFi OFF (`wcbWifiBootedOff`): nothing of ours
+runs on the driver there but ESP-NOW. An access point or a joined network is never torn
+down under its clients, sockets and WebSocket sessions; such a board says that only a
+reboot clears the wedge. Not during an OTA session, while the radio is away on another
+channel, or with a restart pending.
 
 ---
 
@@ -247,10 +269,22 @@ partial send that timed out was also taken for a whole one, which could cut a fr
 **Only this file writes to a WebSocket after the handshake.** `/ws` is registered with
 `handle_ws_control_frames`, so httpd no longer answers PING and CLOSE itself with a blocking send from its task,
 which could land inside a frame the sender had half written. `wsHandler` reads every frame's payload, queues a
-PONG that `sinkPump` sends at the next frame boundary, and echoes a CLOSE when no frame is part-way out. A console
+PONG that `sinkPump` sends at the next frame boundary, and answers a CLOSE itself (`closeEcho`). A console
 frame part-way out finishes first, whatever is queued behind it (a PONG, a session-layer line, §7): the sender used to
 hold the frame back for a PONG that was itself waiting for the frame's end, and the client sat stalled until
 `WS_STUCK_MS` closed it.
+
+**A client's CLOSE is echoed, then the session closes with a FIN.** The echo carries the client's status code (RFC 6455
+5.5.1). A frame part-way out to that client is finished first if the socket takes the rest at once; if it does not,
+there is no room for a control frame and the session closes without the echo. httpd closes the session as soon as the
+handler returns. **The CLOSE's payload is read before the echo, and must be:** lwIP closes a socket that still holds
+received bytes nobody read with a reset instead of a FIN (`tcp_close_shutdown`), sent right behind the echo, or in its
+place while the echo is still queued. A Windows client loses whatever it has not read when a reset arrives, so the
+2-byte status code nearly every client sends, left unread, cost a Windows client the echo: it saw only a dropped
+connection (HIL `ws.ping_pong_and_close`, run `20261022-072416`), while the Mac read the echo before the reset. Every
+session closes through `close()` in `wsClose`: a FIN behind what the client has not ACKed yet, or a reset when the
+client's bytes are left unread. Nothing forces a reset: the core's lwIP is built without `SO_LINGER`
+(`CONFIG_LWIP_SO_LINGER` unset), so `setsockopt(SO_LINGER)` is refused.
 
 **A heap floor for console output** (`WS_HEAP_FLOOR`, 8 KB). Output handed to lwIP sits in its send buffer and the WiFi driver's dynamic TX buffers until the client ACKs it, and the driver takes a dynamic RX buffer from the same heap for every packet it receives. A client that stopped reading took W1 to 1.4 KB free: its window update could not be received, it was closed as stuck, and the heap stayed short long enough that the next client could not join. Below the floor `sinkPump` hands lwIP nothing more (PONG/CLOSE excepted). A close that httpd cannot queue (its control socket needs a little heap too) keeps the slot `closing` and is asked again every pass, instead of leaving the session open with its whole send buffer.
 
@@ -279,10 +313,11 @@ of empty (HIL tracker #111). It was three until 2026-10-07.
 to another network leaves its socket open while TCP retries it, and everything teed to it waits in lwIP, up to a
 TCP send buffer (~5.7 KB) per session. So a hard send error closes the session (`httpd_sess_trigger_close`), not
 just the tee, and so does 10 s in which a client that owes output takes none of it (`WS_STUCK_MS`, reported as
-`[WS] closed N client(s) that took no output for 10 s`); `wsClose` resets the socket (`SO_LINGER` 0) so its buffers
-are freed at once; and when the AP's last station leaves, every session from the AP's /24 is closed on the next
-`loop()`. No send blocks `loop()` (see the sender above); httpd's own `send_wait_timeout` of 2 s now covers only its
-handshake replies.
+`[WS] closed N client(s) that took no output for 10 s`); and when the AP's last station leaves, every session from the
+AP's /24 is closed on the next `loop()`. The close is a FIN (see the CLOSE above), so what a vanished client never
+ACKed stays in lwIP until TCP's retransmissions give up on it; only the session, its slot and its place in the tee are
+let go at once. No send blocks `loop()` (see the sender above); httpd's own `send_wait_timeout` of 2 s now covers only
+its handshake replies.
 
 **AP address: the stock `192.168.4.1`. Do not call `softAPConfig()`.**
 
@@ -392,10 +427,10 @@ the JOIN line still ends up whole.
 - The answers are owed, not sent: `sinkPump` sends them between data frames, as it does a PONG, so a session that has
   just signed in gets `[AUTH:OK]` ahead of the first console frame it joins. They wait at the heap floor like console
   output; the CLOSE does not.
-- **Why a CLOSE and a wait, not a plain close.** `wsClose` resets the socket (`SO_LINGER` 0, tracker #113), and a reset
-  can throw away what the client has not read yet - Windows does - so `[AUTH:FAIL]` would vanish and the client would
-  see only a dropped connection. Sending a CLOSE and closing on its echo (`WS_BYE_WAIT_MS`, 1 s, if none comes) gets
-  the line read first.
+- **Why a CLOSE and a wait, not a plain close.** A close can go out as a reset: lwIP resets a socket closed with bytes
+  from the client still unread (§6a), which a client that goes on sending leaves, and a reset can throw away what the
+  client has not read yet - Windows does - so `[AUTH:FAIL]` would vanish and the client would see only a dropped
+  connection. Sending a CLOSE and closing on its echo (`WS_BYE_WAIT_MS`, 1 s, if none comes) gets the line read first.
 - Cost: no heap at all, per session or otherwise; about 16 bytes of static RAM per session slot, and the two copies of
   the token (WCB_WiFi's, WCB_WS's) and the lockout: +104 B static and +5.4 KB flash on the ESP32 (§9).
 
@@ -516,6 +551,9 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-22 | — | §6a, §7: a client's CLOSE is echoed with its status code and the session then closes with a FIN. `wsHandler` reads the CLOSE's payload first: left unread, it made lwIP close the socket with a reset right behind the echo, and a Windows client lost the echo unread (HIL `ws.ping_pong_and_close`, run `20261022-072416`, the PC; the Mac read it first). A frame part-way out is finished first when the socket takes it. `wsClose` no longer sets `SO_LINGER` 0: the core's lwIP is built without `SO_LINGER`, the option was always refused, and every close was already a FIN (or a reset over unread bytes) - so what a vanished client never ACKed waits for TCP to give up, not "freed at once" as #113 said. |
+| 2026-10-22 | — | §4: power save goes off through `WiFi.setSleep(false)` before `WiFi.mode(WIFI_STA)` as well as `esp_wifi_set_ps`: the core's STA_START handler applied modem sleep after `setup()` turned it off whenever it ran second (a race on every ESP-NOW-only and JOIN board; not on an AP). The transmit-wedge line reports the power save in force. |
+| 2026-10-22 | — | §4: the one runtime WiFi driver restart, the ESP-NOW transmit wedge's second remedy (tracker #112; espressif/esp-idf #18682, #19269): only on a board that booted with WiFi OFF, never under an access point or a joined network, and with the radio put back as `setup()` leaves it (power save off through `WiFi.setSleep(false)` as well, the region, the home channel, the mesh MAC). |
 | 2026-10-21 | — | §4: the JOIN state machine runs only on a board that BOOTED in JOIN (`wifiRunMode`, `WCB_WiFi.cpp`), not on the saved mode. A `?WIFI,JOIN` typed into an AP board started joining at once, under the AP still running until the reboot: "lost", scans of the mesh channel, and with channel sync the full-band scans too (HIL `wifi.join_needs_token` caught it; 7.0.1 did the same). `?WIFI,OFF` on a JOIN board likewise leaves the association to the reboot. |
 | 2026-10-21 | — | Review fixes. §7: at most 2 `[AUTH:REQUIRED]` owed at once (a flooding client was owed up to 65535), a session not signed in within 15 s is closed, and a newcomer at full slots evicts a closing, failed or signed-out session before a signed-in one. §2: channel sync's JOIN full-band scans wait for the 40 s boot grace and an idle board; a scan running when `?WIFI` changes the mode is still finished and the radio put back; what channel sync reads (associated, AP up, can hop) is the running interface, not the saved mode. |
 | 2026-10-21 | — | §2, §3: channel sync ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)) is the one thing that moves the channel at runtime, the whole mesh with it (live, or by a restart with an interface up). JOIN follows its network: full-band scans on a schedule when the mesh-channel scan misses it, a MOVE to the channel it is found on, then `WiFi.begin` there with its BSSID; with channel sync on the off-mesh check no longer settles the join, and the drift warning is skipped while channel sync has the radio. |

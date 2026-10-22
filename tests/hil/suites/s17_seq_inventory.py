@@ -10,8 +10,9 @@ WCB_WDP.cpp. Rules from the specs:
   the snapshot's ?SEQ,SAVE tokens in order, since save order drives both backup order and the SEQHASH.
 - Sequences live in their own store, a file (WCB_SeqStore.h), since 2026-09-29; NVS keeps only the stored_cmds
   marker seq_mig_done. ?SEQ,GET answers NOTFOUND for the NVS layout's records, so ?NVS is the window onto them.
-- A target answers one SEQ_REQ per requester, and one SEQVAL_REQ per (requester, last key), per 1500 ms
-  (WCB.ino:3593-3601, 3634-3646): identical relay requests are spaced 1.7 s apart.
+- A target answers one names request per (requester, last page), an old SEQ_REQ counting as page 0, and one SEQVAL_REQ
+  per (requester, last key), per 1500 ms (answerSeqNames, handleSeqValReqPacket): identical relay requests are spaced
+  1.7 s apart. A names list over one reply comes a page per request (inv.mgmt_seq_paged).
 - The mesh-client specs (seq.fanout_wire_probe, seq.peer_body_broadcasts) live with the probe mesh-mode tests.
 """
 import re
@@ -1410,6 +1411,137 @@ def mgmt_seq_w2_relay(bench):
                 bench.note(f";W2,?MGMT,SEQ,1 try {attempt}: no reply (a lost frag); retrying")
 
 
+# ------------------------------------------------------------ the names in pages (2026-10-22)
+PAGE_KEYS_MAX = 2880       # seqn::PAGE_KEYS_MAX (WCB_SeqNamesWire.h): a page's key text, each key with its comma
+PAGE_ASKED = re.compile(r"^\[MGMT\] Sequence-names request from WCB(\d+) \(page (\d+)\)$")   # answerSeqNames, ?DEBUG,MGMT
+PULL_FAILED = re.compile(r"^\[MGMT\] Sequence names from WCB(\d+)")                        # serviceSeqNamesPull/seqPullTakePage
+SAVES_PER_LINE = 10
+
+
+def _pages_of(names):
+    """seqn::Pager: greedy pages of key text (each key with its comma) up to PAGE_KEYS_MAX."""
+    pages, fill = 1, 0
+    for i, k in enumerate(names):
+        c = len(k) + 1
+        if i and fill + c > PAGE_KEYS_MAX:
+            pages, fill = pages + 1, 0
+        fill += c
+    return pages
+
+
+def _whole_fits(names):
+    """seqn::wholeFits: '<8 hex>,<count>' and every key with its comma within one 2912-character reply."""
+    return 9 + len(str(len(names))) + sum(len(k) + 1 for k in names) <= 2912
+
+
+def _batched(cmds, n=SAVES_PER_LINE):
+    for i in range(0, len(cmds), n):
+        yield cmds[i:i + n]
+
+
+@test("inv.mgmt_seq_paged", "A names list too long for one reply comes in pages: with enough 15-character sequences saved on W2 for 3 pages or more, ?MGMT,SEQ,2 on W1 prints exactly ONE [MGMT:SEQ,2] line, equal to W2's own ?SEQ,NAMES (hash, count and every name, in save order), and W1 prints no 'Sequence names from WCB2' failure line; W2 (?DEBUG,MGMT) logs page 0 as 'Sequence-names request from WCB1' and every later page as '... (page k)', each at least once; the store is as it was after", needs=["wcb1", "wcb2"], links=[])
+def mgmt_seq_paged(bench):
+    """docs/SEQUENCE_INVENTORY.md §3. One reply carries 2912 characters (sendResultFrags, 16 x 182), about 180 names;
+    past that, before 2026-10-22, ?MGMT,SEQ printed '[ERROR] Result too large to relay'. Now W1 asks for page 0 with a
+    59-byte SEQ_PAGE_REQ (28) ahead of the old 13 (seqPullSend), W2 answers a list that does not fit one reply a page at a
+    time as type 29 (answerSeqNames / buildSequenceNamesReply: greedy pages of up to 2880 bytes of key text), and W1
+    joins them and prints the list once, in the one-reply shape (seqPullTakePage). The fill keys are HILPG<4 digits>
+    plus a 6-hex nonce, 15 characters (cost 16 each in the list), with a one-character value nothing recalls; enough of
+    them that the key text passes 2 x 2880 bytes. They go in through W2's own console, ten saves to a line (the ?SEQ,SAVE
+    value ends only at '^?'), and come out the same way, in a finally; config_guard proves the store came back.
+    The pull is asked again after a miss, spaced past the target's 1.5 s dedup: a page the requester asked three times
+    and never got prints a 'Sequence names from WCB2: page <k> never came' line, which is noted and asked again too."""
+    w = usb_wcb(bench)
+    w2 = WCB(bench.dev("wcb2"))
+    me = bench.usb_wcb_number()
+    store = _store(w2)
+    if store is None:
+        raise Skip("W2 keeps its sequences in NVS this boot: no 'Sequences: ... in the sequence store' line in ?NVS")
+    n0, b0, cap = store
+    h0, c0, names0 = _names(w2)
+    tag = nonce()
+    have = sum(len(k) + 1 for k in names0)
+    nfill = max(0, (2 * PAGE_KEYS_MAX + 1 - have + 15) // 16) + 8
+    keys = [f"HILPG{i:04d}{tag}" for i in range(nfill)]
+    if b0 + nfill * (15 + 1 + 1 + 2) > cap:
+        raise Skip(f"W2's sequence store has {cap - b0} bytes free; {nfill} fill sequences need {nfill * 19}")
+    problems, notes = [], []
+    with config_guard(bench, 2):
+        try:
+            for chunk in _batched(keys):
+                out = w2.run("^".join(f"?SEQ,SAVE,{k},p" for k in chunk), timeout=20)
+                missing = [k for k in chunk if not _has(out, f"Stored: Key='{k}'")]
+                if missing:
+                    raise AssertionError(f"setup: W2 did not store {missing[:3]} ({len(missing)} of {len(chunk)})")
+            h1, c1, names1 = _names(w2)
+            if names1 != names0 + keys or c1 != c0 + nfill:
+                raise AssertionError(f"setup: W2 lists {c1} names ending {names1[-2:]}, not {c0} + {nfill} ending "
+                                     f"{keys[-2:]}")
+            pages = _pages_of(names1)
+            if pages < 3 or _whole_fits(names1):
+                raise AssertionError(f"setup: {c1} names make {pages} page(s): the test needs 3 or more")
+            notes.append(f"W2 lists {c1} names, {sum(len(k) + 1 for k in names1)} bytes of key text, {pages} pages")
+            assert _has(w2.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled"), "W2 did not turn MGMT debugging on"
+            got, asked, failed = None, [], []
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    time.sleep(RELAY_SPACING_S)
+                m, m2 = w.dev.mark(), w2.dev.mark()
+                w.send("?MGMT,SEQ,2")
+                try:
+                    w.dev.expect(r"^\[MGMT:SEQ,2\]", timeout=6 + 3 * pages, since=m)
+                except AssertionError:
+                    failed = [x.rstrip() for x in w.dev.since(m) if PULL_FAILED.match(x.rstrip())]
+                    notes.append(f"try {attempt}: no [MGMT:SEQ,2] line{' (' + failed[-1] + ')' if failed else ''}")
+                    continue
+                time.sleep(1.0)
+                lines = [x.rstrip() for x in w.dev.since(m) if x.startswith("[MGMT:SEQ,2]")]
+                failed = [x.rstrip() for x in w.dev.since(m) if PULL_FAILED.match(x.rstrip())]
+                asked = []
+                for x in w2.dev.since(m2):
+                    x = x.rstrip()
+                    g = NAMES_ASKED.match(x)
+                    if g and int(g.group(1)) == me:
+                        asked.append(0)
+                    g = PAGE_ASKED.match(x)
+                    if g and int(g.group(1)) == me:
+                        asked.append(int(g.group(2)))
+                got = lines
+                break
+            if got is None:
+                problems.append(f"?MGMT,SEQ,2 printed no [MGMT:SEQ,2] line in 3 tries")
+            else:
+                if len(got) != 1:
+                    problems.append(f"?MGMT,SEQ,2 printed {len(got)} [MGMT:SEQ,2] lines, not one")
+                try:
+                    h, c, names = _parse_names(got[0])
+                    if (h, c) != (h1, c1) or names != names1:
+                        first = next((i for i, (a, b) in enumerate(zip(names, names1)) if a != b), min(len(names), len(names1)))
+                        problems.append(f"W1 got {c} names hash {h}, W2 lists {c1} hash {h1}; first difference at "
+                                        f"name {first}")
+                except AssertionError as e:
+                    problems.append(f"W1's line: {e}"[:300])
+                if failed:
+                    problems.append(f"W1 also printed {failed}")
+                missing = [p for p in range(pages) if p not in asked]
+                if missing:
+                    problems.append(f"W2 logged no request for page(s) {missing} (it logged {asked})")
+                if asked.count(0) != 1:
+                    notes.append(f"W2 answered page 0 {asked.count(0)} times")
+                again = sorted({p for p in asked if asked.count(p) > 1 and p})
+                if again:
+                    notes.append(f"page(s) {again} asked more than once (a lost page, asked again)")
+        finally:
+            w2.run("?DEBUG,MGMT,OFF")
+            for chunk in _batched(keys):
+                w2.run("^".join(f"?SEQ,CLEAR,{k}" for k in chunk), timeout=40)
+        h2, c2, names2 = _names(w2)
+        if (h2, c2, names2) != (h0, c0, names0):
+            problems.append(f"after the clears W2 lists {c2} names hash {h2}, not {c0} hash {h0}")
+    bench.note("; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
 # ============================================================ the sequence store: a file of its own (2026-09-29)
 STORE_RX = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes")
 STORE_FULL = "the sequence store is full - see ?NVS"
@@ -1440,13 +1572,14 @@ def _store_or_skip(w):
 
 @test("inv.seq_store_unreadable_retry_served", "A sequence request W2 cannot serve because its store will not read (?DEBUG,FAULT,SEQREAD) is left unanswered with an ungated line - '[MGMT] Could not read the sequence store for WCB1's request - not answered' for ?MGMT,SEQ,2 and \"[MGMT] Could not read sequence '<key>' for WCB1 (...) - not answered\" for ?MGMT,SEQGET - and the dedup is cleared, so the next copy of W1's 3-copy burst is answered: W1 still gets the names and the value, exactly; W2's own ?SEQ,NAMES and ?SEQ,GET say they could not read it", needs=["wcb1", "wcb2"], links=[])
 def seq_store_unreadable_retry_served(bench):
-    """Coverage re-scan 2026-10-12, mgmt.seq_store_unreadable_unanswered. handleSeqReqPacket / handleSeqValReqPacket
-    (WCB.ino) answer nothing when buildSequenceNamesString / seqStoreGet cannot read the store (it will not mount on a
+    """Coverage re-scan 2026-10-12, mgmt.seq_store_unreadable_unanswered. answerSeqNames / handleSeqValReqPacket
+    (WCB.ino) answer nothing when buildSequenceNamesReply / seqStoreGet cannot read the store (it will not mount on a
     low heap): a WCB_Client reads any reply as an inventory, so no answer beats a wrong one, and lastSeqReqFrom /
-    lastSeqValFrom = 0 lets the requester's retry through. The requester sends each request 3 times 15 ms apart
-    (handleMgmtSeqRequest), so the second copy is that retry. No bench heap fails the read, so the SEQREAD knob
-    (WCB_Fault.h) fails the next seqStoreKeyList / seqStoreGet once. The local spellings (processLocalCommand's ?SEQ
-    branch) are checked the same way. A throwaway sequence is stored on W2 for the value request and cleared."""
+    lastSeqValFrom = 0 lets the requester's retry through. The requester sends each request 3 times 15 ms apart (the
+    names: three page-0 SEQ_PAGE_REQs, then three SEQ_REQs, seqPullSend), so the second copy is that retry. No bench
+    heap fails the read, so the SEQREAD knob (WCB_Fault.h) fails the next seqStoreForEachKey / seqStoreKeyList /
+    seqStoreGet once. The local spellings (processLocalCommand's ?SEQ branch) are checked the same way. A throwaway
+    sequence is stored on W2 for the value request and cleared."""
     w, w2 = usb_wcb(bench), WCB(bench.dev("wcb2"))
     key, value = "HILSR" + nonce()[:4], ";S0," + marker("v")
     problems = []

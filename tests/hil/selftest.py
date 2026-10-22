@@ -1,7 +1,8 @@
 """Harness self-test: the run checkpoint and the runner loop, with a fake bench and fake tests. No hardware, no serial
 port, no bench - it runs anywhere Python and pyserial are.
 
-    python tests/hil/selftest.py
+    python tests/hil/selftest.py                      # all of it
+    python tests/hil/selftest.py 'probe_*' ncwire_links   # only the tests these globs name
 
 It covers pause and resume (docs/HIL_TESTING.md §9): a new run to done; the finished single-segment report byte for
 byte against the layout write_report produced before checkpoints existed (GOLDEN); a PAUSE-file pause that releases
@@ -64,6 +65,7 @@ which talks to the boards) are replaced by a stub. What only the real bench can 
 docs/HIL_TESTING.md §9.
 """
 import collections
+import fnmatch
 import json
 import os
 import re
@@ -79,6 +81,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from hil import checkpoint, durations, optin, resume, runner, servos  # noqa: E402
+from hil.probe import PROBE_MIN_VERSION  # noqa: E402
 from hil.checkpoint import Checkpoint, CheckpointError, RunBusy, RunLock  # noqa: E402
 
 # report.md exactly as runner.write_report wrote it for GOLDEN_RESULTS with elapsed=3725.4, captured from that function
@@ -1902,7 +1905,7 @@ def t_rule16_espnow_send_wrapped(tmp):
     assert rule16_problems(copy) == []
 
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
-PROBE_BOOT = "BOOT wcb_probe 8 mac=AA:BB:CC:DD:EE:01"
+PROBE_BOOT = f"BOOT wcb_probe {PROBE_MIN_VERSION} mac=AA:BB:CC:DD:EE:01"   # the oldest version the harness takes
 
 
 class FakeProbeDev:
@@ -3037,25 +3040,41 @@ class FakeNetsh:
 
 
 def t_runner_mesh_stall(tmp):
-    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' after the test's
-    mark is reported, with its last report quoted; lines before the mark, a clean console and a non-WCB device are not."""
+    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' or '... wedged'
+    (tracker #112) after the test's mark is reported, with its last report quoted; lines before the mark, a clean
+    console, a non-WCB device and the lines a ?DEBUG,FAULT,TXWEDGE knob caused ('(simulated, ...)') are not."""
     b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
-                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
-    w1, w2, nav = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="navicore")
-    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame accepted or completed while frames are given up (in flight 0, "
-             "internal heap free 9000, largest block 4000, min since boot 1800)")
+                   "wcb3": {"port": "COMW3", "kind": "wcb", "wcb": 3}, "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    w1, w2, w3 = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="wcb3")
+    nav = FakeNaviDev(name="navicore")
+    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame completed while frames are given up (in flight 8, "
+             "heap free 9000, largest block 4000, min since boot 1800)")
+    wedge = ("[MESH] ESP-NOW transmit wedged: 4 frame(s) handed to the radio over 10s and none completed (in flight 8, "
+             "8 counted out unfinished since boot, STA MAC 02:05:4B:00:00:03, channel 1, heap free 90000, largest block "
+             "60000, min since boot 50000) - restarting ESP-NOW, no reboot (tracker #112)")
+    cleared = ("[MESH] ESP-NOW transmit wedge cleared after 12s: the ESP-NOW restart cleared it, frames complete again, "
+               "no reboot")
+    sim = " (simulated, ?DEBUG,FAULT,TXWEDGE)"
     w2._append(stall.replace("5s", "40s"))                        # before the test: not this test's
-    b.devs.update({"wcb1": w1, "wcb2": w2, "navicore": nav})
+    b.devs.update({"wcb1": w1, "wcb2": w2, "wcb3": w3, "navicore": nav})
     marks = runner._wcb_marks(b)
-    assert set(marks) == {"wcb1", "wcb2"}, marks
+    assert set(marks) == {"wcb1", "wcb2", "wcb3"}, marks
     assert runner._wcb_stalls(b, marks) == ""
     nav._append(stall)                                            # not a WCB
+    for line in (stall, wedge, cleared):                          # caused on purpose by a test's knob
+        w1._append(line + sim)
+    assert runner._wcb_stalls(b, marks) == "", runner._wcb_stalls(b, marks)
     w2._append("[MESH] 3 ESP-NOW frame(s) not sent: the radio's queue stayed full (3 since the stats were reset)")
     w2._append(stall)
     w2._append(stall.replace("5s", "35s"))
     got = runner._wcb_stalls(b, marks)
     assert got.startswith("wcb2 reported its ESP-NOW transmit stalled (2 report(s), the last '[MESH] ESP-NOW transmit "
-                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got, got
+                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got and "wedged" not in got, got
+    w3._append(wedge)                                             # a wedge with too few frames sent for a stall line
+    w3._append(cleared)
+    got = runner._wcb_stalls(b, marks)
+    assert "; wcb3 reported its ESP-NOW transmit wedged (2 line(s): the first '[MESH] ESP-NOW transmit wedged: 4 " in got \
+        and "the last '[MESH] ESP-NOW transmit wedge cleared after 12s" in got and "wcb1" not in got, got
     b.devs.clear()
     b.close()
 
@@ -8568,7 +8587,7 @@ class NaviBootModel(NaviModel):
     FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if rx.pattern != r"^#[Ll]0?2$")
     WCB2_FW = "6.2.1_TEST"
     HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L94 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
-            "never a release")                      # NaviCore.ino:5108 (chansync), s46 HOOK_LINE
+            "never a release")
 
     def __init__(self, app_sha, grace_s=0.5, roll_call_s=1.0, idle_s=1.5, boot_s=0.8, mut=()):
         self.mut = set(mut)            # t_ncboot_mutations: a break, or a D-NC fix, by name (see where each is read)
@@ -13045,7 +13064,7 @@ class WireProbe(FakeProbeDev):
         with self.lk:
             if verb == "HELLO":
                 self.sent.append(text)
-                self._rx(f"HELLO wcb_probe 8 mac={self.mac} mesh=0")
+                self._rx(f"HELLO wcb_probe {PROBE_MIN_VERSION} mac={self.mac} mesh=0")   # the oldest the harness takes
             elif verb == "BIND":
                 self.sent.append(text)
                 answer = self._bind(tok)
@@ -13954,8 +13973,13 @@ def main():
         setattr(m, n, v)
     registry = list(runner.REGISTRY)
     failed = 0
+    # Optional globs on the command line pick tests by name (selftest.py 'probe_*' ncwire_links); none runs them all.
+    picked = [fn for fn in TESTS if not sys.argv[1:] or any(fnmatch.fnmatchcase(fn.__name__[2:], g) for g in sys.argv[1:])]
+    if not picked:
+        print(f"no self-test matches {' '.join(sys.argv[1:])}")
+        return 1
     try:
-        for fn in TESTS:
+        for fn in picked:
             tmp = Tmp()
             t0 = time.monotonic()
             try:
@@ -13970,7 +13994,7 @@ def main():
         for m, n, v in saved:
             setattr(m, n, v)
         runner.REGISTRY[:] = registry
-    print(f"\n{len(TESTS) - failed} of {len(TESTS)} passed")
+    print(f"\n{len(picked) - failed} of {len(picked)} passed")
     return 1 if failed else 0
 
 

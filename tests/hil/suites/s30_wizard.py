@@ -359,6 +359,7 @@ _FAKE_RESCAN_L = (
     ("rpull_fake_badges", "A remote pull shows Retrying, then Pull Failed with Retry after its last attempt; Retry and a pull that lands show Remote (rpull.badges)"),
     ("flash_fake_erase_no_reconnect", "An erase whose board never comes back says so, pushes and probes nothing, and gives the Push button back (flash.erase_path)"),
     ("flasher_fake_windows_baud", "The flasher loads at 460800 (ROM 115200), at 115200 on Windows (flasher.windows_baud)"),
+    ("flasher_fake_reset_tap", "An automatic reset that never syncs becomes a request to tap RESET: GPIO0 held low, retries with no reset of its own until the chip answers, GPIO0 released before any reset, then the flash; no tap, a lost port or another failure stops with advice for that board (flasher.reset_tap)"),
     ("ota_fake_entry_guards", "The OTA button takes the relay path for a relayed board and USB otherwise; each refuses an unreachable board (ota.entry_guards)"),
     ("stats_fake_modal", "The ETM test shows only the last summary block; a relayed capture that times out shows what came; Refresh and errors (stats.modal)"),
     ("wdp_fake_render", "The mesh table's self row, capability names, Controller kind, peers count and toolbar, and the empty-mesh note; the channel sync column and leader with [WDPCH] lines, the older-firmware note without (wdp.render)"),

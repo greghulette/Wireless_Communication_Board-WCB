@@ -35,6 +35,7 @@ void    chanSyncLoadSettings();        // NVS wcb_config: chsync (on/off), regio
 // the region alone brings the saved channel back at the next boot. Returns the region's top channel.
 uint8_t chanSyncApplyRegionAtBoot();
 void    chanSyncBegin();               // after esp_now_init(): the home channel, the frame queue
+void    chanSyncReapplyRegion();       // after a runtime WiFi driver restart (WCB_EspNow.h): the region this boot applied
 
 // ---- loop() ------------------------------------------------------------------
 void    chanSyncTick();

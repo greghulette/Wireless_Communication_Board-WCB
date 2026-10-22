@@ -51,7 +51,7 @@ from suites.common import config_guard, link, marker, nonce, probe_in_mesh, requ
 from suites.s03_wcb import _factory_reply, _reply_problems
 from suites.s05_mesh import FRAG_CHUNK, FRAG_GAP_S
 from suites.s05_mesh import _sid as _frag_sid
-from suites.s17_seq_inventory import _names, _seqval
+from suites.s17_seq_inventory import PAGE_ASKED, PAGE_KEYS_MAX, _batched, _names, _pages_of, _seqval, _store
 from suites.s18_etm_config_wdp import _etm, _forget_everywhere, _joined
 from suites.s20_ota import _crc, _session_id
 from suites.s40_navicore_config import (DEFAULTS, HOOK_SKIP, REGION_IGNORED, SAVED, TOKEN_IGNORED,
@@ -2482,6 +2482,99 @@ def seq_pull(bench):
             problems.append(f"the bridged GET_WCB_SEQ 2 came back {o and (len(o.get('names') or []), o.get('hash'))}, "
                             f"USB {len(usb[2]['names'])} names hash {usb[2]['hash']}")
         break
+    bench.note("; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+NOFIT_RX = re.compile(r"^\[MGMT\] WCB(\d+) asked for the sequence names in one reply, and \d+ names")   # answerSeqNames
+
+
+def _from_wcb(rx, line, n):
+    """True when `line` matches `rx` and its first group is board n."""
+    g = rx.match(line)
+    return bool(g) and int(g.group(1)) == n
+
+
+@test("ncmesh.seq_pull_paged", "GET_WCB_SEQ of a names list too long for one mesh reply (3 pages or more of 15-character "
+      "sequences saved on W2 for the test) is never a wrong list: with WCB_Client 1.19.0 NaviCore answers ONE WCB_SEQ "
+      "with every name W2's ?SEQ,NAMES lists, in order, and its hash, W2 having logged each page (?DEBUG,MGMT); with an "
+      "older WCB_Client W2 refuses its one-reply request with the 'asked for the sequence names in one reply' line and "
+      "NaviCore answers 'no reply' (noted, not failed); the store is as it was after", needs=["navicore", "wcb1", "wcb2"],
+      links=[])
+def seq_pull_paged(bench):
+    """docs/SEQUENCE_INVENTORY.md §3. WCB_Client 1.19.0's requestSequenceNames asks for page 0 with a 59-byte
+    SEQ_PAGE_REQ (28) ahead of the old 13 (_seqSendNames), joins W2's type-29 pages (_seqNamesPage) and fires
+    onSequenceNames once with the whole list; NaviCore's seqNamesReply turns it into one WCB_SEQ, and its 6 s 'no reply'
+    waits while the library still has the pull (rc_telemetry.h tick, sequenceNamesPending). WCB_Client up to 1.18.1
+    (NaviCore main) sends only the 13, which W2 does not answer for a list that does not fit one reply (answerSeqNames:
+    an old client read the '[ERROR] Result too large' text as an EMPTY list), so that NaviCore says 'no reply' - the
+    compatibility the design promises, checked here on whichever NaviCore the bench has. The fill is s17
+    inv.mgmt_seq_paged's (HILPG<4 digits><nonce>, value 'p', through W2's own console ten to a line, cleared in a
+    finally). USB only; the pull is asked again once after a 'no reply' from a new library (a lost page)."""
+    nc, w2 = _nc(bench), _w2(bench)
+    nid = _nid(nc)
+    store = _store(w2)
+    if store is None:
+        raise Skip("W2 keeps its sequences in NVS this boot: no 'Sequences: ... in the sequence store' line in ?NVS")
+    n0, b0, cap = store
+    h0, c0, names0 = _names(w2)
+    tag = nonce()
+    have = sum(len(k) + 1 for k in names0)
+    nfill = max(0, (2 * PAGE_KEYS_MAX + 1 - have + 15) // 16) + 8
+    keys = [f"HILPG{i:04d}{tag}" for i in range(nfill)]
+    if b0 + nfill * 19 > cap:
+        raise Skip(f"W2's sequence store has {cap - b0} bytes free; {nfill} fill sequences need {nfill * 19}")
+    problems, notes = [], []
+    with config_guard(bench, 2):
+        try:
+            for chunk in _batched(keys):
+                out = w2.run("^".join(f"?SEQ,SAVE,{k},p" for k in chunk), timeout=20)
+                missing = [k for k in chunk if not any(f"Stored: Key='{k}'" in x for x in out)]
+                if missing:
+                    raise AssertionError(f"setup: W2 did not store {missing[:3]} ({len(missing)} of {len(chunk)})")
+            h1, c1, names1 = _names(w2)
+            pages = _pages_of(names1)
+            if names1 != names0 + keys or pages < 3:
+                raise AssertionError(f"setup: W2 lists {c1} names in {pages} page(s), not {c0} + {nfill} in 3 or more")
+            notes.append(f"W2 lists {c1} names in {pages} pages")
+            want = [ncmesh.json_strip(x[:15]) for x in names1]     # as buildWcbSeq emits them (ncmesh.seq_pull)
+            w2.debug("MGMT", True)
+            for ask in (1, 2):
+                m2 = w2.dev.mark()
+                try:
+                    got = nc.seq(2, timeout=10.0 + 3.0 * pages)
+                    err = None
+                except AssertionError as e:
+                    got, err = None, str(e)
+                time.sleep(0.5)
+                w2lines = [x.rstrip() for x in w2.dev.since(m2)]
+                refused = [x for x in w2lines if _from_wcb(NOFIT_RX, x, nid)]
+                paged = [x for x in w2lines if _from_wcb(PAGE_ASKED, x, nid)]
+                if got is not None:
+                    if got["names"] != want or got["hash"] != int(h1, 16):
+                        problems.append(f"WCB_SEQ 2 came back {len(got['names'])} names hash {got['hash']}; W2 lists "
+                                        f"{len(want)} hash {int(h1, 16)}")
+                    asked = sorted({int(PAGE_ASKED.match(x).group(2)) for x in paged})
+                    if asked != list(range(1, pages)):
+                        problems.append(f"W2 logged NaviCore's pages {asked}, not 1..{pages - 1}")
+                    break
+                if refused and not paged:
+                    notes.append(f"NaviCore's WCB_Client predates paged names: W2 refused its one-reply request "
+                                 f"({refused[0][:90]}...) and NaviCore said {err!r} - no wrong list")
+                    break
+                if ask == 2:
+                    problems.append(f"GET_WCB_SEQ 2: {err}, twice; W2 logged {len(paged)} later-page request(s) from "
+                                    f"WCB{nid} and {'a' if refused else 'no'} one-reply refusal")
+                else:
+                    notes.append(f"GET_WCB_SEQ 2: {err} (a lost page?); asked once more")
+                    time.sleep(2.0)
+        finally:
+            w2.debug("MGMT", False)
+            for chunk in _batched(keys):
+                w2.run("^".join(f"?SEQ,CLEAR,{k}" for k in chunk), timeout=40)
+        h2, c2, names2 = _names(w2)
+        if (h2, c2, names2) != (h0, c0, names0):
+            problems.append(f"after the clears W2 lists {c2} names hash {h2}, not {c0} hash {h0}")
     bench.note("; ".join(notes))
     assert not problems, "; ".join(problems)
 

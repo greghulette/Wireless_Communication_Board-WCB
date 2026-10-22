@@ -280,6 +280,22 @@ uint8_t chanSyncApplyRegionAtBoot() {
   return s_maxCh;
 }
 
+// The WiFi driver was restarted under a running board (the ESP-NOW transmit wedge's second remedy, WCB_EspNow.h), and
+// esp_wifi_init forgot the region this boot applied. The same one goes back, the boot's way; the channel range and
+// meshChannel stay as the boot left them, so nothing is printed unless the driver refuses.
+void chanSyncReapplyRegion() {
+  if (strcmp(s_appliedCc, "01") != 0) {
+    const esp_err_t e = esp_wifi_set_country_code(s_appliedCc, false);
+    if (e != ESP_OK)
+      Serial.printf("[REGION] esp_wifi_set_country_code(\"%s\") FAILED after the WiFi driver restart (0x%x)\n",
+                    s_appliedCc, (unsigned)e);
+    return;
+  }
+  char now[8] = { 0 };
+  if (esp_wifi_get_country_code(now) == ESP_OK && !(now[0] == '0' && now[1] == '1'))
+    esp_wifi_set_country_code("01", true);
+}
+
 void chanSyncBegin() {
   s_home = meshChannel;
   if (!s_q) s_q = xQueueCreate(16, sizeof(CsFrame));
@@ -699,11 +715,27 @@ static void judge(unsigned long now) {
   endSearch("[CHSYNC] search: nobody answered on the other channels");
 }
 
+// Asked again before every later hop, not only when the search starts: a station can associate with this board's
+// access point while the radio dwells on another channel (the AP goes with the radio), and IDF says the channel must
+// not change while the AP has stations. The search then ends and the radio goes home - with the station, where its
+// DHCP and traffic are. The trigger's schedule tries again later.
+static bool searchMayGoOn() {
+  const char *why = nullptr;
+  if (wcbWifiCanHop(&why)) return true;
+  Serial.printf("[CHSYNC] search: stopped - %s\n", why ? why : "the radio may not leave the channel now");
+  endSearch(nullptr);
+  return false;
+}
+
 static void tickSearch(unsigned long now) {
   if (s_sr.phase == SP_HOP) {
     if ((long)(now - s_sr.until) < 0) return;          // still listening on chans[idx]
     s_sr.idx++;
-    if (s_sr.idx < s_sr.n) { hopNext(now); if (s_sr.idx < s_sr.n) return; }
+    if (s_sr.idx < s_sr.n) {                            // another channel to visit (the last one goes home to judge)
+      if (!searchMayGoOn()) return;
+      hopNext(now);
+      if (s_sr.idx < s_sr.n) return;
+    }
     judge(now);
     return;
   }
@@ -717,6 +749,7 @@ static void tickSearch(unsigned long now) {
     return;
   }
   while (s_sr.pullIdx < s_sr.nPulls) {                  // the next worse group
+    if (!searchMayGoOn()) return;
     const uint8_t c = s_sr.pulls[s_sr.pullIdx++];
     s_away = true;
     if (!radioTo(c)) continue;

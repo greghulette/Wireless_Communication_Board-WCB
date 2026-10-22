@@ -11,7 +11,7 @@ changing before editing.**
 |---|---|
 | WDP — discovery, device announce, election | [docs/WDP_DESIGN.md](docs/WDP_DESIGN.md), [docs/WDP_DEVICE_ANNOUNCE.md](docs/WDP_DEVICE_ANNOUNCE.md) |
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
-| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` and its pages (`WCB_SeqNamesWire.h`, packet types 28/29, shared byte-identical with `WCB_Client`) | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
 | The Wizard's sequence builder — timeline ↔ `;T` chain, its warnings, routing, the vendored command library (`Wizard/cmdlib/`) | [docs/SEQUENCE_BUILDER.md](docs/SEQUENCE_BUILDER.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
@@ -262,6 +262,15 @@ changing before editing.**
     - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
     So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
     not, because the task's wait sleeps. `selftest.py` (`t_rule16_espnow_send_wrapped`) fails on any other call.
+    **The WiFi driver can wedge under load** (tracker #112; espressif/esp-idf #18682, #19269): it loses frames it
+    accepted - no send callback, the TX buffer never given back - until every `esp_now_send` returns
+    `ESP_ERR_ESPNOW_NO_MEM`, heartbeats included, while the board still receives. `wcbEspNowService()` (loop) calls it
+    a wedge after 10 s of frames with no completion and puts the radio back without a reboot: ESP-NOW restarted, then
+    the WiFi driver too on a board that booted with WiFi OFF (`espNowRestartForWedge`, `WCB.ino`); an AP or JOIN board
+    is never torn down and says only a reboot clears it. Every line starts `[MESH] ESP-NOW transmit wedge`. So judge
+    the radio by completions, never by what `esp_now_send` accepted; a path that calls `esp_now_add_peer` off the loop
+    task checks `wcbEspNowRestarting()` first; a new kind of standing peer is registered again in
+    `espNowRegisterPeersAgain`. `?DEBUG,FAULT,TXWEDGE[,1-3]` simulates it (HIL `etm.tx_wedge_*`).
 
 17. **Stored sequences are not in NVS.** They are the lines of one file, `/seqs` (`<key>,<value>` in save order), in a
     LittleFS on the min_spiffs table's 128 KB `spiffs` partition, behind `WCB_SeqStore.{h,cpp}`. Go through its calls
@@ -310,6 +319,8 @@ Code/bin/build.sh
 # Host tests — WDP wire format + election; config-pull parts (split, framing, UTF-8, error texts)
 g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./wdp_wire_test
 g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test && ./config_parts_test
+# sequence names in pages (split, header, join; WCB_SeqNamesWire.h, shared with WCB_Client)
+g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test && ./seqnames_page_test
 
 # Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
 python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log

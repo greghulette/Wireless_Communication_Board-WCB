@@ -977,11 +977,39 @@ def _pc_on_w1_ap(bench, problems):
         raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
     ip = st.get("IP address", "")
     _W1_TOKEN["token"] = ws_token(toks)
+    mark, noted = w.dev.mark(), []
     try:
         with _pc_on_ap(bench, problems, ssid, pw, "W1's", identify=_w1_identify(w), home=_navicore_home(bench)) as name:
+            _note_w1_radio_away(bench, w, mark, noted)
             yield w, ip, name
     finally:
+        _note_w1_radio_away(bench, w, mark, noted)
         _W1_TOKEN["token"] = None
+
+
+# W1's console lines that mean its radio - and so its access point - left the channel while the PC joined, or the
+# access point restarted: a channel-sync search (about 1.5 s on other channels, its pulls included), a MOVE, or the
+# restart a MOVE takes on a board with an access point (WCB_ChanSync.cpp). A search starts only while no station is
+# associated with the access point (wcbWifiCanHop, WCB_WiFi.cpp), so one can delay the PC's association but not its
+# DHCP exchange: a slow lease (tracker #110) noted beside "no channel-sync search or move" is not channel sync's.
+_W1_AWAY = re.compile(r"\[CHSYNC\] .*(searching channels|moving the mesh|moves the mesh|restarting so)")
+
+
+def _note_w1_radio_away(bench, w, mark, noted):
+    """Once per join: note whether W1's console says channel sync took its radio off the channel (_W1_AWAY) between
+    `mark` (before the PC began to join) and now - counts by kind only, never the lines."""
+    if noted:
+        return
+    noted.append(True)
+    kinds = {}
+    for line in w.dev.since(mark):
+        m = _W1_AWAY.search(line)
+        if m:
+            k = "search" if "search" in m.group(1) else "restart" if "restart" in m.group(1) else "move"
+            kinds[k] = kinds.get(k, 0) + 1
+    bench.note("W1 while the PC joined its access point: " + (", ".join(f"{n} channel-sync {k} line(s)"
+                                                                        for k, n in sorted(kinds.items()))
+                                                              if kinds else "no channel-sync search or move"))
 
 
 def _w1_identify(w):
@@ -1602,13 +1630,16 @@ def ws_burst_keeps_live_client(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("ws.ping_pong_and_close", "OPT-IN (wifi_pc): W1 answers a WebSocket PING with a PONG carrying the same payload, sent between data frames: a PING sent while ?backup streams out gets its PONG and leaves every frame whole (the chain passes its CRC, every text frame is valid UTF-8), an empty PING gets an empty PONG, and a CLOSE is echoed and leaves W1 counting no client", needs=["wcb1"], links=[], opt_in="wifi_pc")
+@test("ws.ping_pong_and_close", "OPT-IN (wifi_pc): W1 answers a WebSocket PING with a PONG carrying the same payload, sent between data frames: a PING sent while ?backup streams out gets its PONG and leaves every frame whole (the chain passes its CRC, every text frame is valid UTF-8), an empty PING gets an empty PONG, and a CLOSE with status 1000 is echoed with 1000, the connection then closed (a FIN, not a reset) and W1 counting no client", needs=["wcb1"], links=[], opt_in="wifi_pc")
 def ws_ping_pong_and_close(bench):
     """WCB_WS.cpp registers /ws with handle_ws_control_frames (2026-10-14). Before, httpd answered PING and CLOSE
     itself with a blocking send from its own task, which could land inside a frame the loop's non-blocking sender had
     half written; now wsHandler reads every frame's payload, queues the PONG for sinkPump to send at the next frame
-    boundary (queuePong), and echoes a CLOSE itself when no frame is part-way out (closeEcho) before httpd closes the
-    session. ?backup's chain carries W1's credentials: only its CRC is checked, never shown."""
+    boundary (queuePong), and echoes a CLOSE itself, its status code included, once no frame is part-way out
+    (closeEcho) before httpd closes the session. The CLOSE's payload is read first (wsHandler): lwIP resets, rather
+    than closes, a socket holding bytes nobody read, and Windows throws away an echo it has not read when the reset
+    lands (run 20261022-072416 failed so on the PC; the Mac read the echo first). So a reset fails the test here
+    on any OS. ?backup's chain carries W1's credentials: only its CRC is checked, never shown."""
     from suites.s05_mesh import _chain_ok, _live_chain
     problems = []
     with _pc_on_w1_ap(bench, problems) as (w, ip, _):
@@ -1644,15 +1675,23 @@ def ws_ping_pong_and_close(bench):
             if ws.pongs[n:] != [b""]:
                 problems.append(f"an empty PING got {ws.pongs[n:]!r} back, not one empty PONG")
             ws.sock.sendall(ws_frame(struct.pack(">H", 1000), opcode=0x8))
-            gone = False
+            gone, reset = False, False
             try:
                 ws.read_until("\x00never\x00", timeout=3)
                 ws.sock.settimeout(3)
                 ws._frame()                                  # after the echo: the socket closes
+            except ConnectionResetError:
+                gone = reset = True
             except (ConnectionError, OSError):
                 gone = True
             if not ws.close_frames:
-                problems.append("W1 did not echo the CLOSE frame")
+                problems.append("W1 did not echo the CLOSE frame" + (" (the connection was reset)" if reset else ""))
+            elif ws.close_frames[0][:2] != struct.pack(">H", 1000):
+                problems.append(f"W1 echoed the CLOSE with status {ws.close_frames[0][:2].hex() or 'none'}, not "
+                                f"03e8 (1000, the one sent)")
+            if reset:
+                problems.append("W1 reset the connection after the CLOSE instead of closing it: a reset throws away a "
+                                "Windows client's unread echo")
             if not gone:
                 problems.append("the socket stayed open 3 s after the CLOSE")
             time.sleep(1.0)

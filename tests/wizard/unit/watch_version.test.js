@@ -42,7 +42,16 @@ function start(appJs) {
       await sleep(25);
     }
   };
-  const stop = () => { child.kill(); fs.rmSync(dir, { recursive: true, force: true }); };
+  // Wait for the child to exit before removing its folder: on Windows a running watcher holds a handle on it, and a
+  // remove right after kill() fails with EBUSY/EPERM. The retries cover the handle closing just after the exit.
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((r) => child.once('exit', r));
+      child.kill();
+      await Promise.race([exited, sleep(3000)]);
+    }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  };
   return { dir, child, stamps, until, out: () => out, stop };
 }
 
@@ -74,7 +83,7 @@ test('stamps app.js\'s UI_VERSION with the local time on start and again after a
     assert.ok(!w.out().includes('No UI_VERSION pattern found'), 'the line is there: never reported missing');
     assert.match(fs.readFileSync(path.join(w.dir, 'app.js'), 'utf8').match(RE)[1], /^\d\d\.\d\d:\d\d\.R\.[A-Z]{3}\.\d{4}$/);
   } finally {
-    w.stop();
+    await w.stop();
   }
 });
 
@@ -84,6 +93,6 @@ test('says so, and writes nothing, when app.js has no UI_VERSION line', async ()
     await w.until(() => w.out().includes('No UI_VERSION pattern found in app.js'));
     assert.equal(fs.readFileSync(path.join(w.dir, 'app.js'), 'utf8'), '// no version here\n');
   } finally {
-    w.stop();
+    await w.stop();
   }
 });

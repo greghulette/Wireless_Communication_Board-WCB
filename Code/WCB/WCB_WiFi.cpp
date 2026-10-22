@@ -604,6 +604,11 @@ bool wcbWifiJoinAssociated() {
 
 bool wcbWifiApUp() { return csApUp; }
 
+// The ESP-NOW transmit wedge's second remedy (WCB_EspNow.h) restarts the WiFi driver, which only a board that booted
+// with WiFi OFF can take: nothing of ours runs on the driver but ESP-NOW. A JOIN board that never joined (no token,
+// no SSID) still booted in JOIN, and is left alone like one that did.
+bool wcbWifiBootedOff() { return wifiRunMode == WCB_WIFI_OFF; }
+
 bool wcbWifiInterfaceUp() {
     return csApUp || wcbWifiJoinAssociated();
 }
