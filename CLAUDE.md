@@ -11,7 +11,7 @@ changing before editing.**
 |---|---|
 | WDP — discovery, device announce, election | [docs/WDP_DESIGN.md](docs/WDP_DESIGN.md), [docs/WDP_DEVICE_ANNOUNCE.md](docs/WDP_DEVICE_ANNOUNCE.md) |
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
-| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` and its pages (`WCB_SeqNamesWire.h`, packet types 28/29, shared byte-identical with `WCB_Client`) | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
 | The Wizard's sequence builder — timeline ↔ `;T` chain, its warnings, routing, the vendored command library (`Wizard/cmdlib/`) | [docs/SEQUENCE_BUILDER.md](docs/SEQUENCE_BUILDER.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
@@ -310,6 +310,8 @@ Code/bin/build.sh
 # Host tests — WDP wire format + election; config-pull parts (split, framing, UTF-8, error texts)
 g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./wdp_wire_test
 g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test && ./config_parts_test
+# sequence names in pages (split, header, join; WCB_SeqNamesWire.h, shared with WCB_Client)
+g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test && ./seqnames_page_test
 
 # Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
 python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log

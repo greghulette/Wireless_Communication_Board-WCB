@@ -67,6 +67,10 @@ enum : int {
 void   seqStoreBegin();          // setup(), before migrateOldStoredCommands(): mount, move NVS sequences in, report
 bool   seqStoreOnFile();         // false when NVS backs the store this boot
 int    seqStoreKeyList(String &list);                        // "k1,k2,...," in save order
+// fn(key, len) for every sequence's key in save order, no value read and no list held: the names reply and ?SEQ,NAMES
+// (a few hundred keys are more text than a classic board can copy twice). Return false to stop. SEQ_OK when the walk
+// reached the end (or fn stopped it), else SEQ_E_*. ?DEBUG,FAULT,SEQREAD fails it, once.
+int    seqStoreForEachKey(const std::function<bool(const char *key, size_t len)> &fn);
 int    seqStoreGet(const String &key, String &value);        // SEQ_OK / SEQ_NOTFOUND / SEQ_E_*
 int    seqStorePut(const String &key, const String &value);  // a new key goes last; an existing one keeps its place
 int    seqStoreRemove(const String &key);                    // SEQ_OK / SEQ_NOTFOUND / SEQ_E_*

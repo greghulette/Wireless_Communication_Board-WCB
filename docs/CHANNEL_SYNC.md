@@ -155,7 +155,8 @@ joining and leaving an access point does not restart the schedule; a due attempt
 connected** (IDF: `esp_wifi_set_channel` must not be called with stations attached); a JOIN board only while it is
 neither associated, scanning (either scan, §5), connecting (5 s after a `WiFi.begin`), nor moving to its network. A
 search also waits (`chanSyncHostBusy`) for no command to have run for 1 s (`CHSYNC_QUIET_MS`), an empty command queue,
-no ETM command awaiting an ACK, no OTA session, config pull, pending restart or ETM characterization, and no RC
+no ETM command awaiting an ACK, no OTA session, config pull, pending restart, ETM characterization or `?MGMT,SEQ`
+names pull (a long list reads a page per request, docs/SEQUENCE_INVENTORY.md §3), and no RC
 passthrough in use: no PWM (`;P`), raw Kyber or raw-serial frame sent or heard for 5 s (`CHSYNC_RC_QUIET_MS`) -
 those are unacknowledged, and PWM is sent only on a change, so one lost to a hop would leave a servo off where it
 should be. When the radio comes home the PWM passthrough sends every input once more anyway
@@ -334,6 +335,7 @@ MOVE.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-22 | — | §4: a search also waits for a `?MGMT,SEQ` names pull (`chanSyncHostBusy`: "a sequence-names pull"), and the pull's page requests are held while the radio is away (`serviceSeqNamesPull`, rule 18). | A long names list now comes a page per request over several seconds (SEQUENCE_INVENTORY.md §3); a search mid-pull would cost a page a 3 s retry. |
 | 2026-10-21 | — | §4: every command source waits while the radio is away (timed groups, the command queue, WebSocket lines, config-pull replies), not only the heartbeat, adverts and ETM retries. | HIL `ota.relay_navicore_brick_guard` (run 20261021-212944): a relayed `?OTA,BEGIN` typed while W1 searched went out on the visited channel and NaviCore never answered. |
 | 2026-10-21 | — | Initial design: leader key (pinned, rank, id), CHAN TLV `0x14`, MOVE/PROBE/REPLY on ETM types 25-27, search by group leaders, JOIN follows its network across channels, `?REGION` for 12-13. | Greg: a droid joining a network on another channel should take its mesh with it, and stray boards should find their way back. |
 | 2026-10-21 | — | Built in the WCB firmware (`WCB_ChanSync.{h,cpp}`); this page now describes it as built. Settled in the build: a device that does not take part (sync off, older firmware) never leads, but a pinned one still blocks an operator move and a JOIN takeover; frames never refresh presence; while the radio is away the receive path keeps only channel-sync frames and `loop()` holds heartbeats, adverts and ETM retries; can-hop is checked when an attempt is due, not in the trigger; a MOVE that finds a restart pending saves the channel for it instead of waiting; a search also waits for 1 s without a command and no ETM ACK outstanding; a saved channel the region forbids runs on 1 for that boot, NVS kept; `?WCBCH` takes 13 while another region is pending; with sync on the JOIN off-mesh guard no longer settles. | Implementation. |
