@@ -125,6 +125,10 @@ static unsigned long joinBeginMs    = 0;       // when WiFi.begin last went out 
 static uint8_t       csFollowCh     = 0;       // a MOVE to the network's channel is under way; join there once on it
 static uint8_t       csFollowBssid[6];
 static uint16_t      csStayNote     = 0;       // the "staying" line last printed (reason << 8 | channel): say it once
+// The access point this boot brought up (wcbWifiStartAP). ?WIFI changes wcbWifiMode at once but the interface only at
+// the next boot, so what channel sync asks - can the radio hop, does a move need a restart - is answered from this and
+// the driver, never from wcbWifiMode.
+static bool          csApUp         = false;
 static void csJoinLost(unsigned long now);
 static bool csFullScanDue(unsigned long now);
 static void csFullScanStart(unsigned long now);
@@ -163,6 +167,7 @@ static void wcbWifiStartAP() {
     // blackout. max_connection 4: this is a config channel, not a hotspot.
     if (WiFi.softAP(ssid.c_str(), wcbWifiApPass.c_str(), meshChannel, /*hidden=*/0, /*max_conn=*/4)) {
         wifiUp = true;
+        csApUp = true;                       // channel sync asks what RUNS, not what ?WIFI saved since (wcbWifiCanHop)
 
         // NO DEFAULT GATEWAY. This AP is a local management link with no upstream,
         // so it must not advertise itself as the router (DHCP option 3). If it does,
@@ -318,8 +323,23 @@ void wcbWifiStart() {
 //  Service — called every loop() pass, never blocks
 // ════════════════════════════════════════════════════════════════════════════
 void wcbWifiService() {
-    if (wcbWifiMode == WCB_WIFI_OFF) return;
     const unsigned long now = millis();
+    // A JOIN board's full-band scan (channel sync) is finished on every path, before anything else. ?WIFI changes
+    // wcbWifiMode at once, and an association can land meanwhile: either way the JOIN branch below is no longer
+    // reached, and a scan left unfinished kept chanSyncRadioAway() true for good - every frame dropped, heartbeats,
+    // adverts and retries held, the radio never put back. csFullScanDone acts on what it found only for a JOIN board
+    // still looking.
+    if (csFullScanning) { csFullScanDone(now); return; }
+    // Same for the mesh-channel scan, whose flag also holds off a live channel move (wcbWifiJoinScanning), and for a
+    // join waiting on a move to its network's channel, which would otherwise say "moving" to wcbWifiCanHop for good.
+    if (wcbWifiMode != WCB_WIFI_JOIN) {
+        if (joinScanning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
+            joinScanning = false;
+            WiFi.scanDelete();
+        }
+        csFollowCh = 0;
+    }
+    if (wcbWifiMode == WCB_WIFI_OFF) return;
 
     // ---- JOIN state machine ------------------------------------------------
     // joinSettled means "stop trying FOREVER", and only the off-mesh case sets it:
@@ -358,7 +378,7 @@ void wcbWifiService() {
                 // passing true made it the one thing that reliably killed it.
                 WiFi.disconnect();
                 wifiUp      = false;
-                if (chanSyncEnabled() && etmEnabled) {
+                if (chanSyncActive()) {
                     // Channel sync: the full-band scan finds the network where it went and takes the mesh there.
                     Serial.println("[WIFI] Looking for it on every channel - channel sync moves the mesh to it.");
                     csJoinLost(now);
@@ -403,7 +423,6 @@ void wcbWifiService() {
                           wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_RETRY_MS / 1000));
             csJoinLost(now);   // channel sync: the network may have changed channel - look on every one again
         }
-        if (csFullScanning) { csFullScanDone(now); return; }   // channel sync: a full-band scan is running
         if (joinScanning && wcbWifiJoinScanDone()) return;   // still scanning the mesh channel
         if (csFollow(now)) return;          // channel sync: the mesh is moving to the network's channel, or just did
         if (chanSyncBusy()) return;         // a search or a move has the radio: no scan of ours meanwhile
@@ -478,11 +497,15 @@ static void csJoinLost(unsigned long now) {
 }
 
 static bool csFullScanDue(unsigned long now) {
-    if (!chanSyncEnabled() || !etmEnabled || csFollowCh) return false;   // sync off: the mesh channel only, as before
+    if (!chanSyncActive() || csFollowCh) return false;   // sync off: the mesh channel only, as before
     const unsigned long due = csFullIdx < CS_FULL_SCAN_N
         ? csFullEpochMs + (unsigned long)CS_FULL_SCAN_MIN[csFullIdx] * 60000UL
         : csFullLastMs + CS_FULL_SCAN_EVERY;
-    return (long)(now - due) >= 0;
+    if ((long)(now - due) < 0) return false;
+    // The same gate as a search: not inside the boot grace (no presence, no CHAN facts yet, so the decision it leads to
+    // would be blind), and not while the board is busy - a config pull, an OTA, ETM commands awaiting an ACK, RC
+    // passthrough in use. A scan that waits here is tried again at the next mesh-channel miss, 5 s on.
+    return chanSyncMayLeaveChannel(nullptr);
 }
 
 // Every channel the region allows, 120 ms each and the same SSID filter as the mesh-channel scan: the board is off
@@ -503,8 +526,14 @@ static void csFullScanDone(unsigned long now) {
     // The mesh-channel scan never leaves the mesh channel; this one does, so the radio is put back explicitly before
     // anything else is sent or heard, rather than trusting the driver to return an unassociated station there. The
     // home channel, not meshChannel: a ?WCBCH typed since boot is saved for the next one, not applied (WCB_ChanSync.h).
-    esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
+    // An association that landed meanwhile owns the channel: nothing to put back.
+    const bool assoc = wcbWifiJoinAssociated();
+    if (!assoc) esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
     csFullScanning = false;
+    if (wcbWifiMode != WCB_WIFI_JOIN || joinSettled || assoc) {   // no longer looking: the result is not acted on
+        WiFi.scanDelete();
+        return;
+    }
     int16_t best = -1;
     for (int16_t i = 0; i < n; i++) {
         if (WiFi.SSID(i) != wcbWifiJoinSsid) continue;
@@ -571,14 +600,17 @@ static bool csFollow(unsigned long now) {
     return true;
 }
 
+// The running state, not wcbWifiMode (csApUp): the driver says whether the station is associated, whatever ?WIFI has
+// saved since boot.
 bool wcbWifiJoinAssociated() {
-    if (wcbWifiMode != WCB_WIFI_JOIN) return false;
     wifi_ap_record_t ap;                 // the driver's answer, not WiFi.status() (tracker #103)
     return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
 }
 
+bool wcbWifiApUp() { return csApUp; }
+
 bool wcbWifiInterfaceUp() {
-    return (wcbWifiMode == WCB_WIFI_AP && wifiUp) || wcbWifiJoinAssociated();
+    return csApUp || wcbWifiJoinAssociated();
 }
 
 bool wcbWifiJoinScanning()    { return joinScanning || csFullScanning; }
@@ -586,12 +618,14 @@ bool wcbWifiFullScanRunning() { return csFullScanning; }
 
 bool wcbWifiCanHop(const char **why) {
     const char *w = nullptr;
-    if (wcbWifiMode == WCB_WIFI_AP && wifiUp) {
+    if (csApUp) {
         // IDF: esp_wifi_set_channel must not be called while the soft-AP has stations connected.
         wifi_sta_list_t sta;
         if (esp_wifi_ap_get_sta_list(&sta) != ESP_OK || sta.num > 0)
             w = "a station is connected to this board's access point";
-    } else if (wcbWifiMode == WCB_WIFI_JOIN && !joinSettled) {
+    }
+    // The flags below are only ever set by the JOIN state machine, so they describe what the station is doing now.
+    if (!w) {
         if (wcbWifiJoinAssociated())
             w = "this board is joined to its access point";
         else if (joinScanning || csFullScanning)
@@ -606,7 +640,7 @@ bool wcbWifiCanHop(const char **why) {
 }
 
 void wcbWifiJoinCancelConnect() {
-    if (wcbWifiMode != WCB_WIFI_JOIN || wcbWifiJoinAssociated()) return;
+    if (wcbWifiJoinAssociated()) return;
     if (joinBeginMs) {
         WiFi.disconnect();               // not disconnect(true): see the off-mesh guard in wcbWifiService
         joinBeginMs = 0;

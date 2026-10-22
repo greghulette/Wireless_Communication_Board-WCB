@@ -66,6 +66,13 @@ static const size_t   WS_HEAP_FLOOR   = 8192;
 //     read yet (Windows does): waiting for the echo is what gets the [AUTH:FAIL] line read.
 static const uint32_t WS_AUTH_LOCKOUT_MS = 1000;
 static const uint32_t WS_BYE_WAIT_MS     = 1000;
+//   WS_SIGNIN_MS - a session that has not signed in this long after it opened is closed: with two slots, a client that
+//     never signs in would otherwise hold one for good. Intellex signs in at once; the HIL signed-out test keeps one
+//     open about 12 s, so not shorter.
+//   WS_REQ_OWED_MAX - at most this many [AUTH:REQUIRED] lines owed at once. One is owed per line a signed-out session
+//     sends; a client that floods lines and reads nothing was owed up to 65535 before.
+static const uint32_t WS_SIGNIN_MS       = 15000;
+static const uint16_t WS_REQ_OWED_MAX    = 2;
 
 // Serial0 is the source id the USB reader uses. Reusing it means a WebSocket
 // command takes byte-for-byte the same path as a typed one — same routing, same
@@ -87,6 +94,7 @@ static bool     sinkDropping = false;
 static uint32_t sinkDrops    = 0;     // whole lines dropped; reported from loop()
 static uint32_t cmdDrops     = 0;     // commands refused at the queue
 static uint32_t stuckCloses  = 0;     // clients closed by WS_STUCK_MS; reported from loop()
+static uint32_t signinCloses = 0;     // clients closed by WS_SIGNIN_MS; reported from loop()
 // The loop task, captured the first time wcbWsService() runs. wcbWsSinkWrite() may
 // only flush inline while running on THIS task — see the note there.
 static TaskHandle_t sinkLoopTask = nullptr;
@@ -176,6 +184,7 @@ struct WsTx {
   uint8_t  verdict  = SAY_NONE;  // owed after them: SAY_OK, SAY_FAIL, or SAY_BYE (the CLOSE after a FAIL)
   size_t   saySent  = 0;       // of the session-layer frame going out now
   uint32_t byeAt    = 0;       // millis() | 1 once its CLOSE went: closed WS_BYE_WAIT_MS later unless it echoes first
+  uint32_t openedMs = 0;       // millis() when the session took its slot (WS_SIGNIN_MS)
 };
 static WsTx     tx[WS_MAX_CLIENTS];
 static uint8_t  frameHdr[4];
@@ -189,6 +198,7 @@ static void txReset(WsTx &c, int fd) {
   c.fd = fd; c.inFrame = false; c.hdrSent = c.paySent = 0; c.ctlLen = c.ctlSent = 0; c.lastTook = millis();
   c.closing = false;
   c.authed = c.failed = false; c.reqOwed = 0; c.verdict = SAY_NONE; c.saySent = 0; c.byeAt = 0;
+  c.openedMs = millis();
 }
 
 static bool txLive(const WsTx &c) { return c.fd >= 0 && !c.closing; }
@@ -245,8 +255,14 @@ static void sinkAdd(int fd) {
   if (!txFor(fd)) {
     if (!wcbWsSinkLive()) sinkFreshStart();
     WsTx *slot = txFor(-1);
-    if (!slot) {                       // full: evict the oldest rather than refuse the newcomer
-      slot = &tx[0];
+    if (!slot) {                       // full: evict rather than refuse the newcomer - a session that is closing or
+      slot = &tx[0];                   // failed first, then one not signed in, and only then the oldest signed-in one
+      for (int pass = 0; pass < 2; pass++) {
+        bool found = false;
+        for (int i = 0; i < WS_MAX_CLIENTS && !found; i++)
+          if (pass == 0 ? (tx[i].closing || tx[i].failed) : !tx[i].authed) { slot = &tx[i]; found = true; }
+        if (found) break;
+      }
       if (wsServer) httpd_sess_trigger_close(wsServer, slot->fd);   // its stream stops mid-frame: close it
     }
     txReset(*slot, fd);                // joins at the next frame, never part-way into this one
@@ -440,6 +456,7 @@ static bool sinkPump() {
       if (!alive) txClose(c);
       else if (c.byeAt && now - c.byeAt >= WS_BYE_WAIT_MS) txClose(c);   // a failed sign-in that did not echo
       else if (txOwes(c) && now - c.lastTook >= WS_STUCK_MS) { stuckCloses++; txClose(c); }
+      else if (!c.authed && !c.failed && now - c.openedMs >= WS_SIGNIN_MS) { signinCloses++; txClose(c); }
     }
 
     // Free what every client still in the frame has sent: the slowest one sets the pace. When none is left in it
@@ -602,7 +619,7 @@ static bool wsAdmit(int fd, const char *line, size_t len) {
     const bool     owed = txOwes(*c);
     if (!auth) {
       if (c->authed) run = true;
-      else if (c->reqOwed < UINT16_MAX) c->reqOwed++;
+      else if (c->reqOwed < WS_REQ_OWED_MAX) c->reqOwed++;
     } else if (c->authed || !tokLen) {     // signed in already, or nothing to sign in to: OK, compared with nothing
       if (!c->authed && !wcbWsSinkLive()) sinkFreshStart();
       c->authed  = true;
@@ -848,7 +865,7 @@ void wcbWsService() {
   // print would block the wrong task. Summed, at most once a second: while a client
   // is stalled nearly every pass that prints drops something for it.
   static uint32_t lastReportMs = 0;
-  if ((sinkDrops || cmdDrops || stuckCloses) && millis() - lastReportMs >= 1000) {
+  if ((sinkDrops || cmdDrops || stuckCloses || signinCloses) && millis() - lastReportMs >= 1000) {
     lastReportMs = millis();
     sinkReporting = true;
     if (sinkDrops) { uint32_t n = sinkDrops; sinkDrops = 0;
@@ -858,6 +875,9 @@ void wcbWsService() {
     if (stuckCloses) { uint32_t n = stuckCloses; stuckCloses = 0;
                        Serial.printf("[WS] closed %u client(s) that took no output for %u s\n", (unsigned)n,
                                      (unsigned)(WS_STUCK_MS / 1000)); }
+    if (signinCloses) { uint32_t n = signinCloses; signinCloses = 0;
+                        Serial.printf("[WS] closed %u client(s) that did not sign in within %u s\n", (unsigned)n,
+                                      (unsigned)(WS_SIGNIN_MS / 1000)); }
     sinkReporting = false;
   }
 

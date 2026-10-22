@@ -288,8 +288,13 @@ changing before editing.**
     cancel the search), and `loop()` holds the heartbeat, the WDP advert and ETM retries - a new periodic sender in
     `loop()` must hold too, or it transmits to nobody. A scan wider than the mesh channel puts the radio back on the home
     channel itself when it ends (`csFullScanDone`), rather than trusting the driver to return an unassociated station
-    there. Channel-sync frames never refresh presence. And a board stranded by hand (`?WCBCH` + reboot) is searched for and brought back about a minute later, so
-    a HIL test that strands one on purpose restores it sooner or turns `?CHSYNC,OFF` for its length.
+    there - and is finished on EVERY path of `wcbWifiService`, first thing: one left running after a `?WIFI` mode change
+    kept `chanSyncRadioAway()` true for good. Anything that takes the radio off the channel asks
+    `chanSyncMayLeaveChannel` first (the 40 s boot grace, an OTA, a config pull, ETM ACKs outstanding, RC passthrough
+    in use), and what it asks of WiFi is the running interface (`wcbWifiApUp`, the driver), never `wcbWifiMode`, which
+    `?WIFI` changes at once. Channel-sync frames never refresh presence. And a board stranded by hand (`?WCBCH` +
+    reboot) is searched for and brought back about a minute later, so a HIL test that strands one on purpose restores it
+    sooner or turns `?CHSYNC,OFF` for its length.
 
 ## Verifying
 

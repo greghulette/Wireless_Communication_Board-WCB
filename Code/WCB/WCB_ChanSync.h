@@ -52,7 +52,15 @@ void    chanSyncSelfFacts(chansync::ChanFacts &f);      // this board's own CHAN
 
 // ---- State ---------------------------------------------------------------------------
 bool    chanSyncEnabled();             // ?CHSYNC,ON (the default)
+// Taking part: ?CHSYNC,ON with ETM and WDP on. The frames ride the ETM struct and gate (rule 4), and a board with WDP off
+// sends and hears no CHAN facts, so with an empty view it would take itself for every group's leader.
+bool    chanSyncActive();
 bool    chanSyncBusy();                // a search or a move is in progress: no JOIN scan, no drift warning
+// May the radio leave the mesh channel for ~1.5 s now (a search, a JOIN full-band scan)? Not while channel sync is
+// inactive, not inside the boot grace (no presence or CHAN facts yet), and not while the board is busy
+// (chanSyncHostBusy, WCB.ino: OTA, config pull, restart pending, commands or ETM ACKs outstanding, RC passthrough in
+// use). Whether the WiFi interface allows it is wcbWifiCanHop's. why = the first reason not.
+bool    chanSyncMayLeaveChannel(const char **why);
 uint8_t chanSyncHomeChannel();         // the channel the radio is on when it is home
 uint8_t chanSyncMaxChannel();          // the applied region's top channel (<= 13)
 // ?WCBCH's upper bound: the applied region's top channel, or 13 when the SAVED region differs from the applied
@@ -63,10 +71,10 @@ const char *chanSyncSavedRegion();     // the region ?REGION saved (what a confi
 // ---- WiFi JOIN follows its network (WCB_WiFi.cpp, docs/CHANNEL_SYNC.md §5) ---------
 enum ChanSyncJoinVerdict : uint8_t {
   CSJ_GO = 0,            // a MOVE to the channel is announced; the JOIN board associates there once it lands
-  CSJ_SYNC_OFF,          // channel sync is off here (or ETM is): stay, as before
+  CSJ_SYNC_OFF,          // channel sync is inactive here (chanSyncActive): stay, as before
   CSJ_OUT_OF_REGION,     // the channel is outside this board's region
   CSJ_PINNED_OUTRANKED,  // a pinned device this board hears outranks it: two networks cannot both be kept
-  CSJ_BUSY,              // a search or another move is in progress: decide again at the next scan
+  CSJ_BUSY,              // the boot grace, a search or another move: decide again at the next scan
 };
 // The JOIN board found its network on channel ch, not the mesh's. *outrankedBy names the pinned device for
 // CSJ_PINNED_OUTRANKED.
@@ -75,7 +83,7 @@ ChanSyncJoinVerdict chanSyncJoinFollow(uint8_t ch, uint8_t *outrankedBy);
 // ---- Commands ------------------------------------------------------------------------
 //   ?CHSYNC                  status + [CHSYNC:EN=,CH=,MAXCH=,CC=,RANK=,PIN=,LEAD=,LRANK=,LPIN=,STATE=]
 //   ?CHSYNC,ON | ?CHSYNC,OFF take part or not (NVS, live)
-//   ?CHSYNC,SEARCH           one search now, if this board can hop
+//   ?CHSYNC,SEARCH           one search now, if this board leads its group and can hop
 //   ?CHSYNC,MOVE,<ch>        operator move of the whole mesh
 //   ?REGION[,<cc>]           show, or set for the next boot
 void    processChanSyncCommand(const String &args);

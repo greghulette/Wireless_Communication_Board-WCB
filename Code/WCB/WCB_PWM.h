@@ -53,6 +53,10 @@ void clearAllPWMMappings(bool autoReboot = true);
 void savePWMMappingsToPreferences();
 void loadPWMMappingsFromPreferences();
 void processPWMPassthrough();
+// Channel sync (WCB_ChanSync.cpp): the radio was off the mesh channel (a search hop, a JOIN full-band scan) or moved
+// channel. Passthrough sends only on a change, so a change it sent meanwhile reached nobody: the next reading of every
+// input is sent again, whatever it is.
+void pwmResendPassthrough();
 void configureRemotePWMOutput(int serialPort);
 bool isSerialPortUsedForPWMInput(int port);
 // quiet=true skips the refusal print - for callers that pass over a reserved port routinely.

@@ -15,8 +15,10 @@ Channel sync moves the mesh together and brings stray boards back:
 - **Search.** A group's leader that misses a board it knows about visits the other channels, asks who is there, and
   either takes its group there or pulls the other group home.
 
-It is on by default (`?CHSYNC,ON`) and needs ETM, like WDP: every frame rides the ETM struct and gate. A board with it
-off behaves exactly as before: it never moves, never searches, and never answers a search.
+It is on by default (`?CHSYNC,ON`) and needs ETM and WDP (`chanSyncActive`): every frame rides the ETM struct and
+gate, and the CHAN facts that say who leads ride the WDP advert - a board with WDP off would hear none and take itself
+for every group's leader. A board with it off, or inactive, behaves exactly as before: it never moves, never searches,
+and never answers a search.
 
 ---
 
@@ -35,8 +37,9 @@ on), the best key present leads, and the mesh's channel is the leader's channel.
 Ordering (`chansync::better`): a device that can lead beats one that cannot; then a **pinned** device beats an unpinned
 one; then the lower rank; then the lower id.
 
-**Pinned means associated with an access point** — a WCB in `?WIFI,JOIN` that is associated
-(`wcbWifiJoinAssociated`). Its channel is the access point's and nothing on the mesh can move it, so the mesh has to go
+**Pinned means associated with an access point** — a WCB whose station is associated, read from the driver
+(`wcbWifiJoinAssociated`), never from the saved `?WIFI` mode, which changes at once while the interface changes only at
+the next boot. Its channel is the access point's and nothing on the mesh can move it, so the mesh has to go
 to it. That is why pinned outranks rank: with NaviCore (rank 0) present and WCB 3 joined to a router on channel 6, the
 mesh goes to channel 6 and NaviCore follows. Two pinned devices on two channels cannot both keep their networks; the
 lower rank keeps its, and the other drops its association and follows.
@@ -104,8 +107,10 @@ A follower obeys a MOVE (`chansync::judgeMove`) unless:
 - a device it hears **outranks the sender** — then the sender is not its leader and should not be moving anyone. This
   is what stops a confused board from dragging the mesh.
 
-A refusal prints one line naming the reason. A board in the middle of a search ignores MOVEs (it is deciding for its
-group); one whose move already waits on a restart ignores further ones.
+A refusal prints one line naming the reason. A board in the middle of a search holds the latest MOVE it hears at
+home and judges it once the radio is home, before acting on what it found - so a MOVE made meanwhile, an operator's
+above all, is followed rather than undone by a pull. One whose move already waits on a restart ignores further ones. A
+leader sends no MOVE frame while its radio is away (a JOIN full-band scan).
 
 **Applying a move** (`applyMove`), at the switch time:
 
@@ -123,8 +128,9 @@ group); one whose move already waits on a restart ignores further ones.
 `;`-commands sent across the switch are lost, the same as across a reboot. ETM retries recover ensured commands.
 
 **Operator move:** `?CHSYNC,MOVE,<ch>` on any board sends a MOVE with the OPERATOR flag, which every non-pinned
-follower obeys whoever sent it, and the board moves with it. It is refused when the board's sync is off, when ETM is
-off, outside the region, while a search or move is running, and when the board is pinned or **hears a pinned device**
+follower obeys whoever sent it, and the board moves with it. It is refused when the board's sync is off, when ETM or
+WDP is off, outside the region, while a search or move is running, while a JOIN full-band scan has the radio, and when
+the board is pinned or **hears a pinned device**
 (sync on or not): that device would stay, the mesh would go, and searching would bring everyone back.
 
 ---
@@ -135,24 +141,35 @@ off, outside the region, while a search or move is running, and when the board i
 of** (`chansync::shouldSearch`, §1 for "missing"). Followers never search: their leader does it for the group. A board
 alone is its own leader.
 
-**When.** Not before 40 s after boot (presence has to settle), and only once the condition has held for 10 s. Then
-attempts at 0, 1, 2, 4, 8, 16 and 32 minutes after that: seven over about an hour. After that it stops until the next
-boot, `?CHSYNC,SEARCH`, or the condition clears and comes back. A board that is simply switched off costs its leader
-seven short searches, not one an hour forever. Whether the board can hop is checked when an attempt is due, not as part
-of the condition, so a station joining and leaving an access point does not restart the schedule; a due attempt waits
-until the board can go.
+**When.** Not before 40 s after boot (presence has to settle; every board solicits its neighbors' adverts just after
+its first boot advert, so their CHAN facts are in by then), and only once the condition has held for 10 s. Then seven
+attempts, each the gap of 0, 1, 2, 4, 8, 16, 32 minutes after the one before STARTED - an attempt held up (a station
+on the access point, a busy board) is not followed at once by the next. After the seventh it stops until the next boot,
+`?CHSYNC,SEARCH`, or the condition has stayed clear for 10 minutes (`TRIGGER_RESET_MS`) and comes back; a condition
+back sooner carries on its schedule, at the earliest 10 s after it returned, so a member that flaps offline and online
+costs no more than one schedule. A board that is simply switched off costs its leader seven short searches, not one an
+hour forever. Whether the board can hop is checked when an attempt is due, not as part of the condition, so a station
+joining and leaving an access point does not restart the schedule; a due attempt waits until the board can go.
 
 **Who can hop** (`wcbWifiCanHop`). A board with no interface up; a board hosting an access point with **no stations
 connected** (IDF: `esp_wifi_set_channel` must not be called with stations attached); a JOIN board only while it is
 neither associated, scanning (either scan, §5), connecting (5 s after a `WiFi.begin`), nor moving to its network. A
 search also waits (`chanSyncHostBusy`) for no command to have run for 1 s (`CHSYNC_QUIET_MS`), an empty command queue,
-no ETM command awaiting an ACK, and no OTA session, config pull, pending restart or ETM characterization.
+no ETM command awaiting an ACK, no OTA session, config pull, pending restart or ETM characterization, and no RC
+passthrough in use: no PWM (`;P`), raw Kyber or raw-serial frame sent or heard for 5 s (`CHSYNC_RC_QUIET_MS`) -
+those are unacknowledged, and PWM is sent only on a change, so one lost to a hop would leave a servo off where it
+should be. When the radio comes home the PWM passthrough sends every input once more anyway
+(`pwmResendPassthrough`), as it does after a live move. `?CHSYNC,SEARCH` is refused on a follower, naming the board that
+leads: only a group's leader searches.
 
 **How.** For each other channel the region allows: switch, broadcast a PROBE carrying a per-channel nonce, listen
 150 ms, move on; then return home. About 1.5 s off the mesh in all. Every device with sync on that hears a PROBE
-answers with a REPLY naming the best device it hears, itself included, after `(id % 16) × 3 ms` so a group does not
-answer in lockstep. REPLYs are broadcast: the prober is not a registered peer there. The prober takes a REPLY only for
-the channel and nonce it is listening for, and holds a responder to its own key too.
+answers with a REPLY naming the best device it hears, itself included and the prober left out (it can still read
+online there from before it left that channel), after `(id % 16) × 3 ms` so a group does not answer in lockstep.
+REPLYs are broadcast: the prober is not a registered peer there. The prober takes a REPLY only for the channel and nonce
+it is listening for, and holds a responder to its own key too. A REPLY that names the prober itself anyway (a responder
+that does not leave it out) counts only for the responder's own key: the prober would otherwise compare itself with itself and neither
+go nor pull. No REPLY goes out while the responder's own radio is away.
 
 **While the radio is away** (`chanSyncRadioAway()`: a search hop or pull, or a JOIN full-band scan, §5) the receive
 path drops everything but channel-sync frames, and `loop()` holds the heartbeat, the WDP advert and ETM retries, which
@@ -179,6 +196,10 @@ content — except their leader misses the body boards. It searches, finds them,
 A JOIN board with sync on (and ETM on) looks for its network on every channel, not just the mesh's, when it is not
 associated (`WCB_WiFi.cpp`, the channel-sync section): a full-band scan right after a mesh-channel scan misses it, then
 at 1, 2, 4, 8, 16 and 30 minutes after the network went missing (boot, or the association lost), then every 30 minutes.
+Each waits for the same gate as a search (`chanSyncMayLeaveChannel`): not inside the 40 s boot grace - a decision taken
+with no presence and no CHAN facts could not see a pinned device that outranks this one - and not while the board is
+busy. One that waits is tried at the next mesh-channel miss, 5 s on. A full scan running when `?WIFI` changes the mode,
+or when an association lands, is still finished and the radio put back; only a JOIN board still looking acts on it.
 A full scan covers every channel the region allows, 120 ms each, with the same SSID filter, and takes the board off the
 mesh for about 1.5 s; the radio is put back on the home channel explicitly when it ends, rather than trusting the driver
 to return an unassociated station there (not yet observed on the bench either way). The mesh-channel scan every 5 s stays as it was (tracker #103: an unconfined connect scan
@@ -218,9 +239,11 @@ on **every** device:
 Saved in NVS (`wcb_config/region`), applied at the next boot (`chanSyncApplyRegionAtBoot`) after `WiFi.mode()` and
 before the channel is set and before `wcbWifiStart()` brings an access point up: `esp_wifi_set_country_code(cc, false)`.
 802.11d off, so the configured region always applies — with it on, a JOIN board would adopt its router's region while
-associated and the others could not follow. `"01"` makes no call at all, so the default is byte-for-byte the previous
-behaviour. The call never reaches the driver's own flash copy (`WiFi.persistent(false)` has set `WIFI_STORAGE_RAM`
-first), so `?REGION,01` really returns a board to the default. The top channel is the driver's (`esp_wifi_get_country`
+associated and the others could not follow. `"01"` makes no call, so the default is the previous behaviour - unless
+the driver already holds another country (`esp_wifi_get_country_code`): the IDF keeps the country in its own NVS when
+its storage is FLASH, which other firmware on the chip may have left. Only then is it reset to `"01"`, 802.11d on as
+the default has it, with a boot line. This firmware's own call never reaches that flash copy (`WiFi.persistent(false)`
+has set `WIFI_STORAGE_RAM` first), so `?REGION,01` really returns a board to the default. The top channel is the driver's (`esp_wifi_get_country`
 `schan + nchan - 1`), capped at 13: channel 14 is never used.
 
 **A saved channel the region does not allow** — the region was changed back, or a backup from a board in another
@@ -241,7 +264,7 @@ most of the world; WiFi devices in the US are limited to 1-11.
 |---|---|
 | `?CHSYNC` | status block (channel and region, this board's key, the leader, members heard and missing, state, the search schedule), and one machine line `[CHSYNC:EN=,CH=,MAXCH=,CC=,RANK=,PIN=,LEAD=,LRANK=,LPIN=,STATE=idle\|search\|move]` |
 | `?CHSYNC,ON` / `?CHSYNC,OFF` | take part or not (NVS `wcb_config/chsync`, default ON; live — OFF ends a search or a move not yet applied) |
-| `?CHSYNC,SEARCH` | one search, as soon as the command queue is quiet (within 10 s) and if this board can hop; it restarts the attempt schedule |
+| `?CHSYNC,SEARCH` | one search, as soon as the command queue is quiet (within 10 s) and if this board can hop; it restarts the attempt schedule. Refused on a follower, naming the board that leads |
 | `?CHSYNC,MOVE,<ch>` | operator move of the whole mesh (§3) |
 | `?REGION` | `Region: <cc>, channels 1-<n>`, and `Saved for the next boot: <cc>` when one is pending |
 | `?REGION,<cc>` | save a region for the next boot |
@@ -311,3 +334,4 @@ MOVE.
 |---|---|---|---|
 | 2026-10-21 | — | Initial design: leader key (pinned, rank, id), CHAN TLV `0x14`, MOVE/PROBE/REPLY on ETM types 25-27, search by group leaders, JOIN follows its network across channels, `?REGION` for 12-13. | Greg: a droid joining a network on another channel should take its mesh with it, and stray boards should find their way back. |
 | 2026-10-21 | — | Built in the WCB firmware (`WCB_ChanSync.{h,cpp}`); this page now describes it as built. Settled in the build: a device that does not take part (sync off, older firmware) never leads, but a pinned one still blocks an operator move and a JOIN takeover; frames never refresh presence; while the radio is away the receive path keeps only channel-sync frames and `loop()` holds heartbeats, adverts and ETM retries; can-hop is checked when an attempt is due, not in the trigger; a MOVE that finds a restart pending saves the channel for it instead of waiting; a search also waits for 1 s without a command and no ETM ACK outstanding; a saved channel the region forbids runs on 1 for that boot, NVS kept; `?WCBCH` takes 13 while another region is pending; with sync on the JOIN off-mesh guard no longer settles. | Implementation. |
+| 2026-10-21 | — | Review fixes: a JOIN full-band scan is finished, and the radio put back, on every path (a `?WIFI` change mid-scan left the receive path deaf for good); JOIN-follow and full scans wait for the boot grace and for an idle board, RC passthrough included, and boards solicit adverts at boot; the search schedule re-bases on a late attempt and a flapping member keeps its schedule for 10 minutes; the WiFi state channel sync reads is what runs, not the saved mode; a MOVE heard mid-search is judged once home, MOVE frames and REPLYs are held while the radio is away, a responder leaves the prober out of its REPLY and a prober credits the responder for one that names it anyway; `?CHSYNC` says what holds a due search; WDP off makes channel sync inactive; `?CHSYNC,SEARCH` only on a group's leader; PWM passthrough re-sent when the radio returns; at boot with region 01 a country the driver kept from before is reset. | Independent review of the merged firmware. |

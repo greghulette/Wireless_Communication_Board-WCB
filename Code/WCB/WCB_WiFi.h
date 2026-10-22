@@ -103,8 +103,10 @@ void processWifiCommand(const String &args);
 // ---- Channel sync (WCB_ChanSync.cpp, docs/CHANNEL_SYNC.md) -----------------
 // The mesh channel moves at runtime now: a MOVE switches it live, or restarts a board whose interface is up. JOIN
 // follows its network to another channel by moving the mesh there first (§5).
-bool wcbWifiJoinAssociated();            // JOIN, associated with its AP now: the AP owns the channel (F_PINNED)
-bool wcbWifiInterfaceUp();               // an AP is up, or JOIN is associated: a channel move needs a restart
+// These read what RUNS (the driver, the AP this boot started), never wcbWifiMode, which ?WIFI changes at once.
+bool wcbWifiJoinAssociated();            // the station is associated with an AP now: the AP owns the channel (F_PINNED)
+bool wcbWifiApUp();                      // this boot brought an access point up
+bool wcbWifiInterfaceUp();               // an AP is up, or the station is associated: a channel move needs a restart
 bool wcbWifiCanHop(const char **why);    // may a search take the radio to other channels now? why = the reason not
 bool wcbWifiJoinScanning();              // a JOIN scan is running (the driver refuses a channel switch meanwhile)
 bool wcbWifiFullScanRunning();           // a JOIN full-band scan is running: the radio is off the mesh channel

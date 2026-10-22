@@ -3,6 +3,7 @@
 #include "WCB_Storage.h"      // meshChannel, WCB_Number, preferences, etmEnabled, specialPeerEnabled, MAX_WCB_COUNT
 #include "WCB_WDP.h"          // wdpNeighborGet: a neighbor's CHAN TLV
 #include "WCB_WiFi.h"         // pinned (JOIN associated), can-hop, interface up, full-band scan
+#include "WCB_PWM.h"          // pwmResendPassthrough: a PWM change sent while the radio was away
 
 #include <esp_wifi.h>
 #include <esp_random.h>
@@ -89,11 +90,18 @@ struct SearchJob {
 };
 static SearchJob s_sr;
 
-// The search trigger (docs/CHANNEL_SYNC.md §4): attempts at TRIGGER_STABLE_MS after the condition began, then at
-// searchAttemptOffsetMs(n) after that.
+// The search trigger (docs/CHANNEL_SYNC.md §4): the first attempt TRIGGER_STABLE_MS after the condition began, each next
+// one the gap between their searchAttemptOffsetMs() after the one before STARTED - so attempts held up (a station on
+// the access point, a busy board) never run back to back once free.
 static unsigned long s_condSince = 0;              // when shouldSearch() began to hold (0 = it does not)
 static uint8_t       s_attempt   = 0;              // the next attempt (0-based); SEARCH_ATTEMPTS = all made
+static unsigned long s_nextDue   = 0;              // when attempt s_attempt may start
+static bool          s_sched     = false;          // a schedule is under way (s_attempt / s_nextDue mean something)
 static bool          s_gaveUpSaid = false;
+// A condition that clears and comes back within this long carries on the schedule it had instead of starting a new
+// one: a member that flaps offline and online would otherwise restart the seven attempts every cycle, without bound.
+static const unsigned long TRIGGER_RESET_MS = 10UL * 60000UL;
+static unsigned long s_clearedAt = 0;              // when the condition last cleared, with a schedule under way (0 = none)
 static unsigned long s_nextEval  = 0;
 static bool          s_manualPending = false;      // ?CHSYNC,SEARCH waiting for the board to be able to hop
 static unsigned long s_manualSince   = 0;
@@ -104,7 +112,19 @@ static const unsigned long PULL_TAIL_MS   = 50;    // after a pull's last frame,
 // A REPLY this board owes a prober, sent after (id % 16) * REPLY_JITTER_STEP_MS.
 static bool          s_replyArmed = false;
 static uint16_t      s_replyNonce = 0;
+static uint8_t       s_replyProber = 0;            // who asked: never named as the best device here (sendReply)
 static unsigned long s_replyAt    = 0;
+
+// The latest MOVE heard at home while a search had the radio, judged once it is home again (judge): an operator move
+// made meanwhile would otherwise be reversed by this board's next search, which would find its group gone and pull it
+// back. Not one heard away: that is another channel's.
+static bool          s_heldValid = false;
+static CsFrame       s_held;
+static unsigned long s_heldAt    = 0;
+
+static bool          s_wasAway   = false;          // chanSyncRadioAway() at the last tick: home again -> PWM resend
+
+static bool syncActive() { return s_enabled && etmEnabled && wdpEnabled; }   // chanSyncActive (WCB_ChanSync.h)
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Keys: who this board hears, and who leads
@@ -113,7 +133,7 @@ static cs::Key selfKey() {
   cs::Key k;
   k.id    = (uint8_t)WCB_Number;
   k.rank  = (uint8_t)WCB_Number;                   // a WCB's rank is its number (§1)
-  k.flags = (uint8_t)((s_enabled ? cs::F_SYNC : 0) | (wcbWifiJoinAssociated() ? cs::F_PINNED : 0));
+  k.flags = (uint8_t)((syncActive() ? cs::F_SYNC : 0) | (wcbWifiJoinAssociated() ? cs::F_PINNED : 0));
   return k;
 }
 
@@ -154,14 +174,16 @@ struct View {
 // A device that does not take part - SYNC off, or firmware without channel sync (a derived key) - never leads here:
 // it cannot move or search, so a group led by it would never look for a stray board, and would refuse every MOVE
 // but its own. It is still counted as heard, and a pinned one still keeps the mesh where it is (bestPinned).
-static View look() {
+// exclude: a member left out of the view - the prober a REPLY answers, which may still read online here from before
+// it left this channel, and is not who leads here.
+static View look(uint8_t exclude = 0) {
   View v;
   v.self = selfKey();
   v.best = v.self;
   v.bestPinned = cs::noKey();
   v.heard = v.missing = v.missingFirst = 0;
   for (uint8_t id = 1; id <= MAX_WCB_COUNT; id++) {
-    if (!memberOf(id)) continue;
+    if (!memberOf(id) || id == exclude) continue;
     const cs::Key k = keyOf(id);
     if (wcbPeerOnline(id)) {
       v.heard++;
@@ -174,8 +196,6 @@ static View look() {
   }
   return v;
 }
-
-static bool syncActive() { return s_enabled && etmEnabled; }   // the frames ride the ETM struct and gate (rule 4)
 
 static void copyCc(char *dst, const char *src) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = '\0'; }
 
@@ -227,6 +247,17 @@ uint8_t chanSyncApplyRegionAtBoot() {
     if (e == ESP_OK) copyCc(s_appliedCc, s_savedCc);
     else Serial.printf("[REGION] esp_wifi_set_country_code(\"%s\") FAILED (0x%x) - running on the default region 01\n",
                        s_savedCc, (unsigned)e);
+  } else {
+    // "01" makes no call - unless the driver holds another region anyway: the IDF keeps the country in its own NVS
+    // (esp_wifi.h, esp_wifi_set_country_code attention 4) whenever the storage is FLASH, which other firmware on this
+    // chip may have left there. Only then is it put back to the default, 802.11d on as the default has it, so a board
+    // can never stay in another region whatever ran on it before.
+    char now[8] = { 0 };
+    if (esp_wifi_get_country_code(now) == ESP_OK && !(now[0] == '0' && now[1] == '1')) {
+      const esp_err_t e = esp_wifi_set_country_code("01", true);
+      Serial.printf("[REGION] the radio held region \"%.2s\" from before; reset to 01 (%s)\n", now,
+                    e == ESP_OK ? "done" : "FAILED");
+    }
   }
   wifi_country_t c;
   uint8_t top = 11;
@@ -295,7 +326,14 @@ int chanSyncPutTlv(uint8_t *buf, int o, int max) {
 //  State queries
 // ════════════════════════════════════════════════════════════════════════════
 bool        chanSyncEnabled()      { return s_enabled; }
+bool        chanSyncActive()       { return syncActive(); }
 bool        chanSyncBusy()         { return s_mode != M_IDLE; }
+
+bool chanSyncMayLeaveChannel(const char **why) {
+  if (!syncActive())             { if (why) *why = "channel sync is inactive"; return false; }
+  if (millis() < cs::BOOT_GRACE_MS) { if (why) *why = "the boot grace (presence and CHAN facts settling)"; return false; }
+  return !chanSyncHostBusy(true, why);
+}
 uint8_t     chanSyncHomeChannel()  { return s_home; }
 uint8_t     chanSyncMaxChannel()   { return s_maxCh; }
 const char *chanSyncSavedRegion()  { return s_savedCc; }
@@ -340,8 +378,8 @@ static void sendProbe(uint16_t nonce) {
   if (n) chanSyncBroadcastFrame(cs::PT_PROBE, b, n);
 }
 
-static void sendReply(uint16_t nonce) {
-  const View v = look();
+static void sendReply(uint16_t nonce, uint8_t prober) {
+  const View v = look(prober);
   cs::Reply r;
   r.channel = s_home;
   r.nonce   = nonce;
@@ -369,9 +407,13 @@ static void goHome() {
 // ════════════════════════════════════════════════════════════════════════════
 //  Moving
 // ════════════════════════════════════════════════════════════════════════════
+// Forget the schedule outright: after a move, ?CHSYNC,OFF, or a condition that stayed clear TRIGGER_RESET_MS.
 static void resetTrigger() {
   s_condSince  = 0;
+  s_sched      = false;
   s_attempt    = 0;
+  s_nextDue    = 0;
+  s_clearedAt  = 0;
   s_gaveUpSaid = false;
 }
 
@@ -422,11 +464,11 @@ static void applyMove(unsigned long now) {
     persistChannel(ch);
     s_mv.restarting = true;
     Serial.printf("[CHSYNC] channel %u saved - restarting so the %s comes up there\n", ch,
-                  wcbWifiMode == WCB_WIFI_AP ? "access point" : "network association");
+                  wcbWifiApUp() ? "access point" : "network association");
     reboot();
     return;
   }
-  if (wcbWifiMode == WCB_WIFI_JOIN) wcbWifiJoinCancelConnect();   // a connect in progress would hold the old channel
+  wcbWifiJoinCancelConnect();         // a connect in progress would hold the old channel (a no-op without one)
   if (!radioTo(ch)) {
     persistChannel(ch);
     s_mv.restarting = true;
@@ -440,12 +482,14 @@ static void applyMove(unsigned long now) {
   persistChannel(ch);
   s_mode = M_IDLE;
   resetTrigger();
+  pwmResendPassthrough();             // a PWM change sent across the switch reached nobody (WCB_PWM.h)
   Serial.printf("[CHSYNC] moved from channel %u to %u\n", from, ch);
 }
 
 static void tickMove(unsigned long now) {
   if (s_mv.restarting) return;                       // the restart takes it from here
-  if (s_mv.leading && s_mv.framesLeft && (long)(now - s_mv.nextFrameAt) >= 0) {
+  // Not while the radio is away (a JOIN full-band scan): the frame would go out on whatever channel it is visiting.
+  if (s_mv.leading && s_mv.framesLeft && (long)(now - s_mv.nextFrameAt) >= 0 && !chanSyncRadioAway()) {
     const long left = (long)(s_mv.switchAt - now);
     sendMove(s_mv.ch, s_mv.flags, s_mv.moveId, (uint16_t)(left > 0 ? left : 0));   // the time still left
     s_mv.framesLeft--;
@@ -465,19 +509,22 @@ static const char *verdictText(cs::MoveVerdict v) {
   }
 }
 
-static void onMove(const CsFrame &f, unsigned long now) {
+// A MOVE frame heard at home, at rxAt: one held while a search had the radio is judged later, with the time it has
+// already waited taken off its countdown.
+static void judgeMoveFrame(const CsFrame &f, unsigned long rxAt, unsigned long now) {
   cs::Move m;
   if (!cs::decodeMove(f.b, sizeof(f.b), m)) return;
-  if (f.away || s_mode == M_SEARCH) return;           // a search decides for itself; frames heard away are not ours
   if (s_seenMove[f.sender] == m.moveId) return;       // a repeat frame of a move already judged
   s_seenMove[f.sender] = m.moveId;
   if (s_mode == M_MOVE && s_mv.restarting) return;
+  const unsigned long waited = now - rxAt;
+  m.delayMs = (waited >= m.delayMs) ? 0 : (uint16_t)(m.delayMs - waited);   // past its switch: follow at once
   cs::Key sender;
   sender.id    = f.sender;
   sender.rank  = m.rank;
   sender.flags = (uint8_t)(m.flags & (cs::F_PINNED | cs::F_SYNC));
   const View v = look();
-  const cs::MoveVerdict verdict = cs::judgeMove(m, sender, v.self, v.best, s_home, s_maxCh, s_enabled);
+  const cs::MoveVerdict verdict = cs::judgeMove(m, sender, v.self, v.best, s_home, s_maxCh, syncActive());
   if (verdict != cs::MV_ACCEPT) {
     if (verdict != cs::MV_SAME_CHANNEL)
       Serial.printf("[CHSYNC] not following WCB%u's move to channel %u: %s\n", f.sender, m.newChannel,
@@ -495,6 +542,19 @@ static void onMove(const CsFrame &f, unsigned long now) {
                 (unsigned)m.delayMs, (m.flags & cs::MF_OPERATOR) ? " (operator move)" : "");
 }
 
+static void onMove(const CsFrame &f, unsigned long now) {
+  if (f.away) return;                                 // heard on another channel: that channel's business
+  if (s_mode == M_SEARCH) {                           // the search decides for the group: judged once home (judge)
+    cs::Move m;
+    if (!cs::decodeMove(f.b, sizeof(f.b), m) || s_seenMove[f.sender] == m.moveId) return;
+    s_held      = f;
+    s_heldAt    = now;
+    s_heldValid = true;
+    return;
+  }
+  judgeMoveFrame(f, now, now);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  Replies and probes
 // ════════════════════════════════════════════════════════════════════════════
@@ -503,7 +563,8 @@ static void onProbe(const CsFrame &f, unsigned long now) {
   if (!cs::decodeProbe(f.b, sizeof(f.b), p)) return;
   if (f.away || !syncActive()) return;                // sync off: never answers a search (CHANNEL_SYNC.md, intro)
   s_replyArmed = true;
-  s_replyNonce = p.nonce;
+  s_replyNonce  = p.nonce;
+  s_replyProber = f.sender;
   s_replyAt    = now + (unsigned long)((WCB_Number % 16) * cs::REPLY_JITTER_STEP_MS);
   if (debugMGMT) Serial.printf("[CHSYNC] WCB%u (home channel %u) is probing this channel\n", f.sender, p.homeChannel);
 }
@@ -520,6 +581,10 @@ static void onReply(const CsFrame &f) {
   cs::Key best = r.best;
   best.flags = (uint8_t)(best.flags & (cs::F_PINNED | cs::F_SYNC));
   if (!(best.id >= 1 && best.id <= MAX_WCB_COUNT)) best = cs::noKey();
+  // A responder that still lists this board online (its 55 s sweep has not run yet, or older firmware without the
+  // exclusion in sendReply) can name it as the best it hears: that is not who leads over there, and judgeSearch would
+  // compare this board with itself and neither go nor pull. The responder's own key, below, stands in for it.
+  if (best.id == (uint8_t)WCB_Number) best = cs::noKey();
   if (cs::better(responder, best)) best = responder;  // "itself included": hold a responder to it
   if (cs::better(best, s_sr.found[r.channel])) s_sr.found[r.channel] = best;
   if (debugMGMT) Serial.printf("[CHSYNC] channel %u: WCB%u answered, WCB%u leads there (rank %u)\n",
@@ -548,13 +613,26 @@ static void drainFrames(unsigned long now) {
 // May the radio leave the mesh channel now? why = the first reason it may not.
 static bool canSearchNow(const char **why) {
   if (!wcbWifiCanHop(why)) return false;
-  return !chanSyncHostBusy(true, why);
+  return chanSyncMayLeaveChannel(why);
+}
+
+// A MOVE held while the search had the radio (onMove): judged now that it is home. True when it is being followed.
+static bool takeHeldMove(unsigned long now) {
+  if (!s_heldValid) return false;
+  s_heldValid = false;
+  const uint8_t was = s_mode;
+  s_mode = M_IDLE;
+  judgeMoveFrame(s_held, s_heldAt, now);
+  if (s_mode == M_MOVE) return true;
+  s_mode = was;
+  return false;
 }
 
 static void endSearch(const char *line) {
   if (s_away) goHome();
   s_mode = M_IDLE;
   if (line) Serial.println(line);
+  takeHeldMove(millis());
 }
 
 static void hopNext(unsigned long now) {
@@ -594,6 +672,10 @@ static void startSearch(bool manual, unsigned long now) {
 
 static void judge(unsigned long now) {
   goHome();
+  if (takeHeldMove(now)) {             // the mesh was moved meanwhile: follow it, do not undo it from what was found
+    Serial.println("[CHSYNC] search: a MOVE came while it ran - following that instead");
+    return;
+  }
   const cs::Key self = selfKey();
   const cs::SearchResult r = cs::judgeSearch(self, s_home, s_sr.found);
   if (r.moveTo) {
@@ -647,19 +729,29 @@ static void tickSearch(unsigned long now) {
 }
 
 // The trigger (§4): only a group's leader that misses a known board, not before BOOT_GRACE_MS, and only once the
-// condition has held TRIGGER_STABLE_MS; then SEARCH_ATTEMPTS attempts on searchAttemptOffsetMs, then nothing until the
-// next boot, ?CHSYNC,SEARCH, or the condition clears and comes back.
+// condition has held TRIGGER_STABLE_MS; then SEARCH_ATTEMPTS attempts, each the searchAttemptOffsetMs() gap after the
+// one before started; then nothing until the next boot, ?CHSYNC,SEARCH, or the condition clears for TRIGGER_RESET_MS
+// and comes back. A condition back sooner carries on its schedule, at the earliest TRIGGER_STABLE_MS after it returned.
 static void evaluateTrigger(unsigned long now) {
   if ((long)(now - s_nextEval) < 0) return;
   s_nextEval = now + EVAL_EVERY_MS;
   if (s_manualPending) {
     const char *why = nullptr;
+    const View lv = look();
+    if (lv.best.id != (uint8_t)WCB_Number) {          // leadership changed since the command: its leader searches
+      s_manualPending = false;
+      Serial.printf("[CHSYNC] search not started: WCB%u leads this group now\n", lv.best.id);
+      return;
+    }
     if (canSearchNow(&why)) {
       s_manualPending = false;
       startSearch(true, now);
       // ?CHSYNC,SEARCH restarts the schedule: if a board is still missing, the next attempts follow from here.
-      s_condSince = (now - cs::TRIGGER_STABLE_MS) | 1;
-      s_attempt   = 1;
+      s_sched      = true;
+      s_attempt    = 1;
+      s_nextDue    = now + (cs::searchAttemptOffsetMs(1) - cs::searchAttemptOffsetMs(0));
+      s_condSince  = now | 1;
+      s_clearedAt  = 0;
       s_gaveUpSaid = false;
       return;
     }
@@ -669,29 +761,48 @@ static void evaluateTrigger(unsigned long now) {
     }
     return;
   }
-  if (!syncActive() || now < cs::BOOT_GRACE_MS) { resetTrigger(); return; }
   const View v = look();
   // The condition with canHop = true: whether this board can hop is checked when an attempt is due, so an access
   // point's station coming and going does not restart the schedule.
-  if (!cs::shouldSearch(v.self, v.best, v.missing > 0, s_enabled, true)) { resetTrigger(); return; }
-  if (!s_condSince) { s_condSince = now | 1; s_attempt = 0; }
-  if (now - s_condSince < cs::TRIGGER_STABLE_MS) return;
-  const uint32_t off = cs::searchAttemptOffsetMs(s_attempt);
-  if (off == 0xFFFFFFFFUL) {
-    if (!s_gaveUpSaid) {
-      s_gaveUpSaid = true;
-      Serial.printf("[CHSYNC] WCB%u is still missing after %u searches - not searching again until the next boot, "
-                    "?CHSYNC,SEARCH, or it comes back\n", v.missingFirst, (unsigned)cs::SEARCH_ATTEMPTS);
+  const bool cond = syncActive() && now >= cs::BOOT_GRACE_MS &&
+                    cs::shouldSearch(v.self, v.best, v.missing > 0, true, true);
+  if (!cond) {
+    s_condSince = 0;
+    if (s_sched) {
+      if (!s_clearedAt) s_clearedAt = now | 1;
+      else if (now - s_clearedAt >= TRIGGER_RESET_MS) resetTrigger();
     }
     return;
   }
-  if (now - (s_condSince + cs::TRIGGER_STABLE_MS) < off) return;
+  s_clearedAt = 0;
+  if (!s_condSince) s_condSince = now | 1;
+  if (!s_sched) {                                   // a new episode
+    s_sched     = true;
+    s_attempt   = 0;
+    s_nextDue   = s_condSince + cs::TRIGGER_STABLE_MS;
+    s_gaveUpSaid = false;
+  } else if ((long)(s_nextDue - (s_condSince + cs::TRIGGER_STABLE_MS)) < 0) {
+    s_nextDue = s_condSince + cs::TRIGGER_STABLE_MS;   // back after a short clear: it must hold again first
+  }
+  if (s_attempt >= cs::SEARCH_ATTEMPTS) {
+    if (!s_gaveUpSaid) {
+      s_gaveUpSaid = true;
+      Serial.printf("[CHSYNC] WCB%u is still missing after %u searches - not searching again until the next boot, "
+                    "?CHSYNC,SEARCH, or it has been back for %lu minutes\n", v.missingFirst,
+                    (unsigned)cs::SEARCH_ATTEMPTS, TRIGGER_RESET_MS / 60000UL);
+    }
+    return;
+  }
+  if ((long)(now - s_nextDue) < 0) return;
   const char *why = nullptr;
   if (!canSearchNow(&why)) {
     if (debugMGMT) Serial.printf("[CHSYNC] a search is due but waits: %s\n", why ? why : "?");
     return;
   }
+  // Re-based on when this attempt really starts: one held up for a while is not followed at once by the next.
   s_attempt++;
+  if (s_attempt < cs::SEARCH_ATTEMPTS)
+    s_nextDue = now + (cs::searchAttemptOffsetMs(s_attempt) - cs::searchAttemptOffsetMs(s_attempt - 1));
   startSearch(false, now);
 }
 
@@ -700,10 +811,15 @@ static void evaluateTrigger(unsigned long now) {
 // ════════════════════════════════════════════════════════════════════════════
 void chanSyncTick() {
   const unsigned long now = millis();
+  // Home again after a search hop, a pull or a JOIN full-band scan: a PWM passthrough change sent meanwhile went out
+  // on another channel, and the passthrough sends only on change - a servo would stay where that frame left it.
+  const bool away = chanSyncRadioAway();
+  if (s_wasAway && !away) pwmResendPassthrough();
+  s_wasAway = away;
   drainFrames(now);
   if (s_replyArmed && (long)(now - s_replyAt) >= 0) {
     s_replyArmed = false;
-    if (!s_away && syncActive()) sendReply(s_replyNonce);
+    if (!chanSyncRadioAway() && syncActive()) sendReply(s_replyNonce, s_replyProber);   // a JOIN full-band scan too
   }
   switch (s_mode) {
     case M_SEARCH: tickSearch(now); break;
@@ -719,7 +835,10 @@ ChanSyncJoinVerdict chanSyncJoinFollow(uint8_t ch, uint8_t *outrankedBy) {
   if (outrankedBy) *outrankedBy = 0;
   if (!syncActive()) return CSJ_SYNC_OFF;
   if (!cs::validChannel(ch, s_maxCh)) return CSJ_OUT_OF_REGION;
-  if (s_mode != M_IDLE) return CSJ_BUSY;
+  // Not inside the boot grace: until presence and the CHAN facts have landed (the boot solicit, WCB_WDP.cpp) no pinned
+  // device that outranks this one could be seen, and a second JOIN board on another network would take the mesh - or
+  // itself, for good - at every boot. WCB_WiFi.cpp holds its full-band scans until then too (chanSyncMayLeaveChannel).
+  if (millis() < cs::BOOT_GRACE_MS || s_mode != M_IDLE) return CSJ_BUSY;
   // About to be pinned: the access point will own the channel. A pinned device it hears that outranks it keeps
   // the mesh - two networks on two channels cannot both be kept, and the lower rank keeps its own.
   const View v = look();
@@ -746,7 +865,8 @@ static void printStatus() {
   const bool pin = (v.self.flags & cs::F_PINNED) != 0;
   Serial.println("------ Channel sync ------------------------------------");
   Serial.printf("Channel sync  : %s%s\n", s_enabled ? "ON" : "OFF (never moves, searches or answers)",
-                (s_enabled && !etmEnabled) ? " - INACTIVE: it needs ETM (?ETM,ON)" : "");
+                (s_enabled && !etmEnabled) ? " - INACTIVE: it needs ETM (?ETM,ON)"
+                : (s_enabled && !wdpEnabled) ? " - INACTIVE: it needs WDP (?WDP,ON)" : "");
   Serial.printf("Channel       : %u  (region %s, channels 1-%u)\n", s_home, s_appliedCc, s_maxCh);
   if (strcmp(s_savedCc, s_appliedCc) != 0)
     Serial.printf("Saved region  : %s - applies at the next boot\n", s_savedCc);
@@ -784,13 +904,20 @@ static void printStatus() {
     Serial.println("State         : idle");
   }
   if (s_mode == M_IDLE) {
-    if (s_condSince && s_attempt >= cs::SEARCH_ATTEMPTS)
+    if (s_sched && s_attempt >= cs::SEARCH_ATTEMPTS)
       Serial.printf("Search        : all %u attempts made - ?CHSYNC,SEARCH to try again\n", (unsigned)cs::SEARCH_ATTEMPTS);
-    else if (s_condSince) {
-      const unsigned long due = s_condSince + cs::TRIGGER_STABLE_MS + cs::searchAttemptOffsetMs(s_attempt);
+    else if (s_sched && s_condSince && (long)(s_nextDue - now) > 0)
       Serial.printf("Search        : attempt %u of %u in %lu s\n", s_attempt + 1, (unsigned)cs::SEARCH_ATTEMPTS,
-                    (long)(due - now) > 0 ? (unsigned long)(due - now) / 1000UL : 0UL);
-    } else
+                    (unsigned long)(s_nextDue - now) / 1000UL);
+    else if (s_sched && s_condSince) {             // due: say what holds it, which nothing else prints ungated
+      const char *why = nullptr;
+      canSearchNow(&why);
+      Serial.printf("Search        : attempt %u of %u due, held: %s\n", s_attempt + 1,
+                    (unsigned)cs::SEARCH_ATTEMPTS, why ? why : "the next check (every 0.5 s)");
+    } else if (s_sched)
+      Serial.printf("Search        : not needed now (attempt %u of %u kept for %lu min in case it comes back)\n",
+                    s_attempt + 1, (unsigned)cs::SEARCH_ATTEMPTS, TRIGGER_RESET_MS / 60000UL);
+    else
       Serial.println("Search        : not needed (no known board missing, or another board leads)");
   }
   Serial.printf("[CHSYNC:EN=%d,CH=%u,MAXCH=%u,CC=%s,RANK=%u,PIN=%d,LEAD=%u,LRANK=%u,LPIN=%d,STATE=%s]\n",
@@ -803,6 +930,11 @@ static void operatorMove(const String &arg) {
   const int ch = arg.toInt();
   if (!s_enabled) { Serial.println("[CHSYNC] channel sync is OFF on this board - ?CHSYNC,ON first"); return; }
   if (!etmEnabled) { Serial.println("[CHSYNC] channel sync needs ETM (?ETM,ON) - every frame rides it"); return; }
+  if (!wdpEnabled) { Serial.println("[CHSYNC] channel sync needs WDP (?WDP,ON) - it is how boards know who leads"); return; }
+  if (chanSyncRadioAway()) {           // a JOIN full-band scan: the frames would go out on another channel
+    Serial.println("[CHSYNC] the radio is on another channel (a WiFi scan) - try again in a moment");
+    return;
+  }
   if (ch < 1 || ch > s_maxCh) {                      // s_maxCh is capped at 13 (chanSyncApplyRegionAtBoot)
     Serial.printf("[CHSYNC] channel %d is outside region %s (channels 1-%u)\n", ch, s_appliedCc, s_maxCh);
     return;
@@ -835,6 +967,7 @@ void processChanSyncCommand(const String &args) {
     s_enabled = (au == "ON");
     saveEnabled();
     if (!s_enabled) {
+      s_heldValid = false;
       if (s_mode == M_SEARCH) endSearch(nullptr);
       if (s_mode == M_MOVE && !s_mv.restarting) s_mode = M_IDLE;
       s_manualPending = false;
@@ -849,7 +982,16 @@ void processChanSyncCommand(const String &args) {
   if (au == "SEARCH") {
     if (!s_enabled) { Serial.println("[CHSYNC] channel sync is OFF on this board - ?CHSYNC,ON first"); return; }
     if (!etmEnabled) { Serial.println("[CHSYNC] channel sync needs ETM (?ETM,ON) - every frame rides it"); return; }
+    if (!wdpEnabled) { Serial.println("[CHSYNC] channel sync needs WDP (?WDP,ON) - it is how boards know who leads"); return; }
     if (s_mode != M_IDLE) { Serial.printf("[CHSYNC] busy (%s) - try again in a moment\n", stateName()); return; }
+    // Only a group's leader searches, as the trigger has it (chansync::shouldSearch). A follower judging what it found
+    // against itself can go to a group better than it but worse than its leader, alone, and leave its own group.
+    const View lv = look();
+    if (lv.best.id != (uint8_t)WCB_Number) {
+      Serial.printf("[CHSYNC] refused: WCB%u (rank %u) leads this group - run ?CHSYNC,SEARCH there\n",
+                    lv.best.id, lv.best.rank);
+      return;
+    }
     const char *why = nullptr;
     if (!wcbWifiCanHop(&why)) { Serial.printf("[CHSYNC] this board cannot leave the channel now: %s\n", why); return; }
     // Started from loop() once the command queue is quiet (this command is still in it, so not here).

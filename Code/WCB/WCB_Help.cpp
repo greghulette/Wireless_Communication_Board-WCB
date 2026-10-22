@@ -1049,11 +1049,11 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  that leads (NaviCore, else the lowest WCB number; a board joined"));
         Serial.println(F("  to an access point before either) moves everyone with it, and a"));
         Serial.println(F("  leader that misses a board it knows visits the other channels to"));
-        Serial.println(F("  find it and bring it back. ON by default. Requires ETM."));
+        Serial.println(F("  find it and bring it back. ON by default. Requires ETM and WDP."));
         Serial.println(F("\nCommands:"));
         Serial.println(F("  ?CHSYNC              Status, and a [CHSYNC:...] machine line"));
         Serial.println(F("  ?CHSYNC,ON | ,OFF    Take part or not (saved, live)"));
-        Serial.println(F("  ?CHSYNC,SEARCH       Search the other channels once, now"));
+        Serial.println(F("  ?CHSYNC,SEARCH       Search the other channels once (group leader)"));
         Serial.println(F("  ?CHSYNC,MOVE,<ch>    Move the whole mesh to channel <ch>"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - A board with an access point up, or joined to one, moves by"));

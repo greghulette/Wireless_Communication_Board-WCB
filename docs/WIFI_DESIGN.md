@@ -62,8 +62,9 @@ offering a way to brick the mesh with no symptom. Every entry point passes
 separates WiFi from the mesh — it moves `meshChannel` and the whole mesh together. A board with no interface up switches
 live; a board hosting an access point, or associated with one, saves the new channel and restarts, so the interface
 comes up there. And **JOIN follows its network**: with channel sync on, a JOIN board that cannot hear its network on the
-mesh channel also looks on every channel (a full-band scan at once, then 1, 2, 4, 8, 16 and 30 minutes after the network
-went missing, then every 30 minutes; about 1.5 s off the mesh each). Found on another channel, it moves the mesh there
+mesh channel also looks on every channel (a full-band scan at once - but not inside channel sync's 40 s boot grace,
+nor while the board is busy - then 1, 2, 4, 8, 16 and 30 minutes after the network went missing, then every 30
+minutes; about 1.5 s off the mesh each). Found on another channel, it moves the mesh there
 first (it is about to be pinned, so it leads), then calls `WiFi.begin` with the BSSID on that channel — unless a board it
 hears that is joined to another network outranks it, or the channel is outside the region, which it says once. With
 channel sync on, the off-mesh check above no longer settles the join for good: it starts the full-band scans over, so a
@@ -267,7 +268,9 @@ transfer would ACK the BEGIN and then move nothing.
 
 **Two clients at once** (`WS_MAX_CLIENTS`, httpd's `max_open_sockets`). A third
 connection still succeeds: `lru_purge_enable` closes the least recently used session
-to take it. Each session costs heap beyond its static 1.5 KB accumulator: its socket,
+to take it. Where a newcomer finds both of this file's slots still held, it takes one that is closing or failed
+first, then one not signed in, and only then the oldest signed-in one; httpd's own purge picks by last activity and is
+not ours to steer. Each session costs heap beyond its static 1.5 KB accumulator: its socket,
 TCP buffers and httpd's session state. With the AP up a classic ESP32 has about 17 KB
 of heap, and with three sessions a `?backup` streamed to them took it to within 48 bytes
 of empty (HIL tracker #111). It was three until 2026-10-07.
@@ -342,7 +345,7 @@ example's in `WCBClient`. Lines are newline-delimited UTF-8 as everywhere else o
 
 | Board sends | When |
 |---|---|
-| `[AUTH:REQUIRED]` | A session opens while a token is set; and for every line that session sends before it signs in. That line is dropped, never run. |
+| `[AUTH:REQUIRED]` | A session opens while a token is set; and for every line that session sends before it signs in, at most 2 owed at once (`WS_REQ_OWED_MAX`). That line is dropped, never run. A session that has not signed in 15 s after it opened is closed (`WS_SIGNIN_MS`, `[WS] closed N client(s) that did not sign in within 15 s`): it would otherwise hold one of the two slots for good. |
 | `[AUTH:OK]` | `?AUTH,<token>` matched: the session is signed in for its lifetime, gets the console and its lines run. With no token set, any `?AUTH,<anything>` is answered `[AUTH:OK]`, so a client can always send it. |
 | `[AUTH:FAIL]`, then a CLOSE (status 1008) | `?AUTH` did not match, or came within 1 s of a failed one on **any** session (each failure starts the second again). The session closes when the client echoes the CLOSE, or 1 s after. |
 
@@ -513,6 +516,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | Review fixes. §7: at most 2 `[AUTH:REQUIRED]` owed at once (a flooding client was owed up to 65535), a session not signed in within 15 s is closed, and a newcomer at full slots evicts a closing, failed or signed-out session before a signed-in one. §2: channel sync's JOIN full-band scans wait for the 40 s boot grace and an idle board; a scan running when `?WIFI` changes the mode is still finished and the radio put back; what channel sync reads (associated, AP up, can hop) is the running interface, not the saved mode. |
 | 2026-10-21 | — | §2, §3: channel sync ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)) is the one thing that moves the channel at runtime, the whole mesh with it (live, or by a restart with an interface up). JOIN follows its network: full-band scans on a schedule when the mesh-channel scan misses it, a MOVE to the channel it is found on, then `WiFi.begin` there with its BSSID; with channel sync on the off-mesh check no longer settles the join, and the drift warning is skipped while channel sync has the radio. |
 | 2026-10-21 | — | **§7 (new): the WebSocket token** (Greg: joining a router exposes the command channel to everyone on that network). `?WIFI,TOKEN,<token>` / `CLEAR` (NVS `wifi_cfg/token`), `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + a 1008 CLOSE, a 1 s lockout after any failure, signed-out sessions outside the tee and their lines dropped before the queue (`wsAdmit`). **JOIN requires a token**: a JOIN board with none keeps WiFi off at boot - a break for 7.0.1 JOIN boards, Greg's decision. §3, §6 (commands, NVS, the token ahead of the mode line in the chain), §6a and §9 (+5.4 KB flash, +~100 B static, no heap) follow; §7-§8 became §8-§9. §6a also: a console frame part-way out now finishes ahead of a queued PONG, which used to hold it until `WS_STUCK_MS` closed the client. Compiled both targets; not run on hardware. |
 | 2026-10-14 | `f5348c5` | §6a: `WS_HEAP_FLOOR` (8 KB) - no console output into lwIP below it; a session close httpd could not queue is retried every pass (full run `20261014-025548`: a stalled client starved W1's heap, the close was lost, the next client could not join). |

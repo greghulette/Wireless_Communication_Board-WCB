@@ -852,6 +852,13 @@ bool shouldTransmitPWM_Port(int portIdx, unsigned long currentValue) {
     return false;
 }
 
+// A zero lastTransmittedValue is shouldTransmitPWM_Port's "never sent": the next reading goes out. Written from loop()
+// while PWMTask (core 0) reads it; an aligned 32-bit store, and the worst a race costs is that one input is not resent
+// because PWMTask transmitted it in the same instant anyway.
+void pwmResendPassthrough() {
+    for (int i = 0; i < 5; i++) pwmStability[i].lastTransmittedValue = 0;
+}
+
 void processPWMPassthrough() {
     for (int i = 0; i < MAX_PWM_MAPPINGS; i++) {
         if (!pwmMappings[i].active) continue;

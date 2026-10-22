@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_212307ROCT2026                                  *****////
+///*****                                          Version 7.0.1_220215ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_212307ROCT2026";
+String SoftwareVersion = "7.0.1_220215ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1356,8 +1356,22 @@ bool chanSyncRestartPending() { return rebootPending || pwmRebootPending; }
 // Asked before channel sync takes the radio off the mesh channel. Every case is something a channel switch would cut
 // in half: an OTA session or a config pull with a peer on this channel, and a restart that is already pending (a push
 // is usually still arriving). forSearch adds what a 1.5 s absence would cost: commands still queued or arriving, ETM
-// commands awaiting an ACK (their retries would go out on the wrong channel), an ETM characterization.
-static const unsigned long CHSYNC_QUIET_MS = 1000;   // no command processed for this long counts as quiet
+// commands awaiting an ACK (their retries would go out on the wrong channel), an ETM characterization - and RC
+// passthrough in use: PWM (;P) and raw Kyber / raw-serial frames are unacknowledged and PWM is sent only on a change,
+// so one lost to a hop leaves a servo where the frame before it put it until the stick moves again.
+static const unsigned long CHSYNC_QUIET_MS    = 1000;   // no command processed for this long counts as quiet
+static const unsigned long CHSYNC_RC_QUIET_MS = 5000;   // no RC passthrough sent or heard for this long: not in use
+// The receive callback stamps an RC passthrough frame it hears (WiFi task: one store, nothing more); the counters
+// count the ones this board sends (PWMTask, the Kyber and raw-serial tasks). loop() compares them here.
+static volatile uint32_t chanSyncRcRxMs = 0;
+static bool chanSyncRcInUse() {
+  static unsigned long lastCount = 0, changedMs = 0;
+  const unsigned long now   = millis();
+  const unsigned long count = espnowPWMAttempts + espnowRawAttempts;
+  if (count != lastCount) { lastCount = count; changedMs = now | 1; }
+  const uint32_t rx = chanSyncRcRxMs;
+  return (changedMs && now - changedMs < CHSYNC_RC_QUIET_MS) || (rx && now - rx < CHSYNC_RC_QUIET_MS);
+}
 bool configPullJobActive();                          // defined with the config pull job, below
 bool chanSyncHostBusy(bool forSearch, const char **why) {
   const char *w = nullptr;
@@ -1368,6 +1382,7 @@ bool chanSyncHostBusy(bool forSearch, const char **why) {
     if (etmCharRunning || etmLoadRunning)       w = "an ETM characterization";
     else if (commandQueue && uxQueueMessagesWaiting(commandQueue)) w = "queued commands";
     else if (millis() - lastCommandProcessedMs < CHSYNC_QUIET_MS)  w = "commands still arriving";
+    else if (chanSyncRcInUse())                 w = "RC passthrough (PWM / Kyber / raw serial) in use";
     else {
       for (int i = 0; i < ETM_PENDING_MAX; i++)
         if (etmPendingTable[i].active) { w = "ETM commands awaiting an ACK"; break; }
@@ -5881,6 +5896,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     if (debugEnabled) { Serial.println("Received message from an unrelated WCB group, ignoring."); }
     return;
   }
+
+  // RC passthrough heard: this board is in use, and channel sync does not take its radio off the channel meanwhile
+  // (chanSyncRcInUse). One store; everything else about the frame is decided below, as before.
+  if (isPWMCommand || received.structTargetID[0] == 'K' || targetWCB == WCB_TARGET_KYBER ||
+      targetWCB == WCB_TARGET_RAW_SERIAL)
+    chanSyncRcRxMs = millis() | 1;
 
   // Kyber targeted forwarding
   if (received.structTargetID[0] == 'K') {

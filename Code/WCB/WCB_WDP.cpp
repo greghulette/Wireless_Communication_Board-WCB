@@ -387,6 +387,16 @@ void wdpTick() {
     wdpSendAdvert();
     wdpBootLeft--;
     wdpNextBootMs = now + 1300;
+    // Channel sync: one SOLICIT after the first boot advert, so every neighbor re-advertises (jittered,
+    // wdpArmSolicitedAdvert) and this board has their CHAN facts (TLV 0x14) within seconds, not at their next 60 s
+    // backstop: until then every key is derived, SYNC off, and the board takes itself for its group's leader
+    // (docs/CHANNEL_SYNC.md §2). After the first advert, not before it: the two boot adverts still to come repair the
+    // record of a WCB_Client older than 1.15.1, which takes a solicit for an empty advert (§3 of WDP_DESIGN.md).
+    static bool bootSolicited = false;
+    if (!bootSolicited) {
+      bootSolicited = true;
+      if (chanSyncEnabled()) wdpSendSolicit();
+    }
   }
   if ((long)(now - wdpNextAdvertMs) >= 0) {
     wdpSendAdvert();

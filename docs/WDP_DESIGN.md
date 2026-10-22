@@ -56,7 +56,7 @@ packet type) — the ESP‑NOW receive callback runs on the WiFi task and must n
 
 | Trigger | Count | Notes |
 |---|---|---|
-| Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce |
+| Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce. With channel sync on, the first is followed by one SOLICIT, so the neighbors' CHAN facts (`0x14`) arrive within seconds rather than at their next backstop ([`CHANNEL_SYNC.md`](CHANNEL_SYNC.md) §4); the two boot adverts after it repair the record of a `WCB_Client` older than 1.15.1, which takes a SOLICIT for an empty advert |
 | Periodic backstop | every 60 s | staggered per board (`WCB_Number`‑based phase) so co‑booted boards don't collide |
 | Solicited | 1× on hearing a SOLICIT (or local `?WDP,POLL`) | jittered 0–600 ms by board number so a fleet doesn't reply in lockstep; lets an operator refresh the whole mesh on demand |
 | Advert change | 1× + 1 re‑send 800 ms later | the payload is hashed every 500 ms; any change (a label, a capability, a device) goes out now |
@@ -411,6 +411,7 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-21 | **A boot SOLICIT with channel sync on**, after the first boot advert: every neighbor re-advertises (jittered), so channel sync has their CHAN facts long before its 40 s boot grace ends - without them every key is derived, SYNC off, and each board took itself for its group's leader. | — |
 | 2026-10-21 | Added TLV `0x14` **CHAN** — channel sync's channel, rank, PINNED/SYNC flags and region, in every advert ahead of the port labels, so in the change hash: associating, moving or `?CHSYNC,OFF` re-advertises within 500 ms. Decoded into `WdpNeighbor::hasChan` / `::chan` (`wdpNeighborGet` for channel sync); new `[WDPCH:...]` dump record, self first; `?WDP,<n>` shows it. Older peers skip it by length. Host test: `tests/wdp_wire_test.cpp` `test_chan`. See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md). | — |
 | 2026-09-28 | **A learned peer's late ACK promotes it.** `etmProcessAck` promoted a learned peer only for an ACK that matched a still-pending entry, so one that was only ever broadcast to, whose ACK usually lands after the configured boards resolved the entry, was never counted or retried (tracker #96). | `cc231ba` |
 | 2026-09-27 | **The advert stagger uses the board's own number.** `setup()` loaded `WCB_Number` after `wdpBegin()`, so the backstop phase was computed from the default 1 and every board advertised in WCB1's slot, in lockstep when powered together. `WCB_Number` now loads first; the same move fixes saved PWM outputs to W1 reloading as local ports (WCB coverage re-scan #1, #16). | `cc2a8a9` |
