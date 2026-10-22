@@ -186,10 +186,17 @@ static void heapFigures(unsigned *free_, unsigned *largest, unsigned *minimum) {
   *minimum = (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
 }
 
+// Milliseconds from stamp t to now, 0 when t is later. The completion and first-try stamps are written on other tasks
+// (the send callback on the WiFi task, a send from any task), so one can land after loop() read now, and millis() | 1
+// can be a ms ahead of it besides. An unsigned now - t then wrapped to ~49 days: "[MESH] ESP-NOW transmit stalled
+// 4294967s" printed the moment frames completed again after a wedge (HIL run 20261022-123743), and wedgedNow could
+// have called a healthy radio wedged.
+static uint32_t msSince(uint32_t now, uint32_t t) { return (int32_t)(now - t) > 0 ? now - t : 0; }
+
 static void watchStall(uint32_t d, uint32_t now) {
   if (d != s_dropsSeen) { s_dropsSeen = d; s_lastDropMs = now; }
   const uint32_t done     = s_lastDoneMs.load();
-  const uint32_t idle     = done ? now - done : now;   // none since boot: the whole uptime
+  const uint32_t idle     = done ? msSince(now, done) : now;   // none since boot: the whole uptime
   const bool     dropping = s_lastDropMs && (uint32_t)(now - s_lastDropMs) < ESPNOW_STALL_REPORT_MS;
   if (dropping && idle >= ESPNOW_STALL_REPORT_MS) {
     if (!s_stallSinceMs) {
@@ -203,13 +210,13 @@ static void watchStall(uint32_t d, uint32_t now) {
       heapFigures(&f, &l, &m);
       Serial.printf("[MESH] ESP-NOW transmit stalled %lus: no frame completed while frames are given up "
                     "(in flight %d, heap free %u, largest block %u, min since boot %u)%s\n",
-                    (unsigned long)((now - s_stallSinceMs) / 1000), s_inFlight.load(), f, l, m,
+                    (unsigned long)(msSince(now, s_stallSinceMs) / 1000), s_inFlight.load(), f, l, m,
                     (s_stallSim || s_sim.load()) ? SIM_TAG : "");
     }
   } else if (s_stallSinceMs && idle < ESPNOW_STALL_REPORT_MS) {
     // A wedge the watch below found says its own end, with what ended it.
     if (!s_wedgeLevel)
-      Serial.printf("[MESH] ESP-NOW transmit recovered after %lus\n", (unsigned long)((now - s_stallSinceMs) / 1000));
+      Serial.printf("[MESH] ESP-NOW transmit recovered after %lus\n", (unsigned long)(msSince(now, s_stallSinceMs) / 1000));
     s_stallSinceMs = 0;
   }
 }
@@ -228,10 +235,10 @@ static void reportDrops(uint32_t d, uint32_t now) {
 
 static bool wedgedNow(uint32_t now) {
   const uint32_t first = s_firstTryMs.load();
-  return first && s_triesSinceDone.load() >= ESPNOW_WEDGE_MIN_TRIES && (uint32_t)(now - first) >= ESPNOW_WEDGE_MS;
+  return first && s_triesSinceDone.load() >= ESPNOW_WEDGE_MIN_TRIES && msSince(now, first) >= ESPNOW_WEDGE_MS;
 }
 
-static unsigned long wedgeSecs(uint32_t now) { return (unsigned long)((now - s_wedgeStartMs) / 1000); }
+static unsigned long wedgeSecs(uint32_t now) { return (unsigned long)(msSince(now, s_wedgeStartMs) / 1000); }
 
 static uint8_t watchWedge(bool hold, const char *noWifiWhy, uint32_t now) {
   const char *tag = s_wedgeSim ? SIM_TAG : "";
@@ -244,6 +251,7 @@ static uint8_t watchWedge(bool hold, const char *noWifiWhy, uint32_t now) {
     s_wedgeLevel = 0;
     s_wedgeRemedy = 0;
     s_initFailed = false;
+    s_stallSinceMs = 0;   // the stall it began as ended with it: this line says so, not a second "recovered" line
     return 0;
   }
   if (hold) return 0;
