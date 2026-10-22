@@ -58,6 +58,14 @@ extern String      wcbWifiApPass;     // >= 8 chars or the AP refuses to start
 extern String      wcbWifiJoinSsid;
 extern String      wcbWifiJoinPass;
 
+// ---- WebSocket token (docs/WIFI_DESIGN.md §7) ------------------------------
+// What a WebSocket session sends as ?AUTH,<token> before anything it sends runs or any console output reaches it.
+// "" = none. JOIN does not start without one. A char array, not a String: a setter whose String allocation failed
+// would store "" - a cleared token - and say nothing (CLAUDE.md rule 14).
+static const size_t WCB_WIFI_TOKEN_MIN = 8;
+static const size_t WCB_WIFI_TOKEN_MAX = 32;
+extern char        wcbWifiToken[WCB_WIFI_TOKEN_MAX + 1];
+
 // ---- Lifecycle ------------------------------------------------------------
 // Load settings from NVS. Call BEFORE wcbWifiStart().
 void loadWifiSettings();
@@ -85,5 +93,7 @@ String wcbWifiIP();
 //   ?WIFI                       status (mode, SSID, IP, channel, free heap)
 //   ?WIFI,OFF                   disable (next boot)
 //   ?WIFI,AP,<ssid>,<pass>      host an AP  (next boot)
-//   ?WIFI,JOIN,<ssid>,<pass>    join an AP  (next boot)
+//   ?WIFI,JOIN,<ssid>,<pass>    join an AP  (next boot; needs a token)
+//   ?WIFI,TOKEN,<token>         the WebSocket token (sessions opened from then on)
+//   ?WIFI,TOKEN,CLEAR           no token
 void processWifiCommand(const String &args);

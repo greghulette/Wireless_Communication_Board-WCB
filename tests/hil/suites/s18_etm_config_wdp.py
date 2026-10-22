@@ -24,7 +24,8 @@ from hil.navicore import NaviCore
 from hil.runner import Skip, test
 from hil.wcb import WCB
 from suites.common import (FORBIDDEN_MESH_IDS, Console, Watch, absent_wcbs, config_guard, link, marker, mesh_params,
-                           nonce, padded, probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
+                           nonce, padded, probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb,
+                           ws_token)
 
 ETM_KEYS = ("TIMEOUT", "HB", "MISS", "BOOT", "COUNT", "DELAY")
 
@@ -1884,12 +1885,13 @@ def mgmt_input_line_gating(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, free heap", needs=["wcb1"], links=[])
+@test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, the WebSocket token as set or none, free heap", needs=["wcb1"], links=[])
 def wifi_status(bench):
     """wcbWifiPrintStatus (WCB_WiFi.cpp). Read-only, so it runs in whatever mode the board is in (W1 hosts an AP on the
     bench); the mode changes are wifi.off_and_back and wifi.join_w2_ap (opt-in wifi_modes) and the WebSocket endpoint
     wifi.pc_joins_ap_ws (opt-in wifi_pc, attended), all in s28_wifi.py. The ?WIFI line is emitted with the credentials and is not in the chain the harness
-    compares, so the mode is read from the block itself. The SSID is printed, the password only as 'set'."""
+    compares, so the mode is read from the block itself. The SSID is printed, the password only as 'set', and the
+    WebSocket token only as 'set' or 'none' - set exactly when the chain carries ?WIFI,TOKEN (docs/WIFI_DESIGN.md §7)."""
     w = usb_wcb(bench)
     ch = (token(bench.config_tokens(1), "?WCBCH,") or "?WCBCH,?").split(",")[1]
     out = [x.rstrip() for x in w.run("?WIFI")]
@@ -1925,6 +1927,13 @@ def wifi_status(bench):
         bad.append("no WS endpoint line")
     if not any(re.match(r"^Free heap     : \d+ bytes \(min since boot \d+\)$", x) for x in out):
         bad.append("no Free heap line")
+    tok = next((x for x in out if x.startswith("Token         : ")), None)
+    want = "set" if ws_token(bench.config_tokens(1)) else "none"
+    if tok is None:
+        bad.append("no Token line")
+    elif tok.split(" : ", 1)[1].split(" ")[0] != want:
+        bad.append(f"the Token line says {tok.split(' : ', 1)[1]!r}, but the chain {'carries' if want == 'set' else 'has no'} "
+                   f"?WIFI,TOKEN")
     bench.note("W1 WiFi: " + "; ".join(x.strip() for x in out if x.startswith(("Mode", "Interface", "WS endpoint", "Radio channel"))))
     assert not bad, "; ".join(bad)
 

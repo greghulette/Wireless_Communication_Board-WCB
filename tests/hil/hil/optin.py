@@ -204,16 +204,19 @@ OPT_INS = {
     "wifi_modes": {
         "title": "WiFi mode changes on W1",
         "what": "W1 turns its access point off and back on, joins W2's access point and returns to its own, brings its "
-                "access point up under its derived name, loses W2's access point and rejoins it, and looks for an absent "
-                "network: up to ten W1 and two W2 reboots across its tests, and W1's WiFi is unreachable meanwhile.",
+                "access point up under its derived name, loses W2's access point and rejoins it, looks for an absent "
+                "network, and has a JOIN with no WebSocket token refused at boot: up to twelve W1 and two W2 reboots "
+                "across its tests, and W1's WiFi is unreachable meanwhile. Every JOIN gets a throwaway token first, "
+                "taken away after.",
         "why": "changes W1's WiFi mode and reboots it four times",
         "estimate_s": 60,
     },
     "wifi_pc": {
         "title": "PC joins W1's access point (attended)",
-        "what": "For each of six tests a WiFi adapter on the PC joins W1's access point for about 30 s, uses the WebSocket "
-                "endpoint (line framing, ?backup, three client slots, a small OTA session with ota_erase, DHCP with no "
-                "gateway), then returns to its network. The spare adapter is used when there is one; with a single "
+        "what": "For each of its tests a WiFi adapter on the PC joins W1's access point for about 30 s, uses the "
+                "WebSocket endpoint (line framing, ?backup, two client slots, a small OTA session with ota_erase, DHCP "
+                "with no gateway, the WebSocket token's sign-in with a throwaway token on W1), then returns to its "
+                "network. The spare adapter is used when there is one; with a single "
                 "adapter the PC is offline meanwhile. The AP password sits in a temporary Windows profile that is "
                 "deleted after.",
         "why": "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard",

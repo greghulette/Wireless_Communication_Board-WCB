@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_212149ROCT2026                                  *****////
+///*****                                          Version 7.0.1_212304ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -201,7 +201,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_212149ROCT2026";
+String SoftwareVersion = "7.0.1_212304ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -3791,6 +3791,10 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // passphrase would silently fail closed at boot — the board would come up with
   // no AP and nothing saying why. OFF is emitted too, so restoring a backup taken
   // with WiFi off actively turns it off rather than leaving whatever was there.
+  // The WebSocket token goes first, when one is set: a restore then has it before ?WIFI,JOIN, which warns without one,
+  // and before the reboot that starts JOIN, which refuses to without one (docs/WIFI_DESIGN.md §7). A chain from a board
+  // with none leaves the target's token as it is.
+  if (wcbWifiToken[0]) emit("WIFI,TOKEN," + String(wcbWifiToken), true);
   if (wcbWifiMode == WCB_WIFI_AP)
     emit("WIFI,AP," + wcbWifiApSsid + "," + wcbWifiApPass, true);
   else if (wcbWifiMode == WCB_WIFI_JOIN)
@@ -6436,6 +6440,10 @@ void processLocalCommand(const String &message) {
         stopTimerSequence();
         return;
     }
+
+    // --- ?AUTH --- a WebSocket session's sign-in, answered by the session layer (WCB_WS.cpp wsAdmit) and never queued.
+    // Here it came from USB or the mesh, where there is nothing to sign in to: a no-op, never "Unknown command".
+    if (rootUpper == "AUTH") return;
 
     // --- ?DEBUG,... ---
     if (rootUpper == "DEBUG") {

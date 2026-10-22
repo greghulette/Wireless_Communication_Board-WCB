@@ -33,6 +33,15 @@
 //  plus the prefix. A 384-byte cap would truncate every DATA frame at the
 //  line-too-long guard and the transfer would ACK the BEGIN and then move
 //  nothing. Keep this at or above the largest line the USB path accepts.
+//
+//  ── THE TOKEN (docs/WIFI_DESIGN.md §7) ─────────────────────────────────────
+//  With a token set (?WIFI,TOKEN) a session is sent [AUTH:REQUIRED] when it
+//  opens, and until it sends ?AUTH,<token> it is sent no console output and
+//  every other line it sends is dropped unrun and answered [AUTH:REQUIRED].
+//  ?AUTH is answered here, on the httpd task, and never reaches the dispatcher:
+//  [AUTH:OK] signs the session in for its lifetime; [AUTH:FAIL] is followed by a
+//  CLOSE, and for 1 s after any failure every ?AUTH fails. With no token every
+//  session is signed in from its open, and ?AUTH answers [AUTH:OK].
 // ════════════════════════════════════════════════════════════════════════════
 
 #include <Arduino.h>
@@ -46,9 +55,13 @@ bool wcbWsBegin();
 // buffered output to the sockets. Never blocks.
 void wcbWsService();
 
-// True when at least one client is connected. Used by the Serial tee below to
-// skip all work in the overwhelmingly common case of nobody being attached.
+// True when at least one signed-in client is connected. Used by the Serial tee
+// below to skip all work in the overwhelmingly common case of nobody being attached.
 bool wcbWsSinkLive();
+
+// The token sessions sign in with ("" = none). Copied, so the caller's buffer may change after. Applies to sessions
+// opened after the call; a session already signed in stays signed in. Call from loop() or setup().
+void wcbWsSetToken(const char *token);
 
 // Output tee, called from WCBSerial::write() so a WebSocket client sees exactly
 // what a USB console would. MUST NOT print, allocate or block: it runs inside

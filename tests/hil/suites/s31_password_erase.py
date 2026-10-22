@@ -30,7 +30,8 @@ import time
 from hil.checkpoint import redact_text, redact_token
 from hil.runner import Skip, test
 from hil.wcb import WCB, chain_crc, group_tokens, parse_pull_line
-from suites.common import Console, Watch, config_guard, link, marker, nonce, padded, prime, snapshot, token, usb_wcb
+from suites.common import (Console, Watch, config_guard, link, marker, nonce, padded, prime, snapshot, token, usb_wcb,
+                           wifi_mode_token)
 from suites.s12_serial_input import _da_forget, _da_scrub, _da_types
 from suites.s18_etm_config_wdp import _chains, _live_chars, _sent
 from suites.s27_identity_destructive import _learned_peers
@@ -188,12 +189,12 @@ def _defaults_problems(banner, toks, base, da_after, da_before):
     p += [f"after the erase the chain lacks {x}" for x in must if x not in toks]
     left = [redact_token(t) for t in toks if t.upper().startswith(
         ("?LABEL,", "?ALIAS,", "?MAESTRO,", "?WLED,", "?HCR,", "?MP3,", "?DFP,", "?SEQ,", "?VAR,", "?MAP,", "?CONTROLLER,",
-         "?WDP,OFF", "?WDP,AUTOJOIN,OFF", "?KYBER,LOCAL"))]
+         "?WDP,OFF", "?WDP,AUTOJOIN,OFF", "?KYBER,LOCAL", "?WIFI,TOKEN,"))]
     if left:
         p.append(f"after the erase the chain still holds {left}")
     if token(toks, "?EPASS,") == token(base, "?EPASS,"):
         p.append("the mesh password is unchanged by the erase (expected the firmware default, unless the bench uses it)")
-    if token(toks, "?WIFI,") != "?WIFI,OFF":
+    if wifi_mode_token(toks) != "?WIFI,OFF":
         p.append("after the erase the WiFi settings are not back to OFF (F8)")
     if any(x.startswith("[WIFI] SoftAP") for x in banner):
         p.append("after the erase the board still brought its access point up (F8)")

@@ -368,10 +368,10 @@ def harness_info(root):
 
 
 # ---------------------------------------------------------------------------- secrets
-# The backup chain carries the ESP-NOW password (EPASS,<pass>, WCB.ino collectConfigCommands) and the WiFi network and
-# passphrase (WIFI,AP,<ssid>,<pass> / WIFI,JOIN,<ssid>,<pass>). The first character is the function identifier, which
-# printBackupConfig can flip mid-chain, so it is matched as any character.
-_SECRET = re.compile(r"^(.EPASS,?|.WIFI,(?:AP|JOIN),)(.*)$", re.I | re.S)
+# The backup chain carries the ESP-NOW password (EPASS,<pass>, WCB.ino collectConfigCommands), the WiFi network and
+# passphrase (WIFI,AP,<ssid>,<pass> / WIFI,JOIN,<ssid>,<pass>) and the WebSocket token (WIFI,TOKEN,<token>). The first
+# character is the function identifier, which printBackupConfig can flip mid-chain, so it is matched as any character.
+_SECRET = re.compile(r"^(.EPASS,?|.WIFI,(?:AP|JOIN|TOKEN),)(.*)$", re.I | re.S)
 
 
 def redact_token(t):
@@ -414,9 +414,10 @@ def _hash_repl3(m):
 # The same secrets inside free text: a test's failure detail (an ExpectTimeout's last-lines tail around ?backup,
 # ?config or a boot banner), a config diff, a resume block. The token payload runs to '^', the end of the line, or a
 # quote closing a Python list repr. ?config and the boot banner print "Password: <pw>" / "ESP-NOW Password: <pw>"
-# (WCB.ino printConfigInfo, setup); the SBUS controller's cfg JSON carries its WiFi networks in "wifiNets".
+# (WCB.ino printConfigInfo, setup); the SBUS controller's cfg JSON carries its WiFi networks in "wifiNets". A sign-in
+# line a test sent, ?AUTH,<token> (hil/ws.py), carries the WebSocket token as WIFI,TOKEN does.
 _SECRET_TEXT = (
-    (re.compile(r"((?<![A-Za-z0-9])(?:EPASS,|EPASS(?!,)|WIFI,(?:AP|JOIN),))"
+    (re.compile(r"((?<![A-Za-z0-9])(?:EPASS,|EPASS(?!,)|WIFI,(?:AP|JOIN|TOKEN),|AUTH,))"
                 r"((?!<redacted:)(?:(?!['\"](?:[,\])}]|[\r\n]|$))[^\^\r\n])+)", re.I), _hash_repl(1, 2)),
     # "Password: <pw>" (the ETM status, WCB.ino) and "ESP-NOW password updated to: <pw>" (both ?EPASS setters echo the
     # new value). A password may hold spaces, so the value runs to the end of the line.

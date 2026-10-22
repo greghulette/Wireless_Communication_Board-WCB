@@ -57,7 +57,7 @@ def shown(text, cap=160):
 
 
 class NcWs:
-    def __init__(self, ip, name="ncws", log=None, port=80, timeout=5.0, rcvbuf=None):
+    def __init__(self, ip, name="ncws", log=None, port=80, timeout=5.0, rcvbuf=None, token=None):
         self.name, self.ip = name, ip
         self.port = f"ws://{ip}/ws" if port == 80 else f"ws://{ip}:{port}/ws"
         self._raw_log = log
@@ -73,7 +73,8 @@ class NcWs:
         self._wlock = threading.Lock()
         self._stop = threading.Event()
         self._paused = threading.Event()
-        self.ws = WsClient(ip, port=port, timeout=timeout, rcvbuf=rcvbuf)
+        # token: NaviCore's WebSocket token, when it has one - the client signs in only if NaviCore asks (hil/ws.py).
+        self.ws = WsClient(ip, port=port, timeout=timeout, rcvbuf=rcvbuf, token=token)
         self.ws.sock.settimeout(timeout)
         self._thread = threading.Thread(target=self._run, name=f"rx-{name}", daemon=True)
         self._thread.start()

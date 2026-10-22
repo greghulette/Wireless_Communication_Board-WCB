@@ -2,7 +2,12 @@
 the board's console output comes back as text frames. Standard library only, like the rest of the harness (pyserial is
 its one dependency, docs/HIL_TESTING.md). Client frames are masked, as the RFC requires; the board's are not.
 WsEndpoint is the other end: a stand-in board endpoint on a loopback address that can vanish the way an access point
-does when its board restarts."""
+does when its board restarts.
+
+The token (docs/WIFI_DESIGN.md §7; WCB_WS.cpp wsAdmit): a board with one set says [AUTH:REQUIRED] when a session opens,
+and runs nothing and mirrors nothing to it until it sends ?AUTH,<token> and is answered [AUTH:OK]; a wrong one is
+answered [AUTH:FAIL] and a CLOSE (1008). WsClient(token=...) signs in when the board asks, and only then: a board that
+does not ask is never sent the token. The token never goes into a message."""
 import base64
 import hashlib
 import os
@@ -11,6 +16,14 @@ import sys
 import struct
 import threading
 import time
+
+AUTH_REQUIRED, AUTH_OK, AUTH_FAIL = "[AUTH:REQUIRED]", "[AUTH:OK]", "[AUTH:FAIL]"
+AUTH_LINES = (AUTH_REQUIRED, AUTH_OK, AUTH_FAIL)
+CLOSE_POLICY = b"\x03\xf0"          # the CLOSE status a failed sign-in is sent: 1008, policy violation (RFC 6455 7.4.1)
+
+
+class AuthFailed(ConnectionError):
+    """The board answered ?AUTH with [AUTH:FAIL]: a wrong token, or any ?AUTH within 1 s of a failed one."""
 
 
 def frame(payload: bytes, opcode=0x1, mask=None):
@@ -57,8 +70,9 @@ class WsClient:
     """origin: an Origin header to send (Intellex's /_link refuses a foreign one and allows none). Binary frames -
     Intellex relays every byte from the board as one - are kept whole in self.raw and decoded into self.text too.
     rcvbuf: a receive buffer size set before connecting, so a client that stops reading fills its window within a few
-    KB (hil/ncws.py pause(); Windows otherwise grows the window far beyond what a test streams)."""
-    def __init__(self, host, port=80, path="/ws", timeout=5.0, origin=None, rcvbuf=None):
+    KB (hil/ncws.py pause(); Windows otherwise grows the window far beyond what a test streams).
+    token: sign in with it if the board asks (sign_in_if_asked, after the handshake); AuthFailed if it is refused."""
+    def __init__(self, host, port=80, path="/ws", timeout=5.0, origin=None, rcvbuf=None, token=None, auth_wait=1.0):
         if rcvbuf:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
@@ -90,6 +104,13 @@ class WsClient:
         self.text_frames = []      # each text frame's payload as sent (self.text decodes with errors="replace")
         self.pongs = []            # each PONG's payload, in order
         self.close_frames = []     # each CLOSE frame's payload the peer sent
+        self.auth_lines = []       # the [AUTH:...] lines sign_in took out of self.text, in order
+        if token is not None:
+            try:
+                self.sign_in_if_asked(token, wait=auth_wait, timeout=timeout)
+            except OSError:
+                self.sock.close()
+                raise
 
     def send_text(self, s: str):
         self.sock.sendall(frame(s.encode()))
@@ -109,29 +130,81 @@ class WsClient:
                 raise ConnectionError("the connection closed")
             self.buf += chunk
 
+    def _read_one(self, timeout):
+        """Read one frame into the fields read_until fills -> False when none came in `timeout` s or it was a CLOSE."""
+        self.sock.settimeout(max(0.05, timeout))
+        try:
+            op, payload = self._frame()
+        except socket.timeout:
+            return False
+        if op == 0x1:
+            self.text_frames.append(payload)
+            self.text += payload.decode(errors="replace")
+        elif op == 0x2:
+            self.raw += payload
+            self.text += payload.decode(errors="replace")
+        elif op == 0x9:
+            self.sock.sendall(frame(payload, opcode=0xA))
+        elif op == 0xA:
+            self.pongs.append(payload)
+        elif op == 0x8:
+            self.close_frames.append(payload)
+            return False
+        return True
+
     def read_until(self, needle: str, timeout=5.0):
         """Collect text frames into self.text until `needle` is in it or the time is up; returns the text so far."""
         end = time.monotonic() + timeout
         while needle not in self.text and time.monotonic() < end:
-            self.sock.settimeout(max(0.1, end - time.monotonic()))
-            try:
-                op, payload = self._frame()
-            except socket.timeout:
-                break
-            if op == 0x1:
-                self.text_frames.append(payload)
-                self.text += payload.decode(errors="replace")
-            elif op == 0x2:
-                self.raw += payload
-                self.text += payload.decode(errors="replace")
-            elif op == 0x9:
-                self.sock.sendall(frame(payload, opcode=0xA))
-            elif op == 0xA:
-                self.pongs.append(payload)
-            elif op == 0x8:
-                self.close_frames.append(payload)
+            if not self._read_one(max(0.1, end - time.monotonic())):
                 break
         return self.text
+
+    def _take_auth(self):
+        """Move every whole [AUTH:...] line out of self.text (and its frame out of text_frames) into auth_lines."""
+        keep = []
+        for line in self.text.splitlines(keepends=True):
+            if line.strip() in AUTH_LINES and line.endswith(("\n", "\r")):
+                self.auth_lines.append(line.strip())
+            else:
+                keep.append(line)
+        self.text = "".join(keep)
+        self.text_frames = [f for f in self.text_frames if f.decode(errors="replace").strip() not in AUTH_LINES]
+
+    def sign_in(self, token, timeout=5.0):
+        """Send ?AUTH,<token> and read until it is answered: returns on [AUTH:OK], raises AuthFailed on [AUTH:FAIL] and
+        ConnectionError when nothing answers. A board with no token answers [AUTH:OK] to any ?AUTH. The [AUTH:...] lines
+        go to auth_lines; anything else read meanwhile stays in text."""
+        start = len(self.text)
+        self.send_text(f"?AUTH,{token}\n")
+        end = time.monotonic() + timeout
+        while True:
+            new = self.text[start:]
+            if AUTH_FAIL in new:
+                self._take_auth()
+                raise AuthFailed("the board answered ?AUTH with [AUTH:FAIL]")
+            if AUTH_OK in new:
+                self._take_auth()
+                return
+            left = end - time.monotonic()
+            if left <= 0 or self.close_frames:
+                raise ConnectionError(f"?AUTH was not answered within {timeout:g} s")
+            self._read_one(min(0.3, left))
+
+    def sign_in_if_asked(self, token, wait=1.0, timeout=5.0):
+        """Sign in if the board says [AUTH:REQUIRED] in its first frame, read within `wait` s of the open -> True when
+        it did. A board that sends anything else first, or nothing, is not asking: it is never sent the token."""
+        end = time.monotonic() + wait
+        while AUTH_REQUIRED not in self.text and time.monotonic() < end:
+            before = len(self.text)
+            if not self._read_one(end - time.monotonic()):
+                break
+            if len(self.text) > before and AUTH_REQUIRED not in self.text:
+                return False                    # console output: a board that is not asking
+        if AUTH_REQUIRED not in self.text:
+            return False
+        self.sign_in(token, timeout=timeout)
+        return True
 
     def close(self):
         try:
@@ -172,10 +245,15 @@ class WsEndpoint:
 
     For intellex.reconnect_idle_gate it can also stall the way an access point does while its board erases flash for an
     OTA: close_listener() refuses new connects (the probe fails) while the open connections are still served, and
-    trickle() sends a byte frame on each every `period` s - traffic, the proof of life Intellex's idle gate trusts."""
+    trickle() sends a byte frame on each every `period` s - traffic, the proof of life Intellex's idle gate trusts.
 
-    def __init__(self, host="127.0.0.2", port=80, pong='{"type":"PONG","version":"v-endpoint"}'):
-        self.host, self.port, self.pong = host, port, pong
+    token: speak the WCB's sign-in (module docstring; WCB_WS.cpp wsAdmit) - [AUTH:REQUIRED] on the open and for each line
+    sent before ?AUTH,<token>, [AUTH:OK], or [AUTH:FAIL] and a 1008 CLOSE; with none, ?AUTH answers [AUTH:OK]. Every
+    text line a connection sends is kept in `received`, so a check can see what was (never) sent."""
+
+    def __init__(self, host="127.0.0.2", port=80, pong='{"type":"PONG","version":"v-endpoint"}', token=None):
+        self.host, self.port, self.pong, self.token = host, port, pong, token
+        self.received = []
         self.accepted = 0
         self.upgraded = 0
         self._conns = []
@@ -250,6 +328,13 @@ class WsEndpoint:
             with self._lock:
                 self.upgraded += 1
                 self._live.append((conn, slock))
+            authed = not self.token
+
+            def say(line):
+                with slock:
+                    conn.sendall(server_frame((line + "\r\n").encode()))
+            if not authed:
+                say(AUTH_REQUIRED)
             while not self._stopped.is_set():
                 if self._silent.is_set():
                     time.sleep(0.1)             # hold it open; read nothing, answer nothing
@@ -273,9 +358,26 @@ class WsEndpoint:
                     with slock:
                         conn.sendall(server_frame(payload[:2], opcode=0x8))
                     return
-                elif op == 0x1 and payload.strip() == b'{"type":"PING"}':
-                    with slock:
-                        conn.sendall(server_frame((self.pong + "\n").encode()))
+                elif op == 0x1:
+                    for raw in payload.decode(errors="replace").replace("\r", "\n").split("\n"):
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        self.received.append(line)
+                        if line.upper() == "?AUTH" or line.upper().startswith("?AUTH,"):
+                            if authed or line[6:] == self.token:
+                                authed = True
+                                say(AUTH_OK)
+                            else:
+                                say(AUTH_FAIL)
+                                with slock:
+                                    conn.sendall(server_frame(CLOSE_POLICY, opcode=0x8))
+                                return
+                        elif not authed:
+                            say(AUTH_REQUIRED)
+                        elif line == '{"type":"PING"}':
+                            with slock:
+                                conn.sendall(server_frame((self.pong + "\n").encode()))
         except OSError:
             return
         finally:

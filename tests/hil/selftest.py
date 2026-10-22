@@ -101,8 +101,8 @@ GOLDEN_RESULTS = [
     ("pwm.out", "PWM out", "PASS", "", 65.0),
 ]
 
-SECRETS = ("hunter2", "sekrit99", "DomeNet")
-CONFIG = ["?HW,24", "?WCB,1", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2", "?CMDCHAR,;"]
+SECRETS = ("hunter2", "sekrit99", "DomeNet", "domelock77")
+CONFIG = ["?HW,24", "?WCB,1", "?WIFI,TOKEN,domelock77", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2", "?CMDCHAR,;"]
 
 
 # ---------------------------------------------------------------------------- fakes
@@ -598,6 +598,8 @@ def t_redaction(tmp):
     w = r("?WIFI,AP,DomeNet,sekrit99")
     assert w.startswith("?WIFI,AP,<redacted:") and "DomeNet" not in w and "sekrit99" not in w
     assert r("?WIFI,JOIN,Net,pw").startswith("?WIFI,JOIN,<redacted:")
+    tk = r("?WIFI,TOKEN,domelock77")
+    assert tk.startswith("?WIFI,TOKEN,<redacted:") and "domelock77" not in tk and r(tk) == tk, tk
     assert r("?WIFI,OFF") == "?WIFI,OFF" and r("?HW,24") == "?HW,24"
     assert r("?EPASS,hunter2") == e and r("?EPASS,hunter3") != e
     # a paused run's checkpoint and report carry the redacted form only
@@ -611,7 +613,7 @@ def t_redaction(tmp):
         leaked = [s for s in SECRETS if s in text]
         assert not leaked, f"{name} contains {leaked}"
     toks = ck.data["config_ref"]["tokens"]["1"]
-    assert e in toks and w in toks
+    assert e in toks and w in toks and tk in toks
     # the resume's config comparison works on the redacted forms, and its diff shows only those
     old = resume.read_config
     try:
@@ -1584,8 +1586,12 @@ def t_redaction_free_text(tmp):
                  "last lines:\n    ESP-NOW password updated to: hunter2", "ESP-NOW Password updated to: x hunter2",
                  "last lines:\n    Password: DomeNet sekrit99\n    ;S0marker",
                  "probe2: 'MESH JOIN ID=11 OCT2=AB OCT3=CD QTY=9 CHAN=1 CHK=1 TEMP=1 TYPE=HILProbe PASS=hunter2' -> "
-                 "ERR already joined"):
+                 "ERR already joined",
+                 "sent '?AUTH,domelock77' -> no answer", "?HW,24^?WIFI,TOKEN,domelock77^?WIFI,OFF",
+                 "W1: missing ['?WIFI,TOKEN,domelock77'] / extra []"):
         assert not any(s in rt(text) for s in SECRETS), rt(text)
+    for text in ("[AUTH:REQUIRED]", "[AUTH:OK]", "[AUTH:FAIL]", "Token         : set", "OAuth,x"):
+        assert rt(text) == text, f"not a secret: {text!r} -> {rt(text)!r}"
     assert "extra ['?EPASS,<redacted:" in rt("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']")
     assert rt("AP password   : set") == "AP password   : set" and rt("?WIFI,OFF") == "?WIFI,OFF"
     assert rt("PASS: 3, FAIL: 0") == "PASS: 3, FAIL: 0", "a status count is not a password"
@@ -2280,12 +2286,19 @@ GATED = {
                                                 "on, and reboots each board twice"),
     "wifi.join_absent_ssid_keeps_mesh": ("wifi_modes", "points W1's JOIN at a network nobody hosts for about 70 s and "
                                                        "reboots W1 twice"),
+    "wifi.join_needs_token": ("wifi_modes", "saves a JOIN with no token on W1 and reboots it twice; W1's WiFi is off in "
+                                            "between"),
+    "ncmesh.tx_watchdog_reboot": ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s"),
+    "intellex.wifi_wizard_terminal_via_navicore": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's "
+                                                                    "access point for about 30 s"),
     "input.usb_line_cap_32k": ("wifi_modes", "turns W1's access point off for one boot and reboots it twice"),
     "etm.seq_wrap": ("etm_seq_wrap", "floods the mesh with about 65,000 JSON broadcasts from W1 for several minutes "
                                      "and reboots W2"),
     **{t: ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard")
        for t in ("wifi.pc_joins_ap_ws", "ws.line_framing", "ws.backup_over_ws", "ws.client_slots",
-                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released", "ws.drop_reports")},
+                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released", "ws.drop_reports",
+                 "ws.burst_keeps_live_client", "ws.ping_pong_and_close", "ws.stalled_client_costs_nothing",
+                 "ws.token_signed_out", "ws.token_wrong_closes", "ws.token_signs_in")},
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
@@ -2835,6 +2848,73 @@ def t_ws_frames(tmp):
     srv.close()
     assert b"Upgrade: websocket" in seen["req"] and seen["cmd"] == b"?VERSION\n", seen
     assert "Software Version: 1" in text and "End of Version" in text, text
+
+
+def t_ws_sign_in(tmp):
+    """The WebSocket token's client side (hil/ws.py; docs/WIFI_DESIGN.md §7) against WsEndpoint speaking the WCB's
+    sign-in: a client with the right token signs in when asked, keeps [AUTH:...] out of its text and gets answers; a
+    wrong one raises AuthFailed after [AUTH:FAIL] and reads the 1008 CLOSE; a client with no token is answered only
+    [AUTH:REQUIRED]; a token is never sent to an endpoint that does not ask; with none set any ?AUTH is answered
+    [AUTH:OK]. And hil/config.py's wifi_mode_token passes over ?WIFI,TOKEN, ws_token reads it."""
+    from hil import config as C
+    from hil import ws as W
+    toks = ["?HW,24", "?WIFI,TOKEN,domelock77", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2"]
+    assert C.wifi_mode_token(toks) == "?WIFI,AP,DomeNet,sekrit99" and C.ws_token(toks) == "domelock77"
+    assert C.wifi_mode_token(["?WIFI,OFF"]) == "?WIFI,OFF" and C.ws_token(["?WIFI,OFF"]) is None
+    assert C.wifi_mode_token(["?HW,24"]) is None and C.ws_token(["?wifi,token,a,b"]) == "a,b"
+    ep = W.WsEndpoint("127.0.0.1", 0, token="domelock77")
+    try:
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="domelock77")
+        try:
+            assert c.auth_lines == [W.AUTH_REQUIRED, W.AUTH_OK] and "[AUTH" not in c.text, (c.auth_lines, c.text)
+            c.send_text('{"type":"PING"}\n')
+            assert '"type":"PONG"' in c.read_until('"PONG"', timeout=3) and "[AUTH" not in c.text, c.text
+        finally:
+            c.close()
+        try:
+            W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="wrongtoken9")
+            raise AssertionError("a wrong token signed in")
+        except W.AuthFailed:
+            pass
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3)
+        try:
+            c.read_until(W.AUTH_REQUIRED, timeout=3)
+            try:
+                c.sign_in("wrongtoken9")
+                raise AssertionError("a wrong token signed in")
+            except W.AuthFailed:
+                pass
+            c.read_until("\x00never\x00", timeout=3)
+            assert c.close_frames and c.close_frames[0][:2] == W.CLOSE_POLICY, c.close_frames
+            assert c.auth_lines == [W.AUTH_REQUIRED, W.AUTH_FAIL], c.auth_lines
+        finally:
+            c.sock.close()
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3)
+        try:
+            c.send_text('{"type":"PING"}\n')
+            time.sleep(0.5)
+            c.read_until("\x00never\x00", timeout=0.5)
+            lines = [x.strip() for x in c.text.splitlines() if x.strip()]
+            assert lines == [W.AUTH_REQUIRED, W.AUTH_REQUIRED], lines
+        finally:
+            c.close()
+    finally:
+        ep.close()
+    ep = W.WsEndpoint("127.0.0.1", 0)              # no token: nothing asks
+    try:
+        t0 = time.monotonic()
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="domelock77", auth_wait=0.4)
+        try:
+            assert c.auth_lines == [] and time.monotonic() - t0 < 2.0, c.auth_lines
+            c.send_text('{"type":"PING"}\n')
+            c.read_until('"PONG"', timeout=3)
+            c.sign_in("anything-at-all")
+            assert c.auth_lines == [W.AUTH_OK], c.auth_lines
+        finally:
+            c.close()
+        assert not any("domelock77" in x for x in ep.received), "the token went to an endpoint that never asked"
+    finally:
+        ep.close()
 
 
 # ---------------------------------------------------------------------------- the PC's WiFi and NaviCore's socket (INF5)
@@ -11988,6 +12068,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_device_sends_tap_hidden, t_run_lost_marker, t_watch11_witness, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
+         t_ws_sign_in,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
          t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter, t_intellex_py_judge,
          t_intellex_stream_helpers, t_intellex_link_tap, t_intellex_handed_over, t_intellex_github_dir,
