@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_220448ROCT2026                                  *****////
+///*****                                          Version 7.0.1_221533ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_220448ROCT2026";
+String SoftwareVersion = "7.0.1_221533ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1843,8 +1843,9 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
   // being in our own peer table — a high-numbered relay above our WCBQ floor, or a peer evicted
   // from the ~20-slot ESP-NOW table. esp_now_send then fails ESP_ERR_ESPNOW_NOT_FOUND and the ACK
   // is silently dropped, so the sender burns all 3 retries and reports "[ETM] WCBn FAILED" for a
-  // command we actually executed. Mirrors the on-demand registration the retry path already does.
-  if (!esp_now_is_peer_exist(mac)) {
+  // command we actually executed. Mirrors the on-demand registration the retry path already does. Not while a wedge
+  // remedy restarts ESP-NOW from loop() (this runs on the WiFi task): the send below is refused then anyway.
+  if (!wcbEspNowRestarting() && !esp_now_is_peer_exist(mac)) {
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, mac, 6);
     p.channel = 0; p.encrypt = false;
@@ -2242,6 +2243,14 @@ String buildStatsString() {
     // Printed only when non-zero, like the overflow line below.
     snprintf(buf, sizeof(buf), "ESP-NOW: %lu frame(s) not sent - the radio's queue stayed full\n",
              (unsigned long)wcbEspNowDropped());
+    out += buf;
+  }
+  if (wcbEspNowLostFrames() > 0 || wcbEspNowWedges() > 0) {
+    // Since boot, not since a stats reset: frames the radio accepted and never completed - each one a TX buffer the WiFi
+    // driver lost (tracker #112, WCB_EspNow.h) - and the transmit wedges they led to.
+    snprintf(buf, sizeof(buf), "ESP-NOW since boot: %lu frame(s) accepted and never completed; transmit wedged %lu "
+             "time(s), %lu cleared without a reboot\n", (unsigned long)wcbEspNowLostFrames(),
+             (unsigned long)wcbEspNowWedges(), (unsigned long)wcbEspNowWedgesCleared());
     out += buf;
   }
   if (etmQueueFullRefused > 0) {
@@ -6131,6 +6140,87 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
     }
 }
 
+// ── The ESP-NOW transmit wedge's remedies (tracker #112; the why and the ladder: WCB_EspNow.h) ─────────────────────
+// WCB_EspNow.cpp decides when; this file holds what a restart has to put back - the callbacks, the peers and, for a
+// WiFi driver restart, everything setup() gave the radio before esp_now_init(). Run from loop() only (rule 11), never
+// while the radio is away on another channel or a restart is pending (rule 18: the remedy puts the radio on the home
+// channel, and a pending restart clears the wedge anyway).
+
+// Why the WiFi driver may not be restarted on this board now, or nullptr. An access point or a joined network is never
+// torn down under its clients and sockets (docs/WIFI_DESIGN.md §4); an OTA session is left to finish.
+static const char *espNowWifiRestartRefusal() {
+  if (!wcbWifiBootedOff()) return "this board runs WiFi - its access point or network join would go down with it";
+  if (otaActiveSession())  return "an OTA session is running";
+  return nullptr;
+}
+
+// Every peer setup() and the membership code registered, from RAM: the WCBQ floor, the learned and temporary members
+// (wcbPeerActive), the controller peer, the broadcast address. On-demand peers (an OTA or remote-terminal partner, an
+// ETM ACK target) are added again by their own send paths. Returns how many the driver took.
+static int espNowRegisterPeersAgain() {
+  int n = 0;
+  auto add = [&n](const uint8_t *mac) {
+    if (esp_now_is_peer_exist(mac)) return;
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, mac, 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) == ESP_OK) n++;
+  };
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (i + 1 == WCB_Number) continue;
+    const bool special = specialPeerEnabled && (i + 1) == WCB_SPECIAL_PEER_ID;
+    if (wcbPeerActive[i] || special) add(WCBMacAddresses[i]);
+  }
+  add(broadcastMACAddress[0]);
+  return n;
+}
+
+// Remedy 1: ESP-NOW from scratch. Remedy 2 (wifiToo): the WiFi driver too - esp_wifi_stop/deinit/init/start through
+// WiFi.mode(), the only cure the upstream reports found (esp-idf #18682, #19269) - then the radio as setup() leaves it:
+// power save off, the region, the home channel (channel sync's, which a live MOVE may have changed), the mesh MAC.
+static void espNowRestartForWedge(bool wifiToo) {
+  wcbEspNowRestartBegin(wifiToo);      // from here every send returns NOT_INIT, and the peer-add paths stand aside
+  espNowInitialized = false;
+  // A sender that read the gate just before it closed - the WiFi task's ACK in a receive callback, another task's
+  // send - is through the driver call in microseconds; let it finish before the driver's state goes.
+  delay(20);
+  esp_now_deinit();
+  esp_err_t e = ESP_OK;
+  if (wifiToo) {
+    WiFi.mode(WIFI_OFF);
+    WiFi.setSleep(false);              // before the mode, as in setup(): the core's STA_START handler applies it
+    if (!WiFi.mode(WIFI_STA)) e = ESP_ERR_WIFI_NOT_INIT;
+    if (e == ESP_OK) {
+      esp_wifi_set_ps(WIFI_PS_NONE);
+      chanSyncReapplyRegion();
+      const esp_err_t ce = esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
+      const esp_err_t me = esp_wifi_set_mac(WIFI_IF_STA, WCBMacAddresses[WCB_Number - 1]);
+      // Either one failed leaves the board off the mesh with ESP-NOW running: said, ungated, so the next line's
+      // "restarted" is not read as a recovery.
+      if (ce != ESP_OK || me != ESP_OK)
+        Serial.printf("[MESH] ESP-NOW transmit wedged: after the WiFi driver restart the channel (%s) or the mesh MAC "
+                      "(%s) did not go back - ?reboot\n", esp_err_to_name(ce), esp_err_to_name(me));
+    }
+  }
+  if (e == ESP_OK) e = esp_now_init();
+  int peers = 0;
+  if (e == ESP_OK) {
+    espNowInitialized = true;
+    esp_now_register_send_cb(espNowSendCallback);   // first, as in setup(): a frame sent before it holds its slot
+    esp_now_register_recv_cb(espNowReceiveCallback);
+    peers = espNowRegisterPeersAgain();
+  }
+  wcbEspNowRestartEnd(wifiToo ? 2 : 1, e, peers);
+}
+
+// loop(): ESP-NOW's drop and stall reports, and the wedge watch with its remedies.
+static void espNowTxService() {
+  const bool hold = chanSyncRadioAway() || rebootPending || pwmRebootPending;
+  const uint8_t remedy = wcbEspNowService(hold, espNowWifiRestartRefusal());
+  if (remedy) espNowRestartForWedge(remedy == 2);
+}
+
 //*******************************
 /// Kyber Serial Forwarding Commands
 //*******************************
@@ -6373,6 +6463,7 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     for (const Knob &k : knobs) k.k->arm(false);
     configPullFaultArm(false);
     configLineFaultArm(false);
+    wcbEspNowSimulateWedge(0);
     Serial.println("[FAULT] All fault knobs disarmed");
     return;
   }
@@ -6382,6 +6473,21 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     if (k.k == &faultJoinNoIp) wcbWifiFaultRejoin();
     Serial.printf("[FAULT] %s armed: %s (once; lapses in %lu s)\n", k.name, k.what,
                   (unsigned long)(WCB_FAULT_ARM_MS / 1000));
+    return;
+  }
+  if (f == "TXWEDGE" || f.startsWith("TXWEDGE,")) {   // the ESP-NOW transmit wedge, simulated (tracker #112, WCB_EspNow.h)
+    // Not a one-shot WcbFault: a wedge holds until the remedy it names clears it, as the driver's does.
+    const String arg = f.length() > 8 ? f.substring(8) : String("1");
+    const int level = arg.toInt();
+    if (level < 1 || level > 3 || arg != String(level)) {
+      Serial.println("[FAULT] TXWEDGE takes 1, 2 or 3: ?DEBUG,FAULT,TXWEDGE[,<1-3>]");
+      return;
+    }
+    wcbEspNowSimulateWedge((uint8_t)level);
+    Serial.printf("[FAULT] TXWEDGE armed: from now every ESP-NOW frame is lost as a wedged driver loses it (the first "
+                  "8 accepted and never completed, then each refused) until %s\n",
+                  level == 1 ? "the next ESP-NOW restart" : level == 2 ? "the next WiFi driver restart"
+                                                          : "?DEBUG,FAULT,OFF or a reboot");
     return;
   }
   if (f.startsWith("BAUD0,")) {                    // ?DEBUG,FAULT,BAUD0,S<n>: a saved baud of 0, as 483b4d8..f5d758f left
@@ -6446,7 +6552,7 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     return;
   }
   Serial.println("Invalid FAULT knob. Use: ?DEBUG,FAULT,<TIMERMEM|SEQREAD|SEQLIST|VARNVS|ESPNOWDOWN|JOINCHAN|"
-                 "JOINNOIP|CHANDRIFT|LOOPSTALL[,s]|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
+                 "JOINNOIP|CHANDRIFT|LOOPSTALL[,s]|TXWEDGE[,1-3]|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
 }
 
 void processLocalCommand(const String &message) {
@@ -10088,6 +10194,13 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // never read; persistent by default, every WiFi.begin/softAP stored it again in nvs.net80211 (the JOIN retry every
   // 5 s: W1 grew 36 -> 95 entries in one test run, tracker #104).
   WiFi.persistent(false);
+  // Power save OFF through the core as well, BEFORE the mode: the core's STA_START handler (arduino-esp32 3.3.4
+  // STA.cpp, _onStaArduinoEvent) applies WiFi.getSleep() - modem sleep unless told otherwise - on the event task, so
+  // it could land after the esp_wifi_set_ps(WIFI_PS_NONE) below and undo it on a board with no AP up (this core builds
+  // with CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE, so an unassociated, ESP-NOW-only station can power-save too).
+  // Before WiFi.mode() it only records NONE, which that handler then applies. The wedge line (WCB_EspNow.cpp) reports
+  // the power save in force.
+  WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
   // ESP-NOW needs the radio awake to hear the MAC-layer ACK that arrives a few
   // microseconds after every unicast TX. The Arduino/IDF default in STA mode with
@@ -10316,7 +10429,7 @@ void loop() {
   g_loopTick++;
   LOOP_STEP(rtermRelayDrain());        // flush queued remote-terminal packets to USB serial (safe from loop)
   LOOP_STEP(WCBDebugSerial.expireIfIdle());   // end a remote-terminal session nobody re-armed for 30 s
-  LOOP_STEP(wcbEspNowReportDrops());   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
+  LOOP_STEP(espNowTxService());       // ESP-NOW frames given up (#102, #107), stalls, and the transmit wedge's remedies (#112)
   LOOP_STEP(reportEtmQueueRefusals()); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
   LOOP_STEP(drainRcJsonRelay());       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   LOOP_STEP(drainPendingTimerChains());// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)

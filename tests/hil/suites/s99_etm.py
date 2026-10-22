@@ -7,6 +7,9 @@ reports stats to it, and W1's own console asks for its version. Restore if abort
 etm.seq_wrap (opt-in etm_seq_wrap, WCB-WP46) floods the mesh from W1 for several minutes to take its sequence counter
 past 65,535. Restore if aborted: `?DEBUG,ETM,OFF` on W1 and W2, and W1's `?BCAST,OUT,S<n>,ON` for each port its chain
 had on (the test turns them off for the flood).
+
+The etm.tx_wedge_* tests (tracker #112) simulate a wedged ESP-NOW transmit with ?DEBUG,FAULT,TXWEDGE and watch the
+board's own remedies; they reboot nothing. Restore if aborted: `?DEBUG,FAULT,OFF` on the board (RAM only).
 """
 import re
 import threading
@@ -15,8 +18,8 @@ import time
 from hil.runner import test
 from hil.wcb import WCB
 from hil.runner import Skip
-from suites.common import (Watch, config_guard, link, marker, nonce, probe_in_mesh, remote_wcbs, require_tokens,
-                           snapshot, token, usb_wcb)
+from suites.common import (Watch, config_guard, fault, fault_off, link, marker, nonce, probe_in_mesh, remote_wcbs,
+                           require_tokens, snapshot, token, usb_wcb, wifi_mode_token)
 
 
 @test("etm.remote_reboot", "W2 rebooted over the mesh announces itself and answers again", needs=["wcb1"])
@@ -71,7 +74,7 @@ def _reboot_while(w, send_one, limit_s):
 
 HEAP_RX = re.compile(r"Free heap\s*:\s*(\d+) bytes \(min since boot (\d+)\)")     # WCB_WiFi.cpp, ?WIFI's status
 LOAD_DONE = "ETM load test complete:"                                                # processETMLoad's closing line
-NOT_SENT = re.compile(r"^\[MESH\] (\d+) ESP-NOW frame\(s\) not sent")             # wcbEspNowReportDrops
+NOT_SENT = re.compile(r"^\[MESH\] (\d+) ESP-NOW frame\(s\) not sent")             # wcbEspNowService
 TX_SETTLE_S = 3.0     # after a generator ends, its last given-up frames are still being reported
 TX_WATCH_S = 12.0     # then a heartbeat period (HB 10 +/- 1 s) in which a working board gives no frame up
 
@@ -968,10 +971,11 @@ def rterm_backup_stress(bench):
     hours (8 frames in flight, thousands of 'radio's queue stayed full', the byte heap down to 5.5 KB) until a reboot.
     This reproduces that load for a bounded time. Each mirrored line is an ESP-NOW unicast to the relay
     (WCBSerial::_flushLine -> wcbEspNowSend, WCB_RemoteTerm.cpp), so a ?backup puts its whole output on the air; the
-    session expires 30 s after its last re-arm (RTERM_IDLE_MS), hence the re-arm every 10 s. wcbEspNowReportDrops
+    session expires 30 s after its last re-arm (RTERM_IDLE_MS), hence the re-arm every 10 s. wcbEspNowService
     (WCB_EspNow.cpp) prints the stall line from loop() when nothing completes for ESPNOW_STALL_REPORT_MS while frames
     are given up. The test stops early on a stall, stops the mirror, samples W1, and reboots W1 so the bench goes on;
-    the firmware is left as it is (no self-recovery): the result is the finding."""
+    the stall is the finding: the board's own remedy (the etm.tx_wedge_* tests) may clear a wedge, but frames were lost
+    by then."""
     w = usb_wcb(bench)
     w2s2 = link(bench, 2, "S2")
     samples, uni, problems = [], [], []
@@ -1050,3 +1054,200 @@ def rterm_backup_stress(bench):
     if rebooted:
         bench.note("etm.rterm_backup_stress: W1 was rebooted after the run to clear its transmit")
     assert not problems, "; ".join(problems)
+
+
+# ============================================================ #112: the transmit wedge's remedies (?DEBUG,FAULT,TXWEDGE)
+# The WiFi driver loses frames esp_now_send accepted, then refuses every one (WCB_EspNow.h). The knob does what the
+# driver does - 8 frames "accepted" and never completed, then every one refused - until the remedy it names, so these
+# tests drive the real watch and the real restarts. Whether a restart clears the DRIVER's wedge only a real one shows:
+# a full run's '[MESH] ESP-NOW transmit wedge cleared' without '(simulated'. Every line the knob causes carries
+# WEDGE_SIM, which hil/runner.py's stall scan leaves alone.
+WEDGE_SIM = "(simulated, ?DEBUG,FAULT,TXWEDGE)"
+_SIM = " " + re.escape(WEDGE_SIM) + "$"
+WEDGED_RX = (r"^\[MESH\] ESP-NOW transmit wedged: (\d+) frame\(s\) handed to the radio over (\d+)s and none completed "
+             r"\(in flight (\d+), .*\) - restarting ESP-NOW, no reboot \(tracker #112\)" + _SIM)
+RESTARTED_RX = (r"^\[MESH\] ESP-NOW transmit wedged: (ESP-NOW restarted|WiFi driver and ESP-NOW restarted), (\d+) "
+                r"peer\(s\) registered again" + _SIM)
+WIFI_RESTARTED_RX = (r"^\[MESH\] ESP-NOW transmit wedged: (WiFi driver and ESP-NOW restarted), (\d+) peer\(s\) "
+                     r"registered again" + _SIM)
+TO_WIFI_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the ESP-NOW restart did not clear it - restarting the WiFi "
+              r"driver \(this board runs no WiFi interface\), no reboot" + _SIM)
+NO_WIFI_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the ESP-NOW restart did not clear it; the WiFi driver is "
+              r"not restarted \((.*)\) - only a reboot clears it \(\?reboot\)" + _SIM)
+OUT_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the WiFi driver restart did not clear it - only a reboot "
+          r"clears it \(\?reboot\)" + _SIM)
+CLEARED_RX = r"^\[MESH\] ESP-NOW transmit wedge cleared after (\d+)s: (.*), frames complete again, no reboot" + _SIM
+CHSYNC_RX = re.compile(r"\[CHSYNC:EN=\d,CH=(\d+),")
+WEDGE_FIND_S = 40.0     # ESPNOW_WEDGE_MS (10 s) of frames lost, from the first one the knob takes, plus margin
+
+
+def _wedge_wait(w, dst, pattern, since, timeout, what):
+    """Send W<dst> a unicast every 2 s (a frame for the radio to lose, and ETM's retries of it) until w's console
+    prints `pattern` after `since` -> the match. ETM's heartbeat alone would take ~30 s to make the three tries a
+    verdict needs (WCB_EspNow.cpp ESPNOW_WEDGE_MIN_TRIES)."""
+    rx = re.compile(pattern)
+    t0 = time.monotonic()
+    while True:
+        hit = next((g for g in (rx.search(x.rstrip()) for x in w.dev.since(since)) if g), None)
+        if hit:
+            return hit
+        if time.monotonic() - t0 >= timeout:
+            seen = [x.rstrip()[:140] for x in w.dev.since(since) if x.startswith("[MESH]")][-4:]
+            raise AssertionError(f"{what}: no line matching {pattern[:70]!r}... within {timeout:.0f} s; the board's "
+                                 f"last [MESH] lines: {seen}")
+        w.send(f";W{dst},;S0,{marker('WG')}")
+        time.sleep(2.0)
+
+
+def _reaches(src, dst_dev, dst_n, tries=3):
+    """src's ';W<dst_n>,;S0,<marker>' prints on W<dst_n>'s console (dst_dev): src transmits and dst receives."""
+    for _ in range(tries):
+        tag = marker("WR")
+        m = dst_dev.mark()
+        src.send(f";W{dst_n},;S0,{tag}")
+        try:
+            dst_dev.expect(rf"{tag}$", timeout=5, since=m)
+            return True
+        except AssertionError:
+            time.sleep(2.0)
+    return False
+
+
+def _booted_wifi_off(bench, n):
+    """W<n>'s saved ?WIFI mode is OFF (no ?WIFI line, or ?WIFI,OFF): the booted one unless a ?WIFI was typed since its
+    last boot. A board that booted OFF is the one kind the WiFi driver restart runs on (WCB.ino
+    espNowWifiRestartRefusal)."""
+    mode = wifi_mode_token(bench.config_tokens(n, refresh=True))
+    return mode is None or mode.upper().startswith("?WIFI,OFF")
+
+
+def _channel(wn):
+    """The channel W's ?CHSYNC status line reports, or None."""
+    return next((g.group(1) for g in (CHSYNC_RX.search(x) for x in wn.run("?CHSYNC")) if g), None)
+
+
+@test("etm.tx_wedge_esp_now_restart", "Tracker #112's transmit wedge, simulated on W1 (?DEBUG,FAULT,TXWEDGE,1: every "
+      "frame lost as a wedged WiFi driver loses it, until an ESP-NOW restart): W1 finds it within 40 s - "
+      "'[MESH] ESP-NOW transmit wedged: N frame(s) handed to the radio over 10s+ and none completed ... - restarting "
+      "ESP-NOW, no reboot' with 8 in flight and power save off - restarts ESP-NOW, registers its peers again, and says "
+      "the ESP-NOW restart cleared it; W1 never reboots, and afterwards its unicast reaches W2 and W2's reaches W1",
+      needs=["wcb1", "wcb2"])
+def tx_wedge_esp_now_restart(bench):
+    """WCB_EspNow.cpp watchWedge -> WCB.ino espNowRestartForWedge(false): esp_now_deinit/init, both callbacks, every
+    peer from RAM (espNowRegisterPeersAgain); every send is refused meanwhile (wcbEspNowRestarting). A unicast both
+    ways afterwards proves the peers, the send callback (W1's frames complete, or the wedge would be found again) and
+    the receive callback are back. Restore if aborted: ?DEBUG,FAULT,OFF on W1 (RAM only)."""
+    w = usb_wcb(bench)
+    if not bench.usb_wcbs().get(2):
+        raise Skip("W2 has no USB console on this bench")
+    w2 = WCB(bench.dev(bench.usb_wcbs()[2]))
+    with config_guard(bench, 1):
+        _peers_online(bench, w)
+        m = w.dev.mark()
+        try:
+            fault(w, "TXWEDGE,1")
+            found = _wedge_wait(w, 2, WEDGED_RX, m, WEDGE_FIND_S, "W1 never found its simulated wedge")
+            restarted = w.dev.expect(RESTARTED_RX, timeout=5, since=m)
+            cleared = _wedge_wait(w, 2, CLEARED_RX, m, 30.0, "W1 never said the wedge cleared")
+        finally:
+            fault_off(w)
+        bench.note(f"etm.tx_wedge_esp_now_restart: found after {found.group(2)} s ({found.group(1)} frames, "
+                   f"{found.group(3)} in flight); {restarted.group(1)}, {restarted.group(2)} peers; cleared after "
+                   f"{cleared.group(1)} s: {cleared.group(2)}")
+        assert not w.rebooted_since(m), "W1 rebooted: the remedy must not restart the board"
+        assert int(found.group(2)) >= 10 and int(found.group(3)) >= 8, (
+            f"the wedge was called after {found.group(2)} s with {found.group(3)} in flight: the watch needs 10 s of "
+            f"frames none of which completed, and the knob holds 8 of them")
+        assert ", power save off," in found.group(0), (
+            f"W1 runs with power save on: {found.group(0)[:220]} (setup() turns it off, WiFi.setSleep before the mode)")
+        assert restarted.group(1) == "ESP-NOW restarted" and int(restarted.group(2)) >= 2, (
+            f"{restarted.group(0)!r}: expected an ESP-NOW restart with the broadcast peer and W2 registered again")
+        assert cleared.group(2) == "the ESP-NOW restart cleared it", f"cleared, but: {cleared.group(2)}"
+        assert _reaches(w, w2.dev, 2), "after the restart W1's unicast no longer reaches W2"
+        assert _reaches(w2, w.dev, 1), "after the restart W2's unicast no longer reaches W1 (its receive path)"
+
+
+@test("etm.tx_wedge_wifi_restart", "Tracker #112's transmit wedge that an ESP-NOW restart does not clear, simulated "
+      "(?DEBUG,FAULT,TXWEDGE,2) on a USB WCB that booted with WiFi OFF (W3 on Greg's bench): it restarts ESP-NOW "
+      "first, then - still wedged 10 s later - the WiFi driver too ('restarting the WiFi driver (this board runs no "
+      "WiFi interface), no reboot'), and the WiFi driver restart clears it; the board never reboots, stays on its "
+      "channel (?CHSYNC CH= unchanged), and afterwards its unicast reaches W1 and W1's reaches it; its wedge line says "
+      "power save off (an ESP-NOW-only station, where the core's STA_START handler could have put modem sleep back)",
+      needs=["wcb1"])
+def tx_wedge_wifi_restart(bench):
+    """WCB.ino espNowRestartForWedge(true): esp_now_deinit, WiFi.mode(WIFI_OFF) and back to WIFI_STA (esp_wifi_deinit/
+    init - the cure esp-idf #18682 and #19269 found), power save off, the region (chanSyncReapplyRegion), the home
+    channel, the mesh MAC, then ESP-NOW and its peers. Both unicasts afterwards prove the mesh MAC, the channel and the
+    new WiFi task's callbacks. RAM only: nothing saved changes, so no config guard (it would pull the board's config
+    over the mesh it is wedging). Restore if aborted: ?DEBUG,FAULT,OFF on that board."""
+    w = usb_wcb(bench)
+    off = [(n, name) for n, name in sorted(bench.usb_wcbs().items())
+           if n != bench.usb_wcb_number() and _booted_wifi_off(bench, n)]
+    if not off:
+        raise Skip("no USB WCB besides W1 runs with WiFi OFF on this bench (the WiFi driver restart runs on no other)")
+    n, wn = off[0][0], WCB(bench.dev(off[0][1]))
+    _peers_online(bench, w)
+    ch0 = _channel(wn)
+    m = wn.dev.mark()
+    try:
+        fault(wn, "TXWEDGE,2")
+        found = _wedge_wait(wn, 1, WEDGED_RX, m, WEDGE_FIND_S, f"W{n} never found its simulated wedge")
+        wn.dev.expect(RESTARTED_RX, timeout=5, since=m)
+        went = _wedge_wait(wn, 1, TO_WIFI_RX + "|" + NO_WIFI_RX, m, 30.0, f"W{n} never went on from the ESP-NOW restart")
+        assert "restarting the WiFi driver" in went.group(0), (
+            f"W{n} would not restart its WiFi driver: {went.group(0)[:200]} (its saved ?WIFI mode says OFF)")
+        again = _wedge_wait(wn, 1, WIFI_RESTARTED_RX, m, 10.0, f"W{n} never said its WiFi driver and ESP-NOW restarted")
+        cleared = _wedge_wait(wn, 1, CLEARED_RX, m, 30.0, f"W{n} never said the wedge cleared")
+    finally:
+        fault_off(wn)
+    ch1 = _channel(wn)
+    bench.note(f"etm.tx_wedge_wifi_restart: W{n} {again.group(1)}, {again.group(2)} peers; cleared after "
+               f"{cleared.group(1)} s: {cleared.group(2)}; channel {ch0} -> {ch1}")
+    assert not wn.rebooted_since(m), f"W{n} rebooted: the remedy must not restart the board"
+    assert ", power save off," in found.group(0), (
+        f"W{n} runs with power save on: {found.group(0)[:220]} (setup() turns it off, WiFi.setSleep before the mode)")
+    assert cleared.group(2) == "the WiFi driver restart cleared it", f"cleared, but: {cleared.group(2)}"
+    assert ch0 and ch0 == ch1, f"W{n}'s ?CHSYNC channel went from {ch0} to {ch1}"
+    assert _reaches(wn, w.dev, 1), f"after the WiFi driver restart W{n}'s unicast no longer reaches W1"
+    assert _reaches(w, wn.dev, n), f"after the WiFi driver restart W1's unicast no longer reaches W{n} (its receive path)"
+
+
+@test("etm.tx_wedge_only_reboot_clears", "Tracker #112's transmit wedge that no remedy clears, simulated on W1 "
+      "(?DEBUG,FAULT,TXWEDGE,3): W1 restarts ESP-NOW, then says only a reboot clears it - at once on a board running "
+      "an access point or a network join ('the WiFi driver is not restarted (this board runs WiFi ...)'), after a WiFi "
+      "driver restart on one with WiFi OFF - and restarts nothing more for 15 s; with the knob off its frames complete "
+      "again and it says the wedge cleared after the remedies ran out, never having rebooted", needs=["wcb1"])
+def tx_wedge_only_reboot_clears(bench):
+    """watchWedge's level 3 (WCB_EspNow.cpp): out of remedies, the ladder is tried again only every 5 min
+    (ESPNOW_WEDGE_RETRY_MS), and an access point or a joined network is never torn down under its clients
+    (docs/WIFI_DESIGN.md §4). Which branch W1 takes follows its booted WiFi mode, read from its saved ?WIFI. Restore if
+    aborted: ?DEBUG,FAULT,OFF on W1 (RAM only)."""
+    w = usb_wcb(bench)
+    wifi_off = _booted_wifi_off(bench, 1)
+    with config_guard(bench, 1):
+        _peers_online(bench, w)
+        m = w.dev.mark()
+        try:
+            fault(w, "TXWEDGE,3")
+            _wedge_wait(w, 2, WEDGED_RX, m, WEDGE_FIND_S, "W1 never found its simulated wedge")
+            if wifi_off:
+                _wedge_wait(w, 2, TO_WIFI_RX, m, 30.0, "W1 (WiFi OFF) never went on to the WiFi driver restart")
+                out = _wedge_wait(w, 2, OUT_RX, m, 30.0, "W1 never said only a reboot clears it")
+            else:
+                out = _wedge_wait(w, 2, NO_WIFI_RX, m, 30.0, "W1 never said only a reboot clears it")
+            hold = w.dev.mark()
+            time.sleep(15.0)
+            more = [x.rstrip() for x in w.dev.since(hold) if re.search(RESTARTED_RX, x.rstrip())]
+        finally:
+            fault_off(w)
+        cleared = _wedge_wait(w, 2, CLEARED_RX, m, 20.0, "W1 never said the wedge cleared once the knob was off")
+        bench.note(f"etm.tx_wedge_only_reboot_clears: WiFi {'OFF' if wifi_off else 'on'}; {out.group(0)[:160]}; "
+                   f"cleared after {cleared.group(1)} s: {cleared.group(2)}")
+        assert not w.rebooted_since(m), "W1 rebooted: the remedies must not restart the board"
+        if not wifi_off:
+            assert out.group(2).startswith("this board runs WiFi"), f"the reason given: {out.group(2)}"
+        assert not more, f"W1 restarted again while out of remedies: {more[:2]}"
+        assert cleared.group(2) == "after the remedies ran out", f"cleared, but: {cleared.group(2)}"
+        w2name = bench.usb_wcbs().get(2)
+        if w2name:
+            assert _reaches(w, bench.dev(w2name), 2), "with the knob off W1's unicast no longer reaches W2"

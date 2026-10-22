@@ -280,6 +280,22 @@ uint8_t chanSyncApplyRegionAtBoot() {
   return s_maxCh;
 }
 
+// The WiFi driver was restarted under a running board (the ESP-NOW transmit wedge's second remedy, WCB_EspNow.h), and
+// esp_wifi_init forgot the region this boot applied. The same one goes back, the boot's way; the channel range and
+// meshChannel stay as the boot left them, so nothing is printed unless the driver refuses.
+void chanSyncReapplyRegion() {
+  if (strcmp(s_appliedCc, "01") != 0) {
+    const esp_err_t e = esp_wifi_set_country_code(s_appliedCc, false);
+    if (e != ESP_OK)
+      Serial.printf("[REGION] esp_wifi_set_country_code(\"%s\") FAILED after the WiFi driver restart (0x%x)\n",
+                    s_appliedCc, (unsigned)e);
+    return;
+  }
+  char now[8] = { 0 };
+  if (esp_wifi_get_country_code(now) == ESP_OK && !(now[0] == '0' && now[1] == '1'))
+    esp_wifi_set_country_code("01", true);
+}
+
 void chanSyncBegin() {
   s_home = meshChannel;
   if (!s_q) s_q = xQueueCreate(16, sizeof(CsFrame));

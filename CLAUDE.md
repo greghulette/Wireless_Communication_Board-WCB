@@ -262,6 +262,15 @@ changing before editing.**
     - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
     So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
     not, because the task's wait sleeps. `selftest.py` (`t_rule16_espnow_send_wrapped`) fails on any other call.
+    **The WiFi driver can wedge under load** (tracker #112; espressif/esp-idf #18682, #19269): it loses frames it
+    accepted - no send callback, the TX buffer never given back - until every `esp_now_send` returns
+    `ESP_ERR_ESPNOW_NO_MEM`, heartbeats included, while the board still receives. `wcbEspNowService()` (loop) calls it
+    a wedge after 10 s of frames with no completion and puts the radio back without a reboot: ESP-NOW restarted, then
+    the WiFi driver too on a board that booted with WiFi OFF (`espNowRestartForWedge`, `WCB.ino`); an AP or JOIN board
+    is never torn down and says only a reboot clears it. Every line starts `[MESH] ESP-NOW transmit wedge`. So judge
+    the radio by completions, never by what `esp_now_send` accepted; a path that calls `esp_now_add_peer` off the loop
+    task checks `wcbEspNowRestarting()` first; a new kind of standing peer is registered again in
+    `espNowRegisterPeersAgain`. `?DEBUG,FAULT,TXWEDGE[,1-3]` simulates it (HIL `etm.tx_wedge_*`).
 
 17. **Stored sequences are not in NVS.** They are the lines of one file, `/seqs` (`<key>,<value>` in save order), in a
     LittleFS on the min_spiffs table's 128 KB `spiffs` partition, behind `WCB_SeqStore.{h,cpp}`. Go through its calls

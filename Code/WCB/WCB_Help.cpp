@@ -75,6 +75,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      drift check, then comes back"));
         Serial.println(F("  FAULT,LOOPSTALL[,s] loop() stops for s seconds (1-60, default 20)"));
         Serial.println(F("                      now: the loop watch must report it ([HANG])"));
+        Serial.println(F("  FAULT,TXWEDGE[,n] Every ESP-NOW frame is lost as a wedged radio"));
+        Serial.println(F("                      loses it, until the board's own remedy n clears"));
+        Serial.println(F("                      it: 1 an ESP-NOW restart (default), 2 a WiFi"));
+        Serial.println(F("                      driver restart, 3 neither. Holds; never lapses"));
         Serial.println(F("  FAULT,OFF         Disarm every FAULT knob, and PULLFAULT"));
         Serial.println(F(" These three write saved state on purpose; the test puts it back:"));
         Serial.println(F("  FAULT,BAUD0,S<n>  Save a baud of 0 for S<n> in NVS (the next boot"));
