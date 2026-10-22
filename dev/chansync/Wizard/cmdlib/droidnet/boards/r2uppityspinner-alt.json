@@ -1,0 +1,977 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "R2UppitySpinnerV3 ALT fw 3.5.3 (highfalutintodd fork of Mimir Reynisson's original)",
+  "enums": {
+    "uppity.lightMode": {
+      "label": "Light Kit Mode",
+      "values": [
+        {
+          "code": "0",
+          "label": "Full Cycle (random)"
+        },
+        {
+          "code": "1",
+          "label": "Off"
+        },
+        {
+          "code": "2",
+          "label": "Obi-Wan (blue)"
+        },
+        {
+          "code": "3",
+          "label": "Yoda (green fade)"
+        },
+        {
+          "code": "4",
+          "label": "Sith (red flash)"
+        },
+        {
+          "code": "5",
+          "label": "Search Light (white)"
+        },
+        {
+          "code": "6",
+          "label": "Dagobah (screen-accurate)"
+        },
+        {
+          "code": "7",
+          "label": "Sparkle"
+        }
+      ]
+    },
+    "uppity.aggressiveness": {
+      "label": "Aggressiveness",
+      "values": [
+        {
+          "code": "G",
+          "label": "Gentle"
+        },
+        {
+          "code": "M",
+          "label": "Medium"
+        },
+        {
+          "code": "A",
+          "label": "Aggressive"
+        }
+      ]
+    },
+    "uppity.aggressionLevel": {
+      "label": "Aggressiveness (stored default)",
+      "values": [
+        {
+          "code": "0",
+          "label": "Gentle"
+        },
+        {
+          "code": "1",
+          "label": "Medium"
+        },
+        {
+          "code": "2",
+          "label": "Aggressive"
+        }
+      ]
+    },
+    "uppity.motorType": {
+      "label": "Motor Profile",
+      "values": [
+        {
+          "code": "0",
+          "label": "Greg 6.3:1"
+        },
+        {
+          "code": "1",
+          "label": "Pololu 19:1"
+        },
+        {
+          "code": "2",
+          "label": "IA-Parts"
+        }
+      ]
+    },
+    "uppity.onOff": {
+      "label": "State",
+      "values": [
+        {
+          "code": "0",
+          "label": "Off"
+        },
+        {
+          "code": "1",
+          "label": "On"
+        }
+      ]
+    },
+    "uppity.limitLifter": {
+      "label": "Lifter Limit Polarity",
+      "values": [
+        {
+          "code": "NCL",
+          "label": "Normally Closed"
+        },
+        {
+          "code": "NOL",
+          "label": "Normally Open"
+        }
+      ]
+    },
+    "uppity.limitRotary": {
+      "label": "Rotary Limit Polarity",
+      "values": [
+        {
+          "code": "NCR",
+          "label": "Normally Closed"
+        },
+        {
+          "code": "NOR",
+          "label": "Normally Open"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "r2uppityspinner-alt",
+      "name": "R2 Uppity Spinner ALT (Periscope)",
+      "kind": "device-native",
+      "confidence": "community",
+      "firmware": "v3.5.3",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "uppity.playseq",
+          "name": "Play Stored Sequence",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PS{seq}",
+          "params": [
+            {
+              "name": "seq",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            ":PS0",
+            ":PS50"
+          ],
+          "commentLabel": "Uppity play sequence",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.lifter.seek",
+          "name": "Seek Lifter to Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PP{position}",
+          "params": [
+            {
+              "name": "position",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 100
+            }
+          ],
+          "examples": [
+            ":PP0",
+            ":PP100",
+            ":PP50"
+          ],
+          "commentLabel": "Uppity seek",
+          "category": "Lifter"
+        },
+        {
+          "id": "uppity.lifter.seek.speed",
+          "name": "Seek Lifter to Position (with speed)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PP{position},{speed}",
+          "params": [
+            {
+              "name": "position",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 100
+            },
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 60
+            }
+          ],
+          "examples": [
+            ":PP100,60",
+            ":PP0,40"
+          ],
+          "commentLabel": "Uppity seek + speed",
+          "category": "Lifter"
+        },
+        {
+          "id": "uppity.lifter.seek.random",
+          "name": "Seek Lifter to Random Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PPR",
+          "params": [],
+          "examples": [
+            ":PPR"
+          ],
+          "commentLabel": "Uppity random position",
+          "category": "Lifter"
+        },
+        {
+          "id": "uppity.lifter.home",
+          "name": "Return Home",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PH",
+          "params": [],
+          "examples": [
+            ":PH"
+          ],
+          "commentLabel": "Uppity home",
+          "category": "Lifter"
+        },
+        {
+          "id": "uppity.lifter.home.speed",
+          "name": "Return Home (with speed)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PH{speed}",
+          "params": [
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 40
+            }
+          ],
+          "examples": [
+            ":PH40",
+            ":PH100"
+          ],
+          "commentLabel": "Uppity home + speed",
+          "category": "Lifter"
+        },
+        {
+          "id": "uppity.estop",
+          "name": "Emergency Stop",
+          "safety": "power",
+          "encoder": "template",
+          "template": ":PX",
+          "params": [],
+          "examples": [
+            ":PX"
+          ],
+          "commentLabel": "Uppity ESTOP",
+          "category": "Power"
+        },
+        {
+          "id": "uppity.rotary.spin",
+          "name": "Spin Rotary at Speed",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PR{speed}",
+          "params": [
+            {
+              "name": "speed",
+              "type": "int",
+              "min": -100,
+              "max": 100,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            ":PR0",
+            ":PR50",
+            ":PR-80"
+          ],
+          "commentLabel": "Uppity rotary spin (0 = home)",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.spin.random",
+          "name": "Spin Rotary at Random Speed",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PRR{max}",
+          "params": [
+            {
+              "name": "max",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 80
+            }
+          ],
+          "examples": [
+            ":PRR0",
+            ":PRR80"
+          ],
+          "commentLabel": "Uppity rotary random spin",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.abs",
+          "name": "Rotate to Absolute Degrees",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PA{degrees}",
+          "params": [
+            {
+              "name": "degrees",
+              "type": "int",
+              "min": 0,
+              "max": 359,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            ":PA0",
+            ":PA180",
+            ":PA270"
+          ],
+          "commentLabel": "Uppity rotate absolute (0 = home)",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.abs.speed",
+          "name": "Rotate to Absolute Degrees (with speed)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PA{degrees},{speed},{maxspeed}",
+          "params": [
+            {
+              "name": "degrees",
+              "type": "int",
+              "min": 0,
+              "max": 359,
+              "required": true,
+              "default": 180
+            },
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 40
+            },
+            {
+              "name": "maxspeed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 80
+            }
+          ],
+          "examples": [
+            ":PA180,40,80"
+          ],
+          "commentLabel": "Uppity rotate absolute + speed",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.abs.random",
+          "name": "Rotate to Random Absolute Degrees",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PAR",
+          "params": [],
+          "examples": [
+            ":PAR"
+          ],
+          "commentLabel": "Uppity rotate random absolute",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.rel",
+          "name": "Rotate Relative Degrees",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PD{degrees}",
+          "params": [
+            {
+              "name": "degrees",
+              "type": "int",
+              "min": -180,
+              "max": 180,
+              "required": true,
+              "default": 180
+            }
+          ],
+          "examples": [
+            ":PD180",
+            ":PD-90",
+            ":PD45"
+          ],
+          "commentLabel": "Uppity rotate relative (chain multiple for multi-rev — single call clamps ≤180° in fw 3.5.3)",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.rotary.rel.random",
+          "name": "Rotate Random Relative Degrees",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PDR",
+          "params": [],
+          "examples": [
+            ":PDR"
+          ],
+          "commentLabel": "Uppity rotate random relative",
+          "category": "Rotary"
+        },
+        {
+          "id": "uppity.movemode.auto",
+          "name": "Auto Random Mode (stored aggressiveness)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PM",
+          "params": [],
+          "examples": [
+            ":PM"
+          ],
+          "commentLabel": "Uppity auto move mode",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.movemode.aggr",
+          "name": "Auto Random Mode (override aggressiveness)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PM{level}",
+          "params": [
+            {
+              "name": "level",
+              "enum": "uppity.aggressiveness",
+              "required": true,
+              "default": "M"
+            }
+          ],
+          "examples": [
+            ":PMG",
+            ":PMM",
+            ":PMA"
+          ],
+          "commentLabel": "Uppity move mode (G/M/A)",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.movemode.params",
+          "name": "Continuous Move Mode (parameterized)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":PM,{liftSpeed},{rotSpeed},{minInterval},{maxInterval}",
+          "params": [
+            {
+              "name": "liftSpeed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 40
+            },
+            {
+              "name": "rotSpeed",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 40
+            },
+            {
+              "name": "minInterval",
+              "type": "int",
+              "min": 1,
+              "max": 300,
+              "required": true,
+              "default": 3
+            },
+            {
+              "name": "maxInterval",
+              "type": "int",
+              "min": 2,
+              "max": 300,
+              "required": true,
+              "default": 8
+            }
+          ],
+          "examples": [
+            ":PM,40,40,3,8"
+          ],
+          "commentLabel": "Uppity continuous move mode",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.light",
+          "name": "Set Light Kit Mode",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":PL{mode}",
+          "params": [
+            {
+              "name": "mode",
+              "enum": "uppity.lightMode",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            ":PL0",
+            ":PL1",
+            ":PL7"
+          ],
+          "commentLabel": "Uppity light kit",
+          "category": "Lighting"
+        },
+        {
+          "id": "uppity.light.random",
+          "name": "Random Light Kit Mode",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":PLR",
+          "params": [],
+          "examples": [
+            ":PLR"
+          ],
+          "commentLabel": "Uppity random light kit",
+          "category": "Lighting"
+        },
+        {
+          "id": "uppity.wait",
+          "name": "Wait Seconds",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":PW{seconds}",
+          "params": [
+            {
+              "name": "seconds",
+              "type": "int",
+              "min": 1,
+              "max": 60,
+              "required": true,
+              "default": 3
+            }
+          ],
+          "examples": [
+            ":PW1",
+            ":PW3",
+            ":PW60"
+          ],
+          "commentLabel": "Uppity wait (max 60s)",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.wait.random",
+          "name": "Wait Random Seconds",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ":PWR{max}",
+          "params": [
+            {
+              "name": "max",
+              "type": "int",
+              "min": 1,
+              "max": 60,
+              "required": true,
+              "default": 6
+            }
+          ],
+          "examples": [
+            ":PWR6",
+            ":PWR10"
+          ],
+          "commentLabel": "Uppity random wait",
+          "category": "Sequences"
+        },
+        {
+          "id": "uppity.cfg.calibrate",
+          "name": "Run Calibration",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "#PSC",
+          "params": [],
+          "examples": [
+            "#PSC"
+          ],
+          "commentLabel": "Uppity calibrate",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.setId",
+          "name": "Set Device ID",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PID{id}",
+          "params": [
+            {
+              "name": "id",
+              "type": "int",
+              "min": 0,
+              "max": 99,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#PID0",
+            "#PID1"
+          ],
+          "commentLabel": "Uppity set ID",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.zero",
+          "name": "Clear All Stored Sequences",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PZERO",
+          "params": [],
+          "examples": [
+            "#PZERO"
+          ],
+          "commentLabel": "Uppity clear sequences",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.factory",
+          "name": "Factory Reset (destructive, reboots)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PFACTORY",
+          "params": [],
+          "examples": [
+            "#PFACTORY"
+          ],
+          "commentLabel": "Uppity factory reset",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.restart",
+          "name": "Reboot",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#PRESTART",
+          "params": [],
+          "examples": [
+            "#PRESTART"
+          ],
+          "commentLabel": "Uppity reboot",
+          "category": "Power"
+        },
+        {
+          "id": "uppity.cfg.debug",
+          "name": "Verbose Debug",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PDEBUG{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "uppity.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#PDEBUG0",
+            "#PDEBUG1"
+          ],
+          "commentLabel": "Uppity debug output",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.wifiReset",
+          "name": "Reset WiFi Credentials (reboots)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PWIFIRESET",
+          "params": [],
+          "examples": [
+            "#PWIFIRESET"
+          ],
+          "commentLabel": "Uppity WiFi reset",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.wifi",
+          "name": "WiFi On/Off (reboots)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PWIFI{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "uppity.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#PWIFI0",
+            "#PWIFI1"
+          ],
+          "commentLabel": "Uppity WiFi enable",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.aggression",
+          "name": "Set Stored Aggressiveness Default",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PAGGRESSION{level}",
+          "params": [
+            {
+              "name": "level",
+              "enum": "uppity.aggressionLevel",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#PAGGRESSION0",
+            "#PAGGRESSION2"
+          ],
+          "commentLabel": "Uppity default aggressiveness",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.motor",
+          "name": "Set Motor Type (invalidates calibration)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PMOTOR{type}",
+          "params": [
+            {
+              "name": "type",
+              "enum": "uppity.motorType",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#PMOTOR0",
+            "#PMOTOR1",
+            "#PMOTOR2"
+          ],
+          "commentLabel": "Uppity motor profile",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.expert",
+          "name": "Expert Mode (19:1 motor only — frame damage risk)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PEXPERT{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "uppity.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#PEXPERT0",
+            "#PEXPERT1"
+          ],
+          "commentLabel": "Uppity expert mode",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.status",
+          "name": "Print WiFi/Remote Status",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#PSTATUS",
+          "params": [],
+          "examples": [
+            "#PSTATUS"
+          ],
+          "commentLabel": "Uppity status",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.config",
+          "name": "Print Full Configuration",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#PCONFIG",
+          "params": [],
+          "examples": [
+            "#PCONFIG"
+          ],
+          "commentLabel": "Uppity config dump",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.listSeq",
+          "name": "List Stored Sequences",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "#PL",
+          "params": [],
+          "examples": [
+            "#PL"
+          ],
+          "commentLabel": "Uppity list sequences",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.deleteSeq",
+          "name": "Delete Stored Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PD{seq}",
+          "params": [
+            {
+              "name": "seq",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            "#PD0",
+            "#PD50"
+          ],
+          "commentLabel": "Uppity delete sequence",
+          "category": "Config"
+        },
+        {
+          "id": "uppity.cfg.rc",
+          "name": "RC (PPM) Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PRC{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "uppity.onOff",
+              "required": true,
+              "default": "0"
+            }
+          ],
+          "examples": [
+            "#PRC0",
+            "#PRC1"
+          ],
+          "commentLabel": "Uppity RC mode",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.rotaryToggle",
+          "name": "Toggle Rotary Enabled (reboots)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PR",
+          "params": [],
+          "examples": [
+            "#PR"
+          ],
+          "commentLabel": "Uppity rotary enable toggle",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.baud",
+          "name": "Set Baud Rate (reboots)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#PBAUD{rate}",
+          "params": [
+            {
+              "name": "rate",
+              "type": "int",
+              "min": 1200,
+              "max": 921600,
+              "required": true,
+              "default": 9600
+            }
+          ],
+          "examples": [
+            "#PBAUD9600",
+            "#PBAUD115200"
+          ],
+          "commentLabel": "Uppity baud rate",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.lifterLimit",
+          "name": "Lifter Limit Polarity",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#P{polarity}",
+          "params": [
+            {
+              "name": "polarity",
+              "enum": "uppity.limitLifter",
+              "required": true,
+              "default": "NCL"
+            }
+          ],
+          "examples": [
+            "#PNCL",
+            "#PNOL"
+          ],
+          "commentLabel": "Uppity lifter limit",
+          "category": "Setup"
+        },
+        {
+          "id": "uppity.cfg.rotaryLimit",
+          "name": "Rotary Limit Polarity",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#P{polarity}",
+          "params": [
+            {
+              "name": "polarity",
+              "enum": "uppity.limitRotary",
+              "required": true,
+              "default": "NCR"
+            }
+          ],
+          "examples": [
+            "#PNCR",
+            "#PNOR"
+          ],
+          "commentLabel": "Uppity rotary limit",
+          "category": "Setup"
+        }
+      ],
+      "categories": [
+        "Lifter",
+        "Rotary",
+        "Sequences",
+        "Lighting",
+        "Power",
+        "Setup",
+        "Config"
+      ]
+    }
+  ]
+}

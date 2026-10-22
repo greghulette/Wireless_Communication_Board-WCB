@@ -1,0 +1,127 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "components": [
+    {
+      "id": "wcb-sequences",
+      "name": "WCB · Stored Sequences",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "WCB 6.1.5_290119RJUN2026",
+      "commands": [
+        {
+          "id": "wcb.seqSave",
+          "name": "Save Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?SEQ,SAVE,{key},{value}",
+          "params": [
+            {
+              "name": "key",
+              "pattern": "[A-Za-z0-9_]+",
+              "required": true
+            },
+            {
+              "name": "value",
+              "pattern": "[^^]+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?SEQ,SAVE,wave,;A,PLAY,1"
+          ],
+          "commentLabel": "WCB seq save",
+          "category": "Sequences"
+        },
+        {
+          "id": "wcb.seqList",
+          "name": "List Sequences",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?SEQ,LIST",
+          "params": [],
+          "examples": [
+            "?SEQ,LIST"
+          ],
+          "commentLabel": "WCB seq list",
+          "category": "Sequences"
+        },
+        {
+          "id": "wcb.seqClearAll",
+          "name": "Clear All Sequences",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?SEQ,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?SEQ,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB seq clear all",
+          "category": "Sequences"
+        },
+        {
+          "id": "wcb.seqClear",
+          "name": "Clear Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?SEQ,CLEAR,{key}",
+          "params": [
+            {
+              "name": "key",
+              "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?SEQ,CLEAR,wave"
+          ],
+          "commentLabel": "WCB seq clear",
+          "category": "Sequences"
+        },
+        {
+          "id": "wcb.runSeq",
+          "name": "Run Sequence (short)",
+          "safety": "config",
+          "encoder": "template",
+          "template": ";C{key}",
+          "params": [
+            {
+              "name": "key",
+              "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";Cwave"
+          ],
+          "commentLabel": "WCB run seq",
+          "category": "Sequences"
+        },
+        {
+          "id": "wcb.runSeqLong",
+          "name": "Run Sequence (long)",
+          "safety": "config",
+          "encoder": "template",
+          "template": ";SEQ{key}",
+          "params": [
+            {
+              "name": "key",
+              "pattern": "[A-Za-z0-9_]+",
+              "source": "wcb.sequences",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";SEQwave"
+          ],
+          "commentLabel": "WCB run seq (long)",
+          "category": "Sequences"
+        }
+      ],
+      "categories": [
+        "Sequences"
+      ]
+    }
+  ]
+}

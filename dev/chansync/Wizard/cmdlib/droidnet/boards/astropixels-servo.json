@@ -1,0 +1,523 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo AstroPixelsPlus MarcduinoPanel.h (:SF/:SQ/:SL/:SM) + Reeltwo ServoEasing.h / ServoDispatch.h",
+  "enums": {
+    "ap.easing": {
+      "label": "Easing",
+      "values": [
+        {
+          "code": "0",
+          "label": "Linear"
+        },
+        {
+          "code": "1",
+          "label": "Continuous"
+        },
+        {
+          "code": "2",
+          "label": "Quadratic In"
+        },
+        {
+          "code": "3",
+          "label": "Quadratic Out"
+        },
+        {
+          "code": "4",
+          "label": "Quadratic In/Out"
+        },
+        {
+          "code": "5",
+          "label": "Cubic In"
+        },
+        {
+          "code": "6",
+          "label": "Cubic Out"
+        },
+        {
+          "code": "7",
+          "label": "Cubic In/Out"
+        },
+        {
+          "code": "8",
+          "label": "Quartic In"
+        },
+        {
+          "code": "9",
+          "label": "Quartic Out"
+        },
+        {
+          "code": "10",
+          "label": "Quartic In/Out"
+        },
+        {
+          "code": "11",
+          "label": "Quintic In"
+        },
+        {
+          "code": "12",
+          "label": "Quintic Out"
+        },
+        {
+          "code": "13",
+          "label": "Quintic In/Out"
+        },
+        {
+          "code": "14",
+          "label": "Sine In"
+        },
+        {
+          "code": "15",
+          "label": "Sine Out"
+        },
+        {
+          "code": "16",
+          "label": "Sine In/Out"
+        },
+        {
+          "code": "17",
+          "label": "Circular In"
+        },
+        {
+          "code": "18",
+          "label": "Circular Out"
+        },
+        {
+          "code": "19",
+          "label": "Circular In/Out"
+        },
+        {
+          "code": "20",
+          "label": "Exponential In"
+        },
+        {
+          "code": "21",
+          "label": "Exponential Out"
+        },
+        {
+          "code": "22",
+          "label": "Exponential In/Out"
+        },
+        {
+          "code": "23",
+          "label": "Elastic In"
+        },
+        {
+          "code": "24",
+          "label": "Elastic Out"
+        },
+        {
+          "code": "25",
+          "label": "Elastic In/Out"
+        },
+        {
+          "code": "26",
+          "label": "Back In"
+        },
+        {
+          "code": "27",
+          "label": "Back Out"
+        },
+        {
+          "code": "28",
+          "label": "Back In/Out"
+        },
+        {
+          "code": "29",
+          "label": "Bounce In"
+        },
+        {
+          "code": "30",
+          "label": "Bounce Out"
+        },
+        {
+          "code": "31",
+          "label": "Bounce In/Out"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "astropixels-servo",
+      "name": "AstroPixelsPlus (Servo)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "AstroPixelsPlus",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "ap.servo.quickMove",
+          "name": "Quick Move",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SQ{index},{pulse}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "pulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            ":SQ0,1500"
+          ],
+          "commentLabel": "AP servo quick move (pulse µs, board-specific)",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.servo.move",
+          "name": "Move (snap)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SM{index},{pulse}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "pulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            ":SM0,1500"
+          ],
+          "commentLabel": "AP servo move (immediate)",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.servo.moveTimed",
+          "name": "Move (timed ramp)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SM{index},{moveTime},{pulse}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "moveTime",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "pulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            ":SM0,1000,1500"
+          ],
+          "commentLabel": "AP servo move over moveTime ms",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.servo.moveDelayed",
+          "name": "Move (delayed ramp)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SM{index},{startDelay},{moveTime},{pulse}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "startDelay",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "moveTime",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "pulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            ":SM0,500,1000,1500"
+          ],
+          "commentLabel": "AP servo delayed move",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.servo.moveFrom",
+          "name": "Move (from start pulse)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SM{index},{startDelay},{moveTime},{startPulse},{pulse}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "startDelay",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "moveTime",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "startPulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "pulse",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 2000
+            }
+          ],
+          "examples": [
+            ":SM0,500,1000,1000,2000"
+          ],
+          "commentLabel": "AP servo move from explicit start pulse",
+          "category": "Movement"
+        },
+        {
+          "id": "ap.servo.limits3",
+          "name": "Set Limits",
+          "safety": "config",
+          "encoder": "template",
+          "template": ":SL{index},{start},{end}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "start",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "end",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 2000
+            }
+          ],
+          "examples": [
+            ":SL0,1000,2000"
+          ],
+          "commentLabel": "AP servo set start/end limits",
+          "category": "Config"
+        },
+        {
+          "id": "ap.servo.limits4",
+          "name": "Set Limits + Neutral",
+          "safety": "config",
+          "encoder": "template",
+          "template": ":SL{index},{start},{end},{neutral}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "start",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "end",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 2000
+            },
+            {
+              "name": "neutral",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            }
+          ],
+          "examples": [
+            ":SL0,1000,2000,1500"
+          ],
+          "commentLabel": "AP servo set limits + neutral",
+          "category": "Config"
+        },
+        {
+          "id": "ap.servo.limits5",
+          "name": "Set Limits + Neutral + Group",
+          "safety": "config",
+          "encoder": "template",
+          "template": ":SL{index},{start},{end},{neutral},{group}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "max": 63,
+              "required": true,
+              "default": 0
+            },
+            {
+              "name": "start",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1000
+            },
+            {
+              "name": "end",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 2000
+            },
+            {
+              "name": "neutral",
+              "type": "int",
+              "min": 500,
+              "max": 2500,
+              "required": true,
+              "default": 1500
+            },
+            {
+              "name": "group",
+              "type": "int",
+              "min": 0,
+              "max": 16777215,
+              "required": true,
+              "default": 0
+            }
+          ],
+          "examples": [
+            ":SL0,1000,2000,1500,7"
+          ],
+          "commentLabel": "AP servo set limits + neutral + group (decimal bitmask)",
+          "category": "Config"
+        },
+        {
+          "id": "ap.servo.easing",
+          "name": "Set Easing Method",
+          "safety": "config",
+          "encoder": "template",
+          "template": ":SF{easingId}${group}",
+          "params": [
+            {
+              "name": "easingId",
+              "enum": "ap.easing",
+              "required": true,
+              "default": "0"
+            },
+            {
+              "name": "group",
+              "pattern": "[0-9A-Fa-f]+",
+              "required": true
+            }
+          ],
+          "examples": [
+            ":SF0$4000",
+            ":SF26$3F"
+          ],
+          "commentLabel": "AP servo set easing; group = hex panel bitmask, required",
+          "category": "Config"
+        }
+      ],
+      "categories": [
+        "Movement",
+        "Config"
+      ]
+    }
+  ]
+}
