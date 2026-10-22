@@ -5,6 +5,8 @@
  "wifiEnabled": true,
  "wifiSsid": "HILssid",
  "wifiPassword": "HILwifiPass",
+ "wifiToken": "",
+ "chanSync": true,
  "maeGateMs": 250,
  "boardType": 0,
  "tapWindowMs": 500,
@@ -1253,7 +1255,8 @@
   "password": "HILmeshPass",
   "quantity": 1,
   "deviceId": 20,
-  "channel": 1
+  "channel": 1,
+  "region": "01"
  },
  "wcbProfiles": [
   {

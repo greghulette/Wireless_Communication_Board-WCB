@@ -239,12 +239,18 @@ def banner_anchors(cfg, version, app_sha, hooks):
             def softap(x, ssid=ssid, ch=net.get("channel")):
                 m = ap.fullmatch(x)
                 return bool(m) and m.group(1).encode("utf-8") == ssid and int(m.group(2)) == ch
+            # Since channel sync the endpoint line says whether a login is needed, never the token (chansync
+            # navicore_wsserver.h:926-928), which follows the config's wifiToken; an image before it ends at /ws.
+            login = "set" if cfg.get("wifiToken") else "none"
+            ws_tail = rf" \(login token: {login}\)" if "wifiToken" in cfg else r"(?: \(login token: (?:set|none)\))?"
             out += [("the SoftAP on the mesh channel", None, softap),
                     ("ESP-NOW on the AP's channel", *eq("[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).")),
                     ("DHCP with no gateway", *eq("[WIFI] DHCP offers no default gateway — clients keep their own "
                                                  "route.")),
-                    ("the WebSocket endpoint", *like("[WS] command endpoint ready — ws://<ip>/ws",
-                                                     r"\[WS\] command endpoint ready — ws://\d+\.\d+\.\d+\.\d+/ws"))]
+                    ("the WebSocket endpoint", *like(f"[WS] command endpoint ready — ws://<ip>/ws (login token: "
+                                                     f"{login})",
+                                                     r"\[WS\] command endpoint ready — ws://\d+\.\d+\.\d+\.\d+/ws"
+                                                     + ws_tail))]
 
     def done(x):
         m = BOOT_DONE.search(x)

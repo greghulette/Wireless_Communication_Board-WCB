@@ -81,7 +81,9 @@ QUEUE_FULL = "[WS] command queue full - dropped a line"                         
 SOFTAP = re.compile(r'^\[WIFI\] SoftAP "(.*)" up on channel (\d+) — (\d+\.\d+\.\d+\.\d+)$')   # :4727-4728
 ESPNOW_SHARE = "[WIFI] ESP-NOW will share this channel (WIFI_AP_STA)."                   # :4729
 DHCP_NO_GW = "[WIFI] DHCP offers no default gateway — clients keep their own route."     # :4781
-WS_READY = re.compile(r"^\[WS\] command endpoint ready — ws://(\d+\.\d+\.\d+\.\d+)/ws$")  # navicore_wsserver.h:507-508
+# naviws::begin(); since channel sync (NaviCore ab762c1) it ends with whether a login is needed, never the token itself
+# (chansync navicore_wsserver.h:926-928): '... ws://192.168.4.1/ws (login token: set|none)'. Older images end at /ws.
+WS_READY = re.compile(r"^\[WS\] command endpoint ready — ws://(\d+\.\d+\.\d+\.\d+)/ws(?: \(login token: (set|none)\))?$")
 REFUSED_SHORT = re.compile(r"^\[WIFI\] REFUSED: password is (\d+) character\(s\); WPA2 requires 8\.$")   # :4714
 NOT_OPEN = "[WIFI] Not starting an open AP — set a longer password and reboot."          # :4715
 AP_FAILS = ("FAILED", "could not", "not ready", "REFUSED", "disabled", "alloc failed")    # :4714-4791; wsserver :480, :495
@@ -196,7 +198,9 @@ def ap_block(banner, cfg):
     access point the config brings up (ap_of): the SoftAP line with the config's SSID on wcbNetwork.channel at
     192.168.4.1, then ESP-NOW sharing the channel, DHCP with no gateway (NaviCore.ino:4727-4781) and the WebSocket
     endpoint at the same address (navicore_wsserver.h:507-508), in that order, and no [WIFI] or [WS] line carrying a
-    failure word (AP_FAILS). The SSID is compared and never quoted, so no [WIFI] line is quoted. facts: 'ip' and
+    failure word (AP_FAILS). Since channel sync the endpoint line says whether a login token is set (chansync
+    navicore_wsserver.h:926-928), which must agree with the config's wifiToken. The SSID is compared and never quoted,
+    so no [WIFI] line is quoted. facts: 'ip' and
     'psram_free', the [MEM] line's free PSRAM, the only memory figure NaviCore prints."""
     ssid, _ = ap_of(cfg) or ("", "")
     ch = (cfg.get("wcbNetwork") or {}).get("channel")
@@ -225,6 +229,10 @@ def ap_block(banner, cfg):
                 at["ws"] = i
                 if facts["ip"] and m.group(1) != facts["ip"]:
                     problems.append(f"the WebSocket endpoint is at {m.group(1)}, the SoftAP at {facts['ip']}")
+                # The login state, against the config's token (naviws::setToken before begin(), NaviCore.ino setup).
+                if m.group(2) and "wifiToken" in cfg and m.group(2) != ("set" if cfg["wifiToken"] else "none"):
+                    problems.append(f"the WebSocket endpoint says login token {m.group(2)}, but the config "
+                                    f"{'holds one' if cfg['wifiToken'] else 'has none'}")
         if x.startswith(("[WIFI]", "[WS]")) and any(w in x for w in AP_FAILS):
             problems.append("a [WIFI] failure line (not quoted: it can name the network)" if x.startswith("[WIFI]")
                             else f"a failure line: {redact_text(x)[:120]!r}")
@@ -298,15 +306,28 @@ def data_line(offset=1048576):
 
 
 # ------------------------------------------------------------------ the PC on NaviCore's access point
+# NaviCore's WebSocket login token as its USB GET_CONFIG last gave it (wifiToken; None for none), read with the access
+# point's name and password by _on_ap and navicore_home. _open signs in with it: with a token set, a session that has
+# not signed in runs nothing, mirrors nothing and is shut down 15 s after it opened (chansync navicore_wsserver.h:37-56,
+# wsAdmit, WS_SIGNIN_MS). hil/ws.py WsClient sends it only when NaviCore asks. Never printed.
+_NC_TOKEN = {"token": None}
+
+
+def _remember_token(cfg):
+    _NC_TOKEN["token"] = (cfg or {}).get("wifiToken") or None
+
+
 def navicore_home(bench):
     """Where the Mac's spare adapter rests between tests, for pc_on_ap's home= (hil/wlan.py realtek_on_ap): (NaviCore's
     SSID, "NaviCore's", its identify), or None when NaviCore is not on this bench or hosts no access point."""
     if "navicore" not in (bench.cfg.get("devices") or {}):
         return None
     try:
-        ap = ap_of(_nc(bench).config())
+        cfg = _nc(bench).config()
     except AssertionError:
         return None
+    _remember_token(cfg)
+    ap = ap_of(cfg)
     return None if ap is None else (ap[0], "NaviCore's", _navicore_ap(bench))
 
 
@@ -317,6 +338,7 @@ def _on_ap(bench, problems):
     (ap_of)."""
     nc = _nc(bench)
     cfg = nc.config()
+    _remember_token(cfg)
     ap = ap_of(cfg)
     if ap is None:
         raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
@@ -362,8 +384,10 @@ def _spare_adapter(bench):
 
 
 def _open(bench, name="ncws", wait=15.0, **kw):
-    """A NcWs on NaviCore's endpoint, retried for `wait` s (the lease is already held), logging into session.log.
-    AssertionError when it cannot connect."""
+    """A NcWs on NaviCore's endpoint, retried for `wait` s (the lease is already held), logging into session.log, and
+    signed in with NaviCore's token when it has one and asks (_NC_TOKEN; token= overrides it). AssertionError when it
+    cannot connect."""
+    kw.setdefault("token", _NC_TOKEN["token"])
     end = time.monotonic() + wait
     while True:
         try:
@@ -1272,6 +1296,7 @@ def _join_and_ping(bench, problems, cfg, version, label):
     """After a restart: the PC joins the access point `cfg` brings up and PING over the socket answers with `version`
     -> seconds from the call to the PONG. A problem is added, not raised, when the socket does not answer."""
     ssid, pw = ap_of(cfg)
+    _remember_token(cfg)
     t0 = time.monotonic()
     with pc_on_ap(bench, problems, ssid, pw, "NaviCore's", spare_only=True, identify=_navicore_ap(bench, version)):
         ws = _open(bench, wait=20.0)
@@ -1309,6 +1334,7 @@ def ap_boot_lines(bench):
     _restartable(nc)
     problems, facts = [], {}
     with nc_guard(bench, nc=nc) as g:
+        _remember_token(g.before)
         if ap_of(g.before) is None:
             raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
         version = g.nc.ping()
@@ -1361,6 +1387,7 @@ def refuse_short_password(bench):
     _restartable(nc)
     problems, facts = [], {}
     with nc_guard(bench, nc=nc) as g:
+        _remember_token(g.before)
         ap = ap_of(g.before)
         if ap is None:
             raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
@@ -1817,6 +1844,7 @@ def ap_ssid_change_at_boot(bench):
     problems, facts = [], {}
     new_ssid = f"HILAP{nonce()}"
     with nc_guard(bench, nc=nc) as g:
+        _remember_token(g.before)
         if ap_of(g.before) is None:
             raise Skip("NaviCore hosts no access point: wifiEnabled is off or its AP password is under 8 characters")
         version = g.nc.ping()

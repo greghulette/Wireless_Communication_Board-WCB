@@ -54,8 +54,8 @@ from suites.s05_mesh import _sid as _frag_sid
 from suites.s17_seq_inventory import PAGE_ASKED, PAGE_KEYS_MAX, _batched, _names, _pages_of, _seqval, _store
 from suites.s18_etm_config_wdp import _etm, _forget_everywhere, _joined
 from suites.s20_ota import _crc, _session_id
-from suites.s40_navicore_config import (DEFAULTS, HOOK_SKIP, SAVED, _defaults_live_effects, _flushed, _hooks,
-                                        _inert_keys)
+from suites.s40_navicore_config import (DEFAULTS, HOOK_SKIP, REGION_IGNORED, SAVED, TOKEN_IGNORED,
+                                        _defaults_live_effects, _flushed, _hooks, _inert_keys)
 from suites.s41_navicore_engine import _count, _engine_inert, _wait_all
 
 KEEPALIVE = {"type": "STOP_MONITOR"}    # accepted over the mesh and ignored (rc_telemetry.h:2399-2402)
@@ -74,7 +74,9 @@ STALL_MS = 3000                         # the #L90 stall remote_cli_order_and_dr
 CLI_QUEUE = 3                           # remoteCliQueue's depth (NaviCore.ino:4843)
 PENDING_MAX = 10                        # WCB_PENDING_MAX (WCB_Client.h:84): ETM slots before a send degrades
 ETM_RETRY_S = 0.5                       # ETM_RETRY_INTERVAL_MS (WCB_Client.h:130), 3 retries (:131)
-IDENTITY = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword")
+# What RESET_DEFAULTS keeps on both transports (rcConfigResetKeepIdentity, chansync rc_config.h:1071-1091), the
+# WebSocket token among it; s40's IDENTITY.
+IDENTITY = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword", "wifiToken")
 DOT = "·"                          # onWcbStatus separates board and alias with ' · ' (NaviCore.ino:5333)
 
 
@@ -470,32 +472,52 @@ def bridged_set_config(bench):
     assert not problems, "; ".join(problems)
 
 
+STRIP_WIFI_LINE = "[RC] SET_CONFIG: ignoring incoming wifi* fields (WCB-transport saves can't change the SoftAP)"
+
+
 @test("ncmesh.bridged_set_config_strip", "(should) A bridged SET_CONFIG cannot change NaviCore's radio settings: "
-      "wifiEnabled (like wcbNetwork.channel) is stripped as deviceId, the MAC octets, the password and quantity are",
-      needs=["navicore", "wcb1"], links=[])
+      "wifiEnabled, the WebSocket token (wifiToken) and wcbNetwork.region are stripped as channel, deviceId, the MAC "
+      "octets, the password and quantity are - the 'ignoring incoming wifi* fields' line, no [CFG] line for the token "
+      "or the region, and all three read back unchanged", needs=["navicore", "wcb1"], links=[])
 def bridged_set_config_strip(bench):
-    """NAVICORE.md D-NC18. _applyReassembled strips deviceId, macOct2, macOct3, password and quantity from a bridged
-    SET_CONFIG (rc_telemetry.h:1137-1156) and nothing else, so wcbNetwork.channel and wifiEnabled, wifiSsid and
-    wifiPassword are applied and saved (rc_config.h:1526-1531, :1783-1784): a Save over the bridge can move the droid to
-    another mesh channel, or switch its SoftAP off or rename it, at the next boot. The change sent is wifiEnabled
-    flipped: read only at boot (NaviCore.ino:4711), so nothing changes live, and nc_guard writes it back over USB within
-    seconds; it is neither a credential nor the mesh identity. The channel is not sent: a valid other channel would be
-    saved and take NaviCore off the mesh at its next boot (D-NC14), and a value the clamp turns back into the current
-    one (0, or 12 and up, rc_config.h:1783-1784) cannot show whether it was stripped. Recommendation: strip channel and
-    the wifi* fields too; the tool already strips channel."""
+    """NAVICORE.md D-NC18 (fixed in NaviCore 7f47f3c; channel sync, ab762c1, adds the token and the region). Over the mesh
+    _applyReassembled (chansync rc_telemetry.h:1137-1191) strips deviceId, macOct2, macOct3, password, quantity, channel
+    and region from wcbNetwork (:1151-1176) and wifiEnabled, wifiSsid, wifiPassword and wifiToken from the top level,
+    saying STRIP_WIFI_LINE (:1185-1191): a region without the running channel takes the droid off its mesh at the next
+    boot, and anyone holding the public mesh password could otherwise set a token and lock the owner out, or clear it.
+    One save sends three: wifiEnabled flipped and a region valid but other than the stored one, both read only at boot
+    (NaviCore.ino setup), and a 7-character token, which rcWsTokenValid refuses (rc_config.h:69-79), so even unstripped
+    it is never stored: the '[CFG] wifiToken ignored' line rcConfigFromJSON prints for it (:1685) is how an unstripped
+    one shows, as '[CFG] wcbNetwork.region' would for a refused region. None of them is a credential or the mesh
+    identity; nc_guard writes back over USB, within seconds, anything that landed. The channel is not sent: a valid
+    other channel would be saved and take NaviCore off the mesh at its next boot (D-NC14)."""
     w1 = usb_wcb(bench)
     with nc_guard(bench) as g:
-        nid = _open_relay(g.nc, w1)
+        nc = g.nc
+        nid = _open_relay(nc, w1)
         was = bool(g.before.get("wifiEnabled"))
+        net = g.before.get("wcbNetwork") or {}
+        region = "FR" if net.get("region") == "DE" else "DE"
+        probe = marker("T")[:7]                 # 7 characters: never a token NaviCore would store
         save = int(nonce(), 16) % 900000 + 1000
-        r = bridged(w1, {"sys": 1, "type": "SET_CONFIG", "saveId": save, "data": {"wifiEnabled": not was}},
+        nm = nc.dev.mark()
+        r = bridged(w1, {"sys": 1, "type": "SET_CONFIG", "saveId": save,
+                         "data": {"wifiEnabled": not was, "wifiToken": probe, "wcbNetwork": {"region": region}}},
                     rf'"of":"SET_CONFIG".*"saveId":{save}\b', timeout=8.0, target=nid)
         ack = next((o for o in r.sys if o.get("of") == "SET_CONFIG" and o.get("saveId") == save), None)
-        now = bool(g.nc.config().get("wifiEnabled"))
+        lines = _flushed(nc, nm, settle=0.3)
+        cfg = nc.config()
+    landed = [k for k in ("wifiEnabled", "wifiToken") if cfg.get(k) != g.before.get(k)] + \
+        (["wcbNetwork.region"] if (cfg.get("wcbNetwork") or {}).get("region") != net.get("region") else [])
+    reached = [what for what, seen in (("wifiToken", any(x == TOKEN_IGNORED for x in lines)),
+                                       ("wcbNetwork.region", any(REGION_IGNORED.match(x) for x in lines))) if seen]
     assert ack is not None and ack.get("ok") is True, f"the bridged SET_CONFIG was not ACKed ok:true ({ack})"
-    assert now == was, (f"(should, D-NC18) a bridged SET_CONFIG changed wifiEnabled {was} -> {now} and saved it: "
-                        f"rc_telemetry.h:1137-1156 strips only deviceId, the MAC octets, the password and quantity "
-                        f"(the guard put it back)")
+    assert not landed and not reached, (
+        f"(should, D-NC18) a bridged SET_CONFIG was applied: {landed or 'nothing'} changed and saved (values not "
+        f"shown; the guard put it back), {reached or 'nothing else'} reached rcConfigFromJSON (its [CFG] line); "
+        f"chansync rc_telemetry.h:1137-1191 strips wcbNetwork's transport fields with the region and every wifi* "
+        f"field with the token")
+    assert STRIP_WIFI_LINE in lines, f"no {STRIP_WIFI_LINE!r} line on NaviCore's USB for the stripped wifi* fields"
 
 
 def _reset_effects(before):
@@ -596,13 +618,15 @@ def bridged_reset_defaults(bench):
 
 
 @test("ncmesh.bridged_reset_keeps_identity", "(should) A bridged RESET_DEFAULTS keeps the network identity - "
-      "wcbNetwork, wcbProfiles, boardType and the wifi fields - so a later save cannot move the droid onto the default "
-      "mesh credentials, pin profile or SoftAP (SBUS OUT stops for a few seconds)", needs=["navicore", "wcb1"], links=[])
+      "wcbNetwork with its region, wcbProfiles, boardType, the wifi fields and the WebSocket token - so a later save "
+      "cannot move the droid onto the default mesh credentials, pin profile or SoftAP, or open a locked WebSocket (SBUS "
+      "OUT stops for a few seconds)", needs=["navicore", "wcb1"], links=[])
 def bridged_reset_keeps_identity(bench):
     """NAVICORE.md D-NC16, the mesh path. rcConfigLoadDefaults resets the whole block - the compile-time mesh password,
-    deviceId 20, quantity 4, boardType 0, the SoftAP off (rc_config.h:801-968) - and the bridged path then re-applies it
-    live (rc_telemetry.h:1538-1546), so the next Save over either transport persists it; until then the raw-packet
-    paths already use the default password (D-NC17). nccfg.reset_defaults_keeps_identity asks the same of the USB path.
+    deviceId 20, quantity 4, boardType 0, the SoftAP off - and the bridged path then re-applies it live, so the next
+    Save over either transport persists it; until then the raw-packet paths already use the default password (D-NC17).
+    rcConfigResetKeepIdentity (chansync rc_config.h:1071-1091, on both transports) keeps IDENTITY, the token included.
+    nccfg.reset_defaults_keeps_identity asks the same of the USB path.
     Restored by nc_guard over USB, no restart. The failure names the fields that changed, never a value (the SSID and
     the passwords are among them). Skips like ncmesh.bridged_reset_defaults when the defaults would act on the live SBUS
     input."""

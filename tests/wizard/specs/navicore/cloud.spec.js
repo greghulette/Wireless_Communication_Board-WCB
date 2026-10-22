@@ -255,7 +255,7 @@ test.describe('the cloud backup', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.cloud_hidden_wifi the droid WiFi fields parked in the cloud modal edit the config in place (nothing is sent), the note says what Save and a reboot will do and flags a password under 8 characters, the AP name placeholder is NaviCore-<id>, and Save then sends exactly wifiEnabled, wifiSsid and wifiPassword', async ({ page, emu }) => {
+  test('nctool.cloud_hidden_wifi the droid WiFi fields parked in the cloud modal edit the config in place (nothing is sent), the note says what Save and a reboot will do and flags a password under 8 characters, the AP name placeholder is NaviCore-<id>, the masked access-token field refuses a token the firmware would (length, a space, , ^ ; ? " \\) and keeps a valid one, and Save then sends exactly wifiEnabled, wifiSsid, wifiPassword and wifiToken', async ({ page, emu }) => {
     await T.openTool(page);
     await mockWorker(page);
     await T.connectUsb(page, emu);
@@ -282,13 +282,37 @@ test.describe('the cloud backup', () => {
     await page.locator('#cfg-wifi-pw-eye').click();
     expect(await page.locator('#cfg-wifi-pw').getAttribute('type')).toBe('text');
     await page.locator('#cfg-wifi-enable').uncheck();
+    // The WebSocket access token (config.wifiToken; NaviCore chansync, cfgOpenCloudModal's _tokenNote and ncTokenProblem,
+    // the rule of rcWsTokenValid in rc_config.h). The bench has none, so the masked field opens empty and enabled. A
+    // token the firmware would refuse is never put in config - the note says so and that the stored one stays - and a
+    // valid one is, for Save to send.
+    const tok = page.locator('#cfg-wifi-token'), tokNote = page.locator('#cfg-wifi-token-note');
+    expect(BENCH.wifiToken).toBe('');
+    await expect(tok).toBeEnabled();
+    expect(await tok.getAttribute('type')).toBe('password');
+    await expect(tokNote).toHaveText(/^No access token: anyone who joins the droid's WiFi can use it/);
+    await tok.fill('HILtok7');
+    await expect(tokNote).toHaveText('The token must be 8-32 characters (this is 7). Not applied — the token stays unset.');
+    await tok.fill('HIL token1');
+    await expect(tokNote).toHaveText('Only printable ASCII characters, no spaces. Not applied — the token stays unset.');
+    for (const c of [',', '^', ';', '?', '"', '\\']) {
+      await tok.fill(`HILtok${c}12`);
+      await expect(tokNote).toHaveText(/^None of , \^ ; \? " \\ — they break the board's command line\. Not applied/);
+    }
+    expect(await page.evaluate(() => config.wifiToken), 'a refused token never reaches config').toBe('');
+    await tok.fill('HILtoken42');
+    await expect(tokNote).toHaveText(/^Apps connecting over the droid's WiFi must sign in with this token/);
+    expect(await page.evaluate(() => config.wifiToken)).toBe('HILtoken42');
+    await page.locator('#cfg-wifi-token-eye').click();
+    expect(await tok.getAttribute('type')).toBe('text');
     expect(emu.requests('SET_CONFIG'), 'nothing is sent by the fields').toEqual([]);
     await page.locator('#cfg-cloud-close').click();
     await page.evaluate(() => saveConfigToBoard());
     const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
-    expect(sent.data).toEqual({ wifiEnabled: false, wifiSsid: 'HILdroid', wifiPassword: 'hil-wifi-pw' });
+    expect(sent.data).toEqual({ wifiEnabled: false, wifiSsid: 'HILdroid', wifiPassword: 'hil-wifi-pw', wifiToken: 'HILtoken42' });
     await expect.poll(() => page.evaluate(() => !!_pendingSaveBaseline)).toBe(false);
-    expect([emu.config.toJSON().wifiEnabled, emu.config.toJSON().wifiSsid]).toEqual([false, 'HILdroid']);
+    const stored = emu.config.toJSON();
+    expect([stored.wifiEnabled, stored.wifiSsid, stored.wifiToken]).toEqual([false, 'HILdroid', 'HILtoken42']);
     T.expectNoPageErrors(page);
   });
 });

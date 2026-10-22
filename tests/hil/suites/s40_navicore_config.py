@@ -17,10 +17,11 @@ What the tests change, and why each change is inert:
   nothing names it; mode and stats reports only with wcb 0, which sends nothing (rc_telemetry.h:1258, :1298).
 - A baud only on a port already at the value the clamp falls back to, except where a re-open is the point
   (side_effects_live, boardtype_change_no_reboot: S4 for a few seconds, nothing recorded on J5).
-- Nothing writes a credential or the mesh identity: wcbNetwork's password, deviceId and quantity and the wifi fields are
-  never sent changed. The mesh probes send only values the clamp turns back into the current ones (channel 13 or 0 when
-  the channel is already 1; an octet plus 256). wcbProfiles, the tool's inert saved identities, are rebuilt only with
-  HIL entries that hold no password.
+- Nothing writes a credential or the mesh identity: wcbNetwork's password, deviceId, quantity and region, the wifi
+  fields and the WebSocket token (wifiToken) are never sent changed. The mesh probes send only values the clamp turns
+  back into the current ones (channel 14 or 0 when the channel is already 1; an octet plus 256) or that the firmware
+  ignores (a region or a token it refuses). wcbProfiles, the tool's inert saved identities, are rebuilt only with HIL
+  entries that hold no password. chanSync, which applies live, is never sent.
 - RESET_DEFAULTS is RAM only over USB (NaviCore.ino:3989-3992): the guard's diff path puts the saved text back (the
   flash already holds it), or, in the navicore_reboot tests, a REBOOT does and nothing is written at all. Without a
   restart it is sent only when the defaults would decode nothing from the live SBUS input (_defaults_live_effects): a
@@ -50,9 +51,11 @@ from suites.common import marker, nonce
 
 LOG_LINE = re.compile(r"^\s*[0-9.]+\s+(\S+) ([<>#]) (.*)$")      # Bench.log's layout: time, name, direction, text
 
-# rcConfigToJSON's top-level keys, in the order it writes them (rc_config.h:1221-1466); serialLabels only when a label
-# is set (:1416-1426).
-TOP_KEYS = ("txModel", "threeAxisGimbals", "sbusOutEnabled", "wifiEnabled", "wifiSsid", "wifiPassword", "maeGateMs",
+# rcConfigToJSON's top-level keys, in the order it writes them (chansync rc_config.h:1355-1634); serialLabels only when a
+# label is set (:1566-1574), wifiToken only in the USB / WebSocket copy, never the one sent over the mesh (forMesh,
+# :1371-1372; rc_telemetry.h _startGetConfigSend). wcbNetwork.region is a key of wcbNetwork (:1505), not a top-level one.
+TOP_KEYS = ("txModel", "threeAxisGimbals", "sbusOutEnabled", "wifiEnabled", "wifiSsid", "wifiPassword", "wifiToken",
+            "chanSync", "maeGateMs",
             "boardType", "tapWindowMs", "holdMs", "switchSettleMs", "chRateHz", "matrixChannel", "matrixDebounceFrames",
             "funcBindings", "peerEvent", "thresholds", "mappings", "switches", "knobs", "hcrDest", "maestros",
             "wcbNetwork", "wcbProfiles", "mp3Dest", "dfpDest", "wledSlots", "auxBaud", "serialLabels", "serialBcast",
@@ -88,7 +91,8 @@ DEFAULT_BANDS = [("B1", 1799, 1823), ("B2", 1758, 1782), ("B3", 1718, 1742), ("B
                  ("T1 Right", 1103, 1127), ("L-Stick Click", 1062, 1086), ("R-Stick Click", 1021, 1045),
                  ("Unassigned", 0, 0)] + [(f"Logical {i}", 0, 0) for i in range(1, 16)]
 DEFAULTS = {"txModel": 0, "threeAxisGimbals": False, "sbusOutEnabled": False, "wifiEnabled": False, "wifiSsid": "",
-            "wifiPassword": "", "maeGateMs": 250, "boardType": 0, "tapWindowMs": 500, "holdMs": 750,
+            "wifiPassword": "", "wifiToken": "", "chanSync": True,       # chansync rc_config.h:899-900
+            "maeGateMs": 250, "boardType": 0, "tapWindowMs": 500, "holdMs": 750,
             "switchSettleMs": 80, "chRateHz": 5, "matrixChannel": 7, "matrixDebounceFrames": 1,
             "funcBindings": {"mode": 4}, "peerEvent": {"alert": True, "actions": []},
             "thresholds": [{"id": i + 1, "label": b[0], "minPwm": b[1], "maxPwm": b[2]} for i, b in enumerate(DEFAULT_BANDS)],
@@ -106,9 +110,29 @@ DEFAULTS = {"txModel": 0, "threeAxisGimbals": False, "sbusOutEnabled": False, "w
             "modeReport": {"enabled": False, "wcb": 0, "template": "", "cmds": ["", "", ""]},
             "statsReport": {"enabled": False, "wcb": 0},
             "smoothProfiles": [{"name": "Default", "entries": []}] + [{"name": "", "entries": []}] * 5}
-DEFAULT_NET = {"macOct2": 0, "macOct3": 0, "quantity": 4, "deviceId": 20, "channel": 1}   # + the compile-time password
-# What RESET_DEFAULTS keeps, on both transports (D-NC16, rcConfigResetKeepIdentity): the network identity.
-IDENTITY = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword")
+# + the compile-time password; region "01", channels 1-11 (chansync rc_config.h:1054)
+DEFAULT_NET = {"macOct2": 0, "macOct3": 0, "quantity": 4, "deviceId": 20, "channel": 1, "region": "01"}
+# What RESET_DEFAULTS keeps, on both transports (D-NC16, rcConfigResetKeepIdentity, chansync rc_config.h:1071-1091): the
+# network identity - wcbNetwork with its region, the profiles, the pin profile, the SoftAP fields and the WebSocket token
+# ("a reset must not open a locked socket"). chanSync is not kept: it goes back to its default, on.
+IDENTITY = ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword", "wifiToken")
+# The radio regions rcRegionValid accepts (RC_REGIONS, chansync rc_config.h:50-54): "01" or an upper-case country code.
+REGIONS = ("01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
+           "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT", "JP", "KR", "LI", "LT", "LU", "LV", "MT", "MX", "NL", "NO",
+           "NZ", "PL", "PT", "RO", "SE", "SI", "SK", "TW", "US")
+TOKEN_BAD = ",^;?\"\\"                    # rcWsTokenValid (rc_config.h:69-79): 8-32 printable ASCII, none of space and these
+REGION_IGNORED = re.compile(r'^\[CFG\] wcbNetwork\.region "(.{0,8})" ignored: "01" or an upper-case IDF country code '
+                            r'\(the stored "([0-9A-Z]{2})" stays\)$')                    # rc_config.h:1968-1969
+TOKEN_IGNORED = ("[CFG] wifiToken ignored: 8-32 printable characters, none of space , ^ ; ? \" \\ (the stored token "
+                 "stays)")                                                               # rc_config.h:1685-1686
+
+
+def token_ok(t):
+    """rcWsTokenValid (chansync rc_config.h:69-79): "" (none), or 8-32 printable ASCII characters with none of space
+    , ^ ; ? " and backslash."""
+    if not isinstance(t, str):
+        return False
+    return t == "" or (8 <= len(t) <= 32 and all("!" <= c <= "~" and c not in TOKEN_BAD for c in t))
 
 SAVED = re.compile(r"^RC config saved to LittleFS \((\d+) bytes\)\.")                  # rc_config.h:2079
 REOPEN = re.compile(r"^\[(?:AUX\] S[345]|Serial2\] Local Maestro) re-open @")         # NaviCore.ino:3245-3270
@@ -369,8 +393,10 @@ def _action_problems(where, a):
 
 
 def _shape_problems(cfg):
-    """Everything in GET_CONFIG `cfg` that rcConfigToJSON (rc_config.h:1211-1482) would not have written: key sets and
-    orders, array lengths, the sparse rules. Key paths and types only: no value that could be a credential."""
+    """Everything in GET_CONFIG `cfg` that rcConfigToJSON (chansync rc_config.h:1355-1634) would not have written: key
+    sets and orders, array lengths, the sparse rules, and the channel-sync fields' types and ranges (region in
+    RC_REGIONS, channel 1-13, chanSync a bool, wifiToken one rcWsTokenValid stores). Key paths and types only: no value
+    that could be a credential."""
     p = []
     want = [k for k in TOP_KEYS if k != "serialLabels" or "serialLabels" in cfg]
     if list(cfg) != want:
@@ -438,8 +464,17 @@ def _shape_problems(cfg):
             if not chs or [c.get("ch") for c in chs] != sorted({c.get("ch") for c in chs}) or \
                     any(list(c) != ["ch", "name", "min", "max"] or not 0 <= c["ch"] <= 31 for c in chs):
                 p.append(f"maestros[{i}].channels: not a sorted, non-empty list of {{ch 0-31, name, min, max}}")
-    if list(cfg.get("wcbNetwork") or {}) != ["macOct2", "macOct3", "password", "quantity", "deviceId", "channel"]:
-        p.append("wcbNetwork: keys are not macOct2, macOct3, password, quantity, deviceId, channel")
+    net = cfg.get("wcbNetwork") or {}
+    if list(net) != ["macOct2", "macOct3", "password", "quantity", "deviceId", "channel", "region"]:
+        p.append("wcbNetwork: keys are not macOct2, macOct3, password, quantity, deviceId, channel, region")
+    if net.get("region") not in REGIONS:
+        p.append(f"wcbNetwork.region {redact_text(json.dumps(net.get('region')))[:12]} is not one rcRegionValid takes")
+    if not isinstance(net.get("channel"), int) or not 1 <= net["channel"] <= 13:
+        p.append(f"wcbNetwork.channel {net.get('channel')!r} is outside 1-13")
+    if "chanSync" in cfg and not isinstance(cfg["chanSync"], bool):
+        p.append(f"chanSync is {type(cfg['chanSync']).__name__}, not a bool")
+    if "wifiToken" in cfg and not token_ok(cfg["wifiToken"]):      # never quoted: a token is a credential
+        p.append("wifiToken is not a token rcWsTokenValid would have stored (not shown)")
     prof = cfg.get("wcbProfiles")
     if not isinstance(prof, list) or len(prof) > 6 or any(
             list(x) != ["name", "macOct2", "macOct3", "password", "quantity", "deviceId", "channel"] for x in prof):
@@ -478,17 +513,23 @@ def _shape_problems(cfg):
 
 @test("nccfg.get_config_shape", "GET_CONFIG's data has rcConfigToJSON's key set in its order, 36 thresholds, 8 Maestro "
       "slots, 4 WLED slots, 6 smoothing profiles, 3 mode-report commands, the switch and knob label keys, only the "
-      "action types and keys actionToJson writes, and leaves out what is empty (read only)", needs=["navicore"], links=[])
+      "action types and keys actionToJson writes, and leaves out what is empty; the USB copy carries wifiToken (a valid "
+      "token or none) and chanSync, and wcbNetwork a region rcRegionValid takes and a channel 1-13 (read only)",
+      needs=["navicore"], links=[])
 def get_config_shape(bench):
-    """A read of the running config against rcConfigToJSON (rc_config.h:1211-1482) and actionToJson (:970-1061): the
-    config tool builds its whole model from this shape, and nc_guard's clears rely on the sparse rules (an empty mapping,
-    a slot's empty channel list and empty labels are never printed: :1262, :1340, :1421). A field NaviCore gains without
-    a matching entry here fails the test: the entry belongs in TOP_KEYS or ACTIONS, and the tool may need it too."""
+    """A read of the running config against rcConfigToJSON (chansync rc_config.h:1355-1634) and actionToJson: the config
+    tool builds its whole model from this shape, and nc_guard's clears rely on the sparse rules (an empty mapping, a
+    slot's empty channel list and empty labels are never printed). A field NaviCore gains without a matching entry here
+    fails the test: the entry belongs in TOP_KEYS or ACTIONS, and the tool may need it too. Channel sync's fields
+    (NaviCore ab762c1): wifiToken after wifiPassword, then chanSync (:1371-1373), wcbNetwork.region last in wcbNetwork
+    (:1505). This is the USB copy, which carries the token; the one sent over the mesh does not (forMesh, :1371)."""
     cfg = _nc(bench).config()
     problems = _shape_problems(cfg)
     bench.note(f"GET_CONFIG: {len(cfg.get('mappings') or {})} mappings, {len(_all_actions(cfg))} actions, "
                f"{sum(1 for s in cfg.get('maestros') or [] if 'channels' in s)} Maestro slots with channel names, "
-               f"serialLabels {'set' if 'serialLabels' in cfg else 'absent'}")
+               f"serialLabels {'set' if 'serialLabels' in cfg else 'absent'}, region "
+               f"{(cfg.get('wcbNetwork') or {}).get('region')}, chanSync {cfg.get('chanSync')}, WebSocket token "
+               f"{'set' if cfg.get('wifiToken') else 'none'}")
     assert not problems, redact_text("; ".join(problems[:12]) + (f" ... and {len(problems) - 12} more"
                                                                    if len(problems) > 12 else ""))
 
@@ -950,22 +991,28 @@ def clamps_baud(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("nccfg.clamps_mesh_channel", "wcbNetwork.channel 13 and 0 read 1 and a MAC octet + 256 reads the octet (only while "
-      "those equal the current values, so nothing changes); a profile's channel 13 or 0 reads 1, its octets are masked "
-      "to a byte, a missing quantity/deviceId read 4/20, and a 7th profile is dropped", needs=["navicore"], links=[])
+@test("nccfg.clamps_mesh_channel", "wcbNetwork.channel 14 and 0 read 1 and a MAC octet + 256 reads the octet (only while "
+      "those equal the current values, so nothing changes); a region rcRegionValid refuses (XX, lower case, three "
+      "letters, empty, a number) is ignored with its [CFG] line and a null without one, the stored region kept; a "
+      "profile's channel 13 is kept (1-13), 14 or 0 reads 1, its octets are masked to a byte, a missing "
+      "quantity/deviceId read 4/20, and a 7th profile is dropped", needs=["navicore"], links=[])
 def clamps_mesh_channel(bench):
-    """rc_config.h:1743-1768 (wcbNetwork: channel outside 1-11 falls back to 1, not 11, :1759-1767; octets
-    presence-checked and masked, :1749-1750) and :1773-1789 (wcbProfiles, RC_MAX_WCB_PROFILES 6, :461). The wcbNetwork
-    probes are built to leave the identity as it is: channel 13 and 0 only when the channel is already 1 (else a stored 1
-    would move the droid off its mesh at the next boot, D-NC14), and each octet plus 256, which the mask brings back.
-    The profiles are the tool's inert saved identities (the firmware never reads them, :456-460); the guard puts the
-    real ones back. deviceId 21 fails at the next boot (ncboot.bad_device_id, opt-in navicore_identity, attended)."""
+    """chansync rc_config.h:1936-1971 (wcbNetwork: a channel outside 1-13 falls back to 1, not 13, :1949-1961, and 12-13
+    are stored whatever the region - setup() runs one its region does not allow on channel 1 for that boot and keeps it,
+    NaviCore.ino reportBootChannel; octets presence-checked and masked, :1941-1942; a region rcRegionValid (:57-62)
+    refuses is ignored with a line naming it and the stored one, never folded onto "01", and a null is left alone
+    without one, :1962-1970) and :1976-1992 (wcbProfiles 1-13, :1988; RC_MAX_WCB_PROFILES 6, :530). The wcbNetwork probes
+    are built to leave the identity as it is: channel 14 and 0 only when the channel is already 1 (a valid channel,
+    13 now among them, would be stored and move the droid off its mesh at the next boot, D-NC14), each octet plus 256,
+    which the mask brings back, and only regions the firmware refuses (a valid one would apply at the next boot). The
+    profiles are the tool's inert saved identities (the firmware never reads them); the guard puts the real ones back.
+    deviceId 21 fails at the next boot (ncboot.bad_device_id, opt-in navicore_identity, attended)."""
     problems = []
     with nc_guard(bench) as g:
         nc, b = g.nc, g.before
         net = b["wcbNetwork"]
         if net["channel"] == 1:
-            for ch in (13, 0):
+            for ch in (14, 0):
                 _save(nc, {"wcbNetwork": {"channel": ch, "macOct2": net["macOct2"] + 256,
                                           "macOct3": net["macOct3"] + 512}})
                 got = nc.config()["wcbNetwork"]
@@ -973,19 +1020,77 @@ def clamps_mesh_channel(bench):
                     problems.append(f"wcbNetwork channel {ch} / octets +256: {'; '.join(redacted_diff(net, got))}")
         else:
             bench.note(f"wcbNetwork.channel is {net['channel']}: the channel probes would store 1, so they are left out")
+        if "region" not in net:
+            problems.append("wcbNetwork has no region: firmware before channel sync (NaviCore ab762c1)?")
+        else:
+            for bad in ("XX", "us", "DEU", "", 5, None):
+                _, lines = _save(nc, {"wcbNetwork": {"region": bad}})
+                said = [m for x in lines for m in [REGION_IGNORED.match(x)] if m]
+                if bad is None:
+                    if said:
+                        problems.append("region null printed an ignored line (a null is left alone without one)")
+                elif [m.groups() for m in said] != [(bad if isinstance(bad, str) else "", net["region"])]:
+                    problems.append(f"region {bad!r}: {len(said)} '[CFG] wcbNetwork.region ... ignored' line(s) "
+                                    f"naming {[m.groups() for m in said]}, not one naming it and the stored "
+                                    f"{net['region']!r}")
+                got = nc.config()["wcbNetwork"]
+                if got != net:
+                    problems.append(f"wcbNetwork after region {bad!r}: {'; '.join(redacted_diff(net, got))}")
         profiles = [{"name": "HILq", "macOct2": 300, "macOct3": -1, "password": "", "quantity": 3, "deviceId": 7,
                      "channel": 13},
-                    {"name": "HILr", "channel": 0}] + [{"name": f"HIL{i}", "password": ""} for i in range(5)]
+                    {"name": "HILr", "channel": 0},
+                    {"name": "HILs", "password": "", "channel": 14}] + [{"name": f"HIL{i}", "password": ""}
+                                                                       for i in range(4)]
         _save(nc, {"wcbProfiles": profiles})
         got = nc.config()["wcbProfiles"]
         want = [{"name": "HILq", "macOct2": 44, "macOct3": 255, "password": "", "quantity": 3, "deviceId": 7,
-                 "channel": 1},
-                {"name": "HILr", "macOct2": 0, "macOct3": 0, "password": "", "quantity": 4, "deviceId": 20,
-                 "channel": 1}] + \
-               [{"name": f"HIL{i}", "macOct2": 0, "macOct3": 0, "password": "", "quantity": 4, "deviceId": 20,
-                 "channel": 1} for i in range(4)]
+                 "channel": 13}] + \
+               [{"name": n, "macOct2": 0, "macOct3": 0, "password": "", "quantity": 4, "deviceId": 20, "channel": 1}
+                for n in ("HILr", "HILs", "HIL0", "HIL1", "HIL2")]
         problems.append(_mismatch("wcbProfiles", got, want))
     problems = [p for p in problems if p]
+    assert not problems, "; ".join(problems)
+
+
+@test("nccfg.clamps_token", "wifiToken takes only what rcWsTokenValid allows: 7 and 33 characters, a space, each of "
+      ", ^ ; ? \" and backslash, and a character past '~' are each ignored with the '[CFG] wifiToken ignored' line, "
+      "which never echoes it, and the stored token is kept; a null, a number or a bool leaves it without a word (the "
+      "stored token is never sent changed)", needs=["navicore"], links=[])
+def clamps_token(bench):
+    """chansync rc_config.h:1677-1687 and rcWsTokenValid (:63-79): a string the rule refuses is ignored with one line
+    that never quotes it, the stored token staying (never cut down to fit, which would store a token nobody typed); a
+    non-string - the tool's diff sends null for a branch it no longer holds - leaves it alone silently. Every probe is
+    one the firmware must refuse, so nothing changes: NaviCore's WebSocket login (navicore_wsserver.h setToken, applied
+    live to new sessions by applyConfigSideEffects) stays as it was. If a probe were stored, the guard puts the token
+    back within seconds. The probes are HIL markers, never a real token, and session.log shows every wifiToken value
+    hashed (checkpoint.redact_text)."""
+    problems = []
+    with nc_guard(bench) as g:
+        nc, was = g.nc, g.before.get("wifiToken")
+        if was is None:
+            raise Skip("NaviCore's GET_CONFIG carries no wifiToken: firmware before channel sync (NaviCore ab762c1)")
+        tag = marker("T")[:6]
+        probes = [("7 characters", (tag + "x" * 8)[:7]), ("33 characters", (tag + "x" * 40)[:33]),
+                  ("a space", f"{tag} tok12")] + \
+                 [(f"a {c!r}", f"{tag}tok{c}12") for c in TOKEN_BAD] + [("a character past '~'", f"{tag}toké12")]
+        for what, t in probes:
+            if token_ok(t):
+                raise AssertionError(f"the {what} probe is a valid token: the test is wrong")
+            _, lines = _save(nc, {"wifiToken": t})
+            if lines.count(TOKEN_IGNORED) != 1:
+                problems.append(f"{what}: {lines.count(TOKEN_IGNORED)} '[CFG] wifiToken ignored' line(s), not one")
+            if any(t in x for x in lines):
+                problems.append(f"{what}: a console line quotes the probe")
+            if nc.config().get("wifiToken") != was:
+                problems.append(f"{what}: the stored token changed (values not shown)")
+        for v in (None, 5, True):
+            _, lines = _save(nc, {"wifiToken": v})
+            if TOKEN_IGNORED in lines:
+                problems.append(f"{v!r}: an ignored line (a non-string is left alone without one)")
+            if nc.config().get("wifiToken") != was:
+                problems.append(f"{v!r}: the stored token changed (values not shown)")
+        bench.note(f"{len(probes)} refused tokens and 3 non-strings sent; NaviCore's own token is "
+                   f"{'set' if was else 'none'}")
     assert not problems, "; ".join(problems)
 
 
@@ -1733,9 +1838,10 @@ def _defaults_problems(cfg, keep=None):
       "RAM and saves nothing: a REBOOT brings the saved config back byte-identical (NaviCore restarts)",
       needs=["navicore"], links=[], opt_in="navicore_reboot")
 def reset_defaults_ram(bench):
-    """rcConfigResetKeepIdentity (rc_config.h:1003-1030) and resetMaestroReleaseState, then ACK; no save. It keeps
-    IDENTITY - wcbNetwork with its password, wcbProfiles, boardType, the wifi fields - and loads every other default
-    (D-NC16), so that part is checked against the config before it. The side effects the USB path now runs (re-opened
+    """rcConfigResetKeepIdentity (chansync rc_config.h:1071-1091) and resetMaestroReleaseState, then ACK; no save. It
+    keeps IDENTITY - wcbNetwork with its password and region, wcbProfiles, boardType, the wifi fields and the WebSocket
+    token - and loads every other default, chanSync on among them (D-NC16), so that part is checked against the config
+    before it. The side effects the USB path now runs (re-opened
     ports, SBUS OUT) are noted, not asserted. Until the restart the droid runs on defaults (no mappings, no knob
     outputs: nothing moves) with its own network identity. The
     REBOOT is the restore: nothing is written, and the guard then finds the config as it was. A button or mode the
@@ -1765,8 +1871,9 @@ def reset_defaults_ram(bench):
 
 
 @test("nccfg.reset_defaults_keeps_identity", "(should) RESET_DEFAULTS keeps the network identity - wcbNetwork (password "
-      "by hash), wcbProfiles, boardType and the wifi fields - so a later save cannot move the droid onto the default "
-      "mesh credentials and pin profile (NaviCore restarts)", needs=["navicore"], links=[], opt_in="navicore_reboot")
+      "by hash, region), wcbProfiles, boardType, the wifi fields and the WebSocket token - so a later save cannot move "
+      "the droid onto the default mesh credentials and pin profile, or open a locked WebSocket (NaviCore restarts)",
+      needs=["navicore"], links=[], opt_in="navicore_reboot")
 def reset_defaults_keeps_identity(bench):
     """NAVICORE.md D-NC16. rcConfigLoadDefaults resets the whole block, the compile-time mesh password, deviceId 20,
     quantity 4, boardType 0 and WiFi off included (rc_config.h:801-968), and the next successful SET_CONFIG, for
