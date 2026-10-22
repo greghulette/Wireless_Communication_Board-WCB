@@ -149,7 +149,8 @@
     "intellex_wifi_join",
     "camera",
     "fault_nvs",
-    "etm_stress"
+    "etm_stress",
+    "chsync"
   ],
   "navicore_repo": "C:/Users/ghulette/.claude-worktrees/NaviCore/hil-week",
   "fixtures": {
