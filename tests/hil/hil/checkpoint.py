@@ -437,12 +437,15 @@ _SECRET_TEXT = (
     # NaviCore's GET_CONFIG, and every SET_CONFIG the harness sends back, carry "wifiPassword" (the AP passphrase,
     # rc_config.h:1226), "wcbNetwork":{"password"} (the mesh password, :1354) and "wcbProfiles":[{"password"}] (:1367)
     # as plain JSON strings (docs/hil_plan/NAVICORE.md D-NC5). Any key ending in "password" counts, so a renamed or new
-    # field is covered too. The value is hashed as the string it encodes, so a mesh password hashes the same here as in
-    # a WCB's ?EPASS token. An empty value is left alone: that it is empty is no secret.
-    (re.compile(r'("[A-Za-z_]*[Pp]assword"\s*:\s*")((?!<redacted:)(?:[^"\\]|\\.)+)(")'), _json_hash_repl),
+    # field is covered too. So does "wifiToken", the WebSocket login token (NaviCore chansync rc_config.h:1371-1372, the
+    # USB copy; WCB_WS.cpp's ?WIFI,TOKEN on a WCB): a token is a credential like the AP passphrase. The value is hashed
+    # as the string it encodes, so a mesh password hashes the same here as in a WCB's ?EPASS token, and a token as in
+    # its ?WIFI,TOKEN or ?AUTH line. An empty value is left alone: that it is empty is no secret.
+    (re.compile(r'("(?:[A-Za-z_]*[Pp]assword|wifiToken)"\s*:\s*")((?!<redacted:)(?:[^"\\]|\\.)+)(")'), _json_hash_repl),
     # The same fields inside a JSON string (a SET_CONFIG line quoted in another JSON document), where every quote is
     # escaped.
-    (re.compile(r'(\\"[A-Za-z_]*[Pp]assword\\"\s*:\s*\\")((?!<redacted:)(?:(?!\\").)+)(\\")'), _hash_repl3),
+    (re.compile(r'(\\"(?:[A-Za-z_]*[Pp]assword|wifiToken)\\"\s*:\s*\\")((?!<redacted:)(?:(?!\\").)+)(\\")'),
+     _hash_repl3),
     # NaviCore's boot banner names its access point: '[WIFI] SoftAP "<ssid>" up on channel 1 — 192.168.4.1'
     # (NaviCore.ino:4727-4728; a WCB prints the same form, WCB_WiFi.cpp:180-184). Not a credential, but the droid's own
     # name, and every test that restarts NaviCore (suites/s46, s47, the s40 restarts) puts a banner in session.log and
@@ -468,15 +471,15 @@ def redact_text(s):
     return s
 
 
-# JSON keys whose values are credentials, wherever they sit: NaviCore's password fields (any key ending in "password")
-# and the SBUS controller's WiFi networks.
-SECRET_KEY = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiNets)$")
+# JSON keys whose values are credentials, wherever they sit: NaviCore's password fields (any key ending in "password"),
+# its WebSocket token (wifiToken) and the SBUS controller's WiFi networks.
+SECRET_KEY = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiToken|wifiNets)$")
 # Keys a diff line shows only as a hash: the credentials, plus NaviCore's SoftAP name (wifiSsid), the droid's own name,
 # not a secret, but nothing a failure message should quote (s40's nccfg.reset_defaults_keeps_identity did). Deliberately
 # not in SECRET_KEY: nc_guard.secrets_of scans session.log for SECRET_KEY values, and GET_CONFIG's wifiSsid is logged as
 # it is (docs/HIL_WEEK_DECISIONS.md D49), so the scan would call every run a leak; and redact_text, which the snapshot
 # hash covers, is untouched.
-SHOWN_AS_HASH = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiNets|wifiSsid)$")
+SHOWN_AS_HASH = re.compile(r"^(?:[A-Za-z_]*[Pp]assword|wifiToken|wifiNets|wifiSsid)$")
 
 
 def _is_scalar(v):

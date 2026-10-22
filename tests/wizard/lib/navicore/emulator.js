@@ -387,7 +387,8 @@ class NaviEmulator {
       case 'PING':
         return reply('PING', () => `{"sys":1,"type":"PONG","id":${id},"version":"${this.version}","model":${this.config.s.txModel},"mode":${this.mode_}}`);
       case 'GET_CONFIG':
-        return reply('GET_CONFIG', () => { this._fragSend(`{"type":"CONFIG","id":${id},"data":${this.config.text()}}`, out); return null; });
+        // The mesh copy: never the WebSocket token (rc_telemetry.h _startGetConfigSend, rcConfigToJSON(true)).
+        return reply('GET_CONFIG', () => { this._fragSend(`{"type":"CONFIG","id":${id},"data":${this.config.text(true)}}`, out); return null; });
       case 'GET_CMDLIB': {
         const lib = this.cmdlib || '{"boards":[],"enums":{}}';
         return reply('GET_CMDLIB', () => {
@@ -465,7 +466,9 @@ class NaviEmulator {
     }
   }
 
-  // _applyReassembled (:1097-1230): the SET_CONFIG strip, then the apply and the sys ACK.
+  // _applyReassembled (:1097-1230; chansync rc_telemetry.h:1151-1191): the SET_CONFIG strip - wcbNetwork's transport
+  // fields with the channel and the region, and the SoftAP settings with the WebSocket token - then the apply and the
+  // sys ACK.
   _applyReassembled(json, out) {
     let doc;
     try { doc = JSON.parse(json); } catch (_) { return; }
@@ -474,9 +477,10 @@ class NaviEmulator {
       if (!doc.data || typeof doc.data !== 'object' || Array.isArray(doc.data)) return;
       const data = doc.data;
       if (data.wcbNetwork && typeof data.wcbNetwork === 'object') {
-        for (const k of ['deviceId', 'macOct2', 'macOct3', 'password', 'quantity']) delete data.wcbNetwork[k];
+        for (const k of ['deviceId', 'macOct2', 'macOct3', 'password', 'quantity', 'channel', 'region']) delete data.wcbNetwork[k];
         if (Object.keys(data.wcbNetwork).length === 0) delete data.wcbNetwork;
       }
+      for (const k of ['wifiEnabled', 'wifiSsid', 'wifiPassword', 'wifiToken']) delete data[k];
       this.config.fromJSON(data);
       const saveId = Number.isInteger(doc.saveId) ? doc.saveId : 0;
       this.bridgedSaves = (this.bridgedSaves || 0) + 1;

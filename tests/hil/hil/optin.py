@@ -228,7 +228,9 @@ OPT_INS = {
                 "channel with ?CHSYNC,MOVE and back; W2 is saved onto another channel and rebooted until a search brings "
                 "it home (up to 150 s); ?REGION and ?WCBCH's region checks, with ?REGION,DE and ?WCBCH,12 saved for a "
                 "moment and put back. A board with its access point up moves by restarting: up to six W1 and W2 "
-                "reboots. Anything that does not take part (older firmware) is off the mesh while the others are away.",
+                "reboots. Anything that does not take part (older firmware) is off the mesh while the others are away. "
+                "A NaviCore with channel sync follows the moves too, saving the channel in its config (inside "
+                "nc_guard); with its access point up it restarts for each, so that test also needs navicore_reboot.",
         "why": "moves W1 and W2 to another radio channel and back, with up to six reboots",
         "estimate_s": 120,
     },
