@@ -254,21 +254,25 @@ test('wizard.ota_fake_serial_stream an OTA over USB follows the board\'s cursor 
 });
 
 // A relay in slot 1 for WCB2 whose target answers ?OTA,<verb>,<target>,<session>,... with [OTA:ACK,...] lines; the
-// spec's `script(verb, args, t)` may return its own reply. Commands are in __rota.log.
+// spec's `script(verb, args, t)` may return its own reply ({ offset, status }, or null for none). BEGIN goes out with
+// sendAndCollect; DATA and END with send(), answered a moment later on the relay's line stream, as a real relay's
+// [OTA:ACK] lines arrive (the windowed stream, WCBParser.otaRelayStream, does not wait per line). A DATA line whose
+// CRC-32 suffix does not match is dropped unanswered, as the relay drops it (WCB_OTA.cpp). An answered END carries
+// offset 0 on success, as the firmware's does (otaWrittenOffset after otaEnd). ?OTA lines are objects in __rota.log,
+// any other send its text.
 async function otaRelay(page, { bytes = 1000, script = null } = {}) {
   await relayFake(page, 1, { 2: chain(board([], { wcb: 2 })), 3: chain(board([], { wcb: 3, wcbq: 4 })), 4: chain(board([], { wcb: 4, wcbq: 4 })) });
   await page.evaluate(({ bytes, script }) => {
     window.getBinaryData = async () => ({ images: [{ address: 0x10000, buf: new Uint8Array(bytes).fill(0x5a).buffer }] });
     const user = script ? (0, eval)(`(${script})`) : null;
-    const t = { written: 0, total: 0 };
+    const t = { written: 0, total: 0, crcBad: 0 };
     const log = [];
     window.__rota = { t, log };
     const relay = boardConnections[1];
     const send = relay.send;
-    relay.send = async (s) => { log.push(`send ${String(s).trim()}`); return send(s); };
-    relay.sendAndCollect = async (s) => {
-      const m = s.match(/^\?OTA,(\w+),(\d+),(\d+)(?:,(.*))?$/);
-      if (!m) return '';
+    const answer = (s) => {
+      const m = s.match(/^\?OTA,(BEGIN|DATA|END),(\d+),(\d+)(?:,(.*))?$/);
+      if (!m) return null;
       const [, verb, target, session, rest] = m;
       log.push({ verb, target: +target, session: +session, rest: rest ?? '' });
       const own = user ? user(verb, rest ?? '', t) : undefined;
@@ -276,46 +280,78 @@ async function otaRelay(page, { bytes = 1000, script = null } = {}) {
       if (own !== undefined) return own === null ? '' : ack(own.offset, own.status);
       if (verb === 'BEGIN') { t.total = parseInt(rest, 10); t.written = 0; return ack(0); }
       if (verb === 'DATA') {
-        const [off, b64] = rest.split(',');
+        const [offField, b64] = rest.split(',');
+        const [off, crc] = offField.split(':');
+        if (crc !== undefined && parseInt(crc, 16) !== WCBParser.crc32(`${off},${b64}`)) { t.crcBad++; return ''; }
         if (parseInt(off, 10) === t.written) t.written += atob(b64).length;
         return ack(t.written);
       }
-      if (verb === 'END') return ack(t.written, t.written === t.total ? 0 : 1);
-      return '';
+      return t.written === t.total ? ack(0) : ack(t.written, 1);   // END
     };
+    relay.send = async (s) => {
+      const line = String(s).trim();
+      const a = answer(line);
+      if (a === null) log.push(`send ${line}`);
+      else if (a) setTimeout(() => relay._handleLine(a), 2);
+      return send(s);
+    };
+    relay.sendAndCollect = async (s) => answer(s) ?? '';
     window.__pulls = [];
     window.remoteBoardPull = async (...a) => { __pulls.push(a); };
   }, { bytes, script: script ? script.toString() : null });
 }
+const dataOf = (log) => log.filter((e) => typeof e === 'object' && e.verb === 'DATA')
+  .map((f) => [+f.rest.split(':')[0], atob(f.rest.split(',')[1]).length]);
 
-test('wizard.ota_fake_relay a wireless OTA through a relay sends ?OTA,BEGIN / DATA in 192-byte frames following the target\'s cursor / END, each tagged with the target and one session, then re-arms the relay link and pulls the board with 12 attempts 8 s later; a non-zero status or a cursor collapsing to 0 stops it at once with ABORT', async ({ page }) => {
-  // boardOtaRelay and _otaRelayAwaitAck (app.js:2027-2196). Row ota.relay.
+test('wizard.ota_fake_relay a wireless OTA through a relay sends ?OTA,BEGIN / DATA in 192-byte frames, a window of them at a time, each with a CRC-32 the relay checks, following the target\'s cursor / END, each tagged with the target and one session, then re-arms the relay link and pulls the board with 12 attempts 8 s later; a lost frame is resent from the cursor; a non-zero status or a cursor collapsing to 0 stops it at once with ABORT', async ({ page }) => {
+  // boardOtaRelay, _otaAckReader, _otaRelayLink (app.js) and WCBParser.otaRelayStream / otaRelayFinish (parser.js;
+  // the windowing itself is unit/ota_relay_window.test.js). Row ota.relay.
   await setup(page);
   await otaRelay(page);
   const t0 = await page.evaluate(() => Date.now());
   let r = await page.evaluate(async () => {
     const m = __fake.toasts.length;
+    const before = boardConnections[1]._dataCallbacks.length;
     await boardOtaRelay(2);
-    return { log: __rota.log, toasts: __fake.toasts.slice(m).map((t) => t.message).join('\n'), managed: remoteRelayForBoard[2], ota: _otaInProgress.size };
+    return { log: __rota.log, crcBad: __rota.t.crcBad, toasts: __fake.toasts.slice(m).map((t) => t.message).join('\n'),
+             managed: remoteRelayForBoard[2], ota: _otaInProgress.size,
+             listeners: boardConnections[1]._dataCallbacks.length - before };
   });
   const frames = r.log.filter((e) => typeof e === 'object');
   const session = frames[0].session;
   expect(session).toBeGreaterThanOrEqual(1);
   expect(frames.every((f) => f.target === 2 && f.session === session)).toBe(true);
   expect(frames[0]).toEqual({ verb: 'BEGIN', target: 2, session, rest: '1000,0' });
-  const data = frames.filter((f) => f.verb === 'DATA').map((f) => [+f.rest.split(',')[0], atob(f.rest.split(',')[1]).length]);
-  expect(data).toEqual([[0, 192], [192, 192], [384, 192], [576, 192], [768, 192], [960, 40]]);
+  expect(dataOf(r.log)).toEqual([[0, 192], [192, 192], [384, 192], [576, 192], [768, 192], [960, 40]]);
+  // ?OTA,DATA,<t>,<s>,<offset>:<crc32>,<b64>, every CRC right.
+  expect(frames.filter((f) => f.verb === 'DATA').every((f) => /^\d+:[0-9A-F]{8},[A-Za-z0-9+/=]+$/.test(f.rest))).toBe(true);
+  expect(r.crcBad).toBe(0);
   expect(frames.at(-1)).toEqual({ verb: 'END', target: 2, session, rest: '' });
   expect(r.toasts).toContain('WCB 2: wireless OTA complete in');
-  expect([r.managed, r.ota]).toEqual([1, 0]);
+  expect([r.managed, r.ota, r.listeners]).toEqual([1, 0, 0]);   // the ACK listener goes with the OTA
   await page.waitForFunction(() => __pulls.length > 0, null, { timeout: 12_000 });
   expect(await page.evaluate(() => __pulls)).toEqual([[1, 2, 1, 12]]);
   expect(Date.now() - t0).toBeGreaterThanOrEqual(7900);
 
+  // The frame at 384 is lost once: the frames behind it answer with the cursor at 384, and once all three have, the
+  // window is resent from there.
+  await openWizard(page);
+  await install(page);
+  await otaRelay(page, { script: (verb, rest, t) => {
+    if (verb === 'DATA' && rest.startsWith('384:') && !t.lost) { t.lost = true; return null; }
+  } });
+  r = await page.evaluate(async () => {
+    const m = __fake.toasts.length;
+    await boardOtaRelay(2);
+    return { log: __rota.log, toasts: __fake.toasts.slice(m).map((t) => t.message).join('\n') };
+  });
+  expect(dataOf(r.log).map(([o]) => o)).toEqual([0, 192, 384, 576, 768, 960, 384, 576, 768, 960]);
+  expect(r.toasts).toContain('WCB 2: wireless OTA complete in');
+
   // The target reports an error status for a frame: stopped there, ABORT for that session.
   await openWizard(page);
   await install(page);
-  await otaRelay(page, { script: (verb, rest) => (verb === 'DATA' && rest.startsWith('384,') ? { offset: 384, status: 1 } : undefined) });
+  await otaRelay(page, { script: (verb, rest) => (verb === 'DATA' && rest.startsWith('384:') ? { offset: 384, status: 1 } : undefined) });
   r = await page.evaluate(async () => {
     const m = __fake.toasts.length;
     await boardOtaRelay(2);
@@ -323,12 +359,12 @@ test('wizard.ota_fake_relay a wireless OTA through a relay sends ?OTA,BEGIN / DA
   });
   expect(r.toasts).toContain('Wireless OTA failed: target rejected OTA data near 384 bytes');
   const s2 = r.log.find((e) => typeof e === 'object').session;
-  expect(r.log.filter((e) => typeof e === 'object' && e.verb === 'DATA').length).toBe(3);
+  expect(r.log.filter((e) => typeof e === 'object' && e.verb === 'END')).toEqual([]);
   expect(r.log.at(-1)).toBe(`send ?OTA,ABORT,2,${s2}`);
   // The cursor collapses to 0 after progress: the session is gone, stopped at once.
   await openWizard(page);
   await install(page);
-  await otaRelay(page, { script: (verb, rest) => (verb === 'DATA' && rest.startsWith('576,') ? { offset: 0, status: 0 } : undefined) });
+  await otaRelay(page, { script: (verb, rest) => (verb === 'DATA' && rest.startsWith('576:') ? { offset: 0, status: 0 } : undefined) });
   r = await page.evaluate(async () => {
     const m = __fake.toasts.length;
     await boardOtaRelay(2);

@@ -106,6 +106,39 @@ test('wizard.wdp_fake_render the mesh table marks the querying board\'s own row 
   const alone = await page.evaluate((d) => parseWdpDump(d), dump([node(1, { alias: 'Body', peer: 3 })]));
   await page.evaluate((p) => renderWdpMesh(p.nodes, 1, p.cfg), alone);
   expect(await body()).toContain('The mesh as seen from WCB 1 · only this board so far — no other boards heard yet.');
+
+  // Channel sync (docs/CHANNEL_SYNC.md §2): a dump with no [WDPCH] line at all is from firmware before channel sync -
+  // no Channel column, a note. With them, a Channel column: channel, region, rank, pinned, sync off, the leader from the
+  // board's ?CHSYNC line; a device that sent none is flagged as one a channel move leaves behind.
+  expect(await body()).toContain("WCB 1's firmware predates channel sync");
+  const heads = () => page.evaluate(() => [...document.querySelectorAll('#wdp-mesh-body thead th')].map((h) => h.textContent));
+  expect(await heads()).not.toContain('Channel');
+  const synced = await page.evaluate((d) => parseWdpDump(d), dump([
+    '[WDPCH:N=1,CH=6,RANK=1,PIN=0,SYNC=1,CC=DE]',            // the queried board's own line comes first
+    node(1, { alias: 'Body', peer: 3, age: 0 }),
+    node(2, { alias: 'Dome', peer: 1 }),
+    node(3, { alias: 'Periscope', peer: 1 }),
+    node(20, { client: 1, alias: 'NaviCore', hw: 0, tags: 'rc nav', peer: 0 }),
+    '[WDPCH:N=3,CH=6,RANK=3,PIN=1,SYNC=0,CC=DE]',
+    '[WDPCH:N=20,CH=6,RANK=0,PIN=0,SYNC=1,CC=DE]',
+  ]));
+  expect(synced.chanSeen).toBe(true);
+  await page.evaluate((p) => {
+    _chanSyncStatus = { wcb: 1, at: Date.now(),
+                        st: WCBParser.parseChanSyncStatus('[CHSYNC:EN=1,CH=6,MAXCH=13,CC=DE,RANK=1,PIN=0,LEAD=20,LRANK=0,LPIN=0,STATE=idle]') };
+    renderWdpMesh(p.nodes, 1, p.cfg, p.chanSeen);
+  }, synced);
+  expect((await heads())[5]).toBe('Channel');
+  const chan = await page.evaluate(() => [...document.querySelectorAll('#wdp-mesh-body tbody tr')]
+    .map((r) => r.cells[5].textContent.replace(/\s+/g, ' ').trim()));
+  expect(chan).toEqual(['6 DE · rank 1', "older firmware: won't follow a channel move", '6 DE · rank 3 pinned sync off',
+                        '6 DE · rank 0 leader']);
+  // Colour on the tag's edge, never a fill.
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('#wdp-mesh-body .wdp-ch-old')).backgroundColor))
+    .toBe('rgba(0, 0, 0, 0)');
+  t = await body();
+  expect(t).toContain('WCB 1: channel sync on · channel 6 of 1–13 (region DE) · leader Controller 20 (NaviCore), rank 0 · idle');
+  expect(t).not.toContain('predates channel sync');
   expect(page.wizErrors).toEqual([]);
 });
 

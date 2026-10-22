@@ -223,6 +223,48 @@ SHA‑256 at 100%. Two changes close it:
 - `processOtaRelayCommand("?OTA,<SUB>,<target>,<session>,…")` builds the matching struct and `esp_now_send`s it to `WCBMacAddresses[target-1]`.
 - `handleOtaAckRelay` receives the target's ACK and prints `[OTA:ACK,<src>,<session>,<offset>,<status>]` to USB for the browser.
 
+### Host side — a window of frames in flight (the Wizard)
+The target never needed one frame per round trip: it writes only the frame at its cursor and answers every frame with
+the cursor. So the Wizard keeps a **window** of DATA lines in flight and lets the cursor ACKs pull it along (Go-Back-N),
+as NaviCore's config tool does (`otaUpdateOverWcb`). Stop-and-wait cost one round trip per 192-byte frame — ~79 ms
+through a WiFi relay, about ten minutes for a 1.46 MB image. The core is `otaRelayStream` / `otaRelayFinish` in
+`Wizard/parser.js` (unit-tested against a simulated relay and target, `tests/wizard/unit/ota_relay_window.test.js`);
+`boardOtaRelay` in `Wizard/app.js` drives it. Sender-only: firmware in the field takes it unchanged.
+
+**Window and pace come from the link to the relay** — its input queue is what overflows (`OTA_RELAY_LINKS`, parser.js):
+
+| Link | Window | Pace | Bound by |
+|---|---|---|---|
+| USB serial (Web Serial, a shared-hub tab, or Intellex holding a COM port) | 8 lines | 25 ms | the relay's 8 KB serial RX ring (`Serial.setRxBufferSize(8192)` on a WCB, a MgmtRelay and NaviCore) holds ~28 lines; a ~290 B line takes 25.2 ms at 115200 8N1, so 25 ms is the wire's own rate |
+| WebSocket (Intellex bridged to the relay's own WebSocket) | 4 lines | 10 ms | a WCB queues 6 WebSocket lines (`WS_QUEUE_DEPTH`, `WCB_WS.cpp`; a MgmtRelay and NaviCore 8), drained one per `loop()` pass; 4 leaves room for a line still queued after a rewind and for an ABORT |
+
+Below the relay both stay under the target's 12-frame OTA queue (§5) and the relay's 12-frames-in-flight ESP-NOW limit
+(`wcbEspNowSend`). The Wizard tells the links apart by asking Intellex: under Intellex the page's port is a WebSocket
+to the host (`window.__intellexShimInstalled`), and `/_api/status` says whether the host holds a COM port
+(`kind: "serial"`) or a WebSocket (`"ws"`). Without an answer it takes the WebSocket's smaller window.
+
+**Expected time for a 1.46 MB image** (7.0.1's ESP32 app, 7,580 frames), from the unit test's simulator with a
+quiet mesh: over USB the wire is the limit, 25.2 ms a line, so about **3 min 10 s** (stop-and-wait: ~4.5 min). Over a
+WebSocket the window is: 4 frames per ~80 ms round trip, about **2.5 min** (stop-and-wait: ~10 min, which the same
+simulator reproduces). Each lost frame costs one window resent; a timeout costs 2 s plus the probe.
+
+**Losses.** An ACK that does not move the cursor is a gap (a frame was lost) or a duplicate; they look the same.
+- After a lost frame every frame behind it answers with the same cursor. The Wizard rewinds once all of them have
+  answered — the frames in flight minus the lost one — never on the first (NaviCore's tool simulated 440x the sends from
+  rewinding on each), so nothing of the old window is still in flight when the new one goes out.
+- An ACK timeout (2 s) resends **only the frame at the cursor**, as a probe, not the window. A target busy past the
+  timeout is late, not deaf: resending its window would put duplicates behind the late originals, and their answers,
+  arriving while the next window is in flight, would read as gaps and rewind it — for the rest of the image. Late
+  originals move the cursor past the probe and sending carries on; a cursor that moves by exactly the probe is
+  confirmed with one short wait (500 ms), and without a second move the window is resent from the cursor.
+- The fast-fails stay: a cursor that collapses to 0 after progress (the target lost the session), then any ACK with
+  `status != 0`. Ten timeouts in a row (~20 s, inside the target's 30 s reaper) or 40 rewinds without progress stop it.
+
+**END.** A DATA cursor ACK still in flight has the same target, session and status 0 as an END verdict. The target
+answers END with `otaWrittenOffset()` after `otaEnd()` has ended the session, so the verdict is `status != 0`, or
+status 0 with **offset 0**; the Wizard skips status-0 ACKs with an offset. END is sent once: a resent END after a good
+one finds the target rebooting with no session and would be answered ERR.
+
 ---
 
 ## 5. THE critical rule: defer flash writes out of the receive callback
@@ -287,7 +329,7 @@ if (len == sizeof(espnow_struct_ota_data)) { enqueueOtaPacket(data, len); return
 
 - **Image source:** fetch the app `.bin` (the ota_0 image, i.e. the file flashed at `0x10000`), pick `chipFamily` from the target's known hardware.
 - **Serial path:** send `?OTALOCAL,BEGIN,<size>,<family>`, then `DATA` chunks (≤1024 B decoded) each gated on the `[OTA:ACK,<cursor>]` marker, then `END`.
-- **Relay path:** send `?OTA,BEGIN,<t>,<s>,<size>,<family>`, then 192‑B `DATA` chunks, each awaiting the relay's `[OTA:ACK,<src>,<session>,<offset>,<status>]` line; advance the local offset to the ACKed cursor; **fast‑fail** if the cursor collapses to 0 after real progress (target lost the session). On any error, send `ABORT`.
+- **Relay path:** send `?OTA,BEGIN,<t>,<s>,<size>,<family>`, then 192‑B `DATA` chunks with the CRC‑32 suffix (`<offset>:<crc32>`), a **window** of them in flight sized to the link to the relay, the relay's `[OTA:ACK,<src>,<session>,<offset>,<status>]` lines pulling the window along and rewinding it past a loss (§4, Host side); **fast‑fail** if the cursor collapses to 0 after real progress (target lost the session) or an ACK carries `status != 0`; then `END`, skipping cursor ACKs until the verdict (offset 0, or `status != 0`). On any error, send `ABORT`.
 - After `END`, the target reboots; re‑establish the management/terminal session after the reboot window (the WCB Wizard does a proactive re‑pull + RTERM re‑arm, plus a firmware boot‑announce so the relay re‑detects it).
 
 ---
@@ -332,6 +374,7 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-21 | — | §4 Host side, §7: the Wizard's relay OTA keeps a window of DATA lines in flight (Go-Back-N over the cursor, as NaviCore's tool does) and sends the CRC‑32 suffix. Window and pace per link to the relay: USB serial 8 lines / 25 ms, a WebSocket through Intellex 4 / 10 ms. An ACK timeout resends one probe frame, not the window; END skips cursor ACKs until the verdict. | Greg: a relay OTA took ~10 min a board, one 192‑B frame per ~79 ms round trip. Trap: rewinding the whole window on a timeout puts duplicates behind late originals, whose answers then read as gaps and rewind every window after (the unit test's simulator showed 11 spurious rewinds on the WebSocket window); a WCB queues only 6 WebSocket lines. |
 | 2026-10-19 | — | §1: only a USB flash writes the partition table, and 7.x no longer fits the legacy default table's 1.25 MB slots; §8: the size rejection. The Wizard names the one‑time USB update when `BEGIN` is refused for size. | A user's three V2.4s on 6.2.1: one took 7.0.1 by OTA, two were refused (`app0` 1,310,720 B). They had reached 6.2.1 by OTA from a table an older USB flash wrote, so the version they reported said nothing about the layout. Trap: a board's firmware version does not tell you its partition table. |
 | 2026-09-22 | — | Relay `DATA`: the ACK status is read after `otaWrite`, so the frame whose own write tears the session down (image overrun, `esp_ota_write` error) is ACKed `OTA_ST_ERR`+`0`, not `OTA_ST_OK`+`0`. Same change in `navicore_ota.h`. | HIL `ota.relay_teardown_frame_err` (tracker #70). The 2026-08-06 change captured the in-session flag before the write and reused it for the status, so only the frames after the teardown got `ERR`. Hosts recovered one round trip late: the Wizard by resending, NaviCore's tool by treating `OK`+`0` as stale. Trap: a status that the call itself can change must be read after the call. |
 | 2026-09-22 | — | A rejected local `BEGIN` restores the USB rate to 115200 after its `[OTA:BEGIN,ERR]` marker (`processOtaLocalCommand`), and the transfer‑baud bullet lists every restore path. | HIL `ota.local_baud_rejected_rebegin_restores` (tracker #61): `otaBegin` tears a live session down before its guards run, so a refused re‑`BEGIN` at 921600 left no session. The idle reaper and `BAUD` both need one, so W1 stayed at 921600 until reset. The earlier claim that "the 30 s idle timeout owns the restore" was false on that path. |
