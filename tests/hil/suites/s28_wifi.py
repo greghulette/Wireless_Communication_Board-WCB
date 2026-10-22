@@ -14,15 +14,22 @@
   Over the endpoint (WCB-WP22): ?VERSION answered; line framing, the over-long line and the oversized frame; ?backup
   whole and UTF-8-clean; the three client slots and the eviction of the oldest; a DATA-sized ?OTALOCAL session (with
   ota_erase too); and W1's DHCP handing out no gateway.
+- The WebSocket token (docs/WIFI_DESIGN.md §7): the ?WIFI,TOKEN setter with no opt-in (no reboot: a token applies at
+  once, to sessions opened after it); under wifi_modes a JOIN with no token refused at boot; under wifi_pc a throwaway
+  token on W1 and the sign-in seen from the socket - signed out, a wrong token, the right one. JOIN needs a token, so
+  every JOIN test gives W1 a throwaway one first (_token_for_join) and takes it away after, unless W1 has its own. Every
+  client these tests open to W1 signs in with W1's own token when W1 asks for one (_ws_open; hil/ws.py), so a bench W1
+  with a token runs them unchanged.
 
 Credentials: the AP and JOIN lines carry a password. It is read from the board's own chain at run time and given
 back to a board or to a Windows WiFi profile that is removed afterwards; it never goes into a note, a message or a
 file that stays. (?backup output, and so the session log, already carries it, as it always has.) Neither does an SSID:
 W1's own or derived name is compared, never quoted, and a token is shown only as its hash (redact_token). The setter
-tests' throwaway SSIDs and passphrases (HIL + a nonce) are never used for a network. A restore if aborted: replay W1's
-own ?WIFI line from its chain on its USB console (and reboot, if the board was rebooted since it changed); on the PC,
-`netsh wlan delete profile name=HIL-<W1's SSID> interface=<adapter>` and `netsh wlan connect name=<its network>
-interface=<adapter>`.
+tests' throwaway SSIDs and passphrases (HIL + a nonce) are never used for a network. A WebSocket token is never quoted
+either: W1's own is read from its chain and handed back to it or to a client. A restore if aborted: replay W1's own
+?WIFI line from its chain on its USB console (and reboot, if the board was rebooted since it changed), and its own
+?WIFI,TOKEN line, or ?WIFI,TOKEN,CLEAR when its chain had none; on the PC, `netsh wlan delete profile
+name=HIL-<W1's SSID> interface=<adapter>` and `netsh wlan connect name=<its network> interface=<adapter>`.
 """
 import contextlib
 import os
@@ -37,10 +44,10 @@ from hil.wcb import WCB
 from hil.wlan import default_routes as _default_routes
 from hil.wlan import pc_on_ap as _pc_on_ap
 from hil.wlan import realtek_enabled as _realtek_enabled
-from hil.ws import WsClient
+from hil.ws import AUTH_OK, AUTH_REQUIRED, CLOSE_POLICY, AuthFailed, WsClient
 from hil.ws import frame as ws_frame
 from suites.common import (Console, Watch, config_guard, fault, fault_off, link, marker, nonce, snapshot, token,
-                           usb_wcb)
+                           usb_wcb, wifi_mode_token, ws_token)
 from suites.s03_wcb import _w2_online
 from suites.s45_navicore_wifi import navicore_home as _navicore_home
 from suites.s18_etm_config_wdp import HOLD_BAUD, _hold_line
@@ -57,8 +64,9 @@ def _crun(console, cmd, wait=0.8):
 
 
 def _wifi_token(tokens):
-    """(the whole ?WIFI token, MODE, ssid, password) from a chain. The password is only ever handed back to a board."""
-    t = token(tokens, "?WIFI,")
+    """(the whole ?WIFI mode token, MODE, ssid, password) from a chain, passing over ?WIFI,TOKEN (wifi_mode_token). The
+    password is only ever handed back to a board."""
+    t = wifi_mode_token(tokens)
     if t is None:
         raise Skip("the chain lacks a ?WIFI line")
     parts = t.split(",")
@@ -128,8 +136,8 @@ def _derived_ssid(tokens, n):
 
 
 def _wifi_now(bench):
-    """W1's ?WIFI token as its chain holds it now, or None."""
-    return token(snapshot(bench, 1), "?WIFI,")
+    """W1's ?WIFI mode token as its chain holds it now, or None."""
+    return wifi_mode_token(snapshot(bench, 1))
 
 
 def _put_back(w, bench, tok, problems):
@@ -163,11 +171,12 @@ def setter_refusals(bench):
         ("JOIN with an empty network name", "?WIFI,JOIN,,hilpass99", join_name),
         ("JOIN with a 33-character SSID", f"?WIFI,JOIN,{long_ssid},hilpass99", too_long),
         ("an AP with a 33-character SSID", f"?WIFI,AP,{long_ssid},hilpass99", too_long),
-        ("an unknown verb", "?WIFI,BOGUS", ["Usage: ?WIFI | ?WIFI,OFF | ?WIFI,AP,<ssid>,<pass> | ?WIFI,JOIN,<ssid>,<pass>"]),
+        ("an unknown verb", "?WIFI,BOGUS", ["Usage: ?WIFI | ?WIFI,OFF | ?WIFI,AP,<ssid>,<pass> | ?WIFI,JOIN,<ssid>,<pass>",
+                                            "       ?WIFI,TOKEN,<token> | ?WIFI,TOKEN,CLEAR"]),
     )
     problems = []
     with config_guard(bench, 1) as before:
-        tok = token(before[1], "?WIFI,")
+        tok = wifi_mode_token(before[1])
         if tok is None:
             raise Skip("the chain lacks a ?WIFI line")
         mode0 = _status(w).get("Mode")
@@ -236,7 +245,7 @@ def passphrase_trailing_q(bench):
     s = f"HIL{nonce()}"
     problems = []
     with config_guard(bench, 1) as before:
-        tok = token(before[1], "?WIFI,")
+        tok = wifi_mode_token(before[1])
         if tok is None:
             raise Skip("the chain lacks a ?WIFI line")
         changed = False
@@ -271,7 +280,7 @@ def passphrase_commas_spaces(bench):
              ("a trailing space", f"trail{n} ", f"trail{n}"))
     problems = []
     with config_guard(bench, 1) as before:
-        tok = token(before[1], "?WIFI,")
+        tok = wifi_mode_token(before[1])
         if tok is None:
             raise Skip("the chain lacks a ?WIFI line")
         changed = False
@@ -290,6 +299,112 @@ def passphrase_commas_spaces(bench):
         finally:
             if changed:
                 _put_back(w, bench, tok, problems)
+    assert not problems, "; ".join(problems)
+
+
+# ============================================================ the WebSocket token (docs/WIFI_DESIGN.md §7)
+TOKEN_SET = "WebSocket token set. Sessions opened from now on must send ?AUTH,<token>"
+TOKEN_CLEARED = "WebSocket token cleared. Sessions opened from now on need no sign-in."
+JOIN_WARNING = "WARNING: no WebSocket token is set, and JOIN will not start at the next boot"
+JOIN_REFUSED = "[WIFI] JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF."
+
+
+def _throwaway_token():
+    """A token for one test: 12 characters, none of those the grammar reserves (wcbWifiTokenProblem, WCB_WiFi.cpp)."""
+    return f"hil{nonce().lower()}tok"
+
+
+def _token_set(w, t, what="setup"):
+    if not _has(w.run(f"?WIFI,TOKEN,{t}"), TOKEN_SET):
+        raise AssertionError(f"{what}: ?WIFI,TOKEN did not confirm")
+
+
+def _token_put_back(w, before, problems):
+    """W1's own token state from its chain `before`: its own token replayed (never quoted), or none. A token applies at
+    once (wcbWsSetToken), so nothing reboots."""
+    own = ws_token(before)
+    ok = _has(w.run(f"?WIFI,TOKEN,{own}"), TOKEN_SET) if own else _has(w.run("?WIFI,TOKEN,CLEAR"), TOKEN_CLEARED)
+    if not ok:
+        problems.append("W1's own WebSocket token did not go back: replay its ?WIFI,TOKEN line from its ?backup on its "
+                        "USB console, or ?WIFI,TOKEN,CLEAR if it had none")
+
+
+def _token_for_join(w, before):
+    """A WebSocket token on W1 before it is given a JOIN, which does not start without one (wcbWifiStart,
+    WCB_WiFi.cpp) -> the token in force: W1's own when its chain has one, else a throwaway one that _token_put_back
+    takes away again."""
+    own = ws_token(before)
+    if own:
+        return own
+    t = _throwaway_token()
+    _token_set(w, t)
+    return t
+
+
+@test("wifi.token_setter", "?WIFI,TOKEN refuses a token under 8 or over 32 characters, or holding a space or any of , ; ? \" \\, and saves nothing; a good one is saved ('WebSocket token set'), ?WIFI's Token line says 'set' and never the token, and the chain carries ?WIFI,TOKEN,<token> right ahead of the ?WIFI mode line; ?WIFI,TOKEN,CLEAR takes it out ('none'); a ?WIFI,JOIN saved with no token warns that JOIN will not start; ?AUTH typed on USB is a no-op; W1's own ?WIFI lines go back (no opt-in: nothing applies before a reboot)", needs=["wcb1"], links=[])
+def token_setter(bench):
+    """docs/WIFI_DESIGN.md §7. wcbWifiTokenCommand (WCB_WiFi.cpp) checks a token (wcbWifiTokenProblem) before it saves
+    it, in the NVS key wifi_cfg/token alone; collectConfigCommands (WCB.ino) emits WIFI,TOKEN just ahead of the mode
+    line, so a restore has it before ?WIFI,JOIN. processWifiCommand saves a JOIN with no token and warns: the boot is
+    what refuses (wifi.join_needs_token). ?AUTH reaches the dispatcher only from USB or the mesh, where it does nothing
+    (WCB.ino, ahead of ?DEBUG). No '^' case: the line reader splits a chain there, so the rest would run as a command of
+    its own - a token can never hold one, and the setter refuses it anyway. The tokens, SSID and passphrase are
+    throwaway; W1's own ?WIFI line and token are replayed in the finally and never quoted."""
+    w = usb_wcb(bench)
+    good = _throwaway_token()
+    bad = (("7 characters", "hil1234"), ("33 characters", "h" * 33), ("a space", "hil 12345"),
+           ("a comma", "hil,12345"), ("a ;", "hil;12345"), ("a ?", "hil?12345"),
+           ('a "', 'hil"12345'), ("a \\", "hil\\12345"))
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok = wifi_mode_token(before[1])
+        if tok is None:
+            raise Skip("the chain lacks a ?WIFI line")
+        own = ws_token(before[1])
+        changed = False
+        try:
+            for what, t in bad:
+                out = [x.rstrip() for x in w.run(f"?WIFI,TOKEN,{t}")]
+                if not any(x.startswith("Token refused: a token ") for x in out):
+                    problems.append(f"a token with {what} was not refused")
+                if _has(out, TOKEN_SET):
+                    problems.append(f"a token with {what} was saved")
+            if ws_token(snapshot(bench, 1)) != own:
+                problems.append("a refused ?WIFI,TOKEN changed the chain's token")
+            changed = True
+            _token_set(w, good, "a good token")
+            st = _status(w)
+            if st.get("Token") != "set":
+                problems.append(f"with a token set ?WIFI's Token line is {st.get('Token')!r}, not 'set'")
+            if any(good in x for x in w.run("?WIFI")):
+                problems.append("?WIFI printed the token")
+            toks = snapshot(bench, 1)
+            if ws_token(toks) != good:
+                problems.append("the chain does not carry the token just set")
+            else:
+                i = next(k for k, x in enumerate(toks) if x.upper().startswith("?WIFI,TOKEN,"))
+                if i + 1 >= len(toks) or toks[i + 1] != wifi_mode_token(toks):
+                    problems.append("?WIFI,TOKEN is not right ahead of the ?WIFI mode line in the chain")
+            out = [x.rstrip() for x in w.run(f"?AUTH,{good}")]
+            if any("Unknown command" in x or "[AUTH" in x for x in out):
+                problems.append("?AUTH typed on USB was not a no-op")
+            if not _has(w.run("?WIFI,TOKEN,CLEAR"), TOKEN_CLEARED):
+                problems.append("?WIFI,TOKEN,CLEAR did not confirm")
+            if not _status(w).get("Token", "").startswith("none"):
+                problems.append("after ?WIFI,TOKEN,CLEAR ?WIFI's Token line does not say 'none'")
+            if ws_token(snapshot(bench, 1)) is not None:
+                problems.append("after ?WIFI,TOKEN,CLEAR the chain still carries a token")
+            out = [x.rstrip() for x in w.run(f"?WIFI,JOIN,HIL{nonce()},hil{nonce().lower()}pw")]
+            if not _has(out, "WiFi mode set to JOIN"):
+                problems.append("a throwaway ?WIFI,JOIN was not saved")
+            elif not _has(out, JOIN_WARNING):
+                problems.append("a ?WIFI,JOIN saved with no token did not warn that JOIN will not start")
+            if not _status(w).get("Token", "").startswith("none - JOIN will not start"):
+                problems.append(f"in JOIN with no token ?WIFI's Token line is {_status(w).get('Token')!r}")
+        finally:
+            if changed:
+                _put_back(w, bench, tok, problems)
+                _token_put_back(w, before[1], problems)
     assert not problems, "; ".join(problems)
 
 
@@ -358,6 +473,7 @@ def join_w2_ap(bench):
             raise Skip("W1 and W2 are on different mesh channels")
         changed = False
         net0 = _net80211(w)
+        wtok = _token_for_join(w, before[1])        # JOIN does not start without one
         try:
             out = w.run(f"?WIFI,JOIN,{ssid2},{pw2}")
             changed = True
@@ -392,7 +508,7 @@ def join_w2_ap(bench):
             if not re.match(r"^Clients       : [1-9]", clients):
                 problems.append(f"W2 counts no client while W1 is joined: {clients!r}")
             if "wifi_pc" in optin.enabled(bench.cfg):
-                _pc_reaches_joined_w1(bench, problems, ssid2, pw2, st.get("IP address", ""))
+                _pc_reaches_joined_w1(bench, problems, ssid2, pw2, st.get("IP address", ""), wtok)
             _unicast_ok(w, w2s2, problems, "while joined to W2's AP")
             net1 = _net80211(w)
             if net1 != net0:
@@ -401,6 +517,7 @@ def join_w2_ap(bench):
         finally:
             if changed:
                 _restore_ap(w, tok1, ssid1, problems)
+            _token_put_back(w, before[1], problems)
         if _status(w).get("Mode") != "AP":
             problems.append("W1 is not back in AP mode")
         net2 = _net80211(w)
@@ -486,6 +603,7 @@ def join_lost_and_rejoin(bench):
             raise Skip("W1 and W2 are on different mesh channels")
         joined = rf'^\[WIFI\] joined "{re.escape(ssid2)}" on channel {ch} after (\d+) attempt\(s\) \S+ ws://\S+/ws$'
         changed1 = changed2 = False
+        _token_for_join(w, before[1])               # JOIN does not start without one
         try:
             out = w.run(f"?WIFI,JOIN,{ssid2},{pw2}")
             changed1 = True
@@ -527,6 +645,7 @@ def join_lost_and_rejoin(bench):
                 _w2_ap_back(w2, tok2, ssid2, problems)
             if changed1:
                 _restore_ap(w, tok1, ssid1, problems)
+            _token_put_back(w, before[1], problems)
         if _status(w).get("Mode") != "AP":
             problems.append("W1 is not back in AP mode")
     bench.note(f"wifi.join_lost_and_rejoin: {facts}")
@@ -557,6 +676,7 @@ def join_absent_ssid_keeps_mesh(bench):
         nosuch, pw_x = f"HIL-NOSUCH-{nonce()}", f"hil{nonce().lower()}pass"
         looking = rf'^\[WIFI\] still looking for "{re.escape(nosuch)}" \(attempt {{}}\)$'
         changed = sync_off = False
+        _token_for_join(w, before[1])               # JOIN does not start without one
         try:
             if not _has(w.run("?CHSYNC,OFF"), "[CHSYNC] channel sync OFF"):
                 problems.append("?CHSYNC,OFF did not confirm")
@@ -605,6 +725,7 @@ def join_absent_ssid_keeps_mesh(bench):
                 w.run("?CHSYNC,ON")
             if changed:
                 _restore_ap(w, tok, ssid, problems)
+            _token_put_back(w, before[1], problems)
     bench.note(f"wifi.join_absent_ssid_keeps_mesh: {facts}")
     assert not problems, "; ".join(problems)
 
@@ -638,6 +759,7 @@ def join_fault_arms(bench):
         joined_rx = rf'^\[WIFI\] joined "{q}" on channel {ch} after \d+ attempt\(s\) — ws://\S+/ws$'
         offmesh_rx = rf'^\[WIFI\] joined "{q}" but its AP is on channel (\d+), not {ch} — that is OFF-MESH\. Disconnecting\.$'
         changed = sync_off = False
+        _token_for_join(w, before[1])               # JOIN does not start without one
         try:
             if not _has(w.run(f"?WIFI,JOIN,{ssid2},{pw2}"), f'WiFi mode set to JOIN — joining "{ssid2}"'):
                 problems.append("?WIFI,JOIN did not confirm")
@@ -708,6 +830,65 @@ def join_fault_arms(bench):
                 w.run("?CHSYNC,ON")
             if changed:
                 _restore_ap(w, tok1, ssid1, problems)
+            _token_put_back(w, before[1], problems)
+        if _status(w).get("Mode") != "AP":
+            problems.append("W1 is not back in AP mode")
+    assert not problems, "; ".join(problems)
+
+
+@test("wifi.join_needs_token", "A JOIN saved with no WebSocket token warns, and the next boot refuses it: 'JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF.', that 7.0.1 joined without one, and the fix (?WIFI,TOKEN,<token>); no 'will join' and no 'still looking' line; ?WIFI shows Mode JOIN, the interface down, no WS endpoint and 'Token : none - JOIN will not start', with the radio on the mesh channel, and the mesh still delivers; W1's own access point and token come back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="saves a JOIN with no token on W1 and reboots it twice; W1's WiFi is off in between")
+def join_needs_token(bench):
+    """docs/WIFI_DESIGN.md §7. wcbWifiStart (WCB_WiFi.cpp) refuses a JOIN with no token at every boot - a board updated
+    from 7.0.1 in JOIN mode lands here - and settles the JOIN state machine as a missing SSID does (joinSettled), so the
+    radio stays a plain ESP-NOW station on the mesh channel and the WebSocket endpoint never starts. The SSID and
+    passphrase are throwaway (never a network); W1's own token, if it has one, is cleared for the boot and replayed
+    after, never quoted."""
+    w2s2 = link(bench, 2, "S2")
+    w = usb_wcb(bench)
+    problems = []
+    with config_guard(bench, 1) as before:
+        tok, mode, ssid, _ = _wifi_token(before[1])
+        if mode != "AP":
+            raise Skip("W1 does not host an access point")
+        ch = _mesh_channel(before[1])
+        nosuch, pw_x = f"HIL-NOSUCH-{nonce()}", f"hil{nonce().lower()}pass"
+        changed = False
+        try:
+            changed = True
+            if ws_token(before[1]) and not _has(w.run("?WIFI,TOKEN,CLEAR"), TOKEN_CLEARED):
+                problems.append("?WIFI,TOKEN,CLEAR did not confirm")
+            out = w.run(f"?WIFI,JOIN,{nosuch},{pw_x}")
+            if not _has(out, f'WiFi mode set to JOIN — joining "{nosuch}"'):
+                problems.append("?WIFI,JOIN did not confirm")
+            if not _has(out, JOIN_WARNING):
+                problems.append("?WIFI,JOIN with no token did not warn")
+            bm = w.reboot()
+            try:
+                w.dev.expect(rf"^{re.escape(JOIN_REFUSED)}$", timeout=15, since=bm)
+            except AssertionError:
+                problems.append("no 'JOIN REFUSED: no WebSocket token is set' line at boot")
+            time.sleep(8)                            # a JOIN would have said 'still looking' by now (attempt 1)
+            lines = [x.rstrip() for x in w.dev.since(bm)]
+            if not _has(lines, "[WIFI] Fix:  ?WIFI,TOKEN,<token>   then reboot"):
+                problems.append("the boot refusal does not give the fix (?WIFI,TOKEN,<token>)")
+            if not _has(lines, "7.0.1 joined without a token"):
+                problems.append("the boot refusal does not say 7.0.1 joined without a token")
+            if _has(lines, "[WIFI] will join") or _has(lines, "[WIFI] still looking for"):
+                problems.append("with no token the JOIN still started")
+            st = _status(w)
+            for k, want in (("Mode", "JOIN"), ("Interface", "down"), ("WS endpoint", "NOT RUNNING")):
+                if st.get(k) != want:
+                    problems.append(f"with JOIN refused, {k} is {st.get(k)!r}, expected {want!r}")
+            if not st.get("Token", "").startswith("none - JOIN will not start"):
+                problems.append(f"with JOIN refused, the Token line is {st.get('Token')!r}")
+            radio = st.get("Radio channel", "")
+            if not radio.startswith(f"{ch}  (mesh channel {ch})") or "MISMATCH" in radio:
+                problems.append(f"with JOIN refused the radio line is {radio!r}")
+            _unicast_ok(w, w2s2, problems, "with JOIN refused")
+        finally:
+            if changed:
+                _restore_ap(w, tok, ssid, problems)
+                _token_put_back(w, before[1], problems)
         if _status(w).get("Mode") != "AP":
             problems.append("W1 is not back in AP mode")
     assert not problems, "; ".join(problems)
@@ -767,6 +948,12 @@ def channel_drift_warned(bench):
 # ============================================================ the PC on the AP (attended)
 # The PC's side - netsh, the temporary profile, the lease wait, the routes - is hil/wlan.py (NAVICORE.md INF5), which
 # suites/s45_navicore_wifi.py shares.
+# W1's own WebSocket token while _pc_on_w1_ap's block runs (read from W1's chain; None when W1 has none): the clients
+# _ws_open and _w1_identify open sign in with it when W1 asks (hil/ws.py sign_in_if_asked), and only then.
+_W1_TOKEN = {"token": None}
+_W1 = object()          # _ws_open's default: W1's own token
+
+
 @contextlib.contextmanager
 def _pc_on_w1_ap(bench, problems):
     """The PC on W1's access point for the block (_pc_on_ap) -> (w, W1's address, the adapter's name). Skip unless W1
@@ -777,15 +964,20 @@ def _pc_on_w1_ap(bench, problems):
     if os.name != "nt" and not _realtek_enabled(bench):
         raise Skip("netsh (Windows) drives the PC's WiFi here; off Windows set bench.json wifi_switch to realtek")
     w = usb_wcb(bench)
-    _, mode, ssid, pw = _wifi_token(bench.config_tokens(1, refresh=True))
+    toks = bench.config_tokens(1, refresh=True)
+    _, mode, ssid, pw = _wifi_token(toks)
     if mode != "AP" or not pw or not ssid:
         raise Skip("W1 does not host a named access point with a password")
     st = _status(w)
     if st.get("Interface") != "up" or not st.get("WS endpoint", "").startswith("ws://"):
         raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
     ip = st.get("IP address", "")
-    with _pc_on_ap(bench, problems, ssid, pw, "W1's", identify=_w1_identify(w), home=_navicore_home(bench)) as name:
-        yield w, ip, name
+    _W1_TOKEN["token"] = ws_token(toks)
+    try:
+        with _pc_on_ap(bench, problems, ssid, pw, "W1's", identify=_w1_identify(w), home=_navicore_home(bench)) as name:
+            yield w, ip, name
+    finally:
+        _W1_TOKEN["token"] = None
 
 
 def _w1_identify(w):
@@ -794,7 +986,9 @@ def _w1_identify(w):
     and NaviCore's endpoint takes the same connect: only W1's console can say it was W1."""
     def identify(name):
         try:
-            c = WsClient("192.168.4.1", timeout=4.0)
+            c = WsClient("192.168.4.1", timeout=4.0, token=_W1_TOKEN["token"])
+        except AuthFailed:
+            return "ws://192.168.4.1/ws refused W1's WebSocket token"
         except OSError as e:
             return f"ws://192.168.4.1/ws took no connect ({e})"
         try:
@@ -813,12 +1007,18 @@ def _w1_identify(w):
     return identify
 
 
-def _ws_open(ip, wait=15.0):
-    """A WsClient to ws://<ip>/ws, retried for `wait` s (the lease is already held) -> the client, or None."""
+def _ws_open(ip, wait=15.0, token=_W1):
+    """A WsClient to ws://<ip>/ws, retried for `wait` s (the lease is already held) -> the client, or None. It signs in
+    if the board asks (hil/ws.py): with W1's own token by default, with `token`, or never (None). A token the board
+    refuses raises AuthFailed at once: a retry would only fail again, inside the 1 s lockout."""
+    if token is _W1:
+        token = _W1_TOKEN["token"]
     end = time.monotonic() + wait
     while time.monotonic() < end:
         try:
-            return WsClient(ip, timeout=4.0)
+            return WsClient(ip, timeout=4.0, token=token)
+        except AuthFailed:
+            raise
         except OSError:
             time.sleep(1.5)
     return None
@@ -1318,7 +1518,9 @@ def _ws_open_slow(ip, rcvbuf, wait=15.0):
     end = time.monotonic() + wait
     while time.monotonic() < end:
         try:
-            return WsClient(ip, timeout=4.0, rcvbuf=rcvbuf)
+            return WsClient(ip, timeout=4.0, rcvbuf=rcvbuf, token=_W1_TOKEN["token"])
+        except AuthFailed:
+            raise
         except OSError:
             time.sleep(1.5)
     return None
@@ -1662,14 +1864,18 @@ def ws_ota_chunk(bench):
     assert not problems, "; ".join(problems)
 
 
-def _pc_reaches_joined_w1(bench, problems, ssid2, pw2, ip1):
+def _pc_reaches_joined_w1(bench, problems, ssid2, pw2, ip1, wtok):
     """WCB-WP22 row 4's second half, run by wifi.join_w2_ap when wifi_pc is ticked as well: the PC joins W2's access
     point too and opens ws://<W1's joined address>/ws, where ?VERSION is answered - W1's endpoint serves on a JOIN
-    address, reached through W2's access point. A Skip here (not Windows, no adapter) is noted, not raised: the JOIN
-    half has run by then."""
+    address, reached through W2's access point, and a JOIN board has a token, `wtok`, to sign in with. A Skip here (not
+    Windows, no adapter) is noted, not raised: the JOIN half has run by then."""
     try:
         with _pc_on_ap(bench, problems, ssid2, pw2, "W2's"):
-            ws = _ws_open(ip1)
+            try:
+                ws = _ws_open(ip1, token=wtok)
+            except AuthFailed:
+                problems.append("W1's endpoint on its joined address refused its own WebSocket token")
+                return
             if ws is None:
                 problems.append(f"the PC on W2's access point could not open ws://{ip1}/ws, W1's joined address")
                 return
@@ -1681,3 +1887,185 @@ def _pc_reaches_joined_w1(bench, problems, ssid2, pw2, ip1):
                 ws.close()
     except Skip as e:
         bench.note(f"the PC half is skipped: {e}")
+
+
+# ============================================================ the sign-in, seen from the socket (wifi_pc)
+@contextlib.contextmanager
+def _w1_token_on(w, before, problems):
+    """A throwaway WebSocket token on W1 for the block -> the token; W1's own token state from its chain `before`
+    afterwards. A token applies at once, to sessions opened after it (wcbWsSetToken, WCB_WS.cpp): no reboot."""
+    t = _throwaway_token()
+    _token_set(w, t)
+    try:
+        yield t
+    finally:
+        _token_put_back(w, before, problems)
+
+
+def _auth_lines(ws):
+    return [x.strip() for x in ws.text.splitlines() if x.strip()]
+
+
+@test("ws.token_signed_out", "OPT-IN (wifi_pc): with a WebSocket token set on W1, a session that has not signed in is sent nothing but [AUTH:REQUIRED] - one when it opens and one for a line it sends, which does not run (its ;S0 marker never reaches W1's console) - and none of W1's console (a ?VERSION typed on USB is not mirrored to it); W1's own token state is put back", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_token_signed_out(bench):
+    """docs/WIFI_DESIGN.md §7. sinkAdd (WCB_WS.cpp) opens a session outside the tee when a token is set and owes it
+    [AUTH:REQUIRED]; wsAdmit drops every line it sends before ?AUTH, unqueued, and owes another; sinkPump opens console
+    frames only for signed-in clients (txInTee). The token is throwaway, set and taken away over USB."""
+    problems = []
+    with config_guard(bench, 1) as before, _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        with _w1_token_on(w, before[1], problems):
+            ws = _ws_open(ip, token=None)
+            assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+            try:
+                if not _ws_until(ws, lambda t: AUTH_REQUIRED in t, 4):
+                    problems.append("a new session was not sent [AUTH:REQUIRED]")
+                mk = marker("TOK")
+                m = w.dev.mark()
+                ws.send_text(f";S0,{mk}\n")
+                if not _ws_until(ws, lambda t: t.count(AUTH_REQUIRED) >= 2, 4):
+                    problems.append("a line sent before signing in was not answered [AUTH:REQUIRED]")
+                time.sleep(1.0)
+                if any(mk in x for x in w.dev.since(m)):
+                    problems.append("a line sent before signing in ran (its ;S0 marker reached W1's console)")
+                w.run("?VERSION")
+                _ws_quiet(ws, quiet=1.5, cap=5)
+                got = _auth_lines(ws)
+                other = [x for x in got if x != AUTH_REQUIRED]
+                if other:
+                    problems.append(f"a signed-out session was sent {len(other)} line(s) besides [AUTH:REQUIRED], "
+                                    f"the first {other[0][:60]!r}")
+                if got.count(AUTH_REQUIRED) != 2:
+                    problems.append(f"{got.count(AUTH_REQUIRED)} [AUTH:REQUIRED] line(s), expected 2 (the open, the line)")
+            finally:
+                ws.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.token_wrong_closes", "OPT-IN (wifi_pc): with a WebSocket token set on W1, a wrong ?AUTH is answered [AUTH:FAIL] and a CLOSE with status 1008; within 1 s of that failure the right token fails too, on a new session; after that the right token signs in and ?VERSION is answered; W1's own token state is put back", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_token_wrong_closes(bench):
+    """docs/WIFI_DESIGN.md §7. wsAdmit (WCB_WS.cpp) compares in constant time; a mismatch, or any ?AUTH within
+    WS_AUTH_LOCKOUT_MS (1 s) of a failure on any session, owes [AUTH:FAIL], and sinkPump follows it with a 1008 CLOSE
+    and closes the session when the client echoes it (WS_BYE_WAIT_MS, 1 s, if it does not). The second session is
+    opened at once so it lands inside the lockout; a WiFi round trip slow enough to miss it is noted, not failed."""
+    problems, facts = [], {}
+    with config_guard(bench, 1) as before, _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        with _w1_token_on(w, before[1], problems) as t:
+            ws = _ws_open(ip, token=None)
+            assert ws is not None, f"could not open ws://{ip}/ws with a lease held"
+            second = None
+            try:
+                _ws_until(ws, lambda x: AUTH_REQUIRED in x, 4)
+                t_fail = None
+                try:
+                    ws.sign_in("hil" + "x" * 9)
+                    problems.append("a wrong token was answered [AUTH:OK]")
+                except AuthFailed:
+                    t_fail = time.monotonic()
+                except ConnectionError as e:
+                    problems.append(f"a wrong token was not answered [AUTH:FAIL] ({e})")
+                ws.read_until("\x00never\x00", timeout=2)            # the CLOSE that follows
+                if not ws.close_frames:
+                    problems.append("no CLOSE followed [AUTH:FAIL]")
+                elif ws.close_frames[0][:2] != CLOSE_POLICY:
+                    problems.append(f"the CLOSE after [AUTH:FAIL] has status {ws.close_frames[0][:2].hex()}, not 03f0 "
+                                    f"(1008)")
+                if t_fail is not None:
+                    second = WsClient(ip, timeout=4.0)
+                    _ws_until(second, lambda x: AUTH_REQUIRED in x, 2)
+                    try:
+                        second.sign_in(t)
+                        dt = time.monotonic() - t_fail
+                        if dt < 0.8:
+                            problems.append(f"the right token signed in {dt:.2f} s after a failure (the lockout is 1 s)")
+                        else:
+                            facts["lockout"] = f"not checked: the second session took {dt:.2f} s"
+                    except AuthFailed:
+                        facts["lockout"] = f"held {time.monotonic() - t_fail:.2f} s after the failure"
+            finally:
+                ws.close()
+                if second is not None:
+                    second.close()
+            time.sleep(1.5)                                          # past the lockout
+            try:
+                good = _ws_open(ip, token=t)
+            except AuthFailed:
+                good = None
+                problems.append("the right token was refused 1.5 s after the last failure")
+            if good is not None:
+                try:
+                    if good.auth_lines[-1:] != [AUTH_OK]:
+                        problems.append(f"the right token's sign-in ended {good.auth_lines[-1:]}, not [AUTH:OK]")
+                    good.text = ""
+                    good.send_text("?VERSION\n")
+                    if not _ws_until(good, lambda x: "End of Version" in x, 6):
+                        problems.append("signed in after the lockout, ?VERSION was not answered")
+                finally:
+                    good.close()
+    bench.note(f"ws.token_wrong_closes: {facts}")
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)
+
+
+@test("ws.token_signs_in", "OPT-IN (wifi_pc): with a WebSocket token set on W1, the right ?AUTH is answered [AUTH:OK], and the session then runs what it sends (?VERSION answered) and is sent W1's console (a ;S0 marker typed on USB arrives); a session open before the token was set stays signed in; with the token cleared again a new session is sent no [AUTH:REQUIRED] and ?AUTH,<anything> is answered [AUTH:OK]; W1's own token state is put back", needs=["wcb1"], links=[], opt_in="wifi_pc")
+def ws_token_signs_in(bench):
+    """docs/WIFI_DESIGN.md §7. wsAdmit (WCB_WS.cpp) signs a session in for its lifetime on a match and owes [AUTH:OK],
+    which sinkPump sends ahead of the first console frame the session joins (txInTee); the token as it is when a
+    session opens decides that session (sinkAdd), so one open before ?WIFI,TOKEN keeps going; with no token any ?AUTH
+    answers [AUTH:OK]. Two clients at most (WS_MAX_CLIENTS), so the early one is closed before the last opens."""
+    problems = []
+    with config_guard(bench, 1) as before, _pc_on_w1_ap(bench, problems) as (w, ip, _):
+        early = _ws_open(ip)                         # W1 as it is: no token, or signed in with its own
+        assert early is not None, f"could not open ws://{ip}/ws with a lease held"
+        late = None
+        try:
+            with _w1_token_on(w, before[1], problems) as t:
+                early.text = ""
+                early.send_text("?VERSION\n")
+                if not _ws_until(early, lambda x: "End of Version" in x, 6):
+                    problems.append("a session open before the token was set stopped running what it sends")
+                try:
+                    late = _ws_open(ip, token=t)
+                except AuthFailed:
+                    problems.append("the right token was answered [AUTH:FAIL]")
+                if late is not None:
+                    if late.auth_lines[-1:] != [AUTH_OK]:
+                        problems.append(f"the sign-in ended {late.auth_lines[-1:]}, not [AUTH:OK]")
+                    late.text = ""
+                    late.send_text("?VERSION\n")
+                    if not _ws_until(late, lambda x: "End of Version" in x, 6):
+                        problems.append("signed in, ?VERSION was not answered")
+                    mk = marker("TOK")
+                    late.text = ""
+                    w.run(f";S0,{mk}")
+                    if not _ws_until(late, lambda x: mk in x, 4):
+                        problems.append("signed in, W1's console was not mirrored to the session")
+                    late.close()
+                    late = None
+                if not _has(w.run("?WIFI,TOKEN,CLEAR"), TOKEN_CLEARED):
+                    problems.append("?WIFI,TOKEN,CLEAR did not confirm")
+                early.close()
+                early = None
+                free = _ws_open(ip, token=None)
+                if free is None:
+                    problems.append("with the token cleared no session could be opened")
+                else:
+                    try:
+                        if _ws_until(free, lambda x: AUTH_REQUIRED in x, 1.5):
+                            problems.append("with the token cleared a new session was sent [AUTH:REQUIRED]")
+                        try:
+                            free.sign_in("anything-at-all")
+                        except ConnectionError as e:
+                            problems.append(f"with no token ?AUTH,<anything> was not answered [AUTH:OK] ({e})")
+                        free.text = ""
+                        free.send_text("?VERSION\n")
+                        if not _ws_until(free, lambda x: "End of Version" in x, 6):
+                            problems.append("with the token cleared, ?VERSION was not answered")
+                    finally:
+                        free.close()
+        finally:
+            for c in (early, late):
+                if c is not None:
+                    c.close()
+    _left_clean(bench, w, problems)
+    assert not problems, "; ".join(problems)

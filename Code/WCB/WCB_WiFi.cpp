@@ -22,6 +22,7 @@ String      wcbWifiApSsid;
 String      wcbWifiApPass;
 String      wcbWifiJoinSsid;
 String      wcbWifiJoinPass;
+char        wcbWifiToken[WCB_WIFI_TOKEN_MAX + 1] = "";
 
 // ---- Runtime state --------------------------------------------------------
 static bool          wifiUp          = false;   // an interface is up
@@ -55,8 +56,23 @@ void loadWifiSettings() {
     wcbWifiApPass   = preferences.getString("ap_pass",   "");
     wcbWifiJoinSsid = preferences.getString("jn_ssid",   "");
     wcbWifiJoinPass = preferences.getString("jn_pass",   "");
+    wcbWifiToken[0] = '\0';                                        // a missing key leaves the buffer untouched
+    if (preferences.isKey("token")) preferences.getString("token", wcbWifiToken, sizeof(wcbWifiToken));
     preferences.end();
     if (wcbWifiMode > WCB_WIFI_JOIN) wcbWifiMode = WCB_WIFI_OFF;   // corrupt/never-set
+    wcbWsSetToken(wcbWifiToken);
+}
+
+// This boot refused a JOIN for want of a token (wcbWifiStart): ?WIFI,TOKEN then says a reboot starts it.
+static bool joinNoToken = false;
+
+// Only ?WIFI,TOKEN writes the key, alone: a save of the other settings never touches it. False when NVS refused it.
+static bool saveWifiToken() {
+    preferences.begin("wifi_cfg", false);
+    const bool ok = wcbWifiToken[0] ? preferences.putString("token", wcbWifiToken) == strlen(wcbWifiToken)
+                                    : (!preferences.isKey("token") || preferences.remove("token"));
+    preferences.end();
+    return ok;
 }
 
 void saveWifiSettings() {
@@ -276,6 +292,22 @@ void wcbWifiStart() {
         Serial.println("[WIFI] JOIN mode selected but no SSID is set — staying off.");
         Serial.println("[WIFI] Set one with:  ?WIFI,JOIN,<ssid>,<password>");
         joinSettled = true;
+        return;
+    }
+    // NO TOKEN, NO JOIN (docs/WIFI_DESIGN.md §7). On someone else's network the WebSocket endpoint is a command channel
+    // to the whole mesh for every device on that network; an AP of our own at least has its WPA2 password. JOIN shipped
+    // in 7.0.1 without a token, so a board updated from it lands here: every boot says so, with the fix.
+    if (!wcbWifiToken[0]) {
+        Serial.println("[WIFI] ****************************************************************");
+        Serial.println("[WIFI] JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF.");
+        Serial.println("[WIFI] Joining a network opens this board's command channel to every");
+        Serial.println("[WIFI] device on it. 7.0.1 joined without a token; this firmware will not.");
+        Serial.println("[WIFI] Fix:  ?WIFI,TOKEN,<token>   then reboot");
+        Serial.println("[WIFI]       (8-32 characters, none of: space , ^ ; ? \" \\)");
+        Serial.println("[WIFI] Clients then sign in with ?AUTH,<token> (Intellex asks for it).");
+        Serial.println("[WIFI] ****************************************************************");
+        joinSettled = true;
+        joinNoToken = true;
         return;
     }
     Serial.printf("[WIFI] will join \"%s\" on channel %u (retrying in the background)\n",
@@ -644,11 +676,16 @@ static void wcbWifiPrintStatus() {
                       ip.c_str(), wcbWsClientCount());
     else
         Serial.println("WS endpoint   : NOT RUNNING");
+    // Whether a token is set, never what it is. "set" / "none" lead the value: the line is read by tools.
+    Serial.printf("Token         : %s\n", wcbWifiToken[0] ? "set" :
+                  wcbWifiMode == WCB_WIFI_JOIN ? "none - JOIN will not start (?WIFI,TOKEN,<token>)" : "none");
     Serial.printf("Free heap     : %u bytes (min since boot %u)\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),       // byte-addressable only: see ?STATS
                   (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
     Serial.println("------------------------------------------------------");
 }
+
+static void wcbWifiTokenCommand(const String &arg);   // ?WIFI,TOKEN, below
 
 void processWifiCommand(const String &args) {
     if (args.length() == 0) { wcbWifiPrintStatus(); return; }
@@ -667,8 +704,11 @@ void processWifiCommand(const String &args) {
         return;
     }
 
+    if (verb == "TOKEN") { wcbWifiTokenCommand((c1 < 0) ? String("") : args.substring(c1 + 1)); return; }
+
     if (verb != "AP" && verb != "JOIN") {
         Serial.println("Usage: ?WIFI | ?WIFI,OFF | ?WIFI,AP,<ssid>,<pass> | ?WIFI,JOIN,<ssid>,<pass>");
+        Serial.println("       ?WIFI,TOKEN,<token> | ?WIFI,TOKEN,CLEAR");
         return;
     }
 
@@ -721,4 +761,61 @@ void processWifiCommand(const String &args) {
     // to be misunderstood, and it is invisible until the mesh stops working.
     Serial.println("Note: the AP and ESP-NOW share one radio, so the WiFi channel always");
     Serial.println("follows ?WCBCH. It cannot be set independently.");
+    // Saved anyway, so a config push or a restore that sets the token after this line still ends up whole; the boot
+    // is what refuses (wcbWifiStart).
+    if (wcbWifiMode == WCB_WIFI_JOIN && !wcbWifiToken[0]) {
+        Serial.println("WARNING: no WebSocket token is set, and JOIN will not start at the next boot");
+        Serial.println("without one: joining a network opens this board's command channel to every");
+        Serial.println("device on it. Set one before rebooting:  ?WIFI,TOKEN,<token>");
+    }
+}
+
+// ---- ?WIFI,TOKEN ---------------------------------------------------------
+// The characters the config chain and the line grammar give meaning to cannot be in a token: it travels as
+// ?WIFI,TOKEN,<token> in ?backup and a config pull (split at ',' and '^') and as ?AUTH,<token> on the socket.
+static const char *wcbWifiTokenProblem(const String &t) {
+    if (t.length() < WCB_WIFI_TOKEN_MIN || t.length() > WCB_WIFI_TOKEN_MAX) return "must be 8-32 characters";
+    for (size_t i = 0; i < t.length(); i++) {
+        const char ch = t[i];
+        if (ch < 0x21 || ch > 0x7E) return "takes printable ASCII only, and no space";
+        if (strchr(",^;?\"\\", ch)) return "cannot contain any of , ^ ; ? \" \\";
+    }
+    return nullptr;
+}
+
+// Takes effect for sessions opened from now on: one already signed in, the one sending this over the socket
+// included, stays signed in (wcbWsSetToken). The value is never printed, here or in ?WIFI.
+static void wcbWifiTokenCommand(const String &arg) {
+    if (arg.length() == 0) {
+        Serial.println("Usage: ?WIFI,TOKEN,<token> | ?WIFI,TOKEN,CLEAR");
+        return;
+    }
+    char was[sizeof(wcbWifiToken)];
+    memcpy(was, wcbWifiToken, sizeof(was));
+    if (arg.equalsIgnoreCase("CLEAR")) {
+        wcbWifiToken[0] = '\0';
+    } else {
+        const char *why = wcbWifiTokenProblem(arg);
+        if (why) {
+            Serial.printf("Token refused: a token %s. Nothing changed.\n", why);
+            return;
+        }
+        strlcpy(wcbWifiToken, arg.c_str(), sizeof(wcbWifiToken));
+    }
+    if (!saveWifiToken()) {
+        memcpy(wcbWifiToken, was, sizeof(wcbWifiToken));   // RAM keeps what NVS still holds
+        Serial.println("Token NOT saved: NVS refused it (full?). Nothing changed. See ?NVS.");
+        return;
+    }
+    wcbWsSetToken(wcbWifiToken);
+    if (wcbWifiToken[0]) {
+        Serial.println("WebSocket token set. Sessions opened from now on must send ?AUTH,<token>");
+        Serial.println("before anything they send runs; sessions already signed in stay signed in.");
+        if (joinNoToken && wcbWifiMode == WCB_WIFI_JOIN)
+            Serial.println("JOIN was refused at this boot for want of a token: reboot to start it.");
+    } else {
+        Serial.println("WebSocket token cleared. Sessions opened from now on need no sign-in.");
+        if (wcbWifiMode == WCB_WIFI_JOIN)
+            Serial.println("WARNING: this board is set to JOIN, which will not start at the next boot without a token.");
+    }
 }

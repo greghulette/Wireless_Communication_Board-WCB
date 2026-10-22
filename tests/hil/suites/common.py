@@ -4,7 +4,7 @@ import secrets
 import time
 from contextlib import contextmanager
 
-from hil.config import read_config, token  # noqa: F401 — token re-exported for suites
+from hil.config import read_config, token, wifi_mode_token, ws_token  # noqa: F401 — re-exported for suites
 from hil.wcb import WCB
 
 # Console lines that arrive on their own (ETM/WDP/peer events, relayed terminals, JSON telemetry).

@@ -1003,6 +1003,19 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WIFI,OFF                ESP-NOW only (the default)"));
         Serial.println(F("  ?WIFI,AP,<ssid>,<pass>   Host an access point"));
         Serial.println(F("  ?WIFI,JOIN,<ssid>,<pass> Join an existing one (e.g. a NaviCore's)"));
+        Serial.println(F("                           (needs a token: see below)"));
+        Serial.println(F("  ?WIFI,TOKEN,<token>      Set the WebSocket token (8-32 characters,"));
+        Serial.println(F("                           none of: space , ^ ; ? \" \\)"));
+        Serial.println(F("  ?WIFI,TOKEN,CLEAR        No token"));
+        Serial.println(F("\nTHE WEBSOCKET TOKEN:"));
+        Serial.println(F("  With a token set, a WebSocket session is sent nothing and runs"));
+        Serial.println(F("  nothing until it signs in with ?AUTH,<token> (see ?AUTH?)."));
+        Serial.println(F("  JOIN REQUIRES ONE: joining a network opens this board's command"));
+        Serial.println(F("  channel to every device on it, so a JOIN board with no token keeps"));
+        Serial.println(F("  WiFi off at boot. (7.0.1 joined without one.) An AP works without"));
+        Serial.println(F("  one - its WPA2 password is the lock - and enforces one if set."));
+        Serial.println(F("  A token applies at once, to sessions opened after it; ?WIFI shows"));
+        Serial.println(F("  only 'set' or 'none'. ?backup and a config pull carry it, like ?EPASS."));
         Serial.println(F("\nTHE CHANNEL IS NOT SEPARATELY CONFIGURABLE:"));
         Serial.println(F("  The ESP32 has ONE radio, so WiFi and ESP-NOW share a channel."));
         Serial.println(F("  It always follows ?WCBCH. A WiFi channel that disagreed with the"));
@@ -1014,14 +1027,15 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  network on another channel moves the whole mesh there first."));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Settings apply on the NEXT REBOOT, like ?WCBCH."));
-        Serial.println(F("  - The AP password is MANDATORY (8+ chars). This interface accepts"));
-        Serial.println(F("    commands for the whole mesh with no credential of its own, so an"));
-        Serial.println(F("    open AP would hand the droid to anyone in range."));
+        Serial.println(F("  - The AP password is MANDATORY (8+ chars). With no token this"));
+        Serial.println(F("    interface accepts commands for the whole mesh with no credential"));
+        Serial.println(F("    of its own, so an open AP would hand the droid to anyone in range."));
         Serial.println(F("  - Default AP SSID is WCB-<alias> (or WCB-<number> with no alias)."));
         Serial.println(F("  - JOIN retries forever and never falls back to hosting — a board"));
         Serial.println(F("    that quietly became an AP is a surprise nobody wants."));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?WIFI,AP,R2-Dome,astromech1"));
+        Serial.println(F("  ?WIFI,TOKEN,dome-lock-77"));
         Serial.println(F("  ?WIFI,JOIN,NaviCore-20,mypassword"));
         Serial.println(F("  ?WIFI,OFF"));
 
@@ -1077,6 +1091,24 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?REGION,DE"));
         Serial.println(F("  ?REGION,01"));
+
+    // ================================================================
+    } else if (c == "AUTH") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?AUTH,<token>"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Signs a WebSocket session in on a board with a token set"));
+        Serial.println(F("  (?WIFI,TOKEN). The WebSocket endpoint answers it itself; it never"));
+        Serial.println(F("  runs as a command:"));
+        Serial.println(F("    [AUTH:REQUIRED]  sent when a session opens, and for every line"));
+        Serial.println(F("                     it sends before signing in (the line is dropped)"));
+        Serial.println(F("    [AUTH:OK]        signed in for the life of the session"));
+        Serial.println(F("    [AUTH:FAIL]      wrong token: the session is closed"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - After a failure every ?AUTH fails for 1 s, on any session."));
+        Serial.println(F("  - With no token set, ?AUTH,<anything> answers [AUTH:OK]."));
+        Serial.println(F("  - Sent over USB or the mesh it does nothing."));
 
     // ================================================================
     } else if (c == "WDP") {

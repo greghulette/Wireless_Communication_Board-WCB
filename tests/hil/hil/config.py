@@ -44,3 +44,21 @@ def token(tokens, prefix):
         if t.upper().startswith(prefix.upper()):
             return t
     return None
+
+
+def wifi_mode_token(tokens):
+    """The chain's ?WIFI mode line (?WIFI,AP,... / ?WIFI,JOIN,... / ?WIFI,OFF), or None. Not token(tokens, "?WIFI,"):
+    a board with a WebSocket token emits ?WIFI,TOKEN,<token> just ahead of it (collectConfigCommands, WCB.ino;
+    docs/WIFI_DESIGN.md §7)."""
+    for t in tokens:
+        u = t.upper()
+        if u.startswith("?WIFI,") and not u.startswith("?WIFI,TOKEN,"):
+            return t
+    return None
+
+
+def ws_token(tokens):
+    """The WebSocket token a chain carries (?WIFI,TOKEN,<token>), or None. It goes to a board or a WsClient, never into
+    a message."""
+    t = token(tokens, "?WIFI,TOKEN,")
+    return t.split(",", 2)[2] if t else None

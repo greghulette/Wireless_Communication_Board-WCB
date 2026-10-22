@@ -1,6 +1,7 @@
 # WCB WiFi — hosting an access point, or joining one
 
-Status: **in development on branch `WIFI`.** Not in a release.
+Status: **released in 7.0.1** (AP, JOIN and the WebSocket endpoint). The WebSocket token (§7) came after 7.0.1, and
+it changes JOIN: a JOIN board with no token keeps WiFi off.
 
 A WCB can optionally bring up an IP interface — hosting its own access point, or
 joining an existing one — so the mesh can be managed from a phone with no USB cable
@@ -76,8 +77,8 @@ mesh channel (`wcbWifiService`) is skipped while a search or a move has the radi
 | Mode | Behaviour |
 |---|---|
 | `OFF` | ESP-NOW only. The default. Byte-for-byte the previous behaviour. |
-| `AP` | Host a SoftAP on `meshChannel`, `WIFI_AP_STA` so ESP-NOW keeps its interface. Self-contained: no infrastructure, and nothing external can move the radio. The field mode. |
-| `JOIN` | Associate with an existing AP (a NaviCore's, typically). One network reaches everything and the phone keeps its internet. |
+| `AP` | Host a SoftAP on `meshChannel`, `WIFI_AP_STA` so ESP-NOW keeps its interface. Self-contained: no infrastructure, and nothing external can move the radio. The field mode. A WebSocket token (§7) is optional: the WPA2 passphrase decides who reaches the endpoint, and a token, when set, is enforced too. |
+| `JOIN` | Associate with an existing AP (a NaviCore's, typically). One network reaches everything and the phone keeps its internet. **Needs a WebSocket token (§7)**: with none, the boot refuses to start WiFi and says why. |
 
 **JOIN never falls back to hosting.** A board that quietly became an access point
 because it could not find its network is precisely the rogue-AP surprise this design
@@ -162,18 +163,23 @@ caused a regression.
 ## 6. Commands
 
 ```
-?WIFI                       Status: mode, SSID, IP, radio channel, free heap
+?WIFI                       Status: mode, SSID, IP, radio channel, token set/none, free heap
 ?WIFI,OFF                   ESP-NOW only (default)
 ?WIFI,AP,<ssid>,<pass>      Host an access point
-?WIFI,JOIN,<ssid>,<pass>    Join an existing one
+?WIFI,JOIN,<ssid>,<pass>    Join an existing one (needs a token, §7)
+?WIFI,TOKEN,<token>         The WebSocket token (§7)
+?WIFI,TOKEN,CLEAR           No token
 ```
 
-All changes persist immediately and apply on the next reboot.
+All changes persist immediately. A mode applies on the next reboot; a token applies at once, to WebSocket sessions
+opened after it (§7).
 
 - The **AP password is mandatory, 8 characters minimum, and fails closed.**
-  `WiFi.softAP()` with an empty passphrase creates an *open* network, and this
-  interface accepts commands for the whole mesh with no credential of its own — a
-  bare `?RESTART` carries none. It is rejected at both the command and at bring-up.
+  `WiFi.softAP()` with an empty passphrase creates an *open* network, and with no
+  token this interface accepts commands for the whole mesh with no credential of its
+  own — a bare `?RESTART` carries none. It is rejected at both the command and at bring-up.
+- `?WIFI,JOIN` with no token is **saved, with a warning**, and the boot refuses it. Refusing the command instead
+  would break a config push or a restore that sets the token after the JOIN line.
 - **Default AP SSID** is `WCB-<alias>`, falling back to `WCB-<number>`. Two droids in
   one room must not advertise the same name.
 - The password field is **not** trimmed: a trailing space is legal in a WPA2
@@ -181,7 +187,8 @@ All changes persist immediately and apply on the next reboot.
 
 ### NVS
 
-Namespace `wifi_cfg`: `mode` (u8), `ap_ssid`, `ap_pass`, `jn_ssid`, `jn_pass`.
+Namespace `wifi_cfg`: `mode` (u8), `ap_ssid`, `ap_pass`, `jn_ssid`, `jn_pass`, `token` (absent = none; only
+`?WIFI,TOKEN` writes it).
 
 ### Config round-trip
 
@@ -191,6 +198,11 @@ included deliberately: a restore that brought the AP back *without* its passphra
 would fail closed at boot, and the board would come up with no AP and nothing saying
 why. `OFF` is emitted too, so restoring a WiFi-off backup actively turns it off
 rather than leaving whatever was there.
+
+A token set is emitted as `WIFI,TOKEN,<token>` **right ahead of** the mode line (`collectConfigCommands`, WCB.ino),
+in clear, as `?EPASS` already travels: a restore has it before `?WIFI,JOIN`, which warns without one, and before the
+reboot that starts JOIN, which refuses to. With no token nothing is emitted, so a chain from a board with none leaves
+the target's token as it is: a restore never takes a lock off.
 
 ---
 
@@ -213,7 +225,9 @@ the UART0 mutex against `loop()`. Drops are counted and reported from `loop()`.
 mesh relay. Teeing at that one point rather than at each print site is what keeps
 the transports identical — handlers go on printing exactly as they always have.
 `wcbWsSinkWrite()` only appends to a buffer: no print (that would recurse straight
-back into the tee), no allocation, no TCP send.
+back into the tee), no allocation, no TCP send. Only a signed-in session is in the tee (§7): with a token set, a
+session that has not sent the right `?AUTH` is sent no console output, and a board whose only client is signed out
+does no tee work at all (`wcbWsSinkLive` counts signed-in clients).
 
 **The sender never blocks** (2026-10-14, HIL row `ws.burst_closes_live_client`). `sinkPump` runs on `loop()` and
 writes with `send(MSG_DONTWAIT)`: what a socket takes now goes, the rest waits for a later pass. Every client is
@@ -232,7 +246,10 @@ partial send that timed out was also taken for a whole one, which could cut a fr
 **Only this file writes to a WebSocket after the handshake.** `/ws` is registered with
 `handle_ws_control_frames`, so httpd no longer answers PING and CLOSE itself with a blocking send from its task,
 which could land inside a frame the sender had half written. `wsHandler` reads every frame's payload, queues a
-PONG that `sinkPump` sends at the next frame boundary, and echoes a CLOSE when no frame is part-way out.
+PONG that `sinkPump` sends at the next frame boundary, and echoes a CLOSE when no frame is part-way out. A console
+frame part-way out finishes first, whatever is queued behind it (a PONG, a session-layer line, §7): the sender used to
+hold the frame back for a PONG that was itself waiting for the frame's end, and the client sat stalled until
+`WS_STUCK_MS` closed it.
 
 **A heap floor for console output** (`WS_HEAP_FLOOR`, 8 KB). Output handed to lwIP sits in its send buffer and the WiFi driver's dynamic TX buffers until the client ACKs it, and the driver takes a dynamic RX buffer from the same heap for every packet it receives. A client that stopped reading took W1 to 1.4 KB free: its window update could not be received, it was closed as stuck, and the heap stayed short long enough that the next client could not join. Below the floor `sinkPump` hands lwIP nothing more (PONG/CLOSE excepted). A close that httpd cannot queue (its control socket needs a little heap too) keeps the slot `closing` and is asked again every pass, instead of leaving the session open with its whole send buffer.
 
@@ -312,7 +329,81 @@ fresh DISCOVER (reconnect, `ipconfig /release` then `/renew`, or lease expiry) p
 the gateway-free lease. Right after an upgrade, a gateway that is still there means the
 client hasn't re-leased yet — not that the firmware didn't apply.
 
-## 7. Wizard integration
+## 7. The WebSocket token
+
+**Why.** `ws://<ip>/ws` is a command channel to the whole mesh: `?ERASE,NVS`, `?reboot`, an OTA, `?EPASS` all run
+from it. In AP mode the WPA2 passphrase decides who reaches it. In JOIN mode the board is on someone else's network -
+a NaviCore's access point, a home router, a convention's WiFi - and every device on that network reaches the endpoint
+with no credential at all. The token is that credential. **JOIN requires one; AP mode works without one** (its
+passphrase is the lock) **and enforces one when it is set.**
+
+**The protocol** - the same on every WebSocket that takes commands: this one, NaviCore's, and the `MgmtRelay`
+example's in `WCBClient`. Lines are newline-delimited UTF-8 as everywhere else on the socket.
+
+| Board sends | When |
+|---|---|
+| `[AUTH:REQUIRED]` | A session opens while a token is set; and for every line that session sends before it signs in. That line is dropped, never run. |
+| `[AUTH:OK]` | `?AUTH,<token>` matched: the session is signed in for its lifetime, gets the console and its lines run. With no token set, any `?AUTH,<anything>` is answered `[AUTH:OK]`, so a client can always send it. |
+| `[AUTH:FAIL]`, then a CLOSE (status 1008) | `?AUTH` did not match, or came within 1 s of a failed one on **any** session (each failure starts the second again). The session closes when the client echoes the CLOSE, or 1 s after. |
+
+- A session that has not signed in gets **nothing else**: no console output and no reply to anything it sends.
+- A session's state is decided when it opens. Setting, changing or clearing the token takes effect for **new**
+  sessions; a session already signed in keeps going (the one that sent `?WIFI,TOKEN` included).
+- With no token set nothing is sent on open and nothing changes from before the token existed.
+- `?AUTH` is answered by the session layer and never reaches the command dispatcher. Typed on USB or arriving over
+  the mesh, where there is nothing to sign in to, it is a no-op (never "Unknown command").
+- The tools never send `?AUTH` themselves: Intellex, the desktop host that bridges a tool's page to a droid's
+  WebSocket, signs in when the droid says `[AUTH:REQUIRED]`, from the token it saved for that droid.
+
+**The token.** `?WIFI,TOKEN,<token>`: 8-32 printable ASCII characters, none of space `,` `^` `;` `?` `"` `\`. Each
+of those means something in the config chain or the line grammar the token travels in (`,` separates fields, `^`
+separates commands, `;T` starts a timer chain, `?` is the function character and a trailing one asks for help, `"`
+and `\` are quoted by the tools' JSON). `?WIFI,TOKEN,CLEAR` removes it. Stored in NVS `wifi_cfg` key `token`; `?WIFI`
+prints `Token : set` or `none`, never the value; `?backup` and a config pull carry it (§6 Config round-trip). A token
+NVS refuses is not applied: RAM keeps what NVS holds.
+
+**JOIN with no token does not start.** `wcbWifiStart` refuses at every boot, settles the JOIN state machine as a
+missing SSID does, and prints the reason and the fix:
+
+```
+[WIFI] JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF.
+...
+[WIFI] Fix:  ?WIFI,TOKEN,<token>   then reboot
+```
+
+**This breaks existing JOIN boards.** JOIN shipped in 7.0.1 without a token, so a 7.0.1 board in JOIN mode that is
+updated keeps WiFi off until it is given a token (over USB, or a config push through the mesh) and rebooted. Greg's
+decision: an open command channel on a shared network is not a state to preserve. The boot message says so every
+boot. `?WIFI,JOIN` itself is still accepted and saved, with a warning, so a push or restore that sets the token after
+the JOIN line still ends up whole.
+
+**Implementation** (`WCB_WS.cpp`):
+
+- `wsAdmit` decides every whole line on the httpd task, **before** the command queue: a signed-out session's lines
+  never take one of its six slots. It only compares and records: no print, no allocation, no send (the handler rule,
+  §6a). The comparison is constant-time over all 32 bytes (`tokenMatches`).
+- A session's state lives in its sender slot (`authed`, `failed`, the lines it is owed), under `txLock`, which the
+  httpd task (`sinkAdd`, `wsAdmit`) and the loop's sender already share. The token is copied in and out under its own
+  spinlock (`tokenMux`): `wcbWsSetToken` runs on the loop task. The lockout's timestamp is touched only by the httpd
+  task.
+- The answers are owed, not sent: `sinkPump` sends them between data frames, as it does a PONG, so a session that has
+  just signed in gets `[AUTH:OK]` ahead of the first console frame it joins. They wait at the heap floor like console
+  output; the CLOSE does not.
+- **Why a CLOSE and a wait, not a plain close.** `wsClose` resets the socket (`SO_LINGER` 0, tracker #113), and a reset
+  can throw away what the client has not read yet - Windows does - so `[AUTH:FAIL]` would vanish and the client would
+  see only a dropped connection. Sending a CLOSE and closing on its echo (`WS_BYE_WAIT_MS`, 1 s, if none comes) gets
+  the line read first.
+- Cost: no heap at all, per session or otherwise; about 16 bytes of static RAM per session slot, and the two copies of
+  the token (WCB_WiFi's, WCB_WS's) and the lockout: +104 B static and +5.4 KB flash on the ESP32 (§9).
+
+**Known limit.** A signed-out session still holds one of the two session slots, and httpd's LRU purge closes the least
+recently used session to take a new connection (§6a), so anyone who can reach the endpoint can push a signed-in
+client off it by connecting. The token stops commands and output, not that. The purge stays: it is what keeps a client
+that vanished without closing from locking everyone out (#111, #113).
+
+---
+
+## 8. Wizard integration
 
 WiFi is configured from the **board card** in the Setup Wizard, under an
 `advanced-only` subsection — most builders never need it, and putting an access point
@@ -365,7 +456,7 @@ way — from the host, not from Pages.
 
 ---
 
-## 8. Measured cost
+## 9. Measured cost
 
 Baseline is 6.2.1 (`66845b9`), `PartitionScheme=min_spiffs`, core `esp32:esp32@3.3.4`.
 
@@ -387,6 +478,10 @@ Adding the WebSocket endpoint (`WCB_WS`) on top:
 The static growth is the per-socket accumulators (three, 3 × 1536 B, when this was
 measured; two now), the 2 KB output sink and the 3 KB static receive buffer. The command queue is *heap*-allocated
 (6 × 1540 B ≈ 9.2 KB) and so comes out of runtime free heap, not this figure.
+
+The token (§7) on top, against `1614c2a`: ESP32 1,455,039 → 1,460,543 flash (**+5.4 KB**) and 113,048 → 113,152
+static RAM (**+104 B**); ESP32-S3 1,419,099 → 1,424,599 (**+5.4 KB**) and 111,288 → 111,384 (**+96 B**). No heap: the
+session state is in the static sender slots, and the answers are built on the stack as they are sent.
 
 **Measured on hardware**, WCB1 with the AP up and no client attached:
 
@@ -419,6 +514,7 @@ claim.
 | Date | Commit | Change |
 |---|---|---|
 | 2026-10-21 | — | §2, §3: channel sync ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)) is the one thing that moves the channel at runtime, the whole mesh with it (live, or by a restart with an interface up). JOIN follows its network: full-band scans on a schedule when the mesh-channel scan misses it, a MOVE to the channel it is found on, then `WiFi.begin` there with its BSSID; with channel sync on the off-mesh check no longer settles the join, and the drift warning is skipped while channel sync has the radio. |
+| 2026-10-21 | — | **§7 (new): the WebSocket token** (Greg: joining a router exposes the command channel to everyone on that network). `?WIFI,TOKEN,<token>` / `CLEAR` (NVS `wifi_cfg/token`), `[AUTH:REQUIRED]` / `?AUTH,<token>` / `[AUTH:OK]` / `[AUTH:FAIL]` + a 1008 CLOSE, a 1 s lockout after any failure, signed-out sessions outside the tee and their lines dropped before the queue (`wsAdmit`). **JOIN requires a token**: a JOIN board with none keeps WiFi off at boot - a break for 7.0.1 JOIN boards, Greg's decision. §3, §6 (commands, NVS, the token ahead of the mode line in the chain), §6a and §9 (+5.4 KB flash, +~100 B static, no heap) follow; §7-§8 became §8-§9. §6a also: a console frame part-way out now finishes ahead of a queued PONG, which used to hold it until `WS_STUCK_MS` closed the client. Compiled both targets; not run on hardware. |
 | 2026-10-14 | `f5348c5` | §6a: `WS_HEAP_FLOOR` (8 KB) - no console output into lwIP below it; a session close httpd could not queue is retried every pass (full run `20261014-025548`: a stalled client starved W1's heap, the close was lost, the next client could not join). |
 | 2026-10-14 | `4fd7698` | §6a: the WebSocket sender never blocks - `send(MSG_DONTWAIT)`, a place in the frame per client, `ENOMEM`/`EWOULDBLOCK` retried on a later pass, a slow client losing reported lines instead of its session, at most 600 ms of inline wait per `loop()` pass for a bulk reply, and a client that takes no output for 10 s closed. PING/CLOSE are handled by `wsHandler` so httpd never writes into a half-sent frame. HIL row `ws.burst_closes_live_client` (Greg: "Do it"). |
 | 2026-10-07 | `41ce60b` | §6a: a WebSocket client that leaves without closing is let go at once - closed on a failed send and when the AP's last station leaves, reset so lwIP frees its buffers; send timeout 2 s (HIL tracker #113). |

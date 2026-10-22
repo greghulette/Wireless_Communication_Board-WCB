@@ -12,7 +12,7 @@ import time
 from hil.runner import Skip, test
 from hil.wcb import WCB
 from suites.common import (Console, config_guard, fault, fault_off, marker, require_tokens, snapshot, token, usb_wcb,
-                           wire)
+                           wifi_mode_token, wire, ws_token)
 from suites.s22_maestro_kyber import _wdp_off
 
 
@@ -840,12 +840,14 @@ def _banner_problems(banner, toks, version, live):
         exact += [f"Maestro data from the mesh goes to: "
                   + (", ".join(f"S{x}" for x in ports) if ports else "S1 (no local Maestro configured - legacy default)"),
                   "Maestro_Remote Task Created"]
-    wifi = token(toks, "?WIFI,")
+    wifi = wifi_mode_token(toks)
     mode = wifi.split(",")[1].upper() if wifi else "OFF"
     ssid = wifi.split(",")[2] if wifi and len(wifi.split(",")) > 2 else ""
     if mode == "AP":
         starts.append(f'[WIFI] SoftAP "{ssid}" up on channel {ch} — ws://' if ssid else "[WIFI] SoftAP ")
         exact.append("[WIFI] ESP-NOW shares this channel (WIFI_AP_STA).")
+    elif mode == "JOIN" and ws_token(toks) is None:     # no token, no JOIN (docs/WIFI_DESIGN.md §7)
+        exact.append("[WIFI] JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF.")
     elif mode == "JOIN":
         starts.append(f'[WIFI] will join "{ssid}" on channel {ch}')
     elif _has(banner, "[WIFI] SoftAP"):

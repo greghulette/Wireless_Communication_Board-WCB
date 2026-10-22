@@ -200,6 +200,9 @@ under an association is found where it went. With sync off it settles, as before
 When its access point changes channel (routers on "auto" do), the board loses the association, finds the network again
 on the new channel, and leads the mesh there.
 
+None of this runs without a WebSocket token: JOIN refuses to start at boot when none is set, which settles the join
+before any scan ([WIFI_DESIGN.md](WIFI_DESIGN.md) §7).
+
 ---
 
 ## 6. Region: channels 12 and 13
