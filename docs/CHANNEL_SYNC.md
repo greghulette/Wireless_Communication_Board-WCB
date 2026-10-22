@@ -153,7 +153,10 @@ joining and leaving an access point does not restart the schedule; a due attempt
 
 **Who can hop** (`wcbWifiCanHop`). A board with no interface up; a board hosting an access point with **no stations
 connected** (IDF: `esp_wifi_set_channel` must not be called with stations attached); a JOIN board only while it is
-neither associated, scanning (either scan, §5), connecting (5 s after a `WiFi.begin`), nor moving to its network. A
+neither associated, scanning (either scan, §5), connecting (5 s after a `WiFi.begin`), nor moving to its network. It is
+asked again before every later hop of a search (and before each pull), not only at its start: the access point goes
+with the radio, so a station can associate while the radio dwells on another channel. The search then stops
+(`[CHSYNC] search: stopped - <why>`) and the radio goes home with the station; the schedule tries again later. A
 search also waits (`chanSyncHostBusy`) for no command to have run for 1 s (`CHSYNC_QUIET_MS`), an empty command queue,
 no ETM command awaiting an ACK, no OTA session, config pull, pending restart or ETM characterization, and no RC
 passthrough in use: no PWM (`;P`), raw Kyber or raw-serial frame sent or heard for 5 s (`CHSYNC_RC_QUIET_MS`) -
@@ -334,6 +337,7 @@ MOVE.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-22 | — | §4: `wcbWifiCanHop` is asked before every later hop and pull of a search, not only at its start; a station that appears stops the search and the radio goes home. | Review of the slow-DHCP report on W1's AP: a station associating during a 150 ms dwell was left behind while the radio went on hopping, which IDF forbids with stations attached. |
 | 2026-10-21 | — | §4: every command source waits while the radio is away (timed groups, the command queue, WebSocket lines, config-pull replies), not only the heartbeat, adverts and ETM retries. | HIL `ota.relay_navicore_brick_guard` (run 20261021-212944): a relayed `?OTA,BEGIN` typed while W1 searched went out on the visited channel and NaviCore never answered. |
 | 2026-10-21 | — | Initial design: leader key (pinned, rank, id), CHAN TLV `0x14`, MOVE/PROBE/REPLY on ETM types 25-27, search by group leaders, JOIN follows its network across channels, `?REGION` for 12-13. | Greg: a droid joining a network on another channel should take its mesh with it, and stray boards should find their way back. |
 | 2026-10-21 | — | Built in the WCB firmware (`WCB_ChanSync.{h,cpp}`); this page now describes it as built. Settled in the build: a device that does not take part (sync off, older firmware) never leads, but a pinned one still blocks an operator move and a JOIN takeover; frames never refresh presence; while the radio is away the receive path keeps only channel-sync frames and `loop()` holds heartbeats, adverts and ETM retries; can-hop is checked when an attempt is due, not in the trigger; a MOVE that finds a restart pending saves the channel for it instead of waiting; a search also waits for 1 s without a command and no ETM ACK outstanding; a saved channel the region forbids runs on 1 for that boot, NVS kept; `?WCBCH` takes 13 while another region is pending; with sync on the JOIN off-mesh guard no longer settles. | Implementation. |
