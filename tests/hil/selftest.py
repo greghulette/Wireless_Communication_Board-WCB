@@ -1,7 +1,8 @@
 """Harness self-test: the run checkpoint and the runner loop, with a fake bench and fake tests. No hardware, no serial
 port, no bench - it runs anywhere Python and pyserial are.
 
-    python tests/hil/selftest.py
+    python tests/hil/selftest.py                      # all of it
+    python tests/hil/selftest.py 'probe_*' ncwire_links   # only the tests these globs name
 
 It covers pause and resume (docs/HIL_TESTING.md §9): a new run to done; the finished single-segment report byte for
 byte against the layout write_report produced before checkpoints existed (GOLDEN); a PAUSE-file pause that releases
@@ -64,6 +65,7 @@ which talks to the boards) are replaced by a stub. What only the real bench can 
 docs/HIL_TESTING.md §9.
 """
 import collections
+import fnmatch
 import json
 import os
 import re
@@ -79,6 +81,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from hil import checkpoint, durations, optin, resume, runner, servos  # noqa: E402
+from hil.probe import PROBE_MIN_VERSION  # noqa: E402
 from hil.checkpoint import Checkpoint, CheckpointError, RunBusy, RunLock  # noqa: E402
 
 # report.md exactly as runner.write_report wrote it for GOLDEN_RESULTS with elapsed=3725.4, captured from that function
@@ -1902,7 +1905,7 @@ def t_rule16_espnow_send_wrapped(tmp):
     assert rule16_problems(copy) == []
 
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
-PROBE_BOOT = "BOOT wcb_probe 8 mac=AA:BB:CC:DD:EE:01"
+PROBE_BOOT = f"BOOT wcb_probe {PROBE_MIN_VERSION} mac=AA:BB:CC:DD:EE:01"   # the oldest version the harness takes
 
 
 class FakeProbeDev:
@@ -8468,7 +8471,7 @@ class NaviBootModel(NaviModel):
     seconds; the tests' own constants are patched to match."""
     FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if rx.pattern != r"^#[Ll]0?2$")
     WCB2_FW = "6.2.1_TEST"
-    HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
+    HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L94 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
             "never a release")
 
     def __init__(self, app_sha, grace_s=0.5, roll_call_s=1.0, idle_s=1.5, boot_s=0.8, mut=()):
@@ -12923,7 +12926,7 @@ class WireProbe(FakeProbeDev):
         with self.lk:
             if verb == "HELLO":
                 self.sent.append(text)
-                self._rx(f"HELLO wcb_probe 8 mac={self.mac} mesh=0")
+                self._rx(f"HELLO wcb_probe {PROBE_MIN_VERSION} mac={self.mac} mesh=0")   # the oldest the harness takes
             elif verb == "BIND":
                 self.sent.append(text)
                 answer = self._bind(tok)
@@ -13832,8 +13835,13 @@ def main():
         setattr(m, n, v)
     registry = list(runner.REGISTRY)
     failed = 0
+    # Optional globs on the command line pick tests by name (selftest.py 'probe_*' ncwire_links); none runs them all.
+    picked = [fn for fn in TESTS if not sys.argv[1:] or any(fnmatch.fnmatchcase(fn.__name__[2:], g) for g in sys.argv[1:])]
+    if not picked:
+        print(f"no self-test matches {' '.join(sys.argv[1:])}")
+        return 1
     try:
-        for fn in TESTS:
+        for fn in picked:
             tmp = Tmp()
             t0 = time.monotonic()
             try:
@@ -13848,7 +13856,7 @@ def main():
         for m, n, v in saved:
             setattr(m, n, v)
         runner.REGISTRY[:] = registry
-    print(f"\n{len(TESTS) - failed} of {len(TESTS)} passed")
+    print(f"\n{len(picked) - failed} of {len(picked)} passed")
     return 1 if failed else 0
 
 
