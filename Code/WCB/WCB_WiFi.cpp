@@ -25,6 +25,10 @@ String      wcbWifiJoinPass;
 char        wcbWifiToken[WCB_WIFI_TOKEN_MAX + 1] = "";
 
 // ---- Runtime state --------------------------------------------------------
+// The mode this boot started (wcbWifiStart). ?WIFI saves a new wcbWifiMode at once and says "Reboot to apply"; the JOIN
+// state machine and everything else that acts on the interface key on this, so a ?WIFI,JOIN typed into an AP board does
+// not start joining (and scanning, and channel sync's full-band scans) underneath the AP still running until the reboot.
+static WcbWifiMode   wifiRunMode     = WCB_WIFI_OFF;
 static bool          wifiUp          = false;   // an interface is up
 static bool          joinSettled     = false;   // JOIN reached a terminal state
 static unsigned long joinNextAttempt = 0;
@@ -283,6 +287,7 @@ static bool wcbWifiJoinScanDone() {
 }
 
 void wcbWifiStart() {
+    wifiRunMode = wcbWifiMode;
     if (wcbWifiMode == WCB_WIFI_OFF) return;   // leave WIFI_STA exactly as it was
 
     if (wcbWifiMode == WCB_WIFI_AP) {
@@ -324,22 +329,12 @@ void wcbWifiStart() {
 // ════════════════════════════════════════════════════════════════════════════
 void wcbWifiService() {
     const unsigned long now = millis();
-    // A JOIN board's full-band scan (channel sync) is finished on every path, before anything else. ?WIFI changes
-    // wcbWifiMode at once, and an association can land meanwhile: either way the JOIN branch below is no longer
-    // reached, and a scan left unfinished kept chanSyncRadioAway() true for good - every frame dropped, heartbeats,
-    // adverts and retries held, the radio never put back. csFullScanDone acts on what it found only for a JOIN board
-    // still looking.
+    // A JOIN board's full-band scan (channel sync) is finished on every path, before anything else. An association can
+    // land meanwhile and the JOIN branch below is then no longer reached, and a scan left unfinished kept
+    // chanSyncRadioAway() true for good - every frame dropped, heartbeats, adverts and retries held, the radio never
+    // put back. csFullScanDone acts on what it found only for a JOIN board still looking.
     if (csFullScanning) { csFullScanDone(now); return; }
-    // Same for the mesh-channel scan, whose flag also holds off a live channel move (wcbWifiJoinScanning), and for a
-    // join waiting on a move to its network's channel, which would otherwise say "moving" to wcbWifiCanHop for good.
-    if (wcbWifiMode != WCB_WIFI_JOIN) {
-        if (joinScanning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
-            joinScanning = false;
-            WiFi.scanDelete();
-        }
-        csFollowCh = 0;
-    }
-    if (wcbWifiMode == WCB_WIFI_OFF) return;
+    if (wifiRunMode == WCB_WIFI_OFF) return;
 
     // ---- JOIN state machine ------------------------------------------------
     // joinSettled means "stop trying FOREVER", and only the off-mesh case sets it:
@@ -348,7 +343,7 @@ void wcbWifiService() {
     // out of range, has to heal itself. Auto-reconnect is off (it would sweep the
     // band), so if this loop stops retrying nothing else will, and the board is off
     // the network until someone power-cycles it.
-    if (wcbWifiMode == WCB_WIFI_JOIN && !joinSettled) {
+    if (wifiRunMode == WCB_WIFI_JOIN && !joinSettled) {
         // ASK THE DRIVER, NOT WiFi.status(). The core keeps that status from its
         // event task, and it can be wrong both ways: its WIFI_REASON_AUTH_EXPIRE
         // branch leaves WL_CONNECTED standing after the AP has gone, and on the
@@ -475,7 +470,7 @@ void wcbWifiService() {
 // ?DEBUG,FAULT,JOINNOIP (WCB.ino debugFaultCommand): a joined JOIN board drops its association now, so the knob bites
 // the very next one. WiFi.disconnect(), not disconnect(true): see the off-mesh guard.
 void wcbWifiFaultRejoin() {
-    if (wcbWifiMode != WCB_WIFI_JOIN || joinSettled) return;
+    if (wifiRunMode != WCB_WIFI_JOIN || joinSettled) return;
     WiFi.disconnect();
     wifiUp      = false;
     joinAssocMs = 0;
@@ -530,7 +525,7 @@ static void csFullScanDone(unsigned long now) {
     const bool assoc = wcbWifiJoinAssociated();
     if (!assoc) esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
     csFullScanning = false;
-    if (wcbWifiMode != WCB_WIFI_JOIN || joinSettled || assoc) {   // no longer looking: the result is not acted on
+    if (wifiRunMode != WCB_WIFI_JOIN || joinSettled || assoc) {   // no longer looking: the result is not acted on
         WiFi.scanDelete();
         return;
     }
@@ -658,7 +653,7 @@ bool wcbWifiReady() {
 
 String wcbWifiIP() {
     if (!wifiUp) return String("");
-    if (wcbWifiMode == WCB_WIFI_AP)   return WiFi.softAPIP().toString();
+    if (wifiRunMode == WCB_WIFI_AP)   return WiFi.softAPIP().toString();
     if (WiFi.STA.hasIP()) return WiFi.localIP().toString();   // not WiFi.status(): it can stay stale (#103)
     return String("");
 }

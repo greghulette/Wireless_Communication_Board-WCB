@@ -869,6 +869,10 @@ def join_needs_token(bench):
                 problems.append("no 'JOIN REFUSED: no WebSocket token is set' line at boot")
             time.sleep(8)                            # a JOIN would have said 'still looking' by now (attempt 1)
             lines = [x.rstrip() for x in w.dev.since(bm)]
+            # Only what the new boot printed: the ?reboot waits out the quiet window, and anything the old boot said in
+            # it is not this boot's JOIN (WCB_WiFi.cpp wifiRunMode keeps a saved JOIN from starting before the reboot).
+            boot = next((i for i, x in enumerate(lines) if x.startswith("Booting up the Wireless Communication Board")), 0)
+            lines = lines[boot:]
             if not _has(lines, "[WIFI] Fix:  ?WIFI,TOKEN,<token>   then reboot"):
                 problems.append("the boot refusal does not give the fix (?WIFI,TOKEN,<token>)")
             if not _has(lines, "7.0.1 joined without a token"):
