@@ -134,12 +134,13 @@ test('wizard.app_fake_wdp_panel parseWdpDump reads every firmware line - WDP wit
   expect(byN[2].da).toEqual([{ s: 3, type: 'HILDA2', fw: '1.0', hw: 'revP', caps: 'hil.p', seen: false }]);
   expect([byN[2].mb, byN[2].wl, byN[15].hwRev, byN[15].capTags]).toEqual(['2@115200', '1@115200', 'revA', 'hil']);
   expect(parsed.cfg).toEqual({ enabled: true, autojoin: true, peers: 3 });
-  // A dump from firmware before PEER=, SEEN on WDPDA and EN= still parses.
+  // A dump from firmware before PEER=, SEEN on WDPDA and EN= still parses. Nor has it channel sync's [WDPCH] lines
+  // (chanSeen false, chan null: mesh_rescan_l_fake's wdp_fake_render has the panel with and without them).
   const old = await page.evaluate(() => parseWdpDump([
     '[WDP:N=2,CLIENT=0,ALIAS=Old,HW=24,HWREV=,FW=6.0,CAP=0000,CTRL=0,CAPTAGS=,MAESTRO=-,AGE=1,SEEN=1]',
     '[WDPDA:N=2,S=4,TYPE=OLD,FW=1,HW=,CAPS=]', '[WDPCFG:AUTOJOIN=0,PEERS=1]'].join('\n')));
-  expect(old).toEqual({ nodes: [expect.objectContaining({ n: 2, peer: null, da: [expect.objectContaining({ type: 'OLD', seen: true })] })],
-                        cfg: { enabled: true, autojoin: false, peers: 1 } });
+  expect(old).toEqual({ nodes: [expect.objectContaining({ n: 2, peer: null, chan: null, da: [expect.objectContaining({ type: 'OLD', seen: true })] })],
+                        cfg: { enabled: true, autojoin: false, peers: 1 }, chanSeen: false });
 
   await page.evaluate(() => { __fake.meshOn(); return wdpMeshRefresh(); });
   const body = page.locator('#wdp-mesh-body');
