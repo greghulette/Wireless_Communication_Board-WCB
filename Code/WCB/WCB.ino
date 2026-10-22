@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_220237ROCT2026                                  *****////
+///*****                                          Version 7.0.1_220448ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_220237ROCT2026";
+String SoftwareVersion = "7.0.1_220448ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -10320,10 +10320,13 @@ void loop() {
   LOOP_STEP(reportEtmQueueRefusals()); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
   LOOP_STEP(drainRcJsonRelay());       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   LOOP_STEP(drainPendingTimerChains());// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
-  LOOP_STEP(processCommandGroups());
   // Held while the radio visits another channel (a channel-sync search, a JOIN full-band scan; WCB_ChanSync.h): a
-  // heartbeat, an advert or an ETM retry sent there reaches nobody it is for. Each catches up on the first pass home.
+  // heartbeat, an advert or an ETM retry sent there reaches nobody it is for, and so does whatever a command sends.
+  // Commands - timed groups, the command queue at the end of loop(), WebSocket lines, config-pull replies - wait for
+  // the radio to come home and run then, ~1.5 s late rather than lost: a relayed ?OTA,BEGIN typed during a search went
+  // out on the visited channel and was never answered (HIL ota.relay_navicore_brick_guard, run 20261021-212944).
   const bool radioAway = chanSyncRadioAway();
+  if (!radioAway) LOOP_STEP(processCommandGroups());
   if (!radioAway) LOOP_STEP(processETMHeartbeats());
   if (!radioAway) LOOP_STEP(wdpTick());   // WDP: broadcast our advert on schedule + age the neighbor table
   LOOP_STEP(wdpDaTick());             // WDP-DA: age out serial-attached devices that stopped announcing
@@ -10335,22 +10338,22 @@ void loop() {
   LOOP_STEP(processETMLoad());
   LOOP_STEP(checkMgmtTimeout());
   LOOP_STEP(checkConfigPullTimeout());
-  LOOP_STEP(drainMgmtReqs());         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
-  LOOP_STEP(serviceConfigPullJob());  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
+  if (!radioAway) LOOP_STEP(drainMgmtReqs());         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  if (!radioAway) LOOP_STEP(serviceConfigPullJob());  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
   LOOP_STEP(drainMgmtOut());          // print reassembled MGMT results here, NOT on the WiFi callback
   LOOP_STEP(drainStatusOut());        // and the callback's status lines ("[ETM] WCBn came ONLINE")
   LOOP_STEP(drainOtaPackets());       // run queued OTA flash writes in safe loop() context (P2)
   LOOP_STEP(drainWdpPackets());       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   LOOP_STEP(wcbWifiService());        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
   LOOP_STEP(chanSyncTick());          // channel sync: frames from the callback, the MOVE countdown, the search
-  LOOP_STEP(wcbWsService());          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
+  if (!chanSyncRadioAway()) LOOP_STEP(wcbWsService());   // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
   LOOP_STEP(checkOtaTimeout());       // abort a stalled OTA session (current app untouched)
   LOOP_STEP(processMP3Responses());   // Read MP3 Trigger serial responses (non-blocking)
   LOOP_STEP(processDFPResponses());   // Read DFPlayer Mini response frames (non-blocking)
   LOOP_STEP(processHCRTick());        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
   // splitters — by the time commands reach this queue they are unconditional.)
-  if (!commandQueue) return;
+  if (!commandQueue || chanSyncRadioAway()) return;   // away: the queue runs on the first pass home (see radioAway)
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
     const size_t cmdLen = inItem.cmd ? strlen(inItem.cmd) : 0;

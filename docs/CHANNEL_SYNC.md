@@ -172,8 +172,10 @@ that does not leave it out) counts only for the responder's own key: the prober 
 go nor pull. No REPLY goes out while the responder's own radio is away.
 
 **While the radio is away** (`chanSyncRadioAway()`: a search hop or pull, or a JOIN full-band scan, §5) the receive
-path drops everything but channel-sync frames, and `loop()` holds the heartbeat, the WDP advert and ETM retries, which
-would go out where nobody they are for can hear them. Each catches up on the first pass home. A frame received away is
+path drops everything but channel-sync frames, and `loop()` holds the heartbeat, the WDP advert, ETM retries and every
+command source (the timed groups, the command queue, WebSocket lines, config-pull replies), whose sends would go out
+where nobody they are for can hear them. Each catches up on the first pass home: a command typed during a search runs
+about 1.5 s late, never on the visited channel. A frame received away is
 marked so: only a search's REPLYs are taken from one.
 
 **Then** (`chansync::judgeSearch`), per channel, the best leader any reply named:
@@ -332,6 +334,7 @@ MOVE.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-21 | — | §4: every command source waits while the radio is away (timed groups, the command queue, WebSocket lines, config-pull replies), not only the heartbeat, adverts and ETM retries. | HIL `ota.relay_navicore_brick_guard` (run 20261021-212944): a relayed `?OTA,BEGIN` typed while W1 searched went out on the visited channel and NaviCore never answered. |
 | 2026-10-21 | — | Initial design: leader key (pinned, rank, id), CHAN TLV `0x14`, MOVE/PROBE/REPLY on ETM types 25-27, search by group leaders, JOIN follows its network across channels, `?REGION` for 12-13. | Greg: a droid joining a network on another channel should take its mesh with it, and stray boards should find their way back. |
 | 2026-10-21 | — | Built in the WCB firmware (`WCB_ChanSync.{h,cpp}`); this page now describes it as built. Settled in the build: a device that does not take part (sync off, older firmware) never leads, but a pinned one still blocks an operator move and a JOIN takeover; frames never refresh presence; while the radio is away the receive path keeps only channel-sync frames and `loop()` holds heartbeats, adverts and ETM retries; can-hop is checked when an attempt is due, not in the trigger; a MOVE that finds a restart pending saves the channel for it instead of waiting; a search also waits for 1 s without a command and no ETM ACK outstanding; a saved channel the region forbids runs on 1 for that boot, NVS kept; `?WCBCH` takes 13 while another region is pending; with sync on the JOIN off-mesh guard no longer settles. | Implementation. |
 | 2026-10-21 | — | Review fixes: a JOIN full-band scan is finished, and the radio put back, on every path (a `?WIFI` change mid-scan left the receive path deaf for good); JOIN-follow and full scans wait for the boot grace and for an idle board, RC passthrough included, and boards solicit adverts at boot; the search schedule re-bases on a late attempt and a flapping member keeps its schedule for 10 minutes; the WiFi state channel sync reads is what runs, not the saved mode; a MOVE heard mid-search is judged once home, MOVE frames and REPLYs are held while the radio is away, a responder leaves the prober out of its REPLY and a prober credits the responder for one that names it anyway; `?CHSYNC` says what holds a due search; WDP off makes channel sync inactive; `?CHSYNC,SEARCH` only on a group's leader; PWM passthrough re-sent when the radio returns; at boot with region 01 a country the driver kept from before is reset. | Independent review of the merged firmware. |

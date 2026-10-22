@@ -285,8 +285,10 @@ changing before editing.**
     `meshChannel` live, or saves it and restarts a board with an interface up; a search, and a JOIN board's full-band
     scan, take the radio to other channels for ~1.5 s, reported by `chanSyncRadioAway()`. While that is true the
     receive path drops everything but channel-sync frames (a heartbeat heard there would mark a missing board online and
-    cancel the search), and `loop()` holds the heartbeat, the WDP advert and ETM retries - a new periodic sender in
-    `loop()` must hold too, or it transmits to nobody. A scan wider than the mesh channel puts the radio back on the home
+    cancel the search), and `loop()` holds the heartbeat, the WDP advert, ETM retries AND every command source - the
+    timed groups, the command queue, WebSocket lines, config-pull replies - so a command typed mid-search runs ~1.5 s
+    late instead of sending on the visited channel (a relayed `?OTA,BEGIN` was lost that way). A new sender or command
+    path in `loop()` must hold too, or it transmits to nobody. A scan wider than the mesh channel puts the radio back on the home
     channel itself when it ends (`csFullScanDone`), rather than trusting the driver to return an unassociated station
     there - and is finished on EVERY path of `wcbWifiService`, first thing: one left running after a `?WIFI` mode change
     kept `chanSyncRadioAway()` true for good. Anything that takes the radio off the channel asks
