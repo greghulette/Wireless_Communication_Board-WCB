@@ -57,6 +57,18 @@ offering a way to brick the mesh with no symptom. Every entry point passes
   that reconnect (`WiFi.disconnect()`) and goes back to scanning the mesh channel; an association that gets no
   address within 20 s is dropped and started over.
 
+**The one exception: channel sync moves the channel at runtime** ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)). It never
+separates WiFi from the mesh — it moves `meshChannel` and the whole mesh together. A board with no interface up switches
+live; a board hosting an access point, or associated with one, saves the new channel and restarts, so the interface
+comes up there. And **JOIN follows its network**: with channel sync on, a JOIN board that cannot hear its network on the
+mesh channel also looks on every channel (a full-band scan at once, then 1, 2, 4, 8, 16 and 30 minutes after the network
+went missing, then every 30 minutes; about 1.5 s off the mesh each). Found on another channel, it moves the mesh there
+first (it is about to be pinned, so it leads), then calls `WiFi.begin` with the BSSID on that channel — unless a board it
+hears that is joined to another network outranks it, or the channel is outside the region, which it says once. With
+channel sync on, the off-mesh check above no longer settles the join for good: it starts the full-band scans over, so a
+network that changed channel under an association is found where it went. The 30 s check that warns of a radio off the
+mesh channel (`wcbWifiService`) is skipped while a search or a move has the radio.
+
 ---
 
 ## 3. Modes
@@ -70,8 +82,8 @@ offering a way to brick the mesh with no symptom. Every entry point passes
 **JOIN never falls back to hosting.** A board that quietly became an access point
 because it could not find its network is precisely the rogue-AP surprise this design
 avoids — and with several boards configured that way you would get several. It
-scans the mesh channel for its network every 5 s indefinitely, logs occasionally, and stays a
-station.
+scans the mesh channel for its network every 5 s indefinitely (and, with channel sync on, every channel on the §2
+schedule), logs occasionally, and stays a station.
 
 ---
 
@@ -406,6 +418,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-21 | — | §2, §3: channel sync ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)) is the one thing that moves the channel at runtime, the whole mesh with it (live, or by a restart with an interface up). JOIN follows its network: full-band scans on a schedule when the mesh-channel scan misses it, a MOVE to the channel it is found on, then `WiFi.begin` there with its BSSID; with channel sync on the off-mesh check no longer settles the join, and the drift warning is skipped while channel sync has the radio. |
 | 2026-10-14 | `f5348c5` | §6a: `WS_HEAP_FLOOR` (8 KB) - no console output into lwIP below it; a session close httpd could not queue is retried every pass (full run `20261014-025548`: a stalled client starved W1's heap, the close was lost, the next client could not join). |
 | 2026-10-14 | `4fd7698` | §6a: the WebSocket sender never blocks - `send(MSG_DONTWAIT)`, a place in the frame per client, `ENOMEM`/`EWOULDBLOCK` retried on a later pass, a slow client losing reported lines instead of its session, at most 600 ms of inline wait per `loop()` pass for a bulk reply, and a client that takes no output for 10 s closed. PING/CLOSE are handled by `wsHandler` so httpd never writes into a half-sent frame. HIL row `ws.burst_closes_live_client` (Greg: "Do it"). |
 | 2026-10-07 | `41ce60b` | §6a: a WebSocket client that leaves without closing is let go at once - closed on a failed send and when the AP's last station leaves, reset so lwIP frees its buffers; send timeout 2 s (HIL tracker #113). |

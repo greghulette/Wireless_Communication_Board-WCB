@@ -219,6 +219,16 @@ OPT_INS = {
         "why": "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard",
         "estimate_s": 90,
     },
+    "chsync": {
+        "title": "Channel sync: the mesh moves channel",
+        "what": "Channel sync (suites/s55_chsync.py, docs/CHANNEL_SYNC.md): W1 moves itself and W2 to another radio "
+                "channel with ?CHSYNC,MOVE and back; W2 is saved onto another channel and rebooted until a search brings "
+                "it home (up to 150 s); ?REGION and ?WCBCH's region checks, with ?REGION,DE and ?WCBCH,12 saved for a "
+                "moment and put back. A board with its access point up moves by restarting: up to six W1 and W2 "
+                "reboots. Anything that does not take part (older firmware) is off the mesh while the others are away.",
+        "why": "moves W1 and W2 to another radio channel and back, with up to six reboots",
+        "estimate_s": 120,
+    },
     "mesh_password": {
         "title": "Mesh password on W1 (attended)",
         "what": "Gives W1 a throwaway ESP-NOW password for a few seconds, then its own back from its chain: W1 is off the "

@@ -2401,6 +2401,9 @@ GATED = {
                                         "has it")
        for n in ("aux_bytes", "soft_tx_integrity", "s3_console_quiet", "tx_interleave", "rx_monitor_bcast_in",
                  "sbus_out_tee", "maestro_bus_tap", "maestro_bus_live_baud")},
+    # Channel sync (suites/s55_chsync.py, docs/CHANNEL_SYNC.md), 2026-10-21
+    **{f"chsync.{n}": ("chsync", "moves W1 and W2 to another radio channel and back, with up to six reboots")
+       for n in ("status_line", "operator_move_and_back", "stranded_found", "region_refuses_12")},
 }
 
 

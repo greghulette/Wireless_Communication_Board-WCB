@@ -3,6 +3,7 @@
 #include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
 #include "WCB_SeqStore.h"  // stored sequences: a file of their own, not NVS
+#include "WCB_ChanSyncWire.h"  // chansync::MAX_CHANNEL_CAP: the mesh channel's hard cap (13)
 #include <sdkconfig.h>   // CONFIG_IDF_TARGET_ESP32S3 (hwVersionFitsChip)
 #include "driver/gpio.h"                    // GPIO_IS_VALID_OUTPUT_GPIO (ledPinRefusal)
 #include "soc/uart_pins.h"                  // U0TXD_GPIO_NUM / U0RXD_GPIO_NUM: the USB console's UART
@@ -582,12 +583,13 @@ void saveWCBQuantityPreferences(int quantity) {
 
 // Load the ESP-NOW mesh channel from preferences (default WCB_MESH_CHANNEL_DEFAULT).
 // A stale or out-of-range value falls back to the default so a corrupt NVS blob
-// can't strand the board off-channel.
+// can't strand the board off-channel. 12-13 load as saved: whether the region allows
+// them is known only once WiFi is up, and chanSyncApplyRegionAtBoot checks it there.
 void loadMeshChannelFromPreferences() {
     preferences.begin("wcb_config", true);
     meshChannel = preferences.getUChar("mesh_channel", WCB_MESH_CHANNEL_DEFAULT);
     preferences.end();
-    if (meshChannel < 1 || meshChannel > 11) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
+    if (meshChannel < 1 || meshChannel > chansync::MAX_CHANNEL_CAP) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
 }
 
 // Save the ESP-NOW mesh channel to preferences. Applied on the NEXT REBOOT, NOT
@@ -596,10 +598,12 @@ void loadMeshChannelFromPreferences() {
 // unicast), because the sender stays on the old channel and can no longer reach
 // this board to confirm or retry. Deferring keeps the whole fleet reachable on the
 // old channel until a coordinated reboot moves everyone at once. The boot path
-// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it.
+// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it. The region's
+// top channel is the caller's to check (?WCBCH: chanSyncWcbchLimit); this is the
+// hard cap. Channel sync moves the RUNNING mesh, and saves through its own write.
 void saveMeshChannelToPreferences(uint8_t channel) {
-    if (channel < 1 || channel > 11) {
-        Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", channel);
+    if (channel < 1 || channel > chansync::MAX_CHANNEL_CAP) {
+        Serial.printf("Invalid mesh channel %d. Valid range: 1-%u.\n", channel, (unsigned)chansync::MAX_CHANNEL_CAP);
         return;
     }
     preferences.begin("wcb_config", false);

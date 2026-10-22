@@ -15,6 +15,7 @@ changing before editing.**
 | The Wizard's sequence builder — timeline ↔ `;T` chain, its warnings, routing, the vendored command library (`Wizard/cmdlib/`) | [docs/SEQUENCE_BUILDER.md](docs/SEQUENCE_BUILDER.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
+| Channel sync — `?CHSYNC`, `?REGION`, MOVE/PROBE/REPLY (ETM types 25-27), WDP TLV `0x14`, JOIN following its network | [docs/CHANNEL_SYNC.md](docs/CHANNEL_SYNC.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
 | Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
@@ -279,6 +280,16 @@ changing before editing.**
       on, so a damaged file system can `abort()` in the mount and would boot-loop). So does one after `?DEBUG,SEQNVS`,
       which the full-NVS HIL tests use to fill NVS with sequences. Every boot that mounts moves what NVS lists into
       the file, NVS winning a key both hold.
+
+18. **The mesh channel moves at runtime** (channel sync, `WCB_ChanSync.{h,cpp}`, docs/CHANNEL_SYNC.md). A MOVE changes
+    `meshChannel` live, or saves it and restarts a board with an interface up; a search, and a JOIN board's full-band
+    scan, take the radio to other channels for ~1.5 s, reported by `chanSyncRadioAway()`. While that is true the
+    receive path drops everything but channel-sync frames (a heartbeat heard there would mark a missing board online and
+    cancel the search), and `loop()` holds the heartbeat, the WDP advert and ETM retries - a new periodic sender in
+    `loop()` must hold too, or it transmits to nobody. A scan wider than the mesh channel puts the radio back on the home
+    channel itself when it ends (`csFullScanDone`), rather than trusting the driver to return an unassociated station
+    there. Channel-sync frames never refresh presence. And a board stranded by hand (`?WCBCH` + reboot) is searched for and brought back about a minute later, so
+    a HIL test that strands one on purpose restores it sooner or turns `?CHSYNC,OFF` for its length.
 
 ## Verifying
 

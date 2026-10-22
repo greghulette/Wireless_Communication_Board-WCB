@@ -536,14 +536,16 @@ def join_lost_and_rejoin(bench):
 RETRY_ALLOWANCE = 2     # ETM retries a pinned-channel JOIN may cost in 70 s: radio noise, not a channel sweep
 
 
-@test("wifi.join_absent_ssid_keeps_mesh", "A JOIN to a network nobody hosts retries for ever on the mesh channel without sweeping: 'will join', 'still looking (attempt 1)', and '(attempt 12)' about 55 s later, while a unicast to W2 every 5 s for 70 s arrives with no failure and at most two retries and the ?WIFI radio line stays on the mesh channel; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="points W1's JOIN at a network nobody hosts for about 70 s and reboots W1 twice")
+@test("wifi.join_absent_ssid_keeps_mesh", "With channel sync off, a JOIN to a network nobody hosts retries for ever on the mesh channel without sweeping: 'will join', 'still looking (attempt 1)', and '(attempt 12)' about 55 s later, while a unicast to W2 every 5 s for 70 s arrives with no failure and at most two retries and the ?WIFI radio line stays on the mesh channel; W1's own access point and ?CHSYNC,ON are put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="points W1's JOIN at a network nobody hosts for about 70 s and reboots W1 twice")
 def join_absent_ssid_keeps_mesh(bench):
     """WCB-WP45 row 2 (wifi.join_absent_ssid_keeps_mesh). wcbWifiJoinTry passes meshChannel to WiFi.begin and keeps
     auto-reconnect off, so the probe for the SSID stays on the channel the mesh already uses (WCB_WiFi.cpp:191-202),
     and the state machine retries every JOIN_RETRY_MS (5 s, :36) for ever, saying so at attempt 1 and every 12th
     (:279-287). A channel sweep would take the radio off the mesh for most of a second every 5 s, and W1's unicasts
     would need retries or fail. The SSID and passphrase are throwaway (HIL + a nonce, never a network); W1's own ?WIFI
-    line is replayed at the end."""
+    line is replayed at the end. Channel sync is off for the test: with it on, a JOIN board that cannot hear its network
+    also looks on every channel on a schedule (at once, then 1, 2, 4... minutes; WCB_WiFi.cpp csFullScanDue,
+    docs/CHANNEL_SYNC.md §5), about 1.5 s off the mesh each - deliberate, and not the per-attempt sweep this guards."""
     w2s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     problems, radios, facts = [], [], {}
@@ -554,8 +556,11 @@ def join_absent_ssid_keeps_mesh(bench):
         ch = _mesh_channel(before[1])
         nosuch, pw_x = f"HIL-NOSUCH-{nonce()}", f"hil{nonce().lower()}pass"
         looking = rf'^\[WIFI\] still looking for "{re.escape(nosuch)}" \(attempt {{}}\)$'
-        changed = False
+        changed = sync_off = False
         try:
+            if not _has(w.run("?CHSYNC,OFF"), "[CHSYNC] channel sync OFF"):
+                problems.append("?CHSYNC,OFF did not confirm")
+            sync_off = True
             out = w.run(f"?WIFI,JOIN,{nosuch},{pw_x}")
             changed = True
             if not _has(out, f'WiFi mode set to JOIN — joining "{nosuch}"'):
@@ -596,22 +601,26 @@ def join_absent_ssid_keeps_mesh(bench):
             if radios:
                 problems.append(f"the ?WIFI radio line left the mesh channel {len(radios)} time(s): {radios[:2]}")
         finally:
+            if sync_off:
+                w.run("?CHSYNC,ON")
             if changed:
                 _restore_ap(w, tok, ssid, problems)
     bench.note(f"wifi.join_absent_ssid_keeps_mesh: {facts}")
     assert not problems, "; ".join(problems)
 
 
-@test("wifi.join_fault_arms", "W1 joined to W2's access point takes the JOIN state machine's two fault arms: an association that gets no address for 20 s (?DEBUG,FAULT,JOINNOIP) is dropped with 'associated with ... but no address after 20 s — starting over' and the join comes back by itself ('joined ... after N attempt(s)'); an AP read off the mesh channel (?DEBUG,FAULT,JOINCHAN) is hung up on - 'joined ... but its AP is on channel x, not y — that is OFF-MESH. Disconnecting.' - and the join settles: Association not connected, the radio still on the mesh channel, no 'still looking' for 15 s, and a unicast to W2 still delivered; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="joins W1 to W2's access point and reboots W1 twice")
+@test("wifi.join_fault_arms", "W1 joined to W2's access point takes the JOIN state machine's two fault arms: an association that gets no address for 20 s (?DEBUG,FAULT,JOINNOIP) is dropped with 'associated with ... but no address after 20 s — starting over' and the join comes back by itself ('joined ... after N attempt(s)'); an AP read off the mesh channel (?DEBUG,FAULT,JOINCHAN) is hung up on - 'joined ... but its AP is on channel x, not y — that is OFF-MESH. Disconnecting.' - then with channel sync on it is looked for again ('Looking for it on every channel') and joined again where it really is, and with channel sync off the join settles: Association not connected, the radio still on the mesh channel, no 'still looking' for 15 s, and a unicast to W2 still delivered; W1's own access point and ?CHSYNC,ON are put back (2 reboots)", needs=["wcb1"], links=["W2S2"], opt_in="wifi_modes", opt_in_why="joins W1 to W2's access point and reboots W1 twice")
 def join_fault_arms(bench):
     """Coverage re-scan 2026-10-12, wifi.join_state_machine (the off-mesh guard and the no-address arm). wcbWifiService
     (WCB_WiFi.cpp) reads the associated AP's own channel (esp_wifi_sta_get_ap_info) and, off the mesh channel,
-    disconnects - WiFi.disconnect(), never (true), which would stop WiFi and ESP-NOW with it - and settles for good
-    (joinSettled): retrying would thrash, and an operator has to fix one end. An association with no address for
-    JOIN_ADDR_MS (20 s) is dropped and the join starts over. W2's AP is on the mesh channel and hands out addresses,
-    so the JOINCHAN knob (WCB_Fault.h) makes the next check read the AP one channel off, and JOINNOIP hides the address
-    until its arm has fired (a joined board drops its association first, wcbWifiFaultRejoin). The SSID and the
-    passphrase are compared, never printed."""
+    disconnects - WiFi.disconnect(), never (true), which would stop WiFi and ESP-NOW with it. With channel sync on (the
+    default) it then looks for the network again, on every channel if it has to, and takes the mesh to it
+    (docs/CHANNEL_SYNC.md §5); with it off it settles for good (joinSettled): retrying would thrash, and an operator has
+    to fix one end. An association with no address for JOIN_ADDR_MS (20 s) is dropped and the join starts over. W2's AP
+    is on the mesh channel and hands out addresses, so the JOINCHAN knob (WCB_Fault.h) makes the next check read the AP
+    one channel off - once, so with channel sync on the mesh-channel scan finds it again where it is - and JOINNOIP hides
+    the address until its arm has fired (a joined board drops its association first, wcbWifiFaultRejoin). The SSID and
+    the passphrase are compared, never printed."""
     w2s2 = link(bench, 2, "S2")
     w = usb_wcb(bench)
     problems = []
@@ -627,7 +636,8 @@ def join_fault_arms(bench):
             raise Skip("W1 and W2 are on different mesh channels")
         q = re.escape(ssid2)
         joined_rx = rf'^\[WIFI\] joined "{q}" on channel {ch} after \d+ attempt\(s\) — ws://\S+/ws$'
-        changed = False
+        offmesh_rx = rf'^\[WIFI\] joined "{q}" but its AP is on channel (\d+), not {ch} — that is OFF-MESH\. Disconnecting\.$'
+        changed = sync_off = False
         try:
             if not _has(w.run(f"?WIFI,JOIN,{ssid2},{pw2}"), f'WiFi mode set to JOIN — joining "{ssid2}"'):
                 problems.append("?WIFI,JOIN did not confirm")
@@ -650,16 +660,35 @@ def join_fault_arms(bench):
                     problems.append("after 'starting over' W1 did not join W2's access point again within 30 s")
             except AssertionError:
                 problems.append("no 'associated ... but no address after 20 s — starting over' line within 45 s")
-            # the off-mesh guard
+            # the off-mesh guard, channel sync on (the default): hung up on, then looked for again - and found on the
+            # mesh channel, where it is (the knob read it off once)
             om = w.dev.mark()
             fault(w, "JOINCHAN")
             try:
-                g = w.dev.expect(rf'^\[WIFI\] joined "{q}" but its AP is on channel (\d+), not {ch} — that is '
-                                 rf'OFF-MESH\. Disconnecting\.$', timeout=10, since=om)
+                g = w.dev.expect(offmesh_rx, timeout=10, since=om)
                 if g.group(1) == ch:
                     problems.append("the OFF-MESH line names the mesh channel as the AP's")
             except AssertionError:
                 problems.append("no OFF-MESH line after JOINCHAN")
+            try:
+                w.dev.expect(r'^\[WIFI\] Looking for it on every channel - channel sync moves the mesh to it\.$',
+                             timeout=5, since=om)
+                w.dev.expect(joined_rx, timeout=45, since=om)
+            except AssertionError:
+                problems.append("with channel sync on, W1 did not look for W2's access point again and rejoin it "
+                                "within 45 s of the OFF-MESH hang-up")
+            # ...and with channel sync off it settles, as it always did
+            if not _has(w.run("?CHSYNC,OFF"), "[CHSYNC] channel sync OFF"):
+                problems.append("?CHSYNC,OFF did not confirm")
+            sync_off = True
+            om = w.dev.mark()
+            fault(w, "JOINCHAN")
+            try:
+                g = w.dev.expect(offmesh_rx, timeout=10, since=om)
+                if g.group(1) == ch:
+                    problems.append("the OFF-MESH line names the mesh channel as the AP's")
+            except AssertionError:
+                problems.append("no OFF-MESH line after JOINCHAN with channel sync off")
             time.sleep(15)
             later = [x.rstrip() for x in w.dev.since(om)]
             if _has(later, "[WIFI] still looking for"):
@@ -675,6 +704,8 @@ def join_fault_arms(bench):
             _unicast_ok(w, w2s2, problems, "after the OFF-MESH hang-up")
         finally:
             fault_off(w)
+            if sync_off:
+                w.run("?CHSYNC,ON")
             if changed:
                 _restore_ap(w, tok1, ssid1, problems)
         if _status(w).get("Mode") != "AP":

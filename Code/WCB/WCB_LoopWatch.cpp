@@ -1,3 +1,4 @@
+#include "WCB_RemoteTerm.h"   // First, as in every subsystem file (CLAUDE.md rule 12). This one prints only through the ROM.
 // WCB_LoopWatch.cpp - see WCB_LoopWatch.h.
 #include <Arduino.h>
 #include "esp_heap_caps.h"

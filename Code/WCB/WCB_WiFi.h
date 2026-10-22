@@ -21,7 +21,9 @@
 //  disagrees with the mesh is a total, silent blackout — every ESP-NOW packet
 //  dropped, nothing logged on the other boards, no fault indication anywhere.
 //  Every entry point below therefore passes meshChannel explicitly, and JOIN
-//  verifies the channel after associating rather than trusting it.
+//  verifies the channel after associating rather than trusting it. Channel sync
+//  (WCB_ChanSync.h) is the one thing that moves meshChannel at runtime, and it
+//  moves the whole mesh with it.
 //
 //  ── MODES ──────────────────────────────────────────────────────────────────
 //    OFF   ESP-NOW only. The default, and byte-for-byte the previous behaviour.
@@ -87,3 +89,13 @@ String wcbWifiIP();
 //   ?WIFI,AP,<ssid>,<pass>      host an AP  (next boot)
 //   ?WIFI,JOIN,<ssid>,<pass>    join an AP  (next boot)
 void processWifiCommand(const String &args);
+
+// ---- Channel sync (WCB_ChanSync.cpp, docs/CHANNEL_SYNC.md) -----------------
+// The mesh channel moves at runtime now: a MOVE switches it live, or restarts a board whose interface is up. JOIN
+// follows its network to another channel by moving the mesh there first (§5).
+bool wcbWifiJoinAssociated();            // JOIN, associated with its AP now: the AP owns the channel (F_PINNED)
+bool wcbWifiInterfaceUp();               // an AP is up, or JOIN is associated: a channel move needs a restart
+bool wcbWifiCanHop(const char **why);    // may a search take the radio to other channels now? why = the reason not
+bool wcbWifiJoinScanning();              // a JOIN scan is running (the driver refuses a channel switch meanwhile)
+bool wcbWifiFullScanRunning();           // a JOIN full-band scan is running: the radio is off the mesh channel
+void wcbWifiJoinCancelConnect();         // JOIN, not associated: cancel a connect in progress before a live move

@@ -2,6 +2,7 @@
 #define WCB_WDP_H
 
 #include <Arduino.h>
+#include "WCB_ChanSyncWire.h"   // chansync::ChanFacts - TLV 0x14 CHAN (docs/CHANNEL_SYNC.md §2)
 
 // -----------------------------------------------------------------------
 // WDP — Wireless Discovery Protocol.  Full design: docs/WDP_DESIGN.md
@@ -92,6 +93,11 @@ struct WdpNeighbor {
   // "unknown", never as "no sequences": an EMPTY set hashes to the FNV basis
   // 0x811C9DC5, not to 0.
   uint32_t      seqHash;
+  // ---- Channel sync (WDP_TLV_CHAN 0x14, WCB_ChanSync.h) ---------------------
+  // The neighbor's channel, rank, PINNED/SYNC flags and region. hasChan false = firmware without channel sync:
+  // channel sync derives its key instead (a WCB's rank is its number, a client's 100 + id, SYNC off).
+  bool                hasChan;
+  chansync::ChanFacts chan;
   unsigned long lastAdvertMs;
 };
 
@@ -105,6 +111,9 @@ void wdpTick();    // loop(): send adverts on schedule + age the table
 // ---- Receive (called from the loop-drained WDP queue in WCB.ino) ---------
 void wdpOnAdvertReceived(int senderWCB, const uint8_t *structCommand);
 void wdpForgetNeighbor(uint8_t id);   // drop a neighbor row so ?WDP,DUMP stops emitting it (temporary eviction)
+// The neighbor record for board/device id, or nullptr if it was never heard (or forgotten). Loop task only, like
+// every other reader of the table. Channel sync reads its CHAN facts from here (WCB_ChanSync.cpp).
+const WdpNeighbor *wdpNeighborGet(uint8_t id);
 
 // ---- Command / query -----------------------------------------------------
 void processWdpCommand(const String &args);

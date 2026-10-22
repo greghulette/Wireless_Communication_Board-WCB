@@ -15,11 +15,13 @@
 #define WCB_TARGET_KYBER      98
 #endif
 
-// ESP-NOW mesh channel (1–11). The whole mesh AND every WCB_Client device must
-// share this channel — the ESP32 has one radio, so a board on a different channel
-// is silently unreachable. 1–11 only: 12–13 need a WiFi-country override the firmware
-// doesn't set (and aren't US-legal), so esp_wifi_set_channel would silently reject them.
-// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config).
+// ESP-NOW mesh channel. The whole mesh AND every WCB_Client device must share this
+// channel — the ESP32 has one radio, so a board on a different channel is silently
+// unreachable. 1–11 under the default region ("01", world safe); 12–13 only under a
+// ?REGION that allows them (and they aren't US-legal), else esp_wifi_set_channel
+// rejects them - chanSyncApplyRegionAtBoot checks a saved one (WCB_ChanSync.h).
+// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config);
+// channel sync moves the running mesh and saves it too.
 // Own guard so both WCB.ino and WCB_Storage.cpp see it.
 #ifndef WCB_MESH_CHANNEL_DEFAULT
 #define WCB_MESH_CHANNEL_DEFAULT 1
@@ -32,7 +34,7 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
-extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–11); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
+extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–13, region permitting); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
 extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;

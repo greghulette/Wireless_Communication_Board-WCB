@@ -118,6 +118,7 @@ SOLICIT **before** decoding, and return without touching the table
 | `0x11` | SOLICIT | len 0 — a bare "advertise now" request (`?WDP,POLL`); carries no facts, receivers reply with a jittered advert and never record it | WCB |
 | `0x12` | FLAGS | `[flags:1]` advert-flags bitmap. Bit `0x01` **TEMPORARY** = "adopt me as a **temporary** peer" — live so the mesh can reach it, but never persisted, evicted on silence, gone on reboot. For occasional devices (e.g. a management relay) | client (or WCB) |
 | `0x13` | SEQHASH | `[hash:4 LE]` FNV‑1a over the board's stored‑sequence `key_list` **and every stored value** — a fingerprint of what sequences the board has, contents included, so an in‑place edit moves it too. A consumer caches what it pulled and re‑pulls only when this changes. Absent (`0`) means the firmware predates the TLV; an **empty** inventory is `0x811C9DC5`, not `0`. See [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md) | WCB |
+| `0x14` | CHAN | `[channel][rank][flags][cc0][cc1]` — channel sync's facts: the channel the device is on, its leader rank, flags `0x01` PINNED (associated with an access point) / `0x02` SYNC (takes part), and the region it applied. In every advert, before PORTLABEL; a longer value is accepted (appended fields), a shorter one ignored. Absent = firmware without channel sync, whose key is derived. Encoded and decoded by `WCB_ChanSyncWire.h` (`putChanTlv` / `parseChanTlv`). See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md) §2 | WCB + client |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -279,12 +280,15 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 [WDPX:N=..,MB=<id@baud.…>,WL=<id@baud.…>]  ← per board hosting Maestro/WLED: the per-device baud the
                                              main line omits, plus the full WLED list (`-` = none)
 [WDPSEQ:N=..,HASH=<8 hex>]                 ← stored-sequence fingerprint (see SEQUENCE_INVENTORY.md)
+[WDPCH:N=..,CH=..,RANK=..,PIN=<0|1>,SYNC=<0|1>,CC=..]
+                                           ← channel sync (TLV 0x14), self and every device that sent it
+                                             (see CHANNEL_SYNC.md §2)
 [WDPPWM:N=<src>,DST=<dst>,S=<port>]         ← a remote-PWM drive edge: board <src> drives WCB <dst>'s S<port>
 [WDPCFG:EN=..,AUTOJOIN=..,PEERS=..]
 [WDP:END,count=..]
 ```
 
-The self row is emitted first, flagged `PEER=3`. `WDPDA`/`WDPX`/`WDPSEQ`/`WDPPWM` are separate
+The self row is emitted first, flagged `PEER=3`. `WDPDA`/`WDPX`/`WDPSEQ`/`WDPCH`/`WDPPWM` are separate
 lines (not new fields on `[WDP:...]`) so older Wizards ignore them instead of failing to parse the record; only
 edges *touching the queried board* are reconstructable from one dump (a board keeps just the
 `PWMTARGET` entries that name itself), so the full graph is assembled across per‑board pulls.
@@ -399,6 +403,7 @@ so any device can opt in regardless of id.)*
 - Serial device announce: [`WDP_DEVICE_ANNOUNCE.md`](WDP_DEVICE_ANNOUNCE.md).
 - Stored-sequence inventory (the `SEQHASH` TLV and the pull it triggers):
   [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md).
+- Channel sync (the `CHAN` TLV, and MOVE / PROBE / PROBE_REPLY on ETM types 25-27): [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md).
 
 ---
 
@@ -406,6 +411,7 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-21 | Added TLV `0x14` **CHAN** — channel sync's channel, rank, PINNED/SYNC flags and region, in every advert ahead of the port labels, so in the change hash: associating, moving or `?CHSYNC,OFF` re-advertises within 500 ms. Decoded into `WdpNeighbor::hasChan` / `::chan` (`wdpNeighborGet` for channel sync); new `[WDPCH:...]` dump record, self first; `?WDP,<n>` shows it. Older peers skip it by length. Host test: `tests/wdp_wire_test.cpp` `test_chan`. See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md). | — |
 | 2026-09-28 | **A learned peer's late ACK promotes it.** `etmProcessAck` promoted a learned peer only for an ACK that matched a still-pending entry, so one that was only ever broadcast to, whose ACK usually lands after the configured boards resolved the entry, was never counted or retried (tracker #96). | `cc231ba` |
 | 2026-09-27 | **The advert stagger uses the board's own number.** `setup()` loaded `WCB_Number` after `wdpBegin()`, so the backstop phase was computed from the default 1 and every board advertised in WCB1's slot, in lockstep when powered together. `WCB_Number` now loads first; the same move fixes saved PWM outputs to W1 reloading as local ports (WCB coverage re-scan #1, #16). | `cc2a8a9` |
 | 2026-09-23 | **PWMTARGET auto-config can claim the free hardware port of a Kyber‑local board.** `canUsePWMOnPort` now reserves only the port a Kyber mode owns (the Kyber's own port; S1 under Maestro REMOTE — `kyberModeReservesPort`, WCB_Storage.cpp), so the other hardware port takes an auto-configured PWM output like any port; before, it was refused along with the Kyber port (tracker #73 D4, HIL `kyber.local_free_port_takes_pwm`). Nothing changes on the wire. | `95dd811` |

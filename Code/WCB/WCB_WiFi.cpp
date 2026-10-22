@@ -9,6 +9,7 @@
 #include <esp_wifi.h>
 #include <esp_netif.h>                 // esp_netif_dhcps_option / _stop / _start
 #include "dhcpserver/dhcpserver.h"     // dhcps_offer_t, OFFER_ROUTER
+#include "WCB_ChanSync.h"              // JOIN follows its network across channels (docs/CHANNEL_SYNC.md §5)
 
 // Defined in WCB.ino.
 extern uint8_t meshChannel;
@@ -91,6 +92,28 @@ static uint8_t wcbWifiRadioChannel() {
     if (esp_wifi_get_channel(&primary, &second) != ESP_OK) return 0;
     return primary;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Channel sync: JOIN follows its network (state; the functions are at the end)
+// ════════════════════════════════════════════════════════════════════════════
+// With channel sync on, a JOIN board that cannot hear its network on the mesh channel also looks on every channel:
+// at once (right after the mesh-channel scan misses it), then 1, 2, 4, 8, 16 and 30 minutes after the network went
+// missing, then every 30 minutes. A network found elsewhere takes the mesh with it (chanSyncJoinFollow). The
+// mesh-channel scan every 5 s is unchanged, and still the only thing that ever calls WiFi.begin without a move.
+static volatile bool csFullScanning = false;   // a full-band scan is running: the radio is off the mesh channel
+static uint8_t       csFullIdx      = 0;       // full-band scans since the network went missing
+static unsigned long csFullEpochMs  = 0;       // when it went missing (boot, or the association lost)
+static unsigned long csFullLastMs   = 0;
+static bool          joinScanMissed = false;   // the mesh-channel scan just finished without hearing it
+static unsigned long joinBeginMs    = 0;       // when WiFi.begin last went out (a connect in progress); 0 = none
+static uint8_t       csFollowCh     = 0;       // a MOVE to the network's channel is under way; join there once on it
+static uint8_t       csFollowBssid[6];
+static uint16_t      csStayNote     = 0;       // the "staying" line last printed (reason << 8 | channel): say it once
+static void csJoinLost(unsigned long now);
+static bool csFullScanDue(unsigned long now);
+static void csFullScanStart(unsigned long now);
+static void csFullScanDone(unsigned long now);
+static bool csFollow(unsigned long now);
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Bring-up
@@ -232,7 +255,9 @@ static bool wcbWifiJoinScanDone() {
     if (heard) {
         WiFi.setAutoReconnect(false);
         WiFi.begin(wcbWifiJoinSsid.c_str(), wcbWifiJoinPass.c_str(), meshChannel, bssid);
+        joinBeginMs = millis() | 1;      // a connect in progress: no search hop meanwhile (wcbWifiCanHop)
     }
+    joinScanMissed = !heard;             // channel sync: a full-band scan may be due (csFullScanDue)
     return false;
 }
 
@@ -294,7 +319,6 @@ void wcbWifiService() {
                 Serial.printf("[WIFI] joined \"%s\" but its AP is on channel %u, not %u — "
                               "that is OFF-MESH. Disconnecting.\n",
                               wcbWifiJoinSsid.c_str(), ch, meshChannel);
-                Serial.println("[WIFI] Move that AP to the mesh channel, or change ?WCBCH to match it.");
                 // NOT disconnect(true). The bool is `wifioff`, and with the radio in
                 // STA-only mode it runs STA.end() -> WIFI_MODE_NULL, which stops WiFi
                 // outright and takes ESP-NOW with it: no peers, no heartbeats, no WDP,
@@ -302,7 +326,14 @@ void wcbWifiService() {
                 // passing true made it the one thing that reliably killed it.
                 WiFi.disconnect();
                 wifiUp      = false;
-                joinSettled = true;      // do not thrash: the operator must fix one end
+                if (chanSyncEnabled() && etmEnabled) {
+                    // Channel sync: the full-band scan finds the network where it went and takes the mesh there.
+                    Serial.println("[WIFI] Looking for it on every channel - channel sync moves the mesh to it.");
+                    csJoinLost(now);
+                } else {
+                    Serial.println("[WIFI] Move that AP to the mesh channel, or change ?WCBCH to match it.");
+                    joinSettled = true;  // do not thrash: the operator must fix one end
+                }
                 return;
             }
             if (!wifiUp) {
@@ -338,8 +369,16 @@ void wcbWifiService() {
             WiFi.disconnect();
             Serial.printf("[WIFI] lost \"%s\" — retrying every %lu s\n",
                           wcbWifiJoinSsid.c_str(), (unsigned long)(JOIN_RETRY_MS / 1000));
+            csJoinLost(now);   // channel sync: the network may have changed channel - look on every one again
         }
+        if (csFullScanning) { csFullScanDone(now); return; }   // channel sync: a full-band scan is running
         if (joinScanning && wcbWifiJoinScanDone()) return;   // still scanning the mesh channel
+        if (csFollow(now)) return;          // channel sync: the mesh is moving to the network's channel, or just did
+        if (chanSyncBusy()) return;         // a search or a move has the radio: no scan of ours meanwhile
+        if (joinScanMissed) {               // the mesh-channel scan did not hear it: a full-band scan, if one is due
+            joinScanMissed = false;
+            if (csFullScanDue(now)) { csFullScanStart(now); return; }
+        }
         if (now >= joinNextAttempt) {
             wcbWifiJoinScan();
             joinNextAttempt = now + JOIN_RETRY_MS;
@@ -368,7 +407,8 @@ void wcbWifiService() {
                       driftFault ? "radio moved to" : "the radio refused to move to", off);
         if (driftFault) lastChannelWarn = now - CHAN_CHECK_MS;
     }
-    if (wifiUp && (now - lastChannelWarn) >= CHAN_CHECK_MS) {
+    // Not while channel sync has the radio: a search visits the other channels on purpose (WCB_ChanSync.h).
+    if (wifiUp && !chanSyncBusy() && (now - lastChannelWarn) >= CHAN_CHECK_MS) {
         lastChannelWarn = now;
         const uint8_t ch = wcbWifiRadioChannel();
         if (ch != 0 && ch != meshChannel)
@@ -388,6 +428,157 @@ void wcbWifiFaultRejoin() {
     WiFi.disconnect();
     wifiUp      = false;
     joinAssocMs = 0;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Channel sync (WCB_ChanSync.h, docs/CHANNEL_SYNC.md)
+// ════════════════════════════════════════════════════════════════════════════
+// Full-band scans: minutes after the network went missing, then every 30 minutes (docs/CHANNEL_SYNC.md §5).
+static const uint8_t       CS_FULL_SCAN_MIN[] = { 0, 1, 2, 4, 8, 16, 30 };
+static const uint8_t       CS_FULL_SCAN_N     = sizeof(CS_FULL_SCAN_MIN) / sizeof(CS_FULL_SCAN_MIN[0]);
+static const unsigned long CS_FULL_SCAN_EVERY = 30UL * 60000UL;
+
+// The network went missing (boot is the first time): the full-band schedule starts over, from a scan at once.
+static void csJoinLost(unsigned long now) {
+    csFullEpochMs = now;
+    csFullIdx     = 0;
+    csStayNote    = 0;
+}
+
+static bool csFullScanDue(unsigned long now) {
+    if (!chanSyncEnabled() || !etmEnabled || csFollowCh) return false;   // sync off: the mesh channel only, as before
+    const unsigned long due = csFullIdx < CS_FULL_SCAN_N
+        ? csFullEpochMs + (unsigned long)CS_FULL_SCAN_MIN[csFullIdx] * 60000UL
+        : csFullLastMs + CS_FULL_SCAN_EVERY;
+    return (long)(now - due) >= 0;
+}
+
+// Every channel the region allows, 120 ms each and the same SSID filter as the mesh-channel scan: the board is off
+// the mesh for about 1.5 s, which chanSyncRadioAway() reports so the receive path and loop() hold off meanwhile.
+static void csFullScanStart(unsigned long now) {
+    csFullScanning = true;               // first: the radio leaves the moment the scan starts
+    csFullScanning = WiFi.scanNetworks(true, true, false, 120, 0, wcbWifiJoinSsid.c_str()) == WIFI_SCAN_RUNNING;
+    if (!csFullScanning) return;         // refused (a connect still settling): the next miss tries again
+    csFullLastMs = now;
+    if (csFullIdx < 255) csFullIdx++;
+    Serial.printf("[WIFI] \"%s\" is not on channel %u - looking on every channel\n",
+                  wcbWifiJoinSsid.c_str(), meshChannel);
+}
+
+static void csFullScanDone(unsigned long now) {
+    const int16_t n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+    // The mesh-channel scan never leaves the mesh channel; this one does, so the radio is put back explicitly before
+    // anything else is sent or heard, rather than trusting the driver to return an unassociated station there. The
+    // home channel, not meshChannel: a ?WCBCH typed since boot is saved for the next one, not applied (WCB_ChanSync.h).
+    esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
+    csFullScanning = false;
+    int16_t best = -1;
+    for (int16_t i = 0; i < n; i++) {
+        if (WiFi.SSID(i) != wcbWifiJoinSsid) continue;
+        if (WiFi.channel(i) == meshChannel) { best = i; break; }   // on the mesh channel after all: just join it
+        if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
+    }
+    uint8_t ch = 0, bssid[6];
+    if (best >= 0) {
+        ch = (uint8_t)WiFi.channel(best);
+        memcpy(bssid, WiFi.BSSID(best), sizeof(bssid));
+    }
+    WiFi.scanDelete();
+    if (best < 0) return;                // nowhere: the 5 s mesh-channel scans go on, and the next full scan
+    if (ch == meshChannel) {
+        WiFi.setAutoReconnect(false);
+        WiFi.begin(wcbWifiJoinSsid.c_str(), wcbWifiJoinPass.c_str(), meshChannel, bssid);
+        joinBeginMs = now | 1;
+        return;
+    }
+    uint8_t by = 0;
+    const ChanSyncJoinVerdict v = chanSyncJoinFollow(ch, &by);
+    if (v == CSJ_GO) {
+        csFollowCh = ch;
+        memcpy(csFollowBssid, bssid, sizeof(csFollowBssid));
+        csStayNote = 0;
+        Serial.printf("[WIFI] found \"%s\" on channel %u - the mesh moves there, then this board joins it\n",
+                      wcbWifiJoinSsid.c_str(), ch);
+        return;
+    }
+    if (v == CSJ_BUSY) {                 // a search or a move: decide again after the next miss
+        if (csFullIdx) csFullIdx--;
+        return;
+    }
+    const uint16_t note = (uint16_t)(((uint16_t)v << 8) | ch);
+    if (note == csStayNote) return;      // said once already
+    csStayNote = note;
+    if (v == CSJ_PINNED_OUTRANKED)
+        Serial.printf("[WIFI] found \"%s\" on channel %u, but WCB%u is joined to a network on this channel and "
+                      "outranks this board - staying on %u. Two networks on two channels cannot both be kept.\n",
+                      wcbWifiJoinSsid.c_str(), ch, by, meshChannel);
+    else if (v == CSJ_OUT_OF_REGION)
+        Serial.printf("[WIFI] found \"%s\" on channel %u, outside this board's region (channels 1-%u) - staying on "
+                      "%u. ?REGION,<cc> on every board allows it (next boot), or move the access point.\n",
+                      wcbWifiJoinSsid.c_str(), ch, chanSyncMaxChannel(), meshChannel);
+    else
+        Serial.printf("[WIFI] found \"%s\" on channel %u - channel sync is off, staying on %u\n",
+                      wcbWifiJoinSsid.c_str(), ch, meshChannel);
+}
+
+// A move to the network's channel (chanSyncJoinFollow) is counting down; once the radio is there, join with the
+// BSSID the full scan found, so the driver's connect scan finds it on the first channel it tries (tracker #103).
+// Returns true while it has the JOIN state machine.
+static bool csFollow(unsigned long now) {
+    if (!csFollowCh) return false;
+    if (chanSyncBusy()) return true;
+    if (meshChannel == csFollowCh) {
+        WiFi.setAutoReconnect(false);
+        WiFi.begin(wcbWifiJoinSsid.c_str(), wcbWifiJoinPass.c_str(), csFollowCh, csFollowBssid);
+        joinBeginMs     = now | 1;
+        joinNextAttempt = now + JOIN_RETRY_MS;
+        Serial.printf("[WIFI] the mesh is on channel %u - joining \"%s\" there\n", csFollowCh, wcbWifiJoinSsid.c_str());
+    }                                    // else the move did not happen: back to looking
+    csFollowCh = 0;
+    return true;
+}
+
+bool wcbWifiJoinAssociated() {
+    if (wcbWifiMode != WCB_WIFI_JOIN) return false;
+    wifi_ap_record_t ap;                 // the driver's answer, not WiFi.status() (tracker #103)
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+}
+
+bool wcbWifiInterfaceUp() {
+    return (wcbWifiMode == WCB_WIFI_AP && wifiUp) || wcbWifiJoinAssociated();
+}
+
+bool wcbWifiJoinScanning()    { return joinScanning || csFullScanning; }
+bool wcbWifiFullScanRunning() { return csFullScanning; }
+
+bool wcbWifiCanHop(const char **why) {
+    const char *w = nullptr;
+    if (wcbWifiMode == WCB_WIFI_AP && wifiUp) {
+        // IDF: esp_wifi_set_channel must not be called while the soft-AP has stations connected.
+        wifi_sta_list_t sta;
+        if (esp_wifi_ap_get_sta_list(&sta) != ESP_OK || sta.num > 0)
+            w = "a station is connected to this board's access point";
+    } else if (wcbWifiMode == WCB_WIFI_JOIN && !joinSettled) {
+        if (wcbWifiJoinAssociated())
+            w = "this board is joined to its access point";
+        else if (joinScanning || csFullScanning)
+            w = "a WiFi scan is running";
+        else if (joinBeginMs && millis() - joinBeginMs < JOIN_RETRY_MS)
+            w = "a WiFi connect is in progress";
+        else if (csFollowCh)
+            w = "the mesh is moving to this board's network";
+    }
+    if (why) *why = w;
+    return w == nullptr;
+}
+
+void wcbWifiJoinCancelConnect() {
+    if (wcbWifiMode != WCB_WIFI_JOIN || wcbWifiJoinAssociated()) return;
+    if (joinBeginMs) {
+        WiFi.disconnect();               // not disconnect(true): see the off-mesh guard in wcbWifiService
+        joinBeginMs = 0;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

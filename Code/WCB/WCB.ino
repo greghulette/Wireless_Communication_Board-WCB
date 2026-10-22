@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_212149ROCT2026                                  *****////
+///*****                                          Version 7.0.1_212301ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -95,6 +95,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_WDP.h"
 #include "WCB_WiFi.h"
 #include "WCB_WS.h"
+#include "WCB_ChanSync.h"   // channel sync: the mesh on one channel, MOVE / PROBE / REPLY (docs/CHANNEL_SYNC.md)
 #include "WCB_LoopWatch.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
@@ -153,7 +154,7 @@ void enableControllerPeer(uint8_t id);   // enable + persist + live-register the
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
 uint8_t umac_oct3 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
-uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change
+uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11; 12-13 under a ?REGION that allows them); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change; channel sync moves it with the mesh
 
 // User-defined ESP-NOW password
 char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting. Change to match your setup here or via command line.  Lower case characters only!
@@ -201,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_212149ROCT2026";
+String SoftwareVersion = "7.0.1_212301ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1342,6 +1343,39 @@ static void wdpBroadcastAs(const uint8_t *payload, int len, uint8_t packetType) 
 }
 void wdpBroadcast(const uint8_t *payload, int len)   { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP); }
 void wdpDaBroadcast(const uint8_t *payload, int len) { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP_DA); }
+
+// ─── Channel sync transport (WCB_ChanSync.{h,cpp}) ──────────────────────────
+// MOVE / PROBE / PROBE_REPLY (chansync::PT_*, ETM packet types 25-27) ride the same envelope as WDP. Not commands, so
+// nothing here reads lastReceivedViaESPNOW (only sendESPNowMessage does, CLAUDE.md rule 3): a frame channel sync sends
+// from loop() goes out whatever command ran last.
+void chanSyncBroadcastFrame(uint8_t packetType, const uint8_t *payload, int len) {
+  wdpBroadcastAs(payload, len, packetType);
+}
+bool chanSyncRestartPending() { return rebootPending || pwmRebootPending; }
+
+// Asked before channel sync takes the radio off the mesh channel. Every case is something a channel switch would cut
+// in half: an OTA session or a config pull with a peer on this channel, and a restart that is already pending (a push
+// is usually still arriving). forSearch adds what a 1.5 s absence would cost: commands still queued or arriving, ETM
+// commands awaiting an ACK (their retries would go out on the wrong channel), an ETM characterization.
+static const unsigned long CHSYNC_QUIET_MS = 1000;   // no command processed for this long counts as quiet
+bool configPullJobActive();                          // defined with the config pull job, below
+bool chanSyncHostBusy(bool forSearch, const char **why) {
+  const char *w = nullptr;
+  if (otaActiveSession())                       w = "an OTA session";
+  else if (configPullJobActive())               w = "a config pull";
+  else if (rebootPending || pwmRebootPending)   w = "a pending restart";
+  else if (forSearch) {
+    if (etmCharRunning || etmLoadRunning)       w = "an ETM characterization";
+    else if (commandQueue && uxQueueMessagesWaiting(commandQueue)) w = "queued commands";
+    else if (millis() - lastCommandProcessedMs < CHSYNC_QUIET_MS)  w = "commands still arriving";
+    else {
+      for (int i = 0; i < ETM_PENDING_MAX; i++)
+        if (etmPendingTable[i].active) { w = "ETM commands awaiting an ACK"; break; }
+    }
+  }
+  if (why) *why = w;
+  return w != nullptr;
+}
 
 // Callback-side (WiFi task, Core 0): copy the raw advert into a queue. The TLV
 // decode + neighbor-table write happen in loop() (drainWdpPackets), never inline
@@ -3784,8 +3818,11 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
+  // The region BEFORE the channel: ?WCBCH checks the channel against the region, and against 13 when ?REGION has just
+  // saved another one (chanSyncWcbchLimit), so a chain restoring a board onto channel 12 or 13 works in this order only.
+  emit("REGION," + String(chanSyncSavedRegion()), true);
   if (configLineFaultActive()) emit(String(), true);           // the test knob's lost line (above)
-  else emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
+  else emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1-11, 12-13 under a region allowing them)
   // WiFi (?WIFI). Emitted so a backup captures it and a restore replays it. The
   // password rides along because a restore that brought the AP back WITHOUT its
   // passphrase would silently fail closed at boot — the board would come up with
@@ -3923,6 +3960,8 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // of a portable config, so it is intentionally not emitted here.
   if (!wdpEnabled)  emit("WDP,OFF", true);
   if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
+  // Channel sync, both ways: a restore must turn a deliberate OFF back on as surely as it keeps it off.
+  emit(chanSyncEnabled() ? "CHSYNC,ON" : "CHSYNC,OFF", true);
 
   // Stored sequences (WCB_SeqStore.h). A value that could not be held, or a SEQ,SAVE line that could not be built,
   // is a lost token; a store that could not be read, or a walk that broke off, is one more - never a shorter list
@@ -5324,6 +5363,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // data plane.
   if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
 
+  // Channel sync: while the radio visits another channel (a search hop, a pull, a JOIN full-band scan) nothing heard
+  // there is this mesh's business but channel-sync frames, which ride the ETM struct (handled below). WCB_ChanSync.h.
+  if (chanSyncRadioAway() && len != sizeof(espnow_struct_message_etm)) return;
+
   // OTA struct sizes must stay distinct from every other ESP-NOW packet — the
   // router below dispatches by size. WCB_OTA.cpp pins them to 55/243; assert no
   // clash so a future field edit can't silently route OTA into another handler.
@@ -5497,6 +5540,20 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                                   senderWCB, info->src_addr[5]);
       return;
     }
+
+    // Channel-sync frames (MOVE / PROBE / PROBE_REPLY, ETM types 25-27): copied for loop() (chanSyncTick) and nothing
+    // more - no decision, print or send here (rule 11), and no presence refresh: a PROBE or a pull comes from a board
+    // visiting from another channel and gone 150 ms later, and marking it online would clear the very "board missing"
+    // that its group's leader searches on. Firmware without channel sync drops these types at the fall-through return
+    // at the end of this branch, after only the presence refresh below.
+    if (etmReceived.structPacketType == chansync::PT_MOVE ||
+        etmReceived.structPacketType == chansync::PT_PROBE ||
+        etmReceived.structPacketType == chansync::PT_PROBE_REPLY) {
+      chanSyncOnFrame(etmReceived.structPacketType, senderWCB, (const uint8_t *)etmReceived.structCommand);
+      return;
+    }
+    // Visiting another channel: its heartbeats, adverts, ACKs and commands are not this mesh's (see the top gate).
+    if (chanSyncRadioAway()) return;
 
     // Refresh the sender's online presence on EVERY valid received ETM
     // packet (not just heartbeats). Otherwise if heartbeats are dropped
@@ -6926,19 +6983,40 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11) ---
+    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11, or up to 13 under a ?REGION that allows it) ---
     // Persisted and applied on the NEXT REBOOT, not live (see saveMeshChannelToPreferences):
     // a live radio switch would drop this board off the mesh mid-config — fatal for a
     // relayed ?WCBCH, since the sender stays on the old channel. Range-check the plain
     // int BEFORE the uint8_t cast so wrap values (e.g. 268→12) can't slip past. Push to
-    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once.
+    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once
+    // (or move the running mesh with ?CHSYNC,MOVE). The top is the applied region's; when ?REGION
+    // saved another one, 13, since the next boot applies that region and checks the channel against
+    // it (chanSyncApplyRegionAtBoot) - which is why a config chain carries ?REGION before ?WCBCH.
     if (rootUpper == "WCBCH") {
         int ch = args.toInt();
-        if (ch < 1 || ch > 11) {
-            Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", ch);
+        bool regionPending = false;
+        const int top = chanSyncWcbchLimit(&regionPending);
+        if (ch < 1 || ch > top) {
+            Serial.printf("Invalid mesh channel %d. Valid range: 1-%d.\n", ch, top);
+            if (ch >= 12 && ch <= 13)
+                Serial.printf("Channels 12-13 need a region that allows them: ?REGION,<cc>, then reboot "
+                              "(region now %s).\n", chanSyncSavedRegion());
             return;
         }
         saveMeshChannelToPreferences((uint8_t)ch);   // persists; applies on reboot
+        if (regionPending && ch > chanSyncMaxChannel())
+            Serial.printf("Note: channel %d is outside the region running now; the next boot applies region %s "
+                          "and checks it there.\n", ch, chanSyncSavedRegion());
+        return;
+    }
+
+    // --- ?CHSYNC / ?REGION — channel sync: the mesh on one channel (WCB_ChanSync.h, docs/CHANNEL_SYNC.md) ---
+    if (rootUpper == "CHSYNC") {
+        processChanSyncCommand(args);
+        return;
+    }
+    if (rootUpper == "REGION") {
+        processRegionCommand(args);
         return;
     }
 
@@ -9815,6 +9893,7 @@ void setup() {
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
   loadMeshChannelFromPreferences();   // must precede WiFi init below (esp_wifi_set_channel)
+  chanSyncLoadSettings();             // ...and the region it is checked against there (chanSyncApplyRegionAtBoot)
   loadWifiSettings();                 // ditto — wcbWifiStart() hosts/joins on meshChannel
   loadSpecialPeerPreferences();
   loadSpecialPeerIDFromPreferences();
@@ -9997,11 +10076,15 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // WCB_Client must share meshChannel or they silently can't hear each other. Check
   // the result: a rejected channel (e.g. 12–13 without a country override) would
   // otherwise leave the radio on the wrong channel with no signal.
+  // The region (?REGION) FIRST: it decides which channels the driver accepts, and a saved channel it does not allow
+  // falls back to the default here, loudly (WCB_ChanSync.h). "01" makes no call at all - the driver default, as before.
+  // Before wcbWifiStart() too, so an access point comes up under it.
+  chanSyncApplyRegionAtBoot();
   {
     esp_err_t chErr = esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
     if (chErr != ESP_OK)
-      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-11.\n",
-                    meshChannel, chErr);
+      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-%u.\n",
+                    meshChannel, chErr, chanSyncMaxChannel());
   }
   // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
   // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
@@ -10149,6 +10232,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED" : "Disabled");
   if (etmEnabled) Serial.println("[ETM] Heartbeat scheduled (boot window)");
   printKyberSettings();
+  chanSyncBegin();                   // the frame queue the receive callback fills, and the home channel - before it runs
   esp_now_register_recv_cb(espNowReceiveCallback);
   // (The send callback was registered right after esp_now_init().)
   // Create FreeRTOS Tasks-
@@ -10208,12 +10292,15 @@ void loop() {
   LOOP_STEP(drainRcJsonRelay());       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   LOOP_STEP(drainPendingTimerChains());// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
   LOOP_STEP(processCommandGroups());
-  LOOP_STEP(processETMHeartbeats());
-  LOOP_STEP(wdpTick());               // WDP: broadcast our advert on schedule + age the neighbor table
+  // Held while the radio visits another channel (a channel-sync search, a JOIN full-band scan; WCB_ChanSync.h): a
+  // heartbeat, an advert or an ETM retry sent there reaches nobody it is for. Each catches up on the first pass home.
+  const bool radioAway = chanSyncRadioAway();
+  if (!radioAway) LOOP_STEP(processETMHeartbeats());
+  if (!radioAway) LOOP_STEP(wdpTick());   // WDP: broadcast our advert on schedule + age the neighbor table
   LOOP_STEP(wdpDaTick());             // WDP-DA: age out serial-attached devices that stopped announcing
   LOOP_STEP(drainLearnedPeerMaintenance());  // flush learned-peer NVS writes + post-boot prune
   LOOP_STEP(etmDrainAckQueue());       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
-  LOOP_STEP(processETMAcksAndRetries());
+  if (!radioAway) LOOP_STEP(processETMAcksAndRetries());
   LOOP_STEP(processETMChar());
   LOOP_STEP(sendHeldETMCharResult(false));
   LOOP_STEP(processETMLoad());
@@ -10226,6 +10313,7 @@ void loop() {
   LOOP_STEP(drainOtaPackets());       // run queued OTA flash writes in safe loop() context (P2)
   LOOP_STEP(drainWdpPackets());       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   LOOP_STEP(wcbWifiService());        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
+  LOOP_STEP(chanSyncTick());          // channel sync: frames from the callback, the MOVE countdown, the search
   LOOP_STEP(wcbWsService());          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
   LOOP_STEP(checkOtaTimeout());       // abort a stalled OTA session (current app untouched)
   LOOP_STEP(processMP3Responses());   // Read MP3 Trigger serial responses (non-blocking)

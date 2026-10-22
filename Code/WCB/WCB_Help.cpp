@@ -1010,6 +1010,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  logged on the other boards — so it is not offered as a choice."));
         Serial.println(F("  In JOIN mode the channel is VERIFIED after associating; if the"));
         Serial.println(F("  AP put us elsewhere the board disconnects rather than go deaf."));
+        Serial.println(F("  With channel sync on (?CHSYNC?) a JOIN board that finds its"));
+        Serial.println(F("  network on another channel moves the whole mesh there first."));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Settings apply on the NEXT REBOOT, like ?WCBCH."));
         Serial.println(F("  - The AP password is MANDATORY (8+ chars). This interface accepts"));
@@ -1022,6 +1024,59 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WIFI,AP,R2-Dome,astromech1"));
         Serial.println(F("  ?WIFI,JOIN,NaviCore-20,mypassword"));
         Serial.println(F("  ?WIFI,OFF"));
+
+    // ================================================================
+    } else if (c == "CHSYNC") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?CHSYNC[,ON|,OFF|,SEARCH|,MOVE,<channel>]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Channel sync keeps the whole mesh on one radio channel. The board"));
+        Serial.println(F("  that leads (NaviCore, else the lowest WCB number; a board joined"));
+        Serial.println(F("  to an access point before either) moves everyone with it, and a"));
+        Serial.println(F("  leader that misses a board it knows visits the other channels to"));
+        Serial.println(F("  find it and bring it back. ON by default. Requires ETM."));
+        Serial.println(F("\nCommands:"));
+        Serial.println(F("  ?CHSYNC              Status, and a [CHSYNC:...] machine line"));
+        Serial.println(F("  ?CHSYNC,ON | ,OFF    Take part or not (saved, live)"));
+        Serial.println(F("  ?CHSYNC,SEARCH       Search the other channels once, now"));
+        Serial.println(F("  ?CHSYNC,MOVE,<ch>    Move the whole mesh to channel <ch>"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - A board with an access point up, or joined to one, moves by"));
+        Serial.println(F("    restarting; any other switches live and saves the channel."));
+        Serial.println(F("  - MOVE is refused while a board joined to an access point is"));
+        Serial.println(F("    heard: move the access point instead, and the mesh follows."));
+        Serial.println(F("  - A search takes this board off the mesh for about 1.5 s."));
+        Serial.println(F("  - With it OFF the board never moves, searches or answers one."));
+        Serial.println(F("  - Older firmware does not take part and is left behind."));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?CHSYNC,MOVE,6"));
+        Serial.println(F("  ?CHSYNC,OFF"));
+
+    // ================================================================
+    } else if (c == "REGION") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?REGION[,<cc>]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  The WiFi region, which decides the channels the radio may use."));
+        Serial.println(F("  01 (the default, world safe) allows 1-11. Channels 12-13 need a"));
+        Serial.println(F("  region that allows them, set on EVERY board and client."));
+        Serial.println(F("\nCommands:"));
+        Serial.println(F("  ?REGION              Show the region and its channels"));
+        Serial.println(F("  ?REGION,<cc>         Save one; it applies at the next boot"));
+        Serial.println(F("\nRegions: 01 AT AU BE BG BR CA CH CN CY CZ DE DK EE ES FI FR GB GR"));
+        Serial.println(F("         HK HR HU IE IN IS IT JP KR LI LT LU LV MT MX NL NO NZ PL"));
+        Serial.println(F("         PT RO SE SI SK TW US"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Legality is the operator's call: 12-13 are legal in Europe and"));
+        Serial.println(F("    most of the world; WiFi devices in the US are limited to 1-11."));
+        Serial.println(F("  - ?WCBCH and every channel move are checked against it. A saved"));
+        Serial.println(F("    channel the region does not allow runs on 1 for that boot."));
+        Serial.println(F("  - Channel 14 is never used."));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?REGION,DE"));
+        Serial.println(F("  ?REGION,01"));
 
     // ================================================================
     } else if (c == "WDP") {
@@ -1263,6 +1318,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
         Serial.println(F("    ?NVS            Settings storage use, by namespace (read-only)"));
         Serial.println(F("    ?WDP            Mesh discovery + neighbor table (auto-join peers)"));
+        Serial.println(F("    ?CHSYNC         Channel sync: the whole mesh on one radio channel"));
+        Serial.println(F("    ?REGION         WiFi region: which channels the radio may use"));
         Serial.println(F("    ?MGMT           Relay a config pull/push to another board (Wizard)"));
         Serial.println(F("\n  FIRMWARE UPDATE:"));
         Serial.println(F("    ?OTA            Relay a firmware image to another WCB over the mesh"));

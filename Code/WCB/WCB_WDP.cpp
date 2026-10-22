@@ -7,6 +7,7 @@
 #include "WCB_WLED.h"         // wledConfig
 #include "WCB_Maestro.h"      // maestroConfigs[], MAX_MAESTROS_PER_WCB
 #include "WCB_PWM.h"          // pwmOutputCount, pwmMappings[]
+#include "WCB_ChanSync.h"     // TLV 0x14 CHAN: this board's channel facts (chanSyncPutTlv / chanSyncSelfFacts)
 #include <Preferences.h>
 #include <strings.h>          // strcasecmp (?WDP,DA,FORGET type match)
 
@@ -108,6 +109,9 @@ static void wdpDaTxTick(unsigned long now);
 #define WDP_ADVFLAG_TEMPORARY 0x01  // "I'm TEMPORARY" — adopt me as a live-but-not-persisted peer
                                     // (gone on reboot, evicted on silence), never a permanent one.
                                     // For occasional devices like a management relay.
+#define WDP_TLV_CHAN     chansync::TLV_CHAN   // 0x14 [channel][rank][flags][cc0][cc1] — channel sync's key and
+                                              // channel (WCB_ChanSyncWire.h; docs/CHANNEL_SYNC.md §2). A longer
+                                              // value is accepted: fields may be appended.
 
 // ==================== Capability / Maestro helpers =======================
 
@@ -306,6 +310,10 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
                      (uint8_t)((h >> 16) & 0xFF), (uint8_t)((h >> 24) & 0xFF) };  // little-endian
     o = putTLV(buf, o, max, WDP_TLV_SEQHASH, v, 4);
   }
+  // Channel sync (TLV 0x14): this board's channel, rank, PINNED/SYNC and region, 7 bytes. Before the labels too: a
+  // board's leader election and every MOVE judgement read it. In the payload, so in the change hash: associating,
+  // moving or ?CHSYNC,OFF re-advertises within 500 ms.
+  o = chanSyncPutTlv(buf, o, max);
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
   // label set that would overflow the 200 B payload is dropped gracefully.
@@ -563,6 +571,9 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
       case WDP_TLV_SEQHASH:  // stored-sequence inventory fingerprint (little-endian)
         if (len >= 4) nb.seqHash = (uint32_t)val[0]        | ((uint32_t)val[1] << 8) |
                                    ((uint32_t)val[2] << 16) | ((uint32_t)val[3] << 24);
+        break;
+      case WDP_TLV_CHAN:     // channel sync: channel, rank, flags, region (cc scrubbed by parseChanTlv)
+        nb.hasChan = chansync::parseChanTlv(val, (uint8_t)len, nb.chan);
         break;
       // ---- Client-device identity (WCB_Client) ----------------------------
       case WDP_TLV_DEVTYPE: {   // device type name doubles as the neighbor's alias
@@ -1713,6 +1724,12 @@ static void printWdpDetail(int wcbNum) {
   else
     Serial.printf("  Sequences   : hash %08X   (%cMGMT,SEQ,%d to list)\n",
                   nb.seqHash, LocalFunctionIdentifier, nb.wcbNumber);
+  if (nb.hasChan)
+    Serial.printf("  Chan sync   : channel %u, rank %u%s, sync %s, region %s\n", nb.chan.channel, nb.chan.rank,
+                  (nb.chan.flags & chansync::F_PINNED) ? ", PINNED" : "",
+                  (nb.chan.flags & chansync::F_SYNC) ? "on" : "off", nb.chan.cc);
+  else
+    Serial.println("  Chan sync   : (not advertised - firmware without channel sync)");
   Serial.printf("  Last advert : %lus ago  (%s)\n", (millis() - nb.lastAdvertMs) / 1000,
                 nb.confirmed ? "live" : "stale");
   // Each port's label, then the devices announcing on it (from the neighbor's WDP-DA
@@ -1746,6 +1763,17 @@ static void printWdpDetail(int wcbNum) {
 void wdpForgetNeighbor(uint8_t id) {
   if (id >= 1 && id <= MAX_WCB_COUNT) wdpNeighbors[id - 1].valid = false;
   wdpDaDropPeer(id);                     // and the device list it sent
+}
+
+const WdpNeighbor *wdpNeighborGet(uint8_t id) {
+  if (id < 1 || id > MAX_WCB_COUNT || !wdpNeighbors[id - 1].valid) return nullptr;
+  return &wdpNeighbors[id - 1];
+}
+
+// [WDPCH:...] - a device's channel-sync facts (TLV 0x14), its own record like WDPSEQ so older Wizards ignore it.
+static void wdpEmitDumpChan(uint8_t n, const chansync::ChanFacts &f) {
+  Serial.printf("[WDPCH:N=%u,CH=%u,RANK=%u,PIN=%d,SYNC=%d,CC=%s]\n", n, f.channel, f.rank,
+                (f.flags & chansync::F_PINNED) ? 1 : 0, (f.flags & chansync::F_SYNC) ? 1 : 0, f.cc);
 }
 
 // Machine-readable dump (for the config tool / scripts).
@@ -1795,6 +1823,11 @@ static void printWdpDump() {
     // [WDP:...] line — that line's field order is load-bearing for older Wizard
     // regexes (see the PEER= note below).
     Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)self.wcbNumber, sequenceInventoryHash());
+    {
+      chansync::ChanFacts cf;              // channel sync: what this board advertises in TLV 0x14
+      chanSyncSelfFacts(cf);
+      wdpEmitDumpChan(self.wcbNumber, cf);
+    }
     // This board's OUTGOING remote-PWM targets — authoritative, straight from the
     // live mappings. Each is an edge "SELF drives WCB<DST> S<port>". Neighbor rows
     // below emit the reverse direction (a neighbor driving one of OUR ports).
@@ -1837,6 +1870,8 @@ static void printWdpDump() {
     // "old firmware" from "no sequences" (the empty set hashes to 811C9DC5).
     if (nb.seqHash != 0)
       Serial.printf("[WDPSEQ:N=%d,HASH=%08X]\n", (int)nb.wcbNumber, nb.seqHash);
+    // Channel sync: only for a device that sent TLV 0x14 - an older one has no line, and its key is derived.
+    if (nb.hasChan) wdpEmitDumpChan(nb.wcbNumber, nb.chan);
     // Remote-PWM edges terminating on THIS board: ports of ours the neighbor drives
     // (decoded into pwmSelfPorts). Edge "neighbor drives WCB<self> S<port>". The
     // sender's targets aimed at OTHER boards aren't in our table — only edges
