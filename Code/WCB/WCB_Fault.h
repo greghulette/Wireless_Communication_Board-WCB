@@ -30,7 +30,7 @@ struct WcbFault {
 
 // Defined in WCB.ino, beside the dispatcher. Each comment names the site the knob fails.
 extern WcbFault faultTimerMem;    // WCB.ino enqueuePendingTimerChain: a long chain's heap copy
-extern WcbFault faultSeqRead;     // WCB_SeqStore.cpp seqStoreKeyList / seqStoreGet: the store reads as unreadable
+extern WcbFault faultSeqRead;     // WCB_SeqStore.cpp seqStoreKeyList / seqStoreForEachKey / seqStoreGet: the store reads as unreadable
 extern WcbFault faultSeqList;     // WCB_SeqStore.cpp nvsRemove: the key-list rewrite after the value went
 extern WcbFault faultVarNvs;      // WCB_Variables.cpp saveVarsToNVS: the NVS open
 extern WcbFault faultEspNowDown;  // WCB_PWM.cpp canSendESPNow: ESP-NOW reads as not running

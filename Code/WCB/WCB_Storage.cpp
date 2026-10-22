@@ -952,44 +952,127 @@ uint32_t sequenceInventoryHash() {
     return h;
 }
 
-String buildSequenceNamesString() {
-    String keyList;
-    if (seqStoreKeyList(keyList) != SEQ_OK) return String();
+// The names reply for one request (docs/SEQUENCE_INVENTORY.md §3; the split and the header are WCB_SeqNamesWire.h).
+// One walk of the keys, no copy of the list: the key text kept is at most one reply's (a few hundred keys are more
+// than a classic board can copy twice, CLAUDE.md rule 14). Every page of a list comes from the same walk, so the split
+// never differs between the requests for one list.
+int buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo &info) {
+    reply = String();
+    type  = 0;
+    info  = SeqNamesInfo{0, 0, 0};
+    const bool     legacy = page < 0;
+    const unsigned want   = legacy ? 0 : (unsigned)page;
+    seqn::Pager pg(want);
+    // Page 0 (and an old request) keeps every key while the list could still fit one reply, and remembers where page 0
+    // ends; a later page keeps only its own keys. Every append is checked: a failed one would drop names from a list
+    // that still reads as whole.
+    String text;
+    size_t page0End = 0;
+    bool   ok = true;
+    const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+        const bool mine = pg.add(len);
+        if (want == 0) {
+            if (ok && pg.keyBytes <= seqn::REPLY_MAX) ok = text.concat(',') && text.concat(k, (unsigned)len);
+            if (pg.page == 0) page0End = text.length();
+        } else if (mine && ok) {
+            ok = text.concat(',') && text.concat(k, (unsigned)len);
+        }
+        return true;
+    });
+    if (rc != SEQ_OK || !ok) return SEQN_UNREAD;
 
     // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
     // the two directly, so they must never be computed two different ways. One
     // that could not be computed now makes no answer: a stale hash beside a
     // current list would read as current.
     const uint32_t h = sequenceInventoryHash();
-    if (!seqInvHashValid) return String();
+    if (!seqInvHashValid) return SEQN_UNREAD;
+    info = SeqNamesInfo{pg.count, pg.keyBytes, pg.pages()};
 
-    // Walk the key list — trailing comma, and in the NVS layout possible empty
-    // entries from a legacy erase — but emit only the names. Every append is
-    // checked: a failed one would drop names from a list that still reads as whole.
-    String names = "";
-    int    count = 0;
-    int    startIdx = 0;
-    bool   ok = true;
-    while (ok && startIdx < (int)keyList.length()) {
-        int commaIndex = keyList.indexOf(',', startIdx);
-        if (commaIndex == -1) commaIndex = keyList.length();
-
-        String key = keyList.substring(startIdx, commaIndex);
-        ok = key.c_str() != nullptr;
-        key.trim();
-        if (ok && key.length() > 0) {
-            ok = names.concat(',') && names.concat(key);
-            count++;
-        }
-        startIdx = commaIndex + 1;
+    char hdr[seqn::HEADER_MAX + 1];
+    const char *body = text.length() ? text.c_str() : "";
+    size_t bodyLen = text.length();
+    int n;
+    if (want == 0 && seqn::wholeFits(pg.count, pg.keyBytes)) {
+        type = seqn::PT_SEQ_FRAG;                  // the one-reply form, to an old request and a new one alike
+        n = seqn::formatWholeHeader(hdr, sizeof(hdr), h, pg.count);
+    } else if (legacy) {
+        return SEQN_NOFIT;                         // an old requester cannot page: no answer (WCB_SeqNamesWire.h)
+    } else {
+        type = seqn::PT_PAGE;
+        seqn::PageHeader ph;
+        ph.hash = h; ph.count = pg.count; ph.page = want; ph.pages = pg.pages(); ph.keyBytes = pg.keyBytes;
+        n = seqn::formatPageHeader(hdr, sizeof(hdr), ph);
+        if (want == 0) bodyLen = page0End;         // page 0 only; a page past the last (the list shrank) has no key
     }
-    if (!ok) return String();
+    if (n < 0 || !body) return SEQN_UNREAD;
+    if (!reply.reserve((unsigned)n + bodyLen) || !reply.concat(hdr, (unsigned)n) ||
+        (bodyLen && !reply.concat(body, (unsigned)bodyLen))) {
+        reply = String();
+        return SEQN_UNREAD;
+    }
+    return SEQN_REPLY;
+}
 
-    char hdr[16];
-    snprintf(hdr, sizeof(hdr), "%08X,%d", h, count);
-    String out = hdr;
-    if (!out.concat(names)) return String();
-    return out;
+// ?SEQ,NAMES. The line is built in one buffer of its exact size and printed with one write; with no heap for that it is
+// streamed a piece at a time instead. The count is taken first, and the second walk is checked against it.
+bool printSequenceNames() {
+    unsigned count = 0, keyBytes = 0;
+    if (seqStoreForEachKey([&](const char *, size_t len) -> bool {
+            count++;
+            keyBytes += seqn::keyCost(len);
+            return true;
+        }) != SEQ_OK)
+        return false;
+    const uint32_t h = sequenceInventoryHash();
+    if (!seqInvHashValid) return false;
+
+    char head[48];
+    const int hn = snprintf(head, sizeof(head), "[MGMT:SEQ,%d]%08X,%u", WCB_Number, (unsigned)h, count);
+    if (hn < 0 || hn >= (int)sizeof(head)) return false;
+    const size_t total = (size_t)hn + keyBytes + 1;   // the head, every key with its comma, the newline
+    char *line = (char *)malloc(total);
+    if (line) {
+        memcpy(line, head, (size_t)hn);
+        size_t at = (size_t)hn;
+        unsigned seen = 0;
+        const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+            if (at + 1 + len > total - 1) return false;   // more than the first walk counted
+            line[at++] = ',';
+            memcpy(line + at, k, len);
+            at += len;
+            seen++;
+            return true;
+        });
+        const bool whole = rc == SEQ_OK && seen == count && at == total - 1;
+        if (whole) {
+            line[at++] = '\n';
+            Serial.write((const uint8_t *)line, at);
+        }
+        free(line);
+        return whole;
+    }
+    // Streamed: the head, then the keys in pieces of up to 128 characters.
+    Serial.write((const uint8_t *)head, (size_t)hn);
+    char buf[128];
+    size_t at = 0;
+    unsigned seen = 0;
+    const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+        if (at + 1 + len > sizeof(buf)) {
+            Serial.write((const uint8_t *)buf, at);
+            at = 0;
+        }
+        buf[at++] = ',';
+        memcpy(buf + at, k, len);
+        at += len;
+        seen++;
+        return true;
+    });
+    if (at) Serial.write((const uint8_t *)buf, at);
+    Serial.write((const uint8_t *)"\n", 1);
+    if (rc != SEQ_OK || seen != count)
+        Serial.println("Could not read the sequence store to the end: the line above is not the whole list.");
+    return true;   // printed, and said so if it is not whole
 }
 
 // Clear all stored sequences - the sequence store and whatever NVS still holds of them. True when all are gone.

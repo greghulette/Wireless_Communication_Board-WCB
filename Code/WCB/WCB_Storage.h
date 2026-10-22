@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "command_timer_queue.h"
+#include "WCB_SeqNamesWire.h"   // the sequence-names reply's split and header (buildSequenceNamesReply)
 
 // =============== WCB System Constants ===============
 // Guard allows WCB.ino to also define these without conflict
@@ -195,18 +196,30 @@ void listStoredCommands();
 // sequence set. A consumer that only needs to know WHAT exists (NaviCore's command
 // picker, a web UI) wants names alone — ~16 bytes per entry instead of hundreds.
 //
-// buildSequenceNamesString() is the single source of truth for that inventory and
-// is used by BOTH ?SEQ,NAMES (console) and the SEQ_REQ/SEQ_FRAG mesh request, so
-// the two can never disagree. Format:
+// Both readers walk the keys with seqStoreForEachKey and the same cached hash, so
+// ?SEQ,NAMES (console) and the mesh reply can never disagree. Format:
 //
 //     <hash8hex>,<count>[,<key1>,<key2>,...]
 //
 // Comma separation is safe: saveStoredCommandsToPreferences() takes the key as
 // everything BEFORE the first comma, so a stored key can never contain one.
-// Empty when the store could not be read right now (a valid inventory never is).
 // The empty case is "811C9DC5,0" — the FNV offset basis and a zero count, so a
 // parser needs no special case for "board has no sequences".
-String   buildSequenceNamesString();
+//
+// Over the mesh a list longer than one reply (2912 characters, about 180 names) goes
+// in pages, one per request, to a requester that asks for them (WCB_SeqNamesWire.h,
+// docs/SEQUENCE_INVENTORY.md §3).
+enum SeqNamesResult : int {
+    SEQN_REPLY  = 0,   // `reply` is filled: send it as packet type `type` (14 the whole list, 29 one page)
+    SEQN_UNREAD = 1,   // the store could not be read right now (or the heap could not hold the reply): no answer
+    SEQN_NOFIT  = 2,   // an old one-reply request (page < 0) for a list that does not fit one reply: no answer
+};
+struct SeqNamesInfo { unsigned count, keyBytes, pages; };   // the list's, for messages
+// The reply to a names request: page >= 0 for a page request (28), page < 0 for an old one (13).
+int      buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo &info);
+// ?SEQ,NAMES: "[MGMT:SEQ,<n>]<hash>,<count>[,<key>...]" and a newline. False when the store could not be read right now
+// (nothing printed).
+bool     printSequenceNames();
 
 // FNV-1a over the key list ("k1,k2,...," in save order - NVS's key_list format, which
 // the sequence store keeps) AND every stored value. Cheap content fingerprint of

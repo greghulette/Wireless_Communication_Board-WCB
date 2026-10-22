@@ -852,6 +852,42 @@ int seqStoreKeyList(String &list) {
   return rc;
 }
 
+int seqStoreForEachKey(const std::function<bool(const char *key, size_t len)> &fn) {
+  if (faultSeqRead.take()) return SEQ_E_IO;   // ?DEBUG,FAULT,SEQREAD: this read fails, once (WCB_Fault.h)
+  SeqLock lock;
+  if (!onFile) {
+    // The NVS layout's key_list, as nvsForEach walks it: an empty entry (a legacy erase) is no key, and one longer than
+    // SEQ_KEY_MAX_LEN (listed by firmware before d83042e, never stored) is one no call can address.
+    String keys;
+    const int rc = nvsKeyList(keys);
+    if (rc != SEQ_OK) return rc;
+    const char *p = keys.c_str();
+    if (!p) return SEQ_E_NOMEM;
+    while (*p) {
+      const char *e = strchr(p, ',');
+      const size_t n = e ? (size_t)(e - p) : strlen(p);
+      size_t a = 0, b = n;                       // trimmed, as nvsForEach trims
+      while (a < b && isspace((unsigned char)p[a])) a++;
+      while (b > a && isspace((unsigned char)p[b - 1])) b--;
+      if (b > a && b - a <= SEQ_KEY_MAX_LEN) {
+        char k[SEQ_KEY_MAX_LEN + 1];
+        memcpy(k, p + a, b - a);
+        k[b - a] = '\0';
+        if (!fn(k, b - a)) break;
+      }
+      if (!e) break;
+      p = e + 1;
+    }
+    return SEQ_OK;
+  }
+  int rc = mountLocked();
+  if (rc != SEQ_OK) return rc;
+  return walkFile([&](const char *k, SeqReader &r) -> int {
+    if (!r.skipValue()) return SEQ_E_IO;
+    return fn(k, strlen(k)) ? 0 : 1;
+  });
+}
+
 int seqStoreGet(const String &key, String &value) {
   value = String();
   if (key.length() == 0 || key.length() > SEQ_KEY_MAX_LEN || seqKeyReserved(key)) return SEQ_NOTFOUND;
