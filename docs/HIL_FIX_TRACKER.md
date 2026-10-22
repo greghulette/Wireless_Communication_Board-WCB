@@ -2481,3 +2481,8 @@ retries a vanished peer. Any phone or laptop that leaves W1's access point mid-s
 (`ARDUINO_EVENT_WIFI_AP_STADISCONNECTED`), every session from the AP's /24 is closed on the next `loop()`; httpd's
 send timeout is 2 s. On it the test drops the client 0.6 s after the PC left and the heap is back within 0.4 KB, and
 every s28 W1-access-point test passes (`20261007-142719`).
+
+**2026-10-22: the reset never happened.** The core's lwIP is built without `SO_LINGER` (`CONFIG_LWIP_SO_LINGER`
+unset), so the option was refused and every close was a FIN, or a reset only when the client's bytes were left unread.
+`wsClose` no longer sets it (WIFI_DESIGN.md §6a). What a vanished client never ACKed waits in lwIP until TCP gives up;
+the rest of this fix stands.
