@@ -62,8 +62,9 @@ static const size_t   WS_HEAP_FLOOR   = 8192;
 // THE TOKEN (WCB_WS.h; docs/WIFI_DESIGN.md §7):
 //   WS_AUTH_LOCKOUT_MS - after a failed ?AUTH every ?AUTH, on any session, fails for this long: a guess a second.
 //   WS_BYE_WAIT_MS - a session whose ?AUTH failed is sent [AUTH:FAIL] and a CLOSE, then given this long to echo the
-//     CLOSE before it is closed anyway. wsClose resets the socket, and a reset can throw away what the client has not
-//     read yet (Windows does): waiting for the echo is what gets the [AUTH:FAIL] line read.
+//     CLOSE before it is closed anyway. A close can go out as a reset - lwIP resets a socket closed with bytes from the
+//     client still unread, which a client that goes on sending leaves (wsClose) - and a reset can throw away what the
+//     client has not read yet (Windows does): waiting for the echo is what gets the [AUTH:FAIL] line read.
 static const uint32_t WS_AUTH_LOCKOUT_MS = 1000;
 static const uint32_t WS_BYE_WAIT_MS     = 1000;
 //   WS_SIGNIN_MS - a session that has not signed in this long after it opened is closed: with two slots, a client that
@@ -299,23 +300,6 @@ static void queuePong(int fd, const uint8_t *payload, size_t len) {
   xSemaphoreGive(txLock);
 }
 
-// httpd task: the client sent CLOSE. Echo an empty CLOSE if no frame is part-way out (best effort, never waits) and
-// this end has not sent one already (a failed sign-in's, which this CLOSE answers), then leave the tee; httpd closes
-// the session when the handler returns.
-static void closeEcho(int fd) {
-  if (!txLock) return;
-  xSemaphoreTake(txLock, portMAX_DELAY);
-  WsTx *c = txFor(fd);
-  if (c) {
-    if (!c->closing && !txMidFrame(*c) && !c->byeAt) {
-      static const uint8_t bye[2] = { 0x88, 0x00 };
-      send(fd, bye, sizeof(bye), MSG_DONTWAIT);
-    }
-    txReset(*c, -1);
-  }
-  xSemaphoreGive(txLock);
-}
-
 // Longest prefix of b[0..n) that does not end part-way through a UTF-8 sequence.
 // A TEXT frame must be valid UTF-8 on its own (RFC 6455 8.1); a multi-byte
 // character straddling the buffer boundary otherwise ends a frame in a bare
@@ -349,6 +333,49 @@ static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32
     return e == EAGAIN || e == EWOULDBLOCK || e == ENOMEM || e == ENOBUFS || e == EINTR;
   }
   return true;
+}
+
+// httpd task, txLock held: finish whatever frame is part-way out to this client - a console frame, a PONG or a
+// session-layer line; at most one is, since sinkPump starts the next only at a frame boundary - with what the socket
+// takes now, never waiting. True when nothing is left part-way, so a control frame may follow. sinkBuf[0..frameLen)
+// cannot move meanwhile: only sinkPump compacts it, and it does so holding txLock.
+static bool txFinishPartial(WsTx &c, uint32_t now) {
+  bool alive = true;
+  if (c.ctlSent) {
+    alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now, false);
+    if (alive && c.ctlSent == c.ctlLen) c.ctlLen = c.ctlSent = 0;
+  } else if (c.saySent) {
+    uint8_t f[2 + 17];
+    const size_t n = sayFrame(txSayNext(c), f);
+    alive = txSome(c, f, n, c.saySent, now, false);
+    if (alive && c.saySent == n) c.saySent = 0;   // what it owed next does not matter: the session is ending
+  } else if (c.inFrame && (c.hdrSent || c.paySent)) {
+    alive = txSome(c, frameHdr, frameHdrLen, c.hdrSent, now);
+    if (alive && c.hdrSent == frameHdrLen) alive = txSome(c, (const uint8_t *)sinkBuf, frameLen, c.paySent, now);
+    if (alive && c.hdrSent == frameHdrLen && c.paySent == frameLen) c.inFrame = false;
+  }
+  return alive && !txMidFrame(c);
+}
+
+// httpd task: the client sent CLOSE, carrying `code` (its status code, 2 bytes, or none). Echo a CLOSE with the same
+// code (RFC 6455 5.5.1: an endpoint that receives a CLOSE sends one back, typically echoing the status code) unless
+// this end has sent one already - a failed sign-in's, which this CLOSE answers. A frame part-way out is finished first
+// if the socket takes the rest now; one it does not take leaves no room for the echo (a control frame cannot go inside
+// a frame) and the session closes without it. Never waits. Then the client leaves the tee; httpd closes the session
+// when the handler returns, with a FIN behind the echo - provided nothing the client sent is left unread (wsHandler).
+static void closeEcho(int fd, const uint8_t *code, size_t codeLen) {
+  if (!txLock) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c) {
+    if (!c->closing && !c->byeAt && txFinishPartial(*c, millis())) {
+      uint8_t bye[4] = { 0x88, 0x00, 0, 0 };
+      if (code && codeLen == 2) { bye[1] = 2; bye[2] = code[0]; bye[3] = code[1]; }
+      send(fd, bye, 2 + bye[1], MSG_DONTWAIT);
+    }
+    txReset(*c, -1);
+  }
+  xSemaphoreGive(txLock);
 }
 
 // Ask httpd to close the session; free the slot once it has the request or the session is gone. The request is a
@@ -452,7 +479,8 @@ static bool sinkPump() {
       }
       // Close the session, not just leave the tee: a session left open holds its unsent output in lwIP (up to a
       // whole TCP send buffer, ~5.7 KB) for as long as TCP retries a peer that has gone, and two or three such
-      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113). wsClose resets it.
+      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113). Closed, what the
+      // client never ACKed still waits in lwIP until TCP gives up on it (wsClose: there is no forced reset).
       if (!alive) txClose(c);
       else if (c.byeAt && now - c.byeAt >= WS_BYE_WAIT_MS) txClose(c);   // a failed sign-in that did not echo
       else if (txOwes(c) && now - c.lastTook >= WS_STUCK_MS) { stuckCloses++; txClose(c); }
@@ -686,8 +714,24 @@ static esp_err_t wsHandler(httpd_req_t *req) {
   esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);   // length probe
   if (err != ESP_OK) return err;
   // Control frames come here too (handle_ws_control_frames, wcbWsBegin): httpd no longer answers them itself.
-  if (frame.type == HTTPD_WS_TYPE_CLOSE) { accRelease(fd); closeEcho(fd); return ESP_OK; }   // httpd then closes it
-  if (frame.type == HTTPD_WS_TYPE_PING && frame.len > 125) return ESP_FAIL;                 // RFC 6455 5.5
+  // RFC 6455 5.5: a control frame carries at most 125 bytes. Failed, httpd closes the session (wsClose frees the slot).
+  if ((frame.type == HTTPD_WS_TYPE_PING || frame.type == HTTPD_WS_TYPE_CLOSE) && frame.len > 125) return ESP_FAIL;
+  // A CLOSE: its payload is read before the echo. httpd closes the session once this returns, and lwIP closes a socket
+  // holding received bytes nobody read with a RESET instead of a FIN (tcp_close_shutdown: "not all data received by
+  // application"), sent right behind the echo - or in its place, while the echo is still queued. A Windows client
+  // loses what it has not read yet when a reset arrives, so it saw a dropped connection and no echo (HIL
+  // ws.ping_pong_and_close, run 20261022-072416); the Mac read the echo first. The unread bytes were the status code,
+  // which nearly every client sends. With them read, the close is a FIN behind the echo.
+  if (frame.type == HTTPD_WS_TYPE_CLOSE) {
+    size_t got = 0;
+    if (frame.len) {
+      frame.payload = rxBuf;
+      if (httpd_ws_recv_frame(req, &frame, sizeof(rxBuf)) == ESP_OK) got = frame.len;
+    }
+    accRelease(fd);
+    closeEcho(fd, rxBuf, got >= 2 ? 2 : 0);   // the status code back; the reason text is not echoed
+    return ESP_OK;                            // httpd then closes the session (wsClose)
+  }
 
   // OVERSIZED: we cannot read it, and we must not leave it unread. The call above
   // is a LENGTH PROBE — esp_http_server has parsed the header but the payload is
@@ -724,14 +768,14 @@ static esp_err_t wsHandler(httpd_req_t *req) {
 // departed client holds both until some later send happens to fail on it, and
 // the unowned tail of a half-accumulated line eats the next client's first command.
 //
-// Closed with a reset (SO_LINGER 0), not a FIN: a graceful close keeps the socket's unsent data queued while TCP
-// retries a peer that may be gone - a phone out of range, a PC moved to another network - and that is the heap the
-// next client needs (#113). A client that is still there sees its connection reset, which it treats as closed.
+// close() is a FIN behind whatever the client has not ACKed yet, which lwIP keeps sending until the client ACKs it or
+// TCP gives up on a client that has gone - or a RESET at once when the client sent bytes nobody read (wsHandler's
+// CLOSE). There is no forced reset: this file set SO_LINGER 0 here from 2026-10-07 to reset every close (#113), but the
+// core's lwIP is built without SO_LINGER (CONFIG_LWIP_SO_LINGER unset, LWIP_SO_LINGER 0 in lwipopts.h), so the option
+// was refused and every close was already this one. A reset would also throw away the CLOSE echo a client has not read.
 static void wsClose(httpd_handle_t /*hd*/, int sockfd) {
   accRelease(sockfd);
   sinkDrop(sockfd);
-  struct linger lg = { 1, 0 };
-  setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
   close(sockfd);
 }
 
