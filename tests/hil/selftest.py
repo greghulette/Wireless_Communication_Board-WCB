@@ -13944,7 +13944,7 @@ def t_absent_wcbs(tmp):
     assert two.wcb_numbers() == [1, 2] and C.absent_wcbs(two) == [3], C.absent_wcbs(two)
     assert C.absent_wcbs(bench(1, 2, 3)) == [4], "a WCB3 with its own USB is not absent"
     assert C.absent_wcbs(bench(1, 2, mesh_only=[3])) == [4], "a mesh-only WCB3 is not absent"
-    assert C.absent_wcbs(bench(1, 2, 3, 4, 5)) == [7], "6 is one of W1's persisted learned peers (FORBIDDEN_MESH_IDS)"
+    assert C.absent_wcbs(bench(1, 2, 3, 4, 5)) == [7], "6 is reserved (FORBIDDEN_MESH_IDS: W1's learned peer until 2026-10-22)"
     every = C.absent_wcbs(two, 14)
     assert every == [3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18], every
     assert NAVICORE_ID == 20 and not set(every) & {1, 2, 6, 9, 19, NAVICORE_ID}, every

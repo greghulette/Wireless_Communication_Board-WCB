@@ -319,7 +319,8 @@ def mesh_params(bench):
                 channel=int(value("?WCBCH,")), quantity=int(value("?WCBQ,")), checksum=value("?ETM,CHKSM,").upper() == "ON")
 
 
-# The two WCBs, W1's persisted learned peers 6 and 9, the old MgmtRelay (19) and NaviCore (20). Any other WCB on the
+# The two WCBs, 6 and 9 (W1's learned peers from boards long gone, forgotten 2026-10-22 because channel sync searched
+# for them after every boot; still kept out, which costs nothing), the old MgmtRelay (19) and NaviCore (20). Any other WCB on the
 # bench (bench.wcb_numbers(), a WCB3 once it is listed) is refused too, by probe_in_mesh: a probe joined under a
 # real board's id shares its MAC, and its temporary advert downgrades that learned peer and persists it
 # (WCB_WDP.cpp:658-669).
@@ -335,7 +336,7 @@ def absent_wcbs(bench, n=1):
     bench of W1 and W2, so the tests that used a literal 3 send exactly what they sent; [4] once a real WCB3 is listed.
 
     Left out besides bench.wcb_numbers(): NaviCore's id (hil.links.NAVICORE_ID, the special peer, WCB.ino:138) and the
-    rest of FORBIDDEN_MESH_IDS - W1's persisted learned peers 6 and 9 are peers already, so not absent, and 19 is the id
+    rest of FORBIDDEN_MESH_IDS - 6 and 9 were W1's learned peers until 2026-10-22, and 19 is the id
     s15's NEVER_HEARD keeps unheard. The probe clients' temporary ids are NOT left out: they take 3-5, 7, 8 and 10-18
     (s05 CLIENT_IDS, s19 MESH_IDS, s13/s14/s15/s18/s21/s22/s43), so nothing would be left, and probe_in_mesh forgets a
     client when its test ends. What one leaves on W1 until its next boot is that id's ?STATS counters and 'heard since
