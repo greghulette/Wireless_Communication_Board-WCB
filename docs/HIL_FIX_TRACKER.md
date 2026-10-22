@@ -2390,6 +2390,19 @@ answers Windows' first request for the address it held last time (INIT-REBOOT).
 ESP_LOG_DEBUG)` on a debug build, or a capture on the PC), with the heap reading beside it. A user connecting a laptop
 or phone to the droid waits this long too, which reads as "the access point is broken".
 
+**2026-10-22, channel sync ruled out as the cause (not proven on the bench).** The PC's spare adapter took 35-55 s, and
+sometimes got no lease in 62 s, on the channel-sync build (run `20261022-072416`: `ws.client_slots`,
+`.stalled_client_costs_nothing`, `.ota_chunk`, `.token_wrong_closes` failed on it). The same PC took up to 46.7 s on
+2026-09-29, before channel sync existed. The Mac's Realtek adapter, moved to W1's access point by the harness, was
+proved there (associated, leased, a WebSocket connect and a `;S0` marker) about 8 s after the click on nearly every
+join in its runs from 10-07 to 10-15 (7.0.x); the few 40-53 s joins needed the second click. Channel sync cannot take
+W1's radio away during a DHCP exchange: a search starts only while no station is associated (`wcbWifiCanHop`,
+`WCB_WiFi.cpp`), and an AP board runs no full-band scan (JOIN only). Channel sync and the WebSocket token add 608 B of
+static RAM on the ESP32 (113,048 to 113,656 against `f733e1a`) and channel sync a 0.3 KB frame queue, so W1's heap is
+about 0.9 KB lower than before them, which the heap candidate above would feel; nothing shows that it does. Every
+`wifi_pc` join on W1 now notes whether W1's console showed a channel-sync search or move meanwhile
+(`_note_w1_radio_away`, s28), so the next PC run says whether one overlapped a slow lease.
+
 #### 111. With its access point up, a classic-ESP32 WCB's heap drops to within a few hundred bytes of empty
 
 | | |

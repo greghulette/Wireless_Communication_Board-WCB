@@ -977,11 +977,39 @@ def _pc_on_w1_ap(bench, problems):
         raise Skip(f"W1's access point is not up: Interface {st.get('Interface')!r}, WS {st.get('WS endpoint')!r}")
     ip = st.get("IP address", "")
     _W1_TOKEN["token"] = ws_token(toks)
+    mark, noted = w.dev.mark(), []
     try:
         with _pc_on_ap(bench, problems, ssid, pw, "W1's", identify=_w1_identify(w), home=_navicore_home(bench)) as name:
+            _note_w1_radio_away(bench, w, mark, noted)
             yield w, ip, name
     finally:
+        _note_w1_radio_away(bench, w, mark, noted)
         _W1_TOKEN["token"] = None
+
+
+# W1's console lines that mean its radio - and so its access point - left the channel while the PC joined, or the
+# access point restarted: a channel-sync search (about 1.5 s on other channels, its pulls included), a MOVE, or the
+# restart a MOVE takes on a board with an access point (WCB_ChanSync.cpp). A search starts only while no station is
+# associated with the access point (wcbWifiCanHop, WCB_WiFi.cpp), so one can delay the PC's association but not its
+# DHCP exchange: a slow lease (tracker #110) noted beside "no channel-sync search or move" is not channel sync's.
+_W1_AWAY = re.compile(r"\[CHSYNC\] .*(searching channels|moving the mesh|moves the mesh|restarting so)")
+
+
+def _note_w1_radio_away(bench, w, mark, noted):
+    """Once per join: note whether W1's console says channel sync took its radio off the channel (_W1_AWAY) between
+    `mark` (before the PC began to join) and now - counts by kind only, never the lines."""
+    if noted:
+        return
+    noted.append(True)
+    kinds = {}
+    for line in w.dev.since(mark):
+        m = _W1_AWAY.search(line)
+        if m:
+            k = "search" if "search" in m.group(1) else "restart" if "restart" in m.group(1) else "move"
+            kinds[k] = kinds.get(k, 0) + 1
+    bench.note("W1 while the PC joined its access point: " + (", ".join(f"{n} channel-sync {k} line(s)"
+                                                                        for k, n in sorted(kinds.items()))
+                                                              if kinds else "no channel-sync search or move"))
 
 
 def _w1_identify(w):
