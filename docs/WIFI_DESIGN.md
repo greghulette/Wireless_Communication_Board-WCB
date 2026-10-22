@@ -106,10 +106,32 @@ This mirrors what `WCB_Client` had to handle when NaviCore began hosting an AP:
 `WCB_Client::begin()` inspects `WiFi.getMode()` and preserves an existing AP as
 `WIFI_AP_STA` rather than forcing `WIFI_STA` and tearing it down.
 
+**Power save goes off before the mode.** `setup()` calls `WiFi.setSleep(false)` before
+`WiFi.mode(WIFI_STA)`, then `esp_wifi_set_ps(WIFI_PS_NONE)`. The core's STA_START handler
+(arduino-esp32 3.3.4 `STA.cpp`) applies `WiFi.getSleep()` - modem sleep by default - on the
+event task, and could land after the direct call and undo it on a board with no AP up; this
+core builds with `CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE`, so an unassociated,
+ESP-NOW-only station can power-save too. Called before the mode it only records NONE, which
+the handler then applies. An AP or AP+STA board does not modem-sleep at all.
+
 **Settings apply at the next boot, not live.** Same discipline as
 `saveMeshChannelToPreferences()`. Bringing an interface up or down re-enters the WiFi
 driver underneath a running `esp_now`, and a config push arrives as a *stream* of
 commands — losing the radio midway would strand everything still queued behind it.
+
+**One runtime driver restart: the ESP-NOW transmit wedge** (tracker #112, `WCB_EspNow.h`).
+The WiFi driver can lose frames `esp_now_send` accepted until it refuses every one
+(espressif/esp-idf #18682, #19269), and upstream only `esp_wifi_deinit`/`init` or a reboot
+cleared it. When an ESP-NOW restart has not cleared a wedge, `espNowRestartForWedge`
+(`WCB.ino`) restarts the driver from `loop()`: `esp_now_deinit`, `WiFi.mode(WIFI_OFF)` and
+back to `WIFI_STA`, then the radio as `setup()` leaves it - power save off (`WiFi.setSleep(false)`
+too, or the core's STA_START handler puts modem sleep back), the region
+(`chanSyncReapplyRegion`), channel sync's home channel, the mesh MAC - and ESP-NOW with its
+peers. Only on a board that **booted** with WiFi OFF (`wcbWifiBootedOff`): nothing of ours
+runs on the driver there but ESP-NOW. An access point or a joined network is never torn
+down under its clients, sockets and WebSocket sessions; such a board says that only a
+reboot clears the wedge. Not during an OTA session, while the radio is away on another
+channel, or with a restart pending.
 
 ---
 
@@ -530,6 +552,8 @@ claim.
 | Date | Commit | Change |
 |---|---|---|
 | 2026-10-22 | — | §6a, §7: a client's CLOSE is echoed with its status code and the session then closes with a FIN. `wsHandler` reads the CLOSE's payload first: left unread, it made lwIP close the socket with a reset right behind the echo, and a Windows client lost the echo unread (HIL `ws.ping_pong_and_close`, run `20261022-072416`, the PC; the Mac read it first). A frame part-way out is finished first when the socket takes it. `wsClose` no longer sets `SO_LINGER` 0: the core's lwIP is built without `SO_LINGER`, the option was always refused, and every close was already a FIN (or a reset over unread bytes) - so what a vanished client never ACKed waits for TCP to give up, not "freed at once" as #113 said. |
+| 2026-10-22 | — | §4: power save goes off through `WiFi.setSleep(false)` before `WiFi.mode(WIFI_STA)` as well as `esp_wifi_set_ps`: the core's STA_START handler applied modem sleep after `setup()` turned it off whenever it ran second (a race on every ESP-NOW-only and JOIN board; not on an AP). The transmit-wedge line reports the power save in force. |
+| 2026-10-22 | — | §4: the one runtime WiFi driver restart, the ESP-NOW transmit wedge's second remedy (tracker #112; espressif/esp-idf #18682, #19269): only on a board that booted with WiFi OFF, never under an access point or a joined network, and with the radio put back as `setup()` leaves it (power save off through `WiFi.setSleep(false)` as well, the region, the home channel, the mesh MAC). |
 | 2026-10-21 | — | §4: the JOIN state machine runs only on a board that BOOTED in JOIN (`wifiRunMode`, `WCB_WiFi.cpp`), not on the saved mode. A `?WIFI,JOIN` typed into an AP board started joining at once, under the AP still running until the reboot: "lost", scans of the mesh channel, and with channel sync the full-band scans too (HIL `wifi.join_needs_token` caught it; 7.0.1 did the same). `?WIFI,OFF` on a JOIN board likewise leaves the association to the reboot. |
 | 2026-10-21 | — | Review fixes. §7: at most 2 `[AUTH:REQUIRED]` owed at once (a flooding client was owed up to 65535), a session not signed in within 15 s is closed, and a newcomer at full slots evicts a closing, failed or signed-out session before a signed-in one. §2: channel sync's JOIN full-band scans wait for the 40 s boot grace and an idle board; a scan running when `?WIFI` changes the mode is still finished and the radio put back; what channel sync reads (associated, AP up, can hop) is the running interface, not the saved mode. |
 | 2026-10-21 | — | §2, §3: channel sync ([CHANNEL_SYNC.md](CHANNEL_SYNC.md)) is the one thing that moves the channel at runtime, the whole mesh with it (live, or by a restart with an interface up). JOIN follows its network: full-band scans on a schedule when the mesh-channel scan misses it, a MOVE to the channel it is found on, then `WiFi.begin` there with its BSSID; with channel sync on the off-mesh check no longer settles the join, and the drift warning is skipped while channel sync has the radio. |

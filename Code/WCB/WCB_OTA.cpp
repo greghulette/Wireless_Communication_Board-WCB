@@ -354,7 +354,7 @@ void processOtaLocalCommand(const String &args) {
 static void otaEnsurePeer(uint8_t wcbNum) {
   if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT) return;
   const uint8_t *mac = WCBMacAddresses[wcbNum - 1];
-  if (esp_now_is_peer_exist(mac)) return;
+  if (wcbEspNowRestarting() || esp_now_is_peer_exist(mac)) return;   // a transmit-wedge remedy is restarting ESP-NOW
   esp_now_peer_info_t p = {};
   memcpy(p.peer_addr, mac, 6);
   p.channel = 0; p.encrypt = false;

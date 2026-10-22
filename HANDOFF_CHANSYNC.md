@@ -26,7 +26,7 @@ Design docs: `docs/CHANNEL_SYNC.md`, `docs/WIFI_DESIGN.md` §7, `docs/WCB_OTA_TE
 
 ## Open
 
-- **W3 ESP-NOW transmit wedge** during `etm.char_legacy` (driver refuses every frame until a reboot). Same failure recorded in `WCB_EspNow.cpp` from run 20261006-122850, before channel sync: looks pre-existing. Does the re-run reproduce it?
+- **W3 ESP-NOW transmit wedge** during `etm.char_legacy` (driver refuses every frame until a reboot). Pre-existing (W2 2026-10-06, W1 2026-10-12): the WiFi driver's bug (espressif/esp-idf #18682, #19269). Branch `fix/espnow-tx-wedge` makes the board recover by itself (tracker #112 in docs/HIL_FIX_TRACKER.md); bench tests `etm.tx_wedge_*` not yet run.
 - **`ws.ping_pong_and_close`** "W1 did not echo the CLOSE frame": first ever run of that test; re-check on the current build.
 - **Slow DHCP leases** on W1's AP (35-55 s, sometimes none in 62 s) during the `ws.*` tests; cause unknown.
 - **NaviCore not flashed** on the bench yet. Plan: compile with `--library <WCBClient chansync>` and `--build-property compiler.cpp.extra_flags=-DNAVICORE_HIL_HOOKS=1` into `tests/hil/results/builds/navicore-chansync`, flash with `hil/ncflash.flash()` over `?OTALOCAL`. Then update the WCB HIL NaviCore tests the NaviCore agent listed: `s40_navicore_config.py` TOP_KEYS (+`wifiToken`, `chanSync`), `nccfg.clamps_mesh_channel` (13 is now stored), the IDENTITY tuples in s40/s43, s43's bridged-strip test (region + token stripped), s49 `cloud_hidden_wifi`.

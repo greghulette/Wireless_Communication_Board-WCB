@@ -3040,25 +3040,41 @@ class FakeNetsh:
 
 
 def t_runner_mesh_stall(tmp):
-    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' after the test's
-    mark is reported, with its last report quoted; lines before the mark, a clean console and a non-WCB device are not."""
+    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' or '... wedged'
+    (tracker #112) after the test's mark is reported, with its last report quoted; lines before the mark, a clean
+    console, a non-WCB device and the lines a ?DEBUG,FAULT,TXWEDGE knob caused ('(simulated, ...)') are not."""
     b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
-                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
-    w1, w2, nav = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="navicore")
-    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame accepted or completed while frames are given up (in flight 0, "
-             "internal heap free 9000, largest block 4000, min since boot 1800)")
+                   "wcb3": {"port": "COMW3", "kind": "wcb", "wcb": 3}, "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    w1, w2, w3 = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="wcb3")
+    nav = FakeNaviDev(name="navicore")
+    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame completed while frames are given up (in flight 8, "
+             "heap free 9000, largest block 4000, min since boot 1800)")
+    wedge = ("[MESH] ESP-NOW transmit wedged: 4 frame(s) handed to the radio over 10s and none completed (in flight 8, "
+             "8 counted out unfinished since boot, STA MAC 02:05:4B:00:00:03, channel 1, heap free 90000, largest block "
+             "60000, min since boot 50000) - restarting ESP-NOW, no reboot (tracker #112)")
+    cleared = ("[MESH] ESP-NOW transmit wedge cleared after 12s: the ESP-NOW restart cleared it, frames complete again, "
+               "no reboot")
+    sim = " (simulated, ?DEBUG,FAULT,TXWEDGE)"
     w2._append(stall.replace("5s", "40s"))                        # before the test: not this test's
-    b.devs.update({"wcb1": w1, "wcb2": w2, "navicore": nav})
+    b.devs.update({"wcb1": w1, "wcb2": w2, "wcb3": w3, "navicore": nav})
     marks = runner._wcb_marks(b)
-    assert set(marks) == {"wcb1", "wcb2"}, marks
+    assert set(marks) == {"wcb1", "wcb2", "wcb3"}, marks
     assert runner._wcb_stalls(b, marks) == ""
     nav._append(stall)                                            # not a WCB
+    for line in (stall, wedge, cleared):                          # caused on purpose by a test's knob
+        w1._append(line + sim)
+    assert runner._wcb_stalls(b, marks) == "", runner._wcb_stalls(b, marks)
     w2._append("[MESH] 3 ESP-NOW frame(s) not sent: the radio's queue stayed full (3 since the stats were reset)")
     w2._append(stall)
     w2._append(stall.replace("5s", "35s"))
     got = runner._wcb_stalls(b, marks)
     assert got.startswith("wcb2 reported its ESP-NOW transmit stalled (2 report(s), the last '[MESH] ESP-NOW transmit "
-                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got, got
+                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got and "wedged" not in got, got
+    w3._append(wedge)                                             # a wedge with too few frames sent for a stall line
+    w3._append(cleared)
+    got = runner._wcb_stalls(b, marks)
+    assert "; wcb3 reported its ESP-NOW transmit wedged (2 line(s): the first '[MESH] ESP-NOW transmit wedged: 4 " in got \
+        and "the last '[MESH] ESP-NOW transmit wedge cleared after 12s" in got and "wcb1" not in got, got
     b.devs.clear()
     b.close()
 

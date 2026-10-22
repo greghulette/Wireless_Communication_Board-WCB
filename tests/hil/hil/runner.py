@@ -607,6 +607,8 @@ def _probe_incidents(bench, marks):
 
 
 MESH_STALL = "[MESH] ESP-NOW transmit stalled"     # WCB_EspNow.cpp watchStall, every 30 s while a stall lasts
+MESH_WEDGE = "[MESH] ESP-NOW transmit wedge"       # WCB_EspNow.cpp watchWedge: found, each remedy, its end (#112)
+MESH_SIMULATED = "(simulated, ?DEBUG,FAULT,TXWEDGE)"  # on every such line a test's TXWEDGE knob caused on purpose
 
 
 def _wcb_marks(bench):
@@ -625,19 +627,31 @@ def _wcb_marks(bench):
 
 
 def _wcb_stalls(bench, marks):
-    """One line per WCB that reported its ESP-NOW transmit stalled during the test (MESH_STALL: every frame refused
-    for 5 s or more, none completing), or "". Such a board sends nothing to the mesh, heartbeats included, so what the
-    test concluded about its mesh traffic is not a result: full run 20261006-122850 had one board stalled for 2 min,
-    seen only because its peers called it offline. The line carries the board's heap figures, quoted here."""
+    """One line per WCB that reported its ESP-NOW transmit stalled or wedged during the test, or "". MESH_STALL: frames
+    given up for 5 s or more, none completing. MESH_WEDGE: frames handed to the radio for 10 s and none completed -
+    the WiFi driver lost them (tracker #112) - and what the board did about it; a wedge can come without a stall line
+    when too few frames were sent to fill the radio. Such a board sends nothing to the mesh meanwhile, heartbeats
+    included, so what the test concluded about its mesh traffic is not a result: full run 20261006-122850 had one board
+    stalled for 2 min, seen only because its peers called it offline. The stall line carries the board's heap figures
+    and the wedge line its state, quoted here. Lines a test's ?DEBUG,FAULT,TXWEDGE caused (MESH_SIMULATED) do not
+    count."""
     out = []
     for name, (dev, since) in marks.items():
         try:
-            hits = [x.strip() for x in dev.since(since) if x.startswith(MESH_STALL)]
+            lines = [x.strip() for x in dev.since(since) if MESH_SIMULATED not in x]
         except Exception as e:  # noqa: BLE001 - a scan never breaks the run
             bench.note(f"stall scan of {name} failed: {e}")
             continue
+        hits = [x for x in lines if x.startswith(MESH_STALL)]
+        wedge = [x for x in lines if x.startswith(MESH_WEDGE)]
+        said = []
         if hits:
-            out.append(f"{name} reported its ESP-NOW transmit stalled ({len(hits)} report(s), the last {hits[-1][:200]!r})")
+            said.append(f"{name} reported its ESP-NOW transmit stalled ({len(hits)} report(s), the last "
+                        f"{hits[-1][:200]!r})")
+        if wedge:
+            said.append(f"{name} reported its ESP-NOW transmit wedged ({len(wedge)} line(s): the first {wedge[0][:200]!r}"
+                        + (f", the last {wedge[-1][:160]!r}" if len(wedge) > 1 else "") + ")")
+        out.extend(said)
     return "; ".join(out)
 
 
