@@ -124,7 +124,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '21.16:17.R.OCT.2026';
+const UI_VERSION = '21.23:08.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -148,6 +148,7 @@ function runWizardInit() {
   safe(checkBrowserCompat,         'checkBrowserCompat');
   safe(loadThemePreference,        'loadThemePreference');
   safe(initSystemConfig,           'initSystemConfig');
+  safe(initChanSyncFields,         'initChanSyncFields');
   safe(loadModePreference,         'loadModePreference');
   safe(initDeviceCombobox,         'initDeviceCombobox');
   safe(initTerminalResize,         'initTerminalResize');
@@ -985,9 +986,21 @@ function updateWifiVisibility(n, mode) {
       `Takes effect after a reboot.`;
   } else if (mode === 'join') {
     note.style.display = '';
-    note.innerHTML = `That network <b>must be on channel ${ch}</b> — the mesh channel. A NaviCore ` +
-      `hosts its AP on its own mesh channel, so it matches by construction. If the board lands ` +
-      `elsewhere it disconnects on purpose rather than go deaf, and says so. Takes effect after a reboot.`;
+    // Channel sync (docs/CHANNEL_SYNC.md §5): a JOIN board that finds its network on another channel takes the mesh
+    // there. Without it - sync off, or firmware before channel sync - the old rule stands.
+    const sync = systemConfig?.general?.chanSync !== false;
+    note.innerHTML = (sync
+      ? `If that network is not on <b>channel ${ch}</b> (the mesh channel), channel sync moves the whole mesh to ` +
+        `its channel when the board finds it; boards on firmware from before channel sync stay behind. With ` +
+        `channel sync off, that network must be on channel ${ch}: the board disconnects on purpose rather than ` +
+        `go deaf, and says so.`
+      : `That network <b>must be on channel ${ch}</b> — the mesh channel. A NaviCore ` +
+        `hosts its AP on its own mesh channel, so it matches by construction. If the board lands ` +
+        `elsewhere it disconnects on purpose rather than go deaf, and says so.`) +
+      ` Takes effect after a reboot.` +
+      // The firmware refuses to start WiFi in Join mode with no token (docs/WIFI_DESIGN.md §7).
+      (boardConfigs[n]?.wifiToken ? '' : ` <b>Needs an access token</b> (below): without one the board refuses to ` +
+        `start WiFi in Join mode.`);
   } else {
     note.style.display = 'none';
     note.innerHTML = '';
@@ -1014,6 +1027,37 @@ function onWifiFieldChange(n) {
   config.wifi.joinSsid = val('join-ssid');
   config.wifi.joinPass = val('join-pass');
   onBoardFieldChange(n);   // mark the board unsaved (WiFi needs a reboot to apply)
+}
+
+// The WebSocket access token (?WIFI,TOKEN). Checked as typed against the firmware's rule (WCBParser.wifiTokenProblem):
+// the field turns red and says why, and a push refuses it (_pushRowProblem). Blank is no token.
+function onWifiTokenChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.wifiToken = document.getElementById(`b${n}-wifi-token`)?.value ?? '';
+  _showWifiTokenProblem(n);
+  const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+  if (mode) updateWifiVisibility(n, mode);   // the Join note says whether a token is still needed
+  onBoardFieldChange(n);
+}
+
+function _showWifiTokenProblem(n) {
+  const input = document.getElementById(`b${n}-wifi-token`);
+  const err   = document.getElementById(`b${n}-wifi-token-err`);
+  const tok   = input?.value ?? '';
+  const why   = tok ? WCBParser.wifiTokenProblem(tok) : null;
+  if (input) input.style.borderColor = why ? 'var(--red)' : '';
+  if (err) { err.textContent = why ? `${why[0].toUpperCase()}${why.slice(1)}.` : ''; err.style.display = why ? '' : 'none'; }
+}
+
+// Masked by default, like the WiFi passwords; Show reveals it for checking what was typed.
+function toggleWifiTokenReveal(n) {
+  const input = document.getElementById(`b${n}-wifi-token`);
+  const btn   = document.getElementById(`b${n}-wifi-token-reveal`);
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  if (btn) { btn.textContent = show ? 'Hide' : 'Show'; btn.title = show ? 'Hide the token' : 'Show the token'; }
 }
 
 function onKyberChange(n) {
@@ -1366,6 +1410,60 @@ function onMeshChannelChange() {
     const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
     if (mode) updateWifiVisibility(n, mode);
   }
+  _refreshChannelOptions();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+// ─── Channel sync: region and on/off (docs/CHANNEL_SYNC.md §6-7) ────
+// Network-wide like the mesh channel. The region's options are built from WCBParser.CHSYNC_REGIONS, the one list.
+// Channels 12-13 are offered only in a region that allows them (WCBParser.regionMaxChannel - its comment says which
+// regions that is, and that the board's own check is the authority).
+function _regionOptionLabel(cc) {
+  return cc === '01' ? '01 — world-safe (1–11)' : `${cc} (1–${WCBParser.regionMaxChannel(cc)})`;
+}
+
+function initChanSyncFields() {
+  const sel = document.getElementById('g-region');
+  if (!sel) return;
+  sel.innerHTML = WCBParser.CHSYNC_REGIONS.map(cc => `<option value="${cc}">${_regionOptionLabel(cc)}</option>`).join('');
+  sel.value = systemConfig?.general?.region ?? '01';
+  _refreshChannelOptions();
+}
+
+// Enable 12-13 in the mesh channel dropdown only when the region allows them. A selected channel above the region's
+// top stays selected (it is what the boards hold), marked, and the push refuses it (_pushRowProblem) rather than this
+// moving the fleet to another channel unasked.
+function _refreshChannelOptions() {
+  const max = WCBParser.regionMaxChannel(document.getElementById('g-region')?.value ?? '01');
+  const sel = document.getElementById('g-meshch');
+  if (!sel) return;
+  for (const o of sel.options) o.disabled = parseInt(o.value, 10) > max && o.value !== sel.value;
+  const over = (parseInt(sel.value, 10) || 1) > max;
+  sel.style.borderColor = over ? 'var(--red)' : '';
+  sel.title = over ? `Channel ${sel.value} is outside this region (1–${max}): pick another channel or region` : '';
+}
+
+function onRegionChange() {
+  const cc = document.getElementById('g-region')?.value || '01';
+  systemConfig.general.region = cc;
+  for (const n in boardConfigs) boardConfigs[n].region = cc;
+  _refreshChannelOptions();
+  const ch = parseInt(document.getElementById('g-meshch')?.value, 10) || 1;
+  if (ch > WCBParser.regionMaxChannel(cc) && !_mirroringGeneral)
+    showToast(`Region ${cc} allows channels 1–${WCBParser.regionMaxChannel(cc)}: the mesh is on ${ch}. Pick another channel before pushing.`, 'warning', 8000);
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+function onChanSyncChange() {
+  const on = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
+  systemConfig.general.chanSync = on;
+  for (const n in boardConfigs) boardConfigs[n].chanSync = on;
+  for (const n in boardConfigs) {   // a Join note says what happens when its network is on another channel
+    const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+    if (mode) updateWifiVisibility(n, mode);
+  }
   updateGeneralBaseline();
   _notifyGeneralChanged();
 }
@@ -1417,6 +1515,7 @@ function _badMacOctet() {
 //  - A sequence with IF inside a ;t or ;w payload, refused as TEST and SAVE/UPDATE refuse it (validateSequenceValue):
 //    the firmware rejects it as a timer payload. Only a row the push would send - one that differs from what the
 //    board holds - is checked.
+//  - The access token and the mesh channel against the region, below.
 function _pushRowProblem(n, config, baseline) {
   if (config.kyber?.mode === 'local' && !config.kyber.port) {
     showToast(`WCB ${n}: Kyber is set to Local, but S1 and S2 are both in use — free one of them for the Kyber, or set Kyber to None. Nothing was sent.`, 'error', 10000);
@@ -1427,6 +1526,21 @@ function _pushRowProblem(n, config, baseline) {
   if (seq) {
     showToast(`WCB ${n}: sequence "${seq.key}" — IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd. Nothing was sent.`, 'error', 10000);
     return { reason: `sequence "${seq.key}" has IF inside a ;t or ;w payload — nothing was sent` };
+  }
+  //  - A WebSocket token the firmware would refuse (WCBParser.wifiTokenProblem is its rule): the board would keep its
+  //    old token, or none, while the baseline recorded this one.
+  const tokProblem = config.wifiToken ? WCBParser.wifiTokenProblem(config.wifiToken) : null;
+  if (tokProblem) {
+    showToast(`WCB ${n}: ${tokProblem}. Nothing was sent.`, 'error', 10000);
+    return { reason: `invalid access token (${tokProblem}) — nothing was sent` };
+  }
+  //  - A mesh channel above the General region's top (12-13 in a 1-11 region): the board refuses the ?WCBCH, so this
+  //    board would stay where it is while the rest of the fleet moved.
+  const cc = document.getElementById('g-region')?.value || '01';
+  const ch = parseInt(document.getElementById('g-meshch')?.value, 10) || 1;
+  if (ch > WCBParser.regionMaxChannel(cc)) {
+    showToast(`WCB ${n}: mesh channel ${ch} is outside region ${cc} (1–${WCBParser.regionMaxChannel(cc)}). Pick another channel or region. Nothing was sent.`, 'error', 10000);
+    return { reason: `mesh channel ${ch} is outside region ${cc} — nothing was sent` };
   }
   return null;
 }
@@ -1677,6 +1791,8 @@ function onNavicoreIdChange() {
 const GENERAL_FIELD_LABELS = {
   wcbQuantity:    'WCB Quantity',
   meshChannel:    'Mesh Channel',
+  region:         'Region',
+  chanSync:       'Channel Sync',
   espnowPassword: 'ESP-NOW Password',
   macOctet2:      'MAC Octet 2',
   macOctet3:      'MAC Octet 3',
@@ -1699,6 +1815,8 @@ function extractGeneralFields(config) {
   return {
     wcbQuantity:    config.wcbQuantity             ?? 1,
     meshChannel:    config.meshChannel             ?? 1,
+    region:         config.region                  ?? '01',
+    chanSync:       config.chanSync                !== false,
     espnowPassword: config.espnowPassword          ?? '',
     macOctet2:      config.macOctet2               ?? '00',
     macOctet3:      config.macOctet3               ?? '00',
@@ -1745,6 +1863,8 @@ function applyGeneralFieldsToBoardConfig(n, fields) {
   if (!cfg) return;
   cfg.wcbQuantity    = fields.wcbQuantity;
   cfg.meshChannel    = fields.meshChannel;
+  cfg.region         = fields.region;
+  cfg.chanSync       = fields.chanSync;
   cfg.espnowPassword = fields.espnowPassword;
   cfg.macOctet2      = fields.macOctet2;
   cfg.macOctet3      = fields.macOctet3;
@@ -2113,11 +2233,63 @@ async function _otaRelayAwaitAck(relayConn, command, targetWcb, session, timeout
   return m ? { offset: parseInt(m[1]), status: parseInt(m[2]) } : null;
 }
 
+// Every [OTA:ACK,<src>,<session>,<offset>,<status>] line the relay prints, from the moment this is called, queued in
+// arrival order for the windowed stream (WCBParser.otaRelayStream). A listener of its own rather than sendAndCollect:
+// with a window in flight the ACKs are not answers to the line just sent, and one arriving between two waits must
+// not be lost. close() removes it.
+function _otaAckReader(conn) {
+  const queue = [];
+  let waiter = null;
+  const onLine = (line) => {
+    const m = /\[OTA:ACK,(\d+),(\d+),(\d+),(\d+)\]/.exec(line);
+    if (!m) return;
+    const a = { src: +m[1], session: +m[2], offset: +m[3], status: +m[4] };
+    if (waiter) { const w = waiter; waiter = null; w(a); } else queue.push(a);
+  };
+  conn._dataCallbacks.push(onLine);
+  return {
+    nextAck(timeoutMs) {
+      if (queue.length) return Promise.resolve(queue.shift());
+      return new Promise((resolve) => {
+        const t = setTimeout(() => { waiter = null; resolve(null); }, Math.max(0, timeoutMs));
+        waiter = (a) => { clearTimeout(t); resolve(a); };
+      });
+    },
+    close() {
+      conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine);
+      if (waiter) { const w = waiter; waiter = null; w(null); }
+    },
+  };
+}
+
+// Which link reaches the relay, as a key of WCBParser.OTA_RELAY_LINKS (the window and pace, and why, are there).
+// Web Serial - a direct port or a shared-hub tab - is 'usb'. Under Intellex the page's port is a WebSocket to the
+// Intellex host (intellex_shim.js sets window.__intellexShimInstalled), and behind the host is either a COM port or the
+// relay's own WebSocket; the host's /_api/status says which ("kind": "serial" | "ws"). A port that is not a real
+// SerialPort with no Intellex to ask, or an Intellex that does not answer, gets the WebSocket's smaller window: too
+// small costs time, too large drops lines at the relay.
+async function _otaRelayLink(conn) {
+  const intellex = !!window.__intellexShimInstalled;
+  const foreignPort = !!conn?.port && typeof SerialPort === 'function' && !(conn.port instanceof SerialPort);
+  if (!intellex && !foreignPort) return 'usb';
+  if (intellex) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 1500);
+      const st = await (await fetch('/_api/status', { cache: 'no-store', signal: ctl.signal })).json();
+      clearTimeout(t);
+      if (st?.kind === 'serial') return 'usb';
+    } catch (_) {}
+  }
+  return 'ws';
+}
+
 // ─── OTA over ESP-NOW via a relay (Phase 2) ─────────────────────────────────
 // The board is reachable only via a USB-connected RELAY. We stream the firmware
 // to the relay over USB; the relay forwards each frame to the target over
 // ESP-NOW; the target writes its inactive slot and reboots — no USB on the
-// target at all. ACK-paced: the target's cumulative write cursor drives flow.
+// target at all. Windowed: several frames in flight, the target's cumulative
+// write cursor pulling the window along (WCBParser.otaRelayStream).
 async function boardOtaRelay(n) {
   const relayN    = remoteRelayForBoard[n];
   const relayConn = boardConnections[relayN];
@@ -2128,6 +2300,7 @@ async function boardOtaRelay(n) {
   const fc        = _relayFuncChar(relayN);
   const cmd       = (s) => `${fc}OTA,${s}`;
   const btn       = document.getElementById(`b${n}-btn-ota-serial`);
+  let acks        = null;   // the stream's ACK listener (_otaAckReader), removed in finally
 
   // Chip family from the target's known HW version (firmware BEGIN guard is the backstop).
   const hw         = boardConfigs[n]?.hwVersion;
@@ -2167,50 +2340,34 @@ async function boardOtaRelay(n) {
         `${OTA_LEGACY_FIX} If that isn't it, check its HW version (chip family).`
       : `WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
 
-    // Stream 192-byte ESP-NOW frames, ACK-paced (target reports its write cursor).
-    const CHUNK = 192;
-    let offset = 0, stalls = 0, peak = 0;
-    while (offset < total) {
-      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
-      const ack = await _otaRelayAwaitAck(relayConn, cmd(`DATA,${targetWcb},${session},${offset},${_u8ToBase64(slice)}`), targetWcb, session, 4000);
-      // Cursor collapsed to 0 after real progress → the target dropped/timed out the
-      // session. Re-streaming the whole image from 0 can never succeed (the session
-      // id no longer matches), so fail fast with a clear message instead of spinning.
-      if (ack && ack.offset === 0 && peak > CHUNK) {
-        throw new Error(`target lost the OTA session at ${peak} bytes (it likely timed out or rebooted) — retry the OTA`);
-      }
-      // The target flags a dead/torn-down session with OTA_ST_ERR (status != 0) — an
-      // image overrun, a flash-write error, or an idle-timeout abort. That session id
-      // can never accept another byte, so resending is futile: fail fast with the cause
-      // rather than stalling to the retry cap. (WCB firmware + navicore_ota.h both send
-      // this honest status; a live in-flight dup/gap still ACKs OK, so it can't misfire
-      // on normal loss-recovery. The collapse-to-0 check above wins for the nicer
-      // "lost at N bytes" message when progress had been made.)
-      if (ack && ack.status !== 0) {
-        throw new Error(`target rejected OTA data near ${offset} bytes (write error or lost session) — retry the OTA`);
-      }
-      if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
-        if (++stalls > 60) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
-        if (ack && ack.offset < offset) offset = ack.offset;   // target is behind us — rewind
-        // Back off before resending. A stall means a frame or ACK was lost — almost
-        // always to ESP-NOW congestion (e.g. a controller broadcasting on the mesh).
-        // Re-sending instantly just floods the relay→target hop and deepens the
-        // congestion, so a single transient drop cascades straight to the cap. An
-        // escalating pause lets the target drain its queue + re-sync; the target's
-        // keep-alive means the slower cadence won't trip its 30 s session timeout.
-        await sleep(Math.min(stalls * 50, 600));
-        continue;
-      }
-      stalls = 0;
-      offset = ack.offset;                       // advance to the target's confirmed cursor
-      if (offset > peak) peak = offset;
-      updateFlashBar(n, offset, total);
-      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
-    }
+    // Stream 192-byte ESP-NOW frames, a window of them in flight, the target's write cursor pulling the window along
+    // and rewinding it past a loss (WCBParser.otaRelayStream, which also holds the fast-fails: a cursor collapsing to
+    // 0 after progress, and a non-zero ACK status). Window and pace come from the link to the relay
+    // (WCBParser.OTA_RELAY_LINKS): its input queue is what overflows.
+    const link = await _otaRelayLink(relayConn);
+    const { window: win, paceMs } = WCBParser.OTA_RELAY_LINKS[link];
+    termLog(n, `[OTA] relay link ${link === 'usb' ? 'USB serial' : 'WebSocket'}: ${win} frames in flight, ${paceMs} ms apart`, 'sys');
+    const io = {
+      send: (line) => relayConn.send(line + '\r'),
+      nextAck: (ms) => acks.nextAck(ms),
+      sleep,
+      now: () => performance.now(),
+      log: (text) => termLog(n, text, 'sys'),
+      progress: (done, all) => {
+        updateFlashBar(n, done, all);
+        setFlashStatus(n, `Uploading… ${Math.round(done / all * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
+      },
+    };
+    acks = _otaAckReader(relayConn);
+    const _ts = performance.now();
+    const st = await WCBParser.otaRelayStream(bytes, io, { target: targetWcb, session, prefix: cmd(''), window: win, paceMs });
+    const _sec = (performance.now() - _ts) / 1000;
+    termLog(n, `[OTA] ${total} bytes sent in ${_fmtDur(_sec * 1000)} (${(total / 1024 / _sec).toFixed(1)} KB/s): ` +
+               `${st.frames} frames, ${st.rewinds} rewind${st.rewinds === 1 ? '' : 's'}, ${st.timeouts} timeout${st.timeouts === 1 ? '' : 's'}`, 'sys');
 
-    // END — target verifies (SHA) + switches boot + reboots.
+    // END — target verifies (SHA) + switches boot + reboots. Late DATA ACKs are skipped (WCBParser.otaRelayFinish).
     setFlashStatus(n, 'Verifying…');
-    const endAck = await _otaRelayAwaitAck(relayConn, cmd(`END,${targetWcb},${session}`), targetWcb, session, 12000);
+    const endAck = await WCBParser.otaRelayFinish(io, { target: targetWcb, session, prefix: cmd(''), timeoutMs: 12000 });
     if (!endAck || endAck.status !== 0) throw new Error('OTA verify/finalize failed on the target');
 
     const _el = _fmtDur(performance.now() - _t0);
@@ -2248,6 +2405,7 @@ async function boardOtaRelay(n) {
     showToast(`Wireless OTA failed: ${e.message}`, 'error');
     try { await relayConn.send(cmd(`ABORT,${targetWcb},${session}`) + '\r'); } catch (_) {}
   } finally {
+    acks?.close();
     _otaInProgress.delete(n);          // re-enable ETM-listener pulls now the OTA is done
     _otaInProgress.delete(targetWcb);
     // Replay ETM edges swallowed during the transfer — but only once the LAST
@@ -3488,6 +3646,8 @@ function populateUIFromConfig(n, config) {
   setVal('ap-pass',   w.apPass);
   setVal('join-ssid', w.joinSsid);
   setVal('join-pass', w.joinPass);
+  setVal('token',     config.wifiToken);
+  _showWifiTokenProblem(n);
   updateWifiVisibility(n, w.mode ?? 'off');
 
   // Kyber — None / Local / Remote are all directly selectable. "Remote" means
@@ -7129,6 +7289,8 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-mac2',      newFields.macOctet2);
     set('g-mac3',      newFields.macOctet3);
     set('g-meshch',    newFields.meshChannel);
+    set('g-region',    newFields.region);
+    set('g-chsync',    newFields.chanSync ? 'on' : 'off');
     set('g-delimiter', newFields.delimiter);
     set('g-funcchar',  newFields.funcChar);
     set('g-cmdchar',   newFields.cmdChar);
@@ -7149,12 +7311,14 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     onWCBQuantityChange();
     onGeneralPasswordChange();
     onGeneralMacChange();
+    onRegionChange();
     onMeshChannelChange();
+    onChanSyncChange();
     onGeneralCmdCharChange();
     onETMToggle();
     onETMChecksumToggle();
     onGeneralETMChange();
-    // NaviCore is one of the 16 fields this modal DIFFS and DISPLAYS (GENERAL_FIELD_LABELS
+    // NaviCore is one of the fields this modal DIFFS and DISPLAYS (GENERAL_FIELD_LABELS
     // ends with navicoreEnabled/navicoreId), but nothing above applied it — so a user who
     // read a NaviCore row and clicked "Use <new> values" got every other field applied and
     // that one silently ignored, and re-pulling the board re-opened the identical modal
@@ -8551,6 +8715,8 @@ async function boardGo(n, opts = {}) {
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     [config.macOctet2, config.macOctet3] = macOctets;
     config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
+    config.region         = document.getElementById('g-region')?.value || '01';
+    config.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
     config.delimiter      = document.getElementById('g-delimiter').value || '^';
     config.funcChar       = document.getElementById('g-funcchar').value  || '?';
     config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -8983,6 +9149,8 @@ async function boardGoRemote(n, opts = {}) {
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   [config.macOctet2, config.macOctet3] = macOctets;
   config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
+  config.region         = document.getElementById('g-region')?.value || '01';
+  config.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
   config.delimiter      = document.getElementById('g-delimiter').value || '^';
   config.funcChar       = document.getElementById('g-funcchar').value  || '?';
   config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -9609,6 +9777,8 @@ function syncGeneralFromConfig(config) {
   set('g-mac2',      config.macOctet2);
   set('g-mac3',      config.macOctet3);
   set('g-meshch',    config.meshChannel || 1);
+  set('g-region',    config.region || '01');
+  set('g-chsync',    config.chanSync !== false ? 'on' : 'off');
   set('g-delimiter', config.delimiter);
   set('g-funcchar',  config.funcChar);
   set('g-cmdchar',   config.cmdChar);
@@ -9621,6 +9791,8 @@ function syncGeneralFromConfig(config) {
     onGeneralPasswordChange();
     onGeneralMacChange();
     onGeneralCmdCharChange();
+    onRegionChange();             // also re-marks the channel dropdown for the region
+    onChanSyncChange();
   });
 
   const etmEl = document.getElementById('g-etm-enabled');
@@ -9675,6 +9847,8 @@ function captureGeneralDOMSnapshot() {
     mac2:      g('g-mac2'),
     mac3:      g('g-mac3'),
     meshch:    g('g-meshch'),
+    region:    g('g-region'),
+    chsync:    g('g-chsync'),
     wcbq:      g('g-wcbq'),
     delimiter: g('g-delimiter'),
     funcchar:  g('g-funcchar'),
@@ -9690,6 +9864,8 @@ function restoreGeneralDOMSnapshot(snap) {
   set('g-mac2',      snap.mac2);
   set('g-mac3',      snap.mac3);
   set('g-meshch',    snap.meshch);
+  if (snap.region) set('g-region', snap.region);
+  if (snap.chsync) set('g-chsync', snap.chsync);
   set('g-wcbq',      snap.wcbq);
   set('g-delimiter', snap.delimiter);
   set('g-funcchar',  snap.funcchar);
@@ -9701,15 +9877,18 @@ function restoreGeneralDOMSnapshot(snap) {
   onGeneralPasswordChange();
   onGeneralMacChange();
   onGeneralCmdCharChange();
+  onRegionChange();
+  onChanSyncChange();
 }
 
 // ─── Reboot Detection ─────────────────────────────────────────────
 // Returns true if any command in the built string requires a board reboot
 // to take effect, based on WCB firmware documentation and source code.
 //
-// Reboot-required:  HW, WCB (the number), MAC, WCBCH, WIFI, KYBER, MAESTRO,REMOTE, MAP PWM input (not OUT)
+// Reboot-required:  HW, WCB (the number), MAC, WCBCH, REGION, WIFI (not WIFI,TOKEN), KYBER, MAESTRO,REMOTE,
+//                   MAP PWM input (not OUT)
 // Immediate effect: WCBQ (the firmware reconciles peers live - ?WCBQ, WCB.ino), EPASS, DELIM, FUNCCHAR, CMDCHAR,
-//                   BAUD, LABEL, BCAST, MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ
+//                   BAUD, LABEL, BCAST, MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ, CHSYNC, WIFI,TOKEN
 //
 // Both checks read the chain command by command - split exactly as the push splits it, on delimiter + function
 // identifier - and look only at each command's own verb. They used to match substrings of the whole chain, so a
@@ -9728,7 +9907,9 @@ function commandStringNeedsReboot(cmdString, funcChar = '?', delim = '^') {
     verb === 'WCB'   ||   // Board number — peers, MAC and ETM re-init need a reboot (not WCBQ: that is live)
     verb === 'MAC'   ||   // MAC octets — ESP-NOW identity
     verb === 'WCBCH' ||   // Mesh channel — firmware applies it on reboot, not live
-    verb === 'WIFI'  ||   // WiFi mode/SSID — firmware applies it on reboot, not live
+    verb === 'REGION' ||  // Channel sync region — applied at the next boot, before the channel (CHANNEL_SYNC.md §6)
+    // WiFi mode/SSID — firmware applies it on reboot, not live. Not the token: it applies to the next session.
+    (verb === 'WIFI' && sub !== 'TOKEN') ||
     // Kyber mode — serial port reservation. MAESTRO,REMOTE too: it is how a push leaves Kyber LOCAL for remote,
     // and the Maestro-remote bridge task only starts at boot. buildCommandString (parser.js) sends it only on a
     // real mode change or a full push, so a delta push of Maestro lines alone doesn't ask for a reboot.
@@ -9930,6 +10111,8 @@ function loadSystemFileContent(content) {
       fields: extractGeneralFields({
         wcbQuantity:    system.general.wcbQuantity,
         meshChannel:    system.general.meshChannel,
+        region:         system.general.region,
+        chanSync:       system.general.chanSync,
         espnowPassword: system.general.espnowPassword,
         macOctet2:      system.general.macOctet2,
         macOctet3:      system.general.macOctet3,
@@ -9942,6 +10125,8 @@ function loadSystemFileContent(content) {
     syncGeneralFromConfig(Object.assign(WCBParser.createDefaultBoardConfig(), {
       wcbQuantity: system.general.wcbQuantity,
       meshChannel: system.general.meshChannel,
+      region:      system.general.region,
+      chanSync:    system.general.chanSync,
       espnowPassword: system.general.espnowPassword,
       macOctet2: system.general.macOctet2,
       macOctet3: system.general.macOctet3,
@@ -9985,6 +10170,8 @@ function loadSystemFileContent(content) {
 function exportSystemFile() {
   systemConfig.general.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
   systemConfig.general.meshChannel    = parseInt(document.getElementById('g-meshch').value) || 1;
+  systemConfig.general.region         = document.getElementById('g-region')?.value || '01';
+  systemConfig.general.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
   systemConfig.general.espnowPassword = document.getElementById('g-password').value;
   systemConfig.general.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase();
   systemConfig.general.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase();
@@ -13941,8 +14128,14 @@ function _wdpAttr(s) {
 function parseWdpDump(raw) {
   const nodes = {}, order = [];
   let cfg = null;
+  // [WDPCH:...] (docs/CHANNEL_SYNC.md §2): one per device that sent its channel facts, the queried board first - which
+  // can come before that board's own [WDP:] row, so they are kept by number and attached at the end. A dump with none
+  // at all is from a board whose firmware predates channel sync (chanSeen false): it cannot say who else would follow.
+  const chans = new Map();
   for (const line of String(raw).split('\n')) {
     const t = line.trim();
+    const ch = WCBParser.parseWdpChanLine(t);
+    if (ch) { chans.set(ch.n, ch); continue; }
     let m = t.match(/^\[WDP:N=(\d+),CLIENT=(\d+),ALIAS=([^,]*),HW=(\d+),HWREV=([^,]*),FW=([^,]*),CAP=([0-9A-Fa-f]+),CTRL=(\d+),CAPTAGS=([^,]*),MAESTRO=([^,]*),AGE=(\d+),SEEN=(\d+)(?:,PEER=(\d))?\]$/);
     if (m) {
       const n = +m[1];
@@ -13979,7 +14172,49 @@ function parseWdpDump(raw) {
     if (m) cfg = { enabled: m[1] === undefined ? true : m[1] === '1',
                    autojoin: m[2] === '1', peers: +m[3] };
   }
-  return { nodes: order.map(n => nodes[n]), cfg };
+  for (const n of order) nodes[n].chan = chans.get(n) ?? null;
+  return { nodes: order.map(n => nodes[n]), cfg, chanSeen: chans.size > 0 };
+}
+
+// ─── Channel sync in the mesh panel (docs/CHANNEL_SYNC.md) ────────────────────
+// The leader comes from the queried board's ?CHSYNC ([CHSYNC:...] line), which only the Refresh button asks for: the
+// 12 s sweep must not put a command into the terminal that firmware before channel sync answers "Unknown command".
+// The sweep keeps showing the last answer, with its age.
+let _chanSyncStatus = null;   // { wcb, st (WCBParser.parseChanSyncStatus), at }
+
+// The Channel cell: the channel facts a device advertised, or why there are none. Colour on the tag's edge only.
+function _wdpChanCell(nd, chanSeen, st) {
+  const c = nd.chan;
+  if (!c) {
+    if (!chanSeen) return '<span class="wdp-sub">&mdash;</span>';
+    return `<span class="wdp-ch-tag wdp-ch-old" title="It sent no channel facts: its firmware predates channel sync. ` +
+           `When the mesh moves to another channel this device stays behind, and nothing on the mesh hears it until ` +
+           `it is updated or moved by hand.">older firmware: won't follow a channel move</span>`;
+  }
+  const tags = [];
+  if (st && st.leader === nd.n) tags.push('<span class="wdp-ch-tag wdp-ch-lead" title="The device the mesh follows (the queried board\'s ?CHSYNC)">leader</span>');
+  if (c.pinned) tags.push('<span class="wdp-ch-tag wdp-ch-pin" title="Joined to an access point: the mesh goes to its channel, not the other way">pinned</span>');
+  if (!c.sync)  tags.push('<span class="wdp-ch-tag wdp-ch-off" title="Channel sync is off on it (?CHSYNC,OFF): it never moves">sync off</span>');
+  if (c.rank === 255) tags.push('<span class="wdp-sub" title="Rank 255: never leads (temporary peers, management relays); it still follows">never leads</span>');
+  const rank = c.rank !== null && c.rank !== 255 ? ` · rank ${c.rank}` : '';
+  return `${c.ch ?? '?'} <span class="wdp-sub">${_wdpEsc(c.cc || '')}${rank}</span>${tags.length ? ' ' + tags.join(' ') : ''}`;
+}
+
+// The line above the table: who leads, or why the panel cannot say.
+function _wdpChanSummary(nodes, viaWcb, chanSeen, st, at) {
+  if (!chanSeen) return `<div class="rc-devices-note">WCB ${viaWcb}'s firmware predates channel sync, so it cannot ` +
+                        `tell which boards would follow a channel move. Update it to see that here.</div>`;
+  if (!st) return `<div class="wdp-toolbar"><span class="wdp-sub">Channel sync: <button class="wdp-btn" onclick="wdpMeshRefresh()" ` +
+                  `title="Asks WCB ${viaWcb} for its channel sync status (?CHSYNC)">Refresh</button> to see who leads.</span></div>`;
+  const age  = at ? Math.round((Date.now() - at) / 1000) : 0;
+  const ln   = nodes.find(nd => nd.n === st.leader);
+  const who  = st.leader === +viaWcb ? `WCB ${viaWcb} (this board)`
+             : ln ? `${_wdpKind(ln)} ${ln.n}${ln.alias ? ` (${_wdpEsc(ln.alias)})` : ''}`
+             : `#${st.leader}`;
+  const lead = st.leader ? `${who}${st.leaderRank !== null ? `, rank ${st.leaderRank}${st.leaderPinned ? ', pinned' : ''}` : ''}` : 'none heard';
+  return `<div class="wdp-toolbar"><span class="wdp-sub">WCB ${viaWcb}: channel sync ${st.enabled ? 'on' : '<strong>off</strong>'} · ` +
+         `channel ${st.ch ?? '?'} of 1–${st.maxCh ?? '?'} (region ${_wdpEsc(st.cc || '?')}) · ` +
+         `leader ${lead} · ${_wdpEsc(st.state || 'idle')}${age > 20 ? ` · as of ${age < 120 ? age + ' s' : Math.round(age / 60) + ' min'} ago` : ''}</span></div>`;
 }
 
 const _WDP_CAP_BITS = [
@@ -14021,9 +14256,13 @@ function _wdpPeerCell(nd) {
   return '<span class="wdp-sub">not peered</span>';
 }
 
-function renderWdpMesh(nodes, viaWcb, cfg) {
+// chanSeen: the dump carried [WDPCH] lines (parseWdpDump); left out, it is read off the nodes. Without them the queried
+// board's firmware predates channel sync: no Channel column (it could only say "unknown" on every row), a note instead.
+function renderWdpMesh(nodes, viaWcb, cfg, chanSeen) {
   const body = document.getElementById('wdp-mesh-body');
   if (!body) return;
+  if (chanSeen === undefined) chanSeen = (nodes || []).some(nd => nd.chan);
+  const cs = _chanSyncStatus && +_chanSyncStatus.wcb === +viaWcb ? _chanSyncStatus : null;
 
   // WDP turned OFF on this board — a definitive state, not "no neighbors yet".
   // (cfg.enabled is only reported by firmware that sends the EN= field.)
@@ -14093,6 +14332,7 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
       <td>${_wdpKind(nd)}</td>
       <td>${_wdpEsc(_wdpPlatform(nd))}</td>
       <td>${_wdpEsc(nd.fw || '—')}${nd.hwRev ? ' <span class="wdp-sub">(' + _wdpEsc(nd.hwRev) + ')</span>' : ''}</td>
+      ${chanSeen ? `<td>${_wdpChanCell(nd, chanSeen, cs?.st)}</td>` : ''}
       <td>${caps || '&mdash;'}</td>
       <td>${maestro}</td>
       <td>${ifs}</td>
@@ -14101,11 +14341,11 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
       <td>${isSelf ? '<span class="wdp-live">&#9679; this board</span>' : (nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>')}</td>
     </tr>`;
   }).join('');
-  body.innerHTML = toolbar + `
+  body.innerHTML = toolbar + _wdpChanSummary(nodes, viaWcb, chanSeen, cs?.st, cs?.at) + `
     <div class="wdp-mesh-scroll">
       <table class="wdp-mesh-table">
         <thead><tr>
-          <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>
+          <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>${chanSeen ? '<th>Channel</th>' : ''}
           <th>Capabilities</th><th>Maestros</th><th>Devices</th><th>Peer</th><th>Age</th><th>State</th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -14146,7 +14386,12 @@ async function wdpMeshRefresh() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
-    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);
+    // Who leads: asked only here, and only of a board whose dump shows it has channel sync (its own [WDPCH] line).
+    if (parsed.chanSeen) {
+      const st = WCBParser.parseChanSyncStatus(await t.conn.sendAndCollect(`${t.fc}CHSYNC`, 2500, '[CHSYNC:'));
+      if (st) _chanSyncStatus = { wcb: t.wcbNum, st, at: Date.now() };
+    }
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);
   } catch (e) {
     if (body) body.innerHTML = `<div class="rc-devices-note">Failed to read the mesh: ${_wdpEsc((e && e.message) || e)}</div>`;
   } finally {
@@ -14309,7 +14554,7 @@ async function meshAutoDiscoverTick() {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
     if (!parsed.nodes || !parsed.nodes.length) return;
-    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);   // keep the panel live (covers clients)
     // Feed EVERY relay card from this sweep — any connected board's dump shows the whole mesh,
     // so the relay card stays live even when the mesh is queried through a non-relay board.
     for (const rs of _relaySlots) { _relayNodes[rs] = parsed.nodes; renderRelayCard(rs); }
