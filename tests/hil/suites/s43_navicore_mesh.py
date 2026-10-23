@@ -2486,7 +2486,7 @@ def seq_pull(bench):
     assert not problems, "; ".join(problems)
 
 
-NOFIT_RX = re.compile(r"^\[MGMT\] WCB(\d+) asked for the sequence names in one reply, and \d+ names")   # answerSeqNames
+NOFIT_RX = re.compile(r"^\[MGMT\] Result too large to relay: .*WCB(\d+) asked for the sequence names in one reply")
 
 
 def _from_wcb(rx, line, n):
@@ -2559,8 +2559,8 @@ def seq_pull_paged(bench):
                         problems.append(f"W2 logged NaviCore's pages {asked}, not 1..{pages - 1}")
                     break
                 if refused and not paged:
-                    notes.append(f"NaviCore's WCB_Client predates paged names: W2 refused its one-reply request "
-                                 f"({refused[0][:90]}...) and NaviCore said {err!r} - no wrong list")
+                    notes.append(f"NaviCore's WCB_Client predates paged names: W2 sent its one-reply request the [ERROR] text "
+                                 f"({refused[0][:90]}...) and NaviCore said {err!r}")
                     break
                 if ask == 2:
                     problems.append(f"GET_WCB_SEQ 2: {err}, twice; W2 logged {len(paged)} later-page request(s) from "

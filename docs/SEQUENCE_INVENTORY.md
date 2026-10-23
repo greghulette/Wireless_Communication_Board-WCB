@@ -211,13 +211,15 @@ store holds (CLAUDE.md rule 14; the list built whole cost three copies of it).
 
 | Request | The whole list fits one reply | It does not |
 |---|---|---|
-| 13 (one reply) | type 14, the whole list - as it always was | **nothing**, and the target prints `[MGMT] WCB<n> asked for the sequence names in one reply, and <c> names (<l> characters) do not fit one - not answered. A requester that predates paged names cannot read them.` |
+| 13 (one reply) | type 14, the whole list - as it always was | type 14, `[ERROR] Result too large to relay (<l> chars, max 2912). Reduce stored variables/sequences or query this board directly.` - as it always was - and the target prints `[MGMT] Result too large to relay: ...` naming the requester |
 | 28, page 0 | type 14, the whole list - byte for byte the reply to a 13 | type 29, page 0 |
 | 28, page *p* > 0 | type 29, page *p* (the list shrank since page 0: *p* past the last page has no keys, and the new hash or `pages` starts the requester over) | type 29, page *p* |
 
-The 13 that does not fit gets nothing because nothing an old requester could take is right:
-every `WCB_Client` up to 1.18.1 reads any type-14 reply as the inventory, and the `[ERROR] Result
-too large` text read there as hash 0, count 0 - an **empty** list. A list that fits one reply
+The 13 that does not fit gets the `[ERROR]` text it always got (Greg, 2026-10-23: keep the error):
+a WCB relay prints it for the operator. Every `WCB_Client` up to 1.18.1 reads any type-14 reply as
+the inventory, so there it reads as hash 0, count 0 - an **empty** list - and 1.19.0 drops it. The
+real answer is paging: every requester on the paged firmware or WCB_Client 1.19.0 gets the whole
+list however long, and no relay result should ever need the error. A list that fits one reply
 but not one page (2,881-2,898 bytes of key text) goes whole to both requests.
 
 **Dedup.** On (requester, page), an old request counting as page 0, within 1.5 s **of the end
@@ -728,6 +730,7 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | §3: an old one-reply request for a list too long for one reply gets the `[ERROR] Result too large to relay` text again instead of no answer (Greg: keep the error). | — |
 | 2026-10-22 | §3: the names list in pages. One reply carries 2,912 characters, about 180 names, and the store holds a few hundred, so a longer list could not be listed over the mesh at all (`?MGMT,SEQ` printed `[ERROR] Result too large to relay`, which `WCB_Client` read as an empty list). A requester now asks for page 0 with a 59-byte `SEQ_PAGE_REQ` (28) ahead of the old 13; a list that fits still goes as type 14, one that does not goes a page per request as type 29 (`<hash>,<count>,<page>,<pages>,<keyBytes>,<keys>`, greedy pages of up to 2,880 bytes of key text, `WCB_SeqNamesWire.h`, shared with `WCB_Client` 1.19.0), and the requester joins them and prints one line / fires the callback once. An old one-reply request for a list that does not fit is not answered. The dedup is on (requester, page), timed from the end of the answer. The target and `?SEQ,NAMES` walk the keys alone (`seqStoreForEachKey`) instead of building the list three times in heap. §3's sizing (80 keys, `MAX_STORED_COMMANDS`) predated the file store and is replaced. Host test `tests/seqnames_page_test.cpp`; HIL `inv.mgmt_seq_paged`, `ncmesh.seq_pull_paged`. | — |
 | 2026-09-29 | §3d: the store is mounted for each call and unmounted as it returns. Held for 3 s after a call, a `?backup` left its 1.7 KB in use under a 250-token one-line restore, which lost four tokens to out-of-memory (HIL `backup.one_line_restore`, run `20260929-194057`). Bench-verified: a full store (32,727 bytes, 36 sequences) still pulls whole, in 12 of 16 parts. | `8e5d24f` |
 | 2026-09-29 | §3d: sequences move out of NVS into a file of their own, `/seqs` on the 128 KB `spiffs` partition (`WCB_SeqStore`), capped at 32 KB so a full store's config still pulls; NVS keeps the `seq_mig_done` marker, whose absence clears the file (a factory reset that blanks only NVS). Every boot that mounts moves what NVS lists into the file; a boot that cannot mount runs on the NVS layout (`?DEBUG,SEQNVS` forces one). `?SEQ,GET` answers `NOTFOUND` for `key_list` and `seq_mig_done`; a mesh request the store cannot answer right then gets no reply; a value that cannot be read is never hashed. §3a `TOOBIG` is reachable now that the store takes 3,999 characters. | `fecd481` |

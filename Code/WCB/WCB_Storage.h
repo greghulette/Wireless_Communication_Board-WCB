@@ -212,7 +212,7 @@ void listStoredCommands();
 enum SeqNamesResult : int {
     SEQN_REPLY  = 0,   // `reply` is filled: send it as packet type `type` (14 the whole list, 29 one page)
     SEQN_UNREAD = 1,   // the store could not be read right now (or the heap could not hold the reply): no answer
-    SEQN_NOFIT  = 2,   // an old one-reply request (page < 0) for a list that does not fit one reply: no answer
+    SEQN_NOFIT  = 2,   // an old one-reply request (page < 0) for a list that does not fit one reply: the [ERROR] text
 };
 struct SeqNamesInfo { unsigned count, keyBytes, pages; };   // the list's, for messages
 // The reply to a names request: page >= 0 for a page request (28), page < 0 for an old one (13).

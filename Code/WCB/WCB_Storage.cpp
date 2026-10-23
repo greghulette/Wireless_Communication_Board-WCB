@@ -997,7 +997,7 @@ int buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo
         type = seqn::PT_SEQ_FRAG;                  // the one-reply form, to an old request and a new one alike
         n = seqn::formatWholeHeader(hdr, sizeof(hdr), h, pg.count);
     } else if (legacy) {
-        return SEQN_NOFIT;                         // an old requester cannot page: no answer (WCB_SeqNamesWire.h)
+        return SEQN_NOFIT;                         // an old requester cannot page: it gets the [ERROR] text
     } else {
         type = seqn::PT_PAGE;
         seqn::PageHeader ph;

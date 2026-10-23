@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_231519ROCT2026                                  *****////
+///*****                                          Version 7.0.1_231523ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_231519ROCT2026";
+String SoftwareVersion = "7.0.1_231523ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4983,11 +4983,18 @@ static void answerSeqNames(uint8_t requester, int page) {
     return;
   }
   if (rc == SEQN_NOFIT) {
-    // An old requester (WCB firmware before paged names, WCB_Client up to 1.18.1) reads any type-14 reply as the whole
-    // inventory, and "[ERROR] Result too large" read as an EMPTY list there. Nothing it could take is right: no answer.
-    Serial.printf("[MGMT] WCB%d asked for the sequence names in one reply, and %u names (%u characters) do not fit "
-                  "one - not answered. A requester that predates paged names cannot read them.\n",
-                  requester, info.count, seqn::wholeLen(info.count, info.keyBytes));
+    // An old requester (WCB firmware before paged names, WCB_Client up to 1.18.1) cannot page, so it gets what it always
+    // got for a list this long: sendResultFrags' "[ERROR] Result too large to relay" text, which a WCB relay prints for
+    // the operator (Greg, 2026-10-23: keep the error). A WCB_Client that old reads it as an empty list; 1.19.0 drops it.
+    const unsigned whole = seqn::wholeLen(info.count, info.keyBytes);
+    const unsigned cap   = MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1);
+    Serial.printf("[MGMT] Result too large to relay: %u chars needs %u chunks, max %d (%u chars). WCB%d asked for the "
+                  "sequence names in one reply; a requester that predates paged names cannot read %u names.\n", whole,
+                  (whole + CONFIG_PAYLOAD_SIZE - 2) / (CONFIG_PAYLOAD_SIZE - 1), MGMT_MAX_CHUNKS, cap, requester,
+                  info.count);
+    sendResultFrags("[ERROR] Result too large to relay (" + String(whole) + " chars, max " + String(cap) +
+                    "). Reduce stored variables/sequences or query this board directly.", requester, PACKET_TYPE_SEQ_FRAG);
+    lastSeqReqMs = millis();
     return;
   }
   sendResultFrags(reply, requester, type);
