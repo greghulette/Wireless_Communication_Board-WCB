@@ -1,9 +1,11 @@
 """Intellex updating itself (src/selfupdate.py, Greg 2026-10-15: "an update intellex button"), under its venv, with
 nothing reaching GitHub and nothing of Greg's replaced:
 
-- _GitHub is a threaded HTTP server on 127.0.0.1 standing in for api.github.com: /repos/greghulette/Intellex/releases/
-  latest and /releases/tags/v<v> answer what a case gives it (a 404 by default, as for a repo with no release), and
-  /dl/<name> serves a release file. selfupdate.API points at it for the case.
+- _GitHub is a threaded HTTP server on 127.0.0.1 standing in for github.com's own release links, which selfupdate reads
+  since Intellex 0.2.4 instead of the REST API (api.github.com allows 60 calls an hour per public address, and a phone
+  hotspot's is shared: "403 rate limit exceeded", 2026-10-21). /greghulette/Intellex/releases/latest redirects to
+  .../releases/tag/<tag> (to .../releases, or a 404, while there is no release), and .../releases/download/<tag>/<name>
+  serves a release file. selfupdate.WEB points at it for the case.
 - The running app is a stand-in too: sys.executable is pointed at a file (windows) or into an Intellex.app (macos) under
   the stage's scratch directory, selfupdate.mode is set for the case, and selfupdate.restart only records the call.
 - Source mode works on throwaway git repositories: a bare 'origin', the checkout (selfupdate.root), and a second clone
@@ -28,37 +30,51 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ixpy  # noqa: E402
 from _ixpy import SkipCase, case, check  # noqa: E402
 
-REPO = "/repos/greghulette/Intellex"
+REPO = "/greghulette/Intellex"          # <selfupdate.WEB>/<selfupdate.REPO>
 
 
 class _GitHub:
-    """api.github.com for one repo's releases, and the release files: {tag: {"assets": {name: bytes}}}."""
+    """github.com's release links for one repo: releases {tag: {"assets": {name: bytes}}}; `latest` the tag
+    /releases/latest redirects to (None: no release - a redirect to the releases list, as GitHub answers, or a 404 with
+    no_release_404); `latest_status` an HTTP error that request answers instead (GitHub failing). Every request is
+    recorded in `asked` as "<METHOD> <path>"."""
 
     def __init__(self):
         self.releases, self.latest, self.asked = {}, None, []
+        self.no_release_404, self.latest_status = False, None
         gh = self
 
         class H(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
+            def _answer(self, with_body):
                 path = self.path.split("?", 1)[0]
-                gh.asked.append(path)
-                body, code, ctype = b'{"message": "Not Found"}', 404, "application/json"
-                if path == f"{REPO}/releases/latest" and gh.latest:
-                    body, code = json.dumps(gh._rel(gh.latest)).encode(), 200
-                elif path.startswith(f"{REPO}/releases/tags/"):
-                    tag = path.rsplit("/", 1)[1]
-                    if tag in gh.releases:
-                        body, code = json.dumps(gh._rel(tag)).encode(), 200
-                elif path.startswith("/dl/"):
-                    name = path[4:]
-                    for r in gh.releases.values():
-                        if name in r["assets"]:
-                            body, code, ctype = r["assets"][name], 200, "application/octet-stream"
+                gh.asked.append(f"{self.command} {path}")
+                body, code, ctype, where = b"Not Found", 404, "text/plain", None
+                if path == f"{REPO}/releases/latest":
+                    if gh.latest_status:
+                        body, code = b"HIL: GitHub failing", gh.latest_status
+                    elif gh.latest:
+                        body, code, where = b"", 302, f"{gh.url}{REPO}/releases/tag/{gh.latest}"
+                    elif not gh.no_release_404:
+                        body, code, where = b"", 302, f"{gh.url}{REPO}/releases"
+                elif path.startswith(f"{REPO}/releases/download/"):
+                    tag, _, name = path[len(f"{REPO}/releases/download/"):].partition("/")
+                    rel = gh.releases.get(tag)
+                    if rel and name in rel["assets"]:
+                        body, code, ctype = rel["assets"][name], 200, "application/octet-stream"
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                if where:
+                    self.send_header("Location", where)
                 self.end_headers()
-                self.wfile.write(body)
+                if with_body:
+                    self.wfile.write(body)
+
+            def do_GET(self):
+                self._answer(True)
+
+            def do_HEAD(self):
+                self._answer(False)
 
             def log_message(self, *a):
                 pass
@@ -66,11 +82,6 @@ class _GitHub:
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-
-    def _rel(self, tag):
-        return {"tag_name": tag, "html_url": f"https://example.invalid/releases/{tag}",
-                "assets": [{"name": n, "browser_download_url": f"{self.url}/dl/{n}", "size": len(b)}
-                           for n, b in self.releases[tag]["assets"].items()]}
 
     def release(self, ver, files, sums=True, latest=True):
         assets = dict(files)
@@ -83,17 +94,18 @@ class _GitHub:
 
     def close(self):
         self.srv.shutdown()
+        self.srv.server_close()
 
 
 @contextlib.contextmanager
 def _as(ctx, mode, exe=None):
-    """selfupdate with a fresh state, pointed at a stand-in GitHub, running as `mode` (exe: sys.executable), online,
-    with restart() recorded -> (selfupdate, github, restarts)."""
+    """selfupdate with a fresh state, pointed at a stand-in GitHub (selfupdate.WEB), running as `mode` (exe:
+    sys.executable), online, with restart() recorded -> (selfupdate, github, restarts)."""
     import selfupdate
     gh = _GitHub()
-    saved = (selfupdate.API, selfupdate.mode, selfupdate.restart, sys.executable, os.environ.get("INTELLEX_OFFLINE"))
+    saved = (selfupdate.WEB, selfupdate.mode, selfupdate.restart, sys.executable, os.environ.get("INTELLEX_OFFLINE"))
     restarts = []
-    selfupdate.API = gh.url
+    selfupdate.WEB = gh.url
     selfupdate.mode = lambda: mode
     selfupdate.restart = lambda: restarts.append(time.time())
     if exe:
@@ -103,7 +115,7 @@ def _as(ctx, mode, exe=None):
     try:
         yield selfupdate, gh, restarts
     finally:
-        selfupdate.API, selfupdate.mode, selfupdate.restart, sys.executable, off = saved
+        selfupdate.WEB, selfupdate.mode, selfupdate.restart, sys.executable, off = saved
         if off is None:
             os.environ.pop("INTELLEX_OFFLINE", None)
         else:
@@ -173,24 +185,40 @@ def version_info(ctx):
 
 
 # ------------------------------------------------------------------ the check
-@case("the check against GitHub Releases: none published, up to date, a newer one with this computer's build and "
-      "its SHA256SUMS.txt (offered), one without this computer's build or without checksums (not offered), offline "
-      "(nothing asked), and a second check inside the hour answered from the cache", group="selfupdate")
+@case("the check against GitHub Releases, through github.com's links and never the REST API (Intellex 0.2.4): none "
+      "published (the releases list or a 404), GitHub failing (an error, not 'none published'), up to date, a newer "
+      "one with this computer's build in its SHA256SUMS.txt (offered, the tag read from the /releases/latest redirect "
+      "without following it), one without this computer's build or without checksums (not offered), offline (nothing "
+      "asked), and a second check inside the hour answered from the cache", group="selfupdate")
 def check_release(ctx):
     import version
     for mode, name in (("windows", f"Intellex-{NEXT}-windows.exe"), ("macos", None)):
         with _as(ctx, mode) as (su, gh, _):
             name = name or su.asset_name(NEXT, "macos")
+            for label in ("redirected to the releases list", "a 404"):
+                gh.no_release_404 = label == "a 404"
+                s = su.check(force=True)
+                check(not s["available"] and s["reason"] == "no Intellex release has been published yet"
+                      and not s["error"], f"{mode}, no release ({label}): {s['available']} {s['reason']!r} "
+                                          f"{s['error']!r}")
+            gh.no_release_404, gh.latest_status = False, 500
             s = su.check(force=True)
-            check(not s["available"] and s["reason"] == "no Intellex release has been published yet",
-                  f"{mode}, no release: {s['available']} {s['reason']!r}")
+            check(not s["available"] and "500" in s["error"] and "published" not in s["reason"],
+                  f"{mode}, GitHub answering 500: error {s['error']!r}, reason {s['reason']!r}")
+            gh.latest_status = None
             gh.release(version.VERSION, {su.asset_name(version.VERSION, mode): b"same"})
             s = su.check(force=True)
-            check(not s["available"] and s["reason"] == "up to date", f"{mode}, same version: {s['reason']!r}")
+            check(not s["available"] and s["reason"] == "up to date" and not s["error"],
+                  f"{mode}, same version: {s['reason']!r} {s['error']!r}")
             gh.release(NEXT, {name: b"new"})
+            k = len(gh.asked)
             s = su.check(force=True)
             check(s["available"] and s["latest"] == NEXT and s["asset"] == name and not s["reason"],
                   f"{mode}, {NEXT} with {name}: available {s['available']}, asset {s['asset']!r}, {s['reason']!r}")
+            check(s["notes_url"] == f"{gh.url}{REPO}/releases/tag/v{NEXT}", f"{mode}: notes_url {s['notes_url']!r}")
+            want = [f"HEAD {REPO}/releases/latest", f"GET {REPO}/releases/download/v{NEXT}/SHA256SUMS.txt"]
+            check(gh.asked[k:] == want, f"{mode}: the check asked {gh.asked[k:]}, expected {want} (the redirect read, "
+                                        f"not followed)")
             gh.release(NEXT, {"Intellex-9.9.9-otheros.bin": b"x"})
             s = su.check(force=True)
             check(not s["available"] and "has no build for this computer" in s["reason"],
@@ -211,6 +239,10 @@ def check_release(ctx):
             s = su.check(force=True)
             check(not s["available"] and "offline" in s["reason"] and len(gh.asked) == n,
                   f"{mode}, offline: {s['reason']!r}, asked {gh.asked[n:]}")
+            stray = [a for a in gh.asked if not a.endswith(f" {REPO}/releases/latest")
+                     and not a.startswith(f"GET {REPO}/releases/download/")]
+            check(not stray, f"{mode}: the check asked GitHub for more than /releases/latest and release files "
+                             f"(the REST API, or a followed redirect): {stray[:4]}")
 
 
 def _reset_state_only(su):
@@ -234,10 +266,14 @@ def install_windows(ctx):
         new = b"NEW-" + os.urandom(64)
         gh.release(NEXT, {f"Intellex-{NEXT}-windows.exe": new})
         check(su.check(force=True)["available"], "the release was not offered")
+        k = len(gh.asked)
         ok, why = su.start_install()
         check(ok, f"the install did not start: {why}")
         ins = _wait_install(su, restarts)
         check(not ins["error"] and ins["done"] and ins["restarting"], f"the install: {ins}")
+        dl = f"GET {REPO}/releases/download/v{NEXT}/"
+        want = [dl + "SHA256SUMS.txt", dl + f"Intellex-{NEXT}-windows.exe"]
+        check(gh.asked[k:] == want, f"the install asked {gh.asked[k:]}, expected the release's own links {want}")
         check(open(exe, "rb").read() == new, "Intellex.exe is not the download")
         old = os.path.join(d, "Intellex.old.exe")
         check(open(old, "rb").read() == b"OLD", "the running copy was not kept as Intellex.old.exe")

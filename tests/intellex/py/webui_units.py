@@ -14,17 +14,20 @@ its venv, against a local stand-in for Pages. Nothing reaches the network:
 
 group "webui_version" (intellex.webui_version_online, IX re-scan host.api.webui_version): Intellex src/host.py
 api_webui_version, _published_dtg and _wcb_published_ver on its real build_app() in this process (bridge_units._Server).
-A bundle older than the published copy is stale with checked true and no reason; an equal one is not stale; each tool
-asks its configured branch's copy (settings.tool_base: <site>/config_tool or <site>/dev/<branch>/<leaf>), never main's
-for a branch; a failure says why - certs.ADVICE for a certificate the venv cannot verify, the HTTP error otherwise -
-without hiding the other tool's answer.
+A bundle older than the published copy is stale with checked true and no reason; an equal one is not stale; one whose
+page loads files the copy lacks is stale whatever its stamp, `missing` naming them (Intellex 0.2.3, src/webfiles.py
+missing_from); each tool asks its configured branch's copy (settings.tool_base: <site>/config_tool or
+<site>/dev/<branch>/<leaf>), never main's for a branch; a failure says why - certs.ADVICE for a certificate the venv
+cannot verify, the HTTP error otherwise - without hiding the other tool's answer.
 
 group "fetch_webui" (intellex.fetch_webui_unit, IX re-scan tools.fetch_webui): Intellex tools/fetch_webui.py in this
 process, its main() with each argv. _safe_relname (a pure unit); cmdlib_names' walk of each vendor manifest; each tool's
 update as one atomic swap (a staging directory in tempfile's directory, then a rename that keeps the old bundle as
 <dir>.prev), byte-identical to what was served; up to date, --check and --force; one missing file changes nothing and
-leaves no staging directory; the branch's /dev/<branch>/ copy when it is published, else main's with a note; --tool all
-as two independent swaps.
+leaves no staging directory - but a Wizard vendor/ file is a line, not a failure (Intellex 0.2.2: Intellex never loads
+it); the Wizard also takes what its index.html loads beyond WCB_FILES, the cmdlib/ vendors its code names and the
+images those name, and a same-stamp copy lacking one is fetched whole again (0.2.2-0.2.3); the branch's /dev/<branch>/
+copy when it is published, else main's with a note; --tool all as two independent swaps.
 """
 import contextlib
 import datetime
@@ -179,11 +182,16 @@ def _blob(tag, name):
 
 
 EXTRA_IMG = "hil-extra.png"     # a ../Images name the Wizard uses that WCB_IMAGES does not list
+SEQ_IMG = "hil-seq.png"         # a ../Images name only a file index.html loads beyond WCB_FILES uses
 
 
-def _wizard_site(prefix, ver, tag, drop=()):
+def _wizard_site(prefix, ver, tag, drop=(), seq=False):
     """A published Wizard at <prefix>/Wizard with its <prefix>/Images sibling -> {server path: bytes}. app.js carries
-    UI_VERSION; index.html names EXTRA_IMG. drop: server paths to leave out (a 404)."""
+    UI_VERSION; index.html names EXTRA_IMG. drop: server paths to leave out (a 404).
+
+    seq: the page also loads hil-seq.css and hil-seq.js, which WCB_FILES does not list - as the seq-builder Wizard loads
+    seq-builder.css and .js (Intellex 0.2.1 bundled it without them) - and hil-seq.js names two command-library vendors
+    by their manifests, wcb (in CMDLIB_VENDORS) and hil-acme (not), and SEQ_IMG."""
     import fetch_webui as fw
     files = {}
     for name in list(fw.WCB_FILES) + list(fw.WCB_VENDOR):
@@ -191,9 +199,22 @@ def _wizard_site(prefix, ver, tag, drop=()):
         if name == "app.js":
             body = f"const UI_VERSION = '{ver}';\r\n".encode() + body
         elif name == "index.html":
-            body = f'<img src="../Images/{EXTRA_IMG}" alt="">\r\n'.encode() + body
+            tags = '<link rel="stylesheet" href="hil-seq.css"><script src="hil-seq.js"></script>\r\n' if seq else ""
+            body = f'<img src="../Images/{EXTRA_IMG}" alt="">\r\n{tags}'.encode() + body
         files[f"{prefix}/Wizard/{name}"] = body
-    for name in list(fw.WCB_IMAGES) + [EXTRA_IMG]:
+    images = list(fw.WCB_IMAGES) + [EXTRA_IMG]
+    if seq:
+        wiz = f"{prefix}/Wizard"
+        files[f"{wiz}/hil-seq.css"] = _blob(tag, "hil-seq.css")
+        files[f"{wiz}/hil-seq.js"] = (b"const LIBS = ['cmdlib/wcb/manifest.json', 'cmdlib/hil-acme/manifest.json'];\r\n"
+                                      + f"const PIC = '../Images/{SEQ_IMG}';\r\n".encode() + _blob(tag, "hil-seq.js"))
+        files[f"{wiz}/cmdlib/wcb/manifest.json"] = _manifest(["wcb-builder.json"])
+        files[f"{wiz}/cmdlib/wcb/wcb-builder.json"] = _blob(tag, "wcb/wcb-builder.json")
+        files[f"{wiz}/cmdlib/hil-acme/manifest.json"] = _manifest(["./boards/x.json"])
+        files[f"{wiz}/cmdlib/hil-acme/boards/x.json"] = _blob(tag, "hil-acme/boards/x.json")
+        files[f"{wiz}/cmdlib/hil-acme/LICENSE"] = _blob(tag, "hil-acme/LICENSE")
+        images.append(SEQ_IMG)
+    for name in images:
         files[f"{prefix}/Images/{name}"] = _blob(tag, name)
     return {p: b for p, b in files.items() if p not in drop}
 
@@ -333,11 +354,16 @@ def _branches(nc, wcb):
 
 
 # ------------------------------------------------------------------ group "webui_version"
+_NC_INDEX = ("webui", "index.html")                     # under the stage's src/
+_WZ_INDEX = ("webui_wcb", "Wizard", "index.html")
+_WZ_APP = ("webui_wcb", "Wizard", "app.js")
+
+
 def _bundle(ctx, dtg, ui):
     """The stage's bundled tools, as far as the version check reads them: the config tool's footer-dtg and the
     Wizard's UI_VERSION (None removes that file)."""
-    nc = os.path.join(ctx.src, "webui", "index.html")
-    wz = os.path.join(ctx.src, "webui_wcb", "Wizard", "app.js")
+    nc = os.path.join(ctx.src, *_NC_INDEX)
+    wz = os.path.join(ctx.src, *_WZ_APP)
     for p, text in ((nc, None if dtg is None else f'<span id="footer-dtg">{dtg}</span>\n'),
                     (wz, None if ui is None else f"const UI_VERSION = '{ui}';\n")):
         if text is None:
@@ -347,6 +373,15 @@ def _bundle(ctx, dtg, ui):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
+
+
+def _whole_again(ctx):
+    """Back to the old stamps in copies whose pages load nothing (no Wizard index.html), so webui.missing_from finds
+    nothing missing (Intellex src/webfiles.py missing_from) and a stale answer is the stamps' alone."""
+    _bundle(ctx, "HIL-NC-OLD", "HIL-WZ-OLD")
+    p = os.path.join(ctx.src, *_WZ_INDEX)
+    if os.path.exists(p):
+        os.remove(p)
 
 
 def _ver_site(nc_path, dtg, wz_path, ui):
@@ -359,8 +394,9 @@ def _ver_site(nc_path, dtg, wz_path, ui):
 
 
 @case("online, each tool's configured branch compared with its published copy: an older bundle is stale, checked "
-      "true, no reason; an equal one is not stale; a branch asks <site>/dev/<branch>/<leaf>, main asks <site>/<leaf>, "
-      "and never main's copy for a branch", group="webui_version")
+      "true, no reason; an equal one is not stale, missing [] and repaired None; an equal one whose page loads files "
+      "it lacks is stale, missing naming them (Intellex 0.2.3); a branch asks <site>/dev/<branch>/<leaf>, main asks "
+      "<site>/<leaf>, and never main's copy for a branch", group="webui_version")
 def webui_version_online(ctx):
     from bridge_units import _server
     s = _server()
@@ -378,9 +414,13 @@ def webui_version_online(ctx):
                          **_ver_site(None, None, wz_main, "HIL-WZ-MAIN")})
             k = len(pages.github)
             code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            # missing/repaired (Intellex 0.2.3): what each copy's own page loads and the copy lacks - nothing, as these
+            # copies' pages load nothing (the config tool's index.html is the stamp alone, the Wizard has none) - and
+            # what the start's _repair_incomplete_tools fetched again, None: the stage started with no tool at all.
             want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-NEW", "stale": True, "checked": True, "reason": "",
+                    "missing": [], "repaired": None,
                     "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-NEW", "stale": True, "checked": True,
-                            "reason": ""}}
+                            "reason": "", "missing": [], "repaired": None}}
             if code != 200 or body != want:
                 problems.append(f"bundles older than Pages (navicore main, wcb hil-wzb): {code} {body}, expected {want}")
             asked = sorted(pages.github[k:])
@@ -395,13 +435,38 @@ def webui_version_online(ctx):
             k = len(pages.github)
             code, body = s.req("GET", "/_api/webui-version", timeout=60)
             want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-OLD", "stale": False, "checked": True, "reason": "",
+                    "missing": [], "repaired": None,
                     "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-OLD", "stale": False, "checked": True,
-                            "reason": ""}}
+                            "reason": "", "missing": [], "repaired": None}}
             if code != 200 or body != want:
                 problems.append(f"bundles equal to their branch's Pages copy: {code} {body}, expected {want}")
             asked = sorted(pages.github[k:])
             if asked != sorted([PAGES + nc_dev, PAGES + wz_dev]):
                 problems.append(f"with both on branches the check asked {asked}, expected the two dev/<branch>/ copies")
+
+            # 2b. The same stamps, but each copy's page loads what the copy lacks (Intellex 0.2.1 bundled the
+            # seq-builder Wizard without seq-builder.js, .css and cmdlib/, and the launcher called it up to date):
+            # stale whatever the stamp says, `missing` naming each file in page order and "cmdlib/" for a library the
+            # code loads with none beside it. Nothing more is asked of Pages for it.
+            for p, text in ((_WZ_INDEX, '<link rel="stylesheet" href="hil-seq.css"><script src="app.js"></script>'
+                                        '<script src="hil-seq.js"></script>\n'),
+                            (_NC_INDEX, '<span id="footer-dtg">HIL-NC-OLD</span><script src="hil-nc.js"></script>\n'
+                                        '<script>fetch("cmdlib/navicore/manifest.json")</script>\n')):
+                _put_text(os.path.join(ctx.src, *p), text)
+            with open(os.path.join(ctx.src, *_WZ_APP), "a", encoding="utf-8") as f:
+                f.write("const HIL_LIB = 'cmdlib/wcb/manifest.json';\n")
+            k = len(pages.github)
+            code, body = s.req("GET", "/_api/webui-version", timeout=60)
+            want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-OLD", "stale": True, "checked": True, "reason": "",
+                    "missing": ["hil-nc.js", "cmdlib/"], "repaired": None,
+                    "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-OLD", "stale": True, "checked": True,
+                            "reason": "", "missing": ["hil-seq.css", "hil-seq.js", "cmdlib/"], "repaired": None}}
+            if code != 200 or body != want:
+                problems.append(f"copies whose page loads what they lack, at their branch's stamps: {code} {body}, "
+                                f"expected {want}")
+            if sorted(pages.github[k:]) != sorted([PAGES + nc_dev, PAGES + wz_dev]):
+                problems.append(f"incomplete copies: the check asked {sorted(pages.github[k:])}")
+            _whole_again(ctx)
 
             # 3. Back on main: the main copies, older bundles stale again.
             _branches("main", "main")
@@ -417,6 +482,7 @@ def webui_version_online(ctx):
     finally:
         pages.close()
         _branches("main", "main")
+        _whole_again(ctx)
     check(not problems, "; ".join(problems))
 
 
@@ -637,8 +703,11 @@ def navicore_swap(ctx):
 
 @case("the Wizard (--tool wcb --base <stand-in>): every Wizard, vendor and image file byte-identical, the ../Images "
       "name WCB_IMAGES lacks fetched with a line, a missing image a line and not a failure, the old bundle (its own "
-      "extra file included) kept whole as webui_wcb.prev; up to date fetches app.js alone; a missing vendor file "
-      "changes nothing", group="fetch_webui")
+      "extra file included) kept whole as webui_wcb.prev; up to date fetches app.js alone; a missing vendor file (a "
+      "flasher library Intellex never loads) a line and not a failure; what index.html loads beyond WCB_FILES, the "
+      "cmdlib/ vendors its code names and the images they name fetched too; a copy lacking one of them at the same "
+      "stamp fetched whole again (--check only says so), then up to date; a missing page file or cmdlib file, or no "
+      "readable manifest, changes nothing (Intellex 0.2.2-0.2.3)", group="fetch_webui")
 def wizard_swap(ctx):
     import fetch_webui as fw
     wz, prev = str(fw.WEBUI_WCB), str(fw.WEBUI_WCB.with_suffix(".prev"))
@@ -671,13 +740,77 @@ def wizard_swap(ctx):
             if rc != 0 or "[wcb] up to date" not in out or pages.since(k) != [f"{WCB}/Wizard/app.js"]:
                 problems.append(f"up to date: exited {rc}, asked {pages.since(k)}, {out[-120:]!r}")
 
-            before = (_tree(wz), _tree(prev))
-            pages.serve(_wizard_site(WCB, "HIL-WZ-2", "w2", drop=(f"{WCB}/Wizard/{fw.WCB_VENDOR[-1]}",)))
+            # A vendor/ file the site lacks (an esptool-js bump renames it): reported and skipped since Intellex 0.2.2 -
+            # Intellex flashes natively and never loads it, and failing on it held back the whole Wizard. The rest
+            # lands as served, the bundle before kept whole as .prev.
+            w1_disk = _tree(wz)
+            w2 = _wizard_site(WCB, "HIL-WZ-2", "w2", drop=(f"{WCB}/Wizard/{fw.WCB_VENDOR[-1]}",))
+            pages.serve(w2)
             rc, out = _run(["--tool", "wcb", "--base", base])
-            if rc != 1 or "[wcb] nothing was changed" not in out:
-                problems.append(f"a missing vendor file: exited {rc}, {out[-160:]!r}")
-            if (_tree(wz), _tree(prev)) != before:
-                problems.append(f"a missing vendor file changed the bundle: {_diff(_tree(wz), before[0])}")
+            if rc != 0 or "[wcb] updated to HIL-WZ-2" not in out or f"could not fetch {fw.WCB_VENDOR[-1]}" not in out:
+                problems.append(f"a missing vendor file: exited {rc}, {out[-200:]!r}; expected 0, updated, and a "
+                                f"'could not fetch {fw.WCB_VENDOR[-1]}' line")
+            if _tree(wz) != _wizard_disk(w2, WCB):
+                problems.append(f"a missing vendor file: src/webui_wcb vs what was served: "
+                                f"{_diff(_tree(wz), _wizard_disk(w2, WCB))}")
+            if _tree(prev) != w1_disk:
+                problems.append(f"a missing vendor file: webui_wcb.prev vs the bundle before: "
+                                f"{_diff(_tree(prev), w1_disk)}")
+
+            # What the page loads beyond the lists (webfiles.page_refs), the cmdlib/ its code names - a vendor
+            # CMDLIB_VENDORS lacks included (webfiles.named_vendors) - and the ../Images file one of those names.
+            w3 = _wizard_site(WCB, "HIL-WZ-3", "w3", seq=True)
+            pages.serve(w3)
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 0 or "[wcb] updated to HIL-WZ-3" not in out or \
+                    "hil-seq.js: loaded by this Wizard's index.html" not in out or \
+                    f"Images/{SEQ_IMG}: the Wizard uses it and WCB_IMAGES does not list it" not in out:
+                problems.append(f"a Wizard loading files beyond WCB_FILES: exited {rc}, {out[-240:]!r}")
+            if _tree(wz) != _wizard_disk(w3, WCB):
+                problems.append(f"a Wizard loading files beyond WCB_FILES: src/webui_wcb vs what was served: "
+                                f"{_diff(_tree(wz), _wizard_disk(w3, WCB))}")
+
+            # A copy lacking some of it at the published stamp, as 0.2.1's fixed list left the seq-builder Wizard:
+            # not up to date (webfiles.missing_from) - --check says so and changes nothing, a plain run fetches it
+            # whole - and once whole, up to date again (one request), not refetched every time.
+            shutil.rmtree(os.path.join(wz, "Wizard", "cmdlib"), ignore_errors=True)
+            with contextlib.suppress(FileNotFoundError):        # (absent: the fetch above already failed)
+                os.remove(os.path.join(wz, "Wizard", "hil-seq.css"))
+            incomplete = _tree(wz)
+            rc, out = _run(["--tool", "wcb", "--base", base, "--check"])
+            if rc != 0 or "[wcb] the bundled copy lacks hil-seq.css, cmdlib/" not in out or \
+                    "update available" not in out or _tree(wz) != incomplete:
+                problems.append(f"--check on a copy lacking hil-seq.css and cmdlib/: exited {rc}, {out[-200:]!r}")
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 0 or "[wcb] the bundled copy lacks hil-seq.css, cmdlib/ - fetching it whole again" not in out or \
+                    "[wcb] updated to HIL-WZ-3" not in out:
+                problems.append(f"a copy lacking hil-seq.css and cmdlib/ at the published stamp: exited {rc}, "
+                                f"{out[-200:]!r}; expected it fetched whole again")
+            if _tree(wz) != _wizard_disk(w3, WCB) or _tree(prev) != incomplete:
+                problems.append(f"the incomplete copy fetched again: {_diff(_tree(wz), _wizard_disk(w3, WCB))}; .prev "
+                                f"vs the incomplete copy {_diff(_tree(prev), incomplete)}")
+            k = pages.mark()
+            rc, out = _run(["--tool", "wcb", "--base", base])
+            if rc != 0 or "[wcb] up to date" not in out or pages.since(k) != [f"{WCB}/Wizard/app.js"]:
+                problems.append(f"the whole copy again: exited {rc}, asked {pages.since(k)}, {out[-120:]!r}; expected "
+                                f"up to date")
+
+            # One file the page or its library loads missing, or no manifest to read: nothing changes.
+            before = (_tree(wz), _tree(prev))
+            for label, gone, words in (
+                    ("a missing hil-seq.css", (f"{WCB}/Wizard/hil-seq.css",), "[wcb] nothing was changed"),
+                    ("a missing cmdlib board", (f"{WCB}/Wizard/cmdlib/hil-acme/boards/x.json",),
+                     "[wcb] nothing was changed"),
+                    ("no readable cmdlib manifest", (f"{WCB}/Wizard/cmdlib/wcb/manifest.json",
+                                                     f"{WCB}/Wizard/cmdlib/hil-acme/manifest.json"),
+                     "refusing a partial update")):
+                pages.serve(_wizard_site(WCB, "HIL-WZ-4", "w4", seq=True, drop=gone))
+                rc, out = _run(["--tool", "wcb", "--base", base])
+                if rc != 1 or words not in out:
+                    problems.append(f"{label}: exited {rc}, {out[-160:]!r}; expected 1 and {words!r}")
+                if (_tree(wz), _tree(prev)) != before:
+                    problems.append(f"{label} changed the bundle: {_diff(_tree(wz), before[0])}; .prev "
+                                    f"{_diff(_tree(prev), before[1])}")
             if os.listdir(tmp):
                 problems.append(f"a staging directory was left behind: {os.listdir(tmp)}")
             if refused:
