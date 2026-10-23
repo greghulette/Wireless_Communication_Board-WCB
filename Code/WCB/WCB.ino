@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_221844ROCT2026                                  *****////
+///*****                                          Version 7.0.1_222040ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_221844ROCT2026";
+String SoftwareVersion = "7.0.1_222040ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -782,8 +782,7 @@ struct ETMCharBoardResult {
     unsigned long latencyAccum;
 };
 
-// [phase 0-2][board index 0-(MAX_WCB_COUNT-1)]
-ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
+// etmCharBoardResults[phase 0-2][board index 0-(MAX_WCB_COUNT-1)] lives in EtmCharTables, below.
 
 // Hard cap on messages PER PHASE. This is the row length of etmCharPhaseSentTimes below, and
 // processETMChar() clamps totalMessages to it — do not raise one without the other.
@@ -798,7 +797,21 @@ ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
 // unclamped run could never satisfy `totalAcked >= totalMessages` and EVERY phase ran to its full
 // timeout (count 200 / 2 peers ≈ 11.6 minutes of dead wall-clock).
 #define ETM_CHAR_MAX_MSGS 200
-unsigned long etmCharPhaseSentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
+
+// A run's per-board results and send times (3.6 KB): allocated when a run starts (startETMChar) and freed once its
+// results text is built (printETMCharResults) or it is abandoned - static until 2026-10-22, when that much of W1's
+// AP-mode heap was the difference between ?backup building every line and not (HIL run 20261022-132202, tracker
+// #110). Every access is on the loop task - etmProcessAck runs there, fed by the ACK ring - and each one is behind
+// etmCharRunning (processETMChar, processETMCharAck, the ACK hook) or inside printETMCharResults before the free,
+// so nothing reads them after they are gone.
+struct EtmCharTables {
+    ETMCharBoardResult results[3][MAX_WCB_COUNT];        // [phase][board index]
+    unsigned long      sentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
+};
+static EtmCharTables *etmCharTables = nullptr;
+#define etmCharBoardResults   (etmCharTables->results)
+#define etmCharPhaseSentTimes (etmCharTables->sentTimes)
+static void etmCharFreeTables() { free(etmCharTables); etmCharTables = nullptr; }
 int etmCharPhaseMessageIndex = 0;
 bool etmCharClampWarned = false;   // one-shot notice per run when the sample had to be reduced
 unsigned long etmCharPhaseStartTime = 0;
@@ -1939,6 +1952,13 @@ const char *startETMChar() {
     }  
 
     sendHeldETMCharResult(true);   // a result still held for the previous run's requester goes first
+    if (!etmCharTables) etmCharTables = (EtmCharTables *)malloc(sizeof(EtmCharTables));
+    if (!etmCharTables) {
+        Serial.printf("[ETM CHAR] Not enough memory to run: it needs %u bytes in one block, the largest free is %u.\n",
+                      (unsigned)sizeof(EtmCharTables), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        if (etmCharDebugWasSaved) { debugETM = true; etmCharDebugWasSaved = false; }
+        return "not enough memory";
+    }
     etmCharLoadTriggeredMs = 0;
     etmCharRunning = true;
     etmCharPhase = 1;
@@ -1972,6 +1992,7 @@ void processETMChar() {
     if (peerCount == 0) {
         Serial.println("[ETM] Characterization aborted: no online peers.");
         etmCharRunning = false;
+        etmCharFreeTables();
         // printETMCharResults() is the only place that unwinds the rest of the run's state, and
         // this early return skips it. Unwind here too, or: debugETM stays suppressed for the rest
         // of the session, and etmCharRelayRequesterWCB stays latched so the NEXT — possibly
@@ -2468,6 +2489,7 @@ String buildETMCharResultsString(int* peers, int peerCount) {
 
 void printETMCharResults(int* peers, int peerCount) {
     String results = buildETMCharResultsString(peers, peerCount);
+    etmCharFreeTables();           // the text holds the run now
     Serial.print(results);
 
     // Restore ETM debug state
