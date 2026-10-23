@@ -11,6 +11,7 @@
 // the user never made, written to real hardware.
 const { test, expect } = require('../lib/fixtures');
 const { openWizard } = require('../lib/wizard');
+const { wdpDump, feedWdpDump } = require('../lib/fake');
 
 const EPASS = 'dummy_not_a_real_mesh_password';
 
@@ -456,27 +457,39 @@ test('wizard.push_fake_relay_wcb_change a push that changes the board number and
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) is refused for a classic ESP32 or old firmware, and goes as one long session of 23 chunks to an ESP32-S3 on firmware that takes it', async ({ page }) => {
+test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24, an ESP32-S3) and the relay forwards it (mgmt.fwd24, or a WcbMgmt relay); a classic ESP32, older firmware or tags not seen yet are refused', async ({ page }) => {
   const value = ';S1' + 'v'.repeat(3996);
-  for (const [hw, fw, relayFw, ok] of [[24, '7.0.2_011200RNOV2026', '7.0.2_011200RNOV2026', false],
-                                       [32, '7.0.1_231523ROCT2026', '7.0.2_011200RNOV2026', false],
-                                       [32, '7.0.2_011200RNOV2026', '7.0.1_231523ROCT2026', false],
-                                       [32, '7.0.2_011200RNOV2026', '7.0.2_011200RNOV2026', true]]) {
+  const S3 = 'mgmt.fwd24 mgmt.rx24', W = 'mgmt.fwd24';
+  // [what, the relay's own row's tags (null: no dump at all), the target's row's tags (null: no row), WcbMgmt relay, ok]
+  for (const [what, relayTags, targetTags, mgmtRelay, ok] of [
+    ['a classic ESP32 target', W, W, false, false],
+    ['an S3 target on firmware from before the tags', W, '', false, false],
+    ['a relay on firmware from before the tags', '', S3, false, false],
+    ['no dump read yet', null, null, false, false],
+    ['the S3 target not in the dump', W, null, false, false],
+    ['an S3 target through a relay that forwards 24', W, S3, false, true],
+    ['an S3 target through a WcbMgmt relay', null, S3, true, true],
+  ]) {
     await relayBoard(page, RELAY_CHAIN);
-    const r = await page.evaluate(async ({ hw, fw, relayFw, value }) => {
+    if (relayTags !== null || targetTags !== null) {
+      const rows = [];
+      if (relayTags !== null) rows.push({ n: 1, alias: 'Relay', tags: relayTags, peer: 3 });
+      if (targetTags !== null) rows.push({ n: 2, alias: 'Dome', hw: 32, tags: targetTags });
+      await feedWdpDump(page, wdpDump(rows));
+    }
+    const r = await page.evaluate(async ({ value, mgmtRelay }) => {
       window.sleep = () => Promise.resolve();
-      boardConfigs[2].hwVersion = hw;
-      boardBaselines[2].hwVersion = hw;
-      boardConfigs[2].fwVersion = fw;
+      boardConfigs[2].hwVersion = 32;
+      boardBaselines[2].hwVersion = 32;
       if (!boardConfigs[1]) boardConfigs[1] = {};
-      boardConfigs[1].fwVersion = relayFw;
+      boardConfigs[1].isRelay = mgmtRelay;
       boardConfigs[2].sequences = [{ key: 'abcdefghijklmno', value }];
       populateUIFromConfig(2, boardConfigs[2]);
       await boardGo(2, { skipReboot: true });
       return { sent: [...__sent], outcome: boardPushOutcome[2] };
-    }, { hw, fw, relayFw, value });
+    }, { value, mgmtRelay });
     if (!ok) {
-      expect(r.outcome.ok, `hw ${hw} fw ${fw} relay ${relayFw}`).toBe(false);
+      expect(r.outcome.ok, what).toBe(false);
       expect(r.outcome.reason).toMatch(/one command is 4025 bytes/);
       expect(frags(r.sent)).toEqual([]);
       continue;

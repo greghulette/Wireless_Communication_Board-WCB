@@ -637,8 +637,98 @@ static void test_chan(){
   CHECK(decode(4,4,old,p,1,nb4)==DK_ADVERT && !nb4.hasChan, "absent chan reads as not advertised");
 }
 
+// A WCB's OWN capability tags (TLV 0x0D CAPTAGS), since 2026-10-23: wcbOwnCapTags (WCB.ino), from its push-session
+// limits MGMT_FWD_MAX_CHUNKS / MGMT_RX_MAX_CHUNKS - the classic ESP32 forwards 24 and takes 16, the S3 both 24. The
+// Wizard reads them from ?WDP,DUMP (WCBParser.relayLongChunks) to send one long ?SEQ,SAVE as one 23-chunk session.
+static const char OWN_TAGS_ESP32[] = "mgmt.fwd24";
+static const char OWN_TAGS_S3[]    = "mgmt.fwd24 mgmt.rx24";
+
+// wdpBuildPayload's order (WCB_WDP.cpp) with every field at its largest: alias 24, firmware 27, hw, capability flags,
+// controller, 9 Maestros (ids, then id+baud), 9 WLEDs, 10 PWM targets, the sequence hash, CHAN, CAPTAGS, then the five
+// port labels (24 characters each) for whatever is left of the 200 bytes. Returns the length; *beforeLabels gets the
+// length before the first label, *labels how many labels fitted.
+static int buildWorstAdvert(uint8_t*buf, const char*tags, int*beforeLabels, int*labels){
+  memset(buf,0,200);
+  int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+  o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"AAAAAAAAAAAAAAAAAAAAAAAA",24);
+  o=putTLV(buf,o,200,T_FWVER,(const uint8_t*)"7.0.2_311259RDEC2026_xxxxxx",27);
+  { uint8_t hw=32; o=putTLV(buf,o,200,T_HWVER,&hw,1); }
+  { uint8_t cf[2]={0xFF,0x01}; o=putTLV(buf,o,200,T_CAPFLAGS,cf,2); }
+  { uint8_t id=20; o=putTLV(buf,o,200,T_CTRLID,&id,1); }
+  { uint8_t ids[9]={1,2,3,4,5,6,7,8,9}; o=putTLV(buf,o,200,T_MAESTRO,ids,9);
+    uint8_t rec[18]; for(int i=0;i<9;i++){rec[i*2]=ids[i]; rec[i*2+1]=baudToCode(57600);} o=putTLV(buf,o,200,T_MAESTRO_CFG,rec,18); }
+  { uint8_t rec[18]; for(int i=0;i<9;i++){rec[i*2]=(uint8_t)(i+1); rec[i*2+1]=baudToCode(115200);} o=putTLV(buf,o,200,T_WLED_CFG,rec,18); }
+  { uint8_t rec[20]; for(int i=0;i<10;i++){rec[i*2]=(uint8_t)(i+2); rec[i*2+1]=(uint8_t)(1+i%5);} o=putTLV(buf,o,200,T_PWMTARGET,rec,20); }
+  { uint8_t v[4]={0xC5,0x9D,0x1C,0x81}; o=putTLV(buf,o,200,T_SEQHASH,v,4); }
+  { chansync::ChanFacts f; f.channel=6; f.rank=3; f.flags=chansync::F_SYNC; f.cc[0]='U'; f.cc[1]='S'; f.cc[2]=0;
+    o=chansync::putChanTlv(buf,o,200,f); }
+  { int L=(int)strlen(tags); if(L>0) o=putTLV(buf,o,200,T_CAPTAGS,(const uint8_t*)tags,L); }
+  *beforeLabels=o; *labels=0;
+  for(int p=1;p<=5;p++){
+    uint8_t v[25]; v[0]=(uint8_t)p; memset(v+1,'L',24);
+    int before=o; o=putTLV(buf,o,200,T_PORTLABEL,v,25); if(o!=before) (*labels)++;
+  }
+  if(o<200) buf[o++]=T_END;
+  return o;
+}
+
+static void test_own_captags(){
+  printf("a WCB's own CAPTAGS: fits the advert, decodes, never makes it a client, skipped by an old decoder...\n");
+  CHECK(strlen(OWN_TAGS_S3)<=48 && strlen(OWN_TAGS_ESP32)<=48, "tags within the 48 bytes every receiver keeps");
+  CHECK(!strpbrk(OWN_TAGS_S3,",]") && !strpbrk(OWN_TAGS_ESP32,",]"), "no ',' or ']' (the dump's separators)");
+  const char* builds[2]={OWN_TAGS_ESP32, OWN_TAGS_S3};
+  for(int b=0;b<2;b++){
+    uint8_t buf[200]; int before=0, labels=0;
+    int len=buildWorstAdvert(buf,builds[b],&before,&labels);
+    printf("  %s: %d bytes before the labels (%d with no tags), %d of 5 24-char labels fit, %d bytes in all\n",
+           builds[b], before, before-2-(int)strlen(builds[b]), labels, len);
+    CHECK(len<=200, "the advert fits its 200-byte field");
+    CHECK(before<=200-1, "every TLV before the labels fits, with room for END");
+    Neighbor nb;
+    CHECK(decode(3,3,buf,len,1,nb)==DK_ADVERT, "worst-case advert decodes");
+    CHECK(nb.capTags==builds[b], "CAPTAGS round-trip");
+    CHECK(!nb.isClient, "CAPTAGS without DEVTYPE leaves the sender a WCB");
+    CHECK(nb.alias.size()==24 && nb.fwVer.size()==27 && nb.hwVer==32 && nb.maestroCount==9 && nb.wledCount==9 &&
+          nb.seqHash==0x811C9DC5u && nb.hasChan, "every identity field and record intact beside the tags");
+    // A decoder from before 0x0D (it skips an unknown TLV by its length) reads everything else the same.
+    uint8_t old[200]; memcpy(old,buf,200);
+    for(int o=2;o+2<=200 && old[o]!=T_END;o+=2+old[o+1]) if(old[o]==T_CAPTAGS) old[o]=0x3F;   // as if unknown
+    Neighbor nb2;
+    CHECK(decode(3,3,old,len,1,nb2)==DK_ADVERT && nb2.capTags.empty() && nb2.alias==nb.alias && nb2.hasChan &&
+          nb2.maestroCount==9, "an older receiver skips the tags and keeps the rest");
+  }
+  // The usual board - alias, firmware, hw, caps, one Maestro, the hash, CHAN - with five labels of `len` characters:
+  // how many labels fit beside the tags. The tags cost the labels their last bytes, never an identity field: an S3
+  // board keeps five labels of up to 21 characters (24 before), a classic one up to 23.
+  auto usualLabels=[](const char*tags,int len,int*bytes){
+    uint8_t buf[200]; memset(buf,0,sizeof(buf));
+    int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+    o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"Dome",4);
+    o=putTLV(buf,o,200,T_FWVER,(const uint8_t*)"7.0.2_311259RDEC2026",20);
+    { uint8_t hw=32; o=putTLV(buf,o,200,T_HWVER,&hw,1); }
+    { uint8_t cf[2]={0x80,0x00}; o=putTLV(buf,o,200,T_CAPFLAGS,cf,2); }
+    { uint8_t id=2; o=putTLV(buf,o,200,T_MAESTRO,&id,1); uint8_t rec[2]={2,baudToCode(57600)}; o=putTLV(buf,o,200,T_MAESTRO_CFG,rec,2); }
+    { uint8_t v[4]={1,2,3,4}; o=putTLV(buf,o,200,T_SEQHASH,v,4); }
+    { chansync::ChanFacts f; f.channel=1; f.rank=2; f.flags=chansync::F_SYNC; f.cc[0]='0'; f.cc[1]='1'; f.cc[2]=0;
+      o=chansync::putChanTlv(buf,o,200,f); }
+    if(tags[0]) o=putTLV(buf,o,200,T_CAPTAGS,(const uint8_t*)tags,(int)strlen(tags));
+    *bytes=o;
+    int fitted=0;
+    for(int p=1;p<=5;p++){ uint8_t v[25]; v[0]=(uint8_t)p; memset(v+1,'L',len); int b4=o; o=putTLV(buf,o,200,T_PORTLABEL,v,1+len); if(o!=b4) fitted++; }
+    return fitted;
+  };
+  int bNone=0, bW=0, bS3=0;
+  int none24=usualLabels("",24,&bNone), w23=usualLabels(OWN_TAGS_ESP32,23,&bW), w24=usualLabels(OWN_TAGS_ESP32,24,&bW);
+  int s21=usualLabels(OWN_TAGS_S3,21,&bS3), s24=usualLabels(OWN_TAGS_S3,24,&bS3);
+  printf("  a usual board, before its labels: %d bytes with no tags, %d classic, %d S3; five 24-char labels fit %d / %d / %d\n",
+         bNone, bW, bS3, none24, w24, s24);
+  CHECK(none24==5 && w23==5 && s21==5, "five labels still fit: 24 characters without tags, 23 classic, 21 on an S3");
+  CHECK(w24==4 && s24==4, "five labels of 24 characters lose the last one to the tags (the identity never)");
+}
+
 int main(){
   printf("== WDP wire-format & election spec test ==\n");
+  test_own_captags();
   test_roundtrip();
   test_unknown_and_truncated();
   test_seqhash();

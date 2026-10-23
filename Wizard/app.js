@@ -5472,7 +5472,8 @@ async function updateSequence(n, rowId) {
         showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
       } else {
         // One command: one session, of up to MGMT_MAX_CHUNKS chunks, or a long one where this board and relay take
-        // it (_relayLongChunks: an ESP32-S3 target, both on firmware that takes it) - docs/MGMT_RELAY.md §10.
+        // it (_relayLongChunks: an ESP32-S3 target and the relay say so in their WDP capability tags) -
+        // docs/MGMT_RELAY.md §10.
         const plan = WCBParser.planRelayPush(cmd, { funcChar, delim, chunkBytes: MGMT_CHUNK_SIZE,
                                                     maxChunks: MGMT_MAX_CHUNKS, longChunks: _relayLongChunks(relayN, n) });
         if (plan.problem || plan.sessions.length !== 1) {
@@ -9098,21 +9099,18 @@ function fragmentString(str, chunkSize) {
 }
 
 // The most chunks ONE command may take through relayN to board n, where it is longer than one session: a long
-// ?SEQ,SAVE (up to 4025 characters, 23 chunks). An ESP32-S3 target reassembles MGMT_LONG_MAX_CHUNKS since firmware built
-// on or after RELAY_LONG_SINCE, and a WCB relay forwards them from then; a WcbMgmt relay (NaviCore, MgmtRelay) forwards
-// any count. A classic ESP32 target never needs it: a ?SEQ,SAVE costs about 7x its length in heap while it runs, so it
-// stops near 2,400 characters, under one session. 0 = one session at most, as before. The date is the firmware's first
-// build with it, as its version stamp reads (US Eastern; a release is stamped when it is published, later).
-const MGMT_LONG_MAX_CHUNKS = 24;
-const RELAY_LONG_SINCE     = new Date(2026, 9, 23, 17, 0);
+// ?SEQ,SAVE (up to 4025 characters, 23 chunks). Read from the capability tags each WCB advertises about itself
+// (WCBParser.relayLongChunks; _meshSeen, from the ?WDP,DUMP rows): an ESP32-S3 target says "mgmt.rx24", every WCB
+// relay on the firmware that forwards them "mgmt.fwd24"; a WcbMgmt relay (NaviCore, MgmtRelay) forwards any count. A
+// classic ESP32 target never needs it: a ?SEQ,SAVE costs about 7x its length in heap while it runs, so it stops near
+// 2,400 characters, under one session. 0 = one session at most, as before - and so for a board or relay whose tags no
+// dump has shown yet, as for firmware that sends none.
 function _relayLongChunks(relayN, n) {
-  const fwAtLeast = (cfg) => {
-    const built = parseWCBVersion(String(cfg?.fwVersion || ''));
-    return !!built && built >= RELAY_LONG_SINCE;
-  };
-  const target = boardConfigs[n], relay = boardConfigs[relayN];
-  const s3 = target && (target.hwVersion === 31 || target.hwVersion === 32);
-  return s3 && fwAtLeast(target) && (relay?.isRelay || fwAtLeast(relay)) ? MGMT_LONG_MAX_CHUNKS : 0;
+  const relay = boardConfigs[relayN];
+  const targetNum = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
+  const relayNum  = relay?.wcbNumber || relayN;
+  return WCBParser.relayLongChunks(_meshSeen.get(+targetNum)?.capTags, _meshSeen.get(+relayNum)?.capTags,
+                                   { relayForwardsAny: !!relay?.isRelay, maxChunks: MGMT_MAX_CHUNKS });
 }
 
 // The commands one relay session may carry: the target queues them all at once, from its WiFi task, and its command
@@ -14162,6 +14160,19 @@ function _wdpAttr(s) {
   return _wdpEsc(s).replace(/"/g, '&quot;');
 }
 
+// What the Wizard last read about each device in a ?WDP,DUMP (the mesh poll, the panel's Refresh), by number - the
+// queried board's own row (PEER=3) included: { capTags, live, client, at }. A WCB's capability tags say what its
+// firmware takes (docs/WDP_DESIGN.md §3; _relayLongChunks); live says it was heard within the WDP TTL. An entry is
+// replaced by the next row that names its number, and kept while none does: a board that drops out of a dump has not
+// changed its firmware.
+const _meshSeen = new Map();
+function _noteMeshDump(nodes) {
+  const at = Date.now();
+  for (const nd of nodes || []) {
+    if (nd && nd.n >= 1) _meshSeen.set(nd.n, { capTags: nd.capTags || '', live: !!nd.live, client: !!nd.client, at });
+  }
+}
+
 // Parse the ?WDP,DUMP response. String fields are scrubbed of ',' and ']' on the
 // board, so [^,] / [^\]] field matching is safe. PEER= (membership: 0 none,
 // 1 WCBQ-floor, 2 auto-joined) and the [WDPCFG:...] summary are optional so
@@ -14428,6 +14439,7 @@ async function wdpMeshRefresh() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks)
     // Who leads: asked only here, and only of a board whose dump shows it has channel sync (its own [WDPCH] line).
     if (parsed.chanSeen) {
       const st = WCBParser.parseChanSyncStatus(await t.conn.sendAndCollect(`${t.fc}CHSYNC`, 2500, '[CHSYNC:'));
@@ -14595,6 +14607,7 @@ async function meshAutoDiscoverTick() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks)
     if (!parsed.nodes || !parsed.nodes.length) return;
     renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);   // keep the panel live (covers clients)
     // Feed EVERY relay card from this sweep — any connected board's dump shows the whole mesh,

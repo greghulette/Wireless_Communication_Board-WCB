@@ -222,7 +222,7 @@ those sizes.
 | `?MGMT,SEQGET,<n>,<key>` | target → requester | type 16, one session | 2,912: `TOOBIG` for a value over 2,912 - 4 - its key | `<key>,OK,<value>` of 15 + 4 + 3,999 = 4,018 (`SEQ_VALUE_MAX`) | in parts, type 34 |
 | `?MGMT,SEQ,<n>` names | target → requester | type 14, or type 29 pages | 64 pages of 2,880 bytes of key text (`WCB_SeqNamesWire.h`) | 29,120 bytes (1,820 keys of 15 characters); 19,623 (6,572 of 1-2) | in pages ([SEQUENCE_INVENTORY.md](SEQUENCE_INVENTORY.md) §3); the WCB relay joins them in one heap buffer of the exact size and says so when the heap has no such block (a list over about 14 KB on an access-point W1) |
 | `?MGMT,FRAG` push, one session | requester → target | 226-byte chunks of 179 bytes | 16 chunks, 2,864 bytes (a released relay and target take no more; the Wizard refused a longer push) | a push is the config's diff: up to the whole config, under 142,000 | the Wizard sends it as several sessions of whole commands (`planRelayPush`, below) |
-| `?MGMT,FRAG`, one command longer than a session | requester → target | one session | 16 chunks | a `?SEQ,SAVE` of a 15-character key and 3,999 characters: 4,025 bytes, 23 chunks | one long session: a relay forwards 24 chunks (`MGMT_FWD_MAX_CHUNKS`), an ESP32-S3 target takes 24 (`MGMT_RX_MAX_CHUNKS`); a classic ESP32 cannot run a command that long (a `?SEQ,SAVE` costs about 7 times its length in heap, so it stops near 2,400 characters, under 16 chunks) |
+| `?MGMT,FRAG`, one command longer than a session | requester → target | one session | 16 chunks | a `?SEQ,SAVE` of a 15-character key and 3,999 characters: 4,025 bytes, 23 chunks | one long session: a relay forwards 24 chunks (`MGMT_FWD_MAX_CHUNKS`), an ESP32-S3 target takes 24 (`MGMT_RX_MAX_CHUNKS`), and each says so in its WDP capability tags (`mgmt.fwd24`, `mgmt.rx24`), which the Wizard reads; a classic ESP32 cannot run a command that long (a `?SEQ,SAVE` costs about 7 times its length in heap, so it stops near 2,400 characters, under 16 chunks) |
 | `?MGMT,FRAG` chunk | requester → relay | one serial line | 179 BYTES (the relay refuses a longer chunk) | - | the Wizard cuts chunks by UTF-8 bytes (`utf8Chunks`); it cut them by JavaScript characters, so a chunk with an `é` in it was 180 bytes and refused |
 | `?MGMT,FRAG` single-chunk ETM shortcut | relay → target | one ETM command | 198 bytes, 186 under `?ETM,CHKSM` | - | the Wizard sends one chunk only up to 186 bytes (`MGMT_SINGLE_MAX`); a longer single command goes as a session of 179-byte chunks |
 | The relay's output ring (`s_mgmtOut`) | relay → console | 3 slots of 2,960 bytes | a tag, one reply or one part (2,912) and its CRLF | one reply or one part | bounded: a STATS / ETM part is printed from its session, a joined SEQVAL or names line from its own heap buffer, never the ring |
@@ -320,17 +320,21 @@ lost chunk costs that session, as it costs a one-session push today, never the n
 unacknowledged, as before.
 
 One command longer than a session (a `?SEQ,SAVE` of more than about 2,830 characters) goes as one long session of up to
-24 chunks (`MGMT_LONG_MAX_CHUNKS`), only to an ESP32-S3 target (HW 3.1 / 3.2) whose firmware's version stamp is
-2026-10-23 17:00 or later (`RELAY_LONG_SINCE`, the first build with it), through a relay that forwards it (a WCB built
-then, or a WcbMgmt relay, which forwards any count); otherwise
-it is refused before anything is sent, as a push over one session was. A relay or target from before forwards or takes 16
-at most and drops a longer session whole; a target reassembles a command whole or not at all (a failed String append
-used to run it with a chunk missing).
+24 chunks (the firmware's `MGMT_FWD_MAX_CHUNKS`, `MGMT_RX_MAX_CHUNKS`), only where the WDP capability tags say it gets
+across ([WDP_DESIGN.md](WDP_DESIGN.md) §3): the target's `mgmt.rx<N>` (the ESP32-S3 build sends `mgmt.rx24`) and the
+relay's `mgmt.fwd<N>` (every WCB build with it sends `mgmt.fwd24`; a WcbMgmt relay forwards any count) -
+`WCBParser.relayLongChunks`, the smaller of the two, when it is past 16. The Wizard reads the tags from every `?WDP,DUMP` it takes (the 12 s mesh poll, the panel's Refresh;
+`_meshSeen`): the target's from its row, the relay's from its own row or another board's. A board or relay whose tags it
+has not seen yet, or whose firmware sends none, gets one session at most, and a longer command is refused before
+anything is sent, as a push over one session was. (It read the firmware's build date until 2026-10-23.) A relay or
+target from before forwards or takes 16 at most and drops a longer session whole; a target reassembles a command whole
+or not at all (a failed String append used to run it with a chunk missing).
 
 ## Revision log
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-23 | — | §10: the long relay session is decided by a capability flag, not a build date (Greg): every WCB advertises WDP capability tags (`mgmt.fwd24`; `mgmt.rx24` on the ESP32-S3, WDP_DESIGN.md §3) and the Wizard sends one command longer than a session as one long session only where the target's `mgmt.rx` and the relay's `mgmt.fwd` cover it (`RELAY_LONG_SINCE` removed; a board whose tags it has not seen gets one session at most). |
 | 2026-10-23 | — | §10 new: the audit of everything the relay carries, and every path that could not carry what a board stores now does (Greg: "make sure we can transport everything across the relay"). `?MGMT,STATS`, `?MGMT,ETM,CHAR` and `?MGMT,SEQGET` results longer than one reply come in parts (`WCB_ResultWire.h`, types 30-34, shared with WCB_Client 1.20.0; host test `tests/result_parts_test.cpp`): STATS and ETM held on the target as built and printed by the relay as they come, a sequence read again per part and joined; an old requester or target gets what it always got. The config pull carries 64 parts, not 16 (§3, §8; the largest config is under 142,000 characters, 16 parts were 46,080), its split points kept as back-offs. The Wizard pushes in sessions (`planRelayPush`): chunks by UTF-8 bytes, at most 150 commands a session, the network and restart commands last, a board-number change only in one session, addressed to the board's current number; one long `?SEQ,SAVE` as one session of up to 24 chunks to an ESP32-S3 (`MGMT_FWD_MAX_CHUNKS`, `MGMT_RX_MAX_CHUNKS`). A target runs a pushed command whole or not at all. Test knobs `?DEBUG,RESULTPART`, `?DEBUG,ONEREPLY`. |
 | 2026-09-28 | `7ca7e5a` | §9: the WCB-WP25 tests (the restart gate, CHANGED, the dedup window and the parked second requester, the knobs, an oversized result, a wrong target, a reaped session). |
 | 2026-09-24 | `337f5df` | Created with F13 (`docs/HIL_TEST_AUDIT.md`, tracker #91): configs over 2912 characters are pulled in parts (packet types 18/19, `?MGMT,PULL,<n>,P`, `[MGMT:CFGPART,`), refusals are coded errors (`[MGMT:CFGERR,`), the target's reply is a non-blocking job, relay lines are one write each, and the Wizard serialises pulls per relay. Verified on the bench (W1 relay, W2 target, NaviCore on the old library) and by host, unit and no-board browser tests. |

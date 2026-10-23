@@ -155,4 +155,28 @@ async function relayFake(page, relay, targets) {
   }, { relay, targets });
 }
 
-module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake };
+// One ?WDP,DUMP row, as printWdpDump (WCB_WDP.cpp) prints it. tags is the CAPTAGS field: a WCB's own capability tags
+// since 2026-10-23 - "mgmt.fwd24" on a classic ESP32, "mgmt.fwd24 mgmt.rx24" on an ESP32-S3 - and "" from firmware
+// before. peer 3 is the queried board's own row.
+function wdpRow({ n, client = 0, alias = '', hw = 24, hwrev = '', fw = '7.0.2_TEST', cap = '0000', ctrl = 0, tags = '',
+                  maestro = '-', age = 0, seen = 1, peer = 1 }) {
+  return `[WDP:N=${n},CLIENT=${client},ALIAS=${alias},HW=${hw},HWREV=${hwrev},FW=${fw},CAP=${cap},CTRL=${ctrl},` +
+         `CAPTAGS=${tags},MAESTRO=${maestro},AGE=${age},SEEN=${seen},PEER=${peer}]`;
+}
+// A whole dump of those rows (the self row first, as the firmware prints it), with its WDPCFG and END lines.
+function wdpDump(rows) {
+  const self = rows.filter((r) => r.peer === 3), rest = rows.filter((r) => r.peer !== 3);
+  return [...self, ...rest].map(wdpRow).concat([`[WDPCFG:EN=1,AUTOJOIN=1,PEERS=${rest.length}]`,
+                                                `[WDP:END,count=${rest.length}]`]).join('\r\n');
+}
+// The page reads `text` as the answer to its mesh panel's ?WDP,DUMP (the real wdpMeshRefresh, through a stand-in for
+// the board it queries), as the 12 s poll would: what it keeps of each row (_meshSeen) is what a push then reads.
+async function feedWdpDump(page, text, { slot = 1, wcbNum = 1 } = {}) {
+  await page.evaluate(async ({ text, slot, wcbNum }) => {
+    const keep = window._wdpMeshConn;
+    window._wdpMeshConn = () => ({ slot, conn: { sendAndCollect: async () => text }, fc: '?', wcbNum });
+    try { await wdpMeshRefresh(); } finally { window._wdpMeshConn = keep; }
+  }, { text, slot, wcbNum });
+}
+
+module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake, wdpRow, wdpDump, feedWdpDump };

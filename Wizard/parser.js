@@ -2291,11 +2291,34 @@ function utf8Chunks(str, maxBytes = 179) {
   return out;
 }
 
+// What a WCB's firmware takes, from the capability tags it advertises about itself (WDP TLV 0x0D, the CAPTAGS= field
+// of its ?WDP,DUMP row, docs/WDP_DESIGN.md §3; the firmware's wcbOwnCapTags). "mgmt.fwd<N>": as a relay it forwards a
+// push session of up to N chunks; "mgmt.rx<N>": as a target it reassembles one of up to N. Firmware from before
+// 2026-10-23 sends no tags, and takes 16 of each.
+// capTagChunks(tags, prefix) -> the N of the first "<prefix><N>" in a space-separated tag list, or 0.
+function capTagChunks(tags, prefix) {
+  const want = String(prefix).toLowerCase();
+  for (const t of String(tags ?? '').trim().toLowerCase().split(/\s+/)) {
+    if (t.startsWith(want) && /^\d{1,3}$/.test(t.slice(want.length))) return Number(t.slice(want.length));
+  }
+  return 0;
+}
+// relayLongChunks(targetTags, relayTags, { relayForwardsAny, maxChunks }) -> the most chunks ONE command too long for a
+// session may take through that relay to that target, or 0 (one session at most, as before): the target's rx and the
+// relay's fwd, where both are past maxChunks (16). relayForwardsAny: a WcbMgmt relay (NaviCore, MgmtRelay), which
+// forwards a session of any length and advertises no tags of its own. Tags not known yet (undefined) read as none.
+function relayLongChunks(targetTags, relayTags, { relayForwardsAny = false, maxChunks = 16 } = {}) {
+  const rx  = capTagChunks(targetTags, 'mgmt.rx');
+  const fwd = relayForwardsAny ? Infinity : capTagChunks(relayTags, 'mgmt.fwd');
+  const most = Math.min(rx, fwd);
+  return most > maxChunks ? most : 0;
+}
+
 // planRelayPush(cmdString, opts) -> { sessions: [{ text, chunks, cmds, list }], split, problem }   (list: its commands)
 //   cmdString  the push chain, funcChar-led commands joined by delim (buildCommandString)
 //   opts       { funcChar, delim, reboot (append ?reboot), chunkBytes 179, maxChunks 16, maxCmds 150,
 //                longChunks: 0, or the most chunks the target and relay take for ONE command too long for one session
-//                (24 on an ESP32-S3 board and relay with the firmware that takes them),
+//                (relayLongChunks: 24 to an ESP32-S3 through a relay that forwards them),
 //                wcbChange: the push changes the board's number (?WCB,<n> with a new n) }
 // Everything that fits one session is ONE session, in the order given, exactly as before. A longer push is split at
 // command boundaries into sessions of at most maxChunks chunks and maxCmds commands (the target queues a session's
@@ -2620,6 +2643,8 @@ const WCB_PARSER_API = {
   verifyConfigReply,
   createPullCollector,
   utf8Chunks,
+  capTagChunks,
+  relayLongChunks,
   planRelayPush,
   CHSYNC_REGIONS,
   regionMaxChannel,

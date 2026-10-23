@@ -47,6 +47,8 @@ extern bool    wcbPeerLearned[MAX_WCB_COUNT];
 extern bool    wcbPeerTemporary[MAX_WCB_COUNT];
 extern uint8_t wcbPeerAdvertCount[MAX_WCB_COUNT];
 extern bool    wcbPeerOnline(uint8_t id);   // registered peer AND currently ETM-online (for cap routing)
+// This board's own capability tags for its advert (TLV 0x0D), from the push-session limits WCB.ino defines.
+extern const char *wcbOwnCapTags();
 
 // ---- Module state --------------------------------------------------------
 bool wdpEnabled  = true;
@@ -89,7 +91,8 @@ static void wdpDaTxTick(unsigned long now);
 // Presence of DEVTYPE marks the sender as a client device, not a WCB.
 #define WDP_TLV_DEVTYPE  0x0B    // string — canonical device type name (from the vocabulary)
 #define WDP_TLV_HWREV    0x0C    // string — hardware revision (distinct from numeric HWVER)
-#define WDP_TLV_CAPTAGS  0x0D    // string — space-separated capability tags (optional)
+#define WDP_TLV_CAPTAGS  0x0D    // string — space-separated capability tags (optional). A WCB sends its own
+                                 // (wcbOwnCapTags, WCB.ino) since 2026-10-23: mgmt.fwd<N> / mgmt.rx<N>
 #define WDP_TLV_PWMTARGET 0x10   // [targetWCB(1)][port(1)] pairs — this board's REMOTE PWM
                                  // outputs. Each named board self-configures that output port
                                  // (receiver-side), so a target that was powered off when the
@@ -314,6 +317,16 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   // board's leader election and every MOVE judgement read it. In the payload, so in the change hash: associating,
   // moving or ?CHSYNC,OFF re-advertises within 500 ms.
   o = chanSyncPutTlv(buf, o, max);
+  // This board's own capability tags (TLV 0x0D CAPTAGS, wcbOwnCapTags in WCB.ino): what its firmware takes, which the
+  // Wizard reads from a ?WDP,DUMP row to decide how long a relay push session may be. Before the labels too: the
+  // Wizard acts on it. 12 bytes on the classic ESP32, 22 on the S3, so the identity and every record above still fit
+  // the 200 bytes with the largest of each (165 classic, 175 S3); the labels get what is left. Every receiver parses it
+  // already (WCBs and WCB_Client into capTags, 1.8.0 on) or skips it by length.
+  {
+    const char *tags = wcbOwnCapTags();
+    int L = (int)strnlen(tags, 48);
+    if (L > 0) o = putTLV(buf, o, max, WDP_TLV_CAPTAGS, (const uint8_t *)tags, L);
+  }
   // Per-port interface labels (the ?LABEL / device names) — one TLV per labeled
   // port: [port][label]. Advertised last so the core identity always fits; a
   // label set that would overflow the 200 B payload is dropped gracefully.
@@ -1705,6 +1718,7 @@ static void printWdpDetail(int wcbNum) {
     Serial.printf("  Capabilities: %s  (controller ID %d)\n", caps, nb.ctrlId);
   else
     Serial.printf("  Capabilities: %s\n", caps);
+  if (nb.capTags[0]) Serial.printf("  Tags        : %s\n", nb.capTags);   // TLV 0x0D: what its firmware takes
   if (nb.maestroCount == 0) {
     Serial.println("  Maestros    : -");
   } else {
@@ -1804,6 +1818,7 @@ static void printWdpDump() {
     self.hwVer    = (uint8_t)wcb_hw_version;
     self.capFlags = wdpCapFlags();
     self.ctrlId   = specialPeerEnabled ? WCB_SPECIAL_PEER_ID : 0;
+    strncpy(self.capTags, wcbOwnCapTags(), sizeof(self.capTags) - 1);   // as advertised (TLV 0x0D)
     uint8_t sids[WDP_MAX_MAESTRO], scodes[WDP_MAX_MAESTRO];
     int sn = wdpLocalMaestroCfg(sids, scodes);
     for (int m = 0; m < sn; m++) { self.maestroIds[m] = sids[m]; self.maestroBaudCode[m] = scodes[m]; }
@@ -1817,7 +1832,7 @@ static void printWdpDump() {
       if (lbl.length() == 0) { char t[25]; wdpDaLabel(p + 1, t, sizeof(t)); lbl = t; }
       strncpy(self.portLabels[p], lbl.c_str(), sizeof(self.portLabels[p]) - 1);
     }
-    wdpScrub(self.alias); wdpScrub(self.fwVer);
+    wdpScrub(self.alias); wdpScrub(self.fwVer); wdpScrub(self.capTags);
     for (int p = 0; p < 5; p++) wdpScrub(self.portLabels[p]);
 
     char smaestro[48]; wdpMaestroStr(self, smaestro, sizeof(smaestro));

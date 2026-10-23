@@ -81,6 +81,8 @@ Copy the spelling exactly. If your device isn't on the list, you can still annou
 
 `hp.servo` · `hp.led` · `audio.trigger` · `audio.play` · `led.wled` · `led.pixel` · `led.logic` · `servo.maestro` · `servo.pwm` · `panel.magic` · `panel.data` · `dome.spin` · `dome.periscope` · `sensor.lifeform`
 
+The `mgmt.` domain is taken: WCBs use it for tags about themselves (`mgmt.fwd24`, `mgmt.rx24` — what their firmware takes when the config tool pushes through the mesh; see [`WDP_DESIGN.md`](WDP_DESIGN.md) §3). Don't use it for your device.
+
 ## When to send it
 
 Send the line **every 25–30 seconds**, picking a fresh random interval in that range each time.
@@ -197,5 +199,6 @@ If two boards do talk at once, the WCB drops the garbled line when it can tell �
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | The `mgmt.` capability-tag domain is reserved: WCBs now advertise their own tags in it (`mgmt.fwd24`, `mgmt.rx24`; [`WDP_DESIGN.md`](WDP_DESIGN.md) §3). Nothing changes for an announcing device. | — |
 | 2026-09-23 | Devices are saved and shared: the second announcement saves a device (one heard once is dropped after 90 s, so a garbled line never sticks), a saved device is kept through reboots and while switched off until someone forgets it (`?WDP,DA,FORGET` / `CLEAR`, or the config tool's ✕), and its whole record — type, fw, hw, caps — reaches every WCB and the config tool. A full port refuses a newcomer instead of dropping a saved device. Added the "removed a board" question. | `ef4381d` |
 | 2026-09-22 | Several devices may announce on one port: the WCB keeps one record per port and type (up to four per port), and the first one heard names the port (issue #19). An announce must now end at its JSON object's closing `}` and contain a single `@WDP`, so a line two boards garble by talking at once is dropped. Added the role‑specific‑type exception (`PSI Front` / `PSI Rear`) to "don't send an instance name", and the shared‑port questions. Corrected the claim that a device's firmware version is visible across the droid: only its `type` crosses the mesh (as the port's name); fw/hw/caps are read from the WCB it's plugged into. | `95dd811` |

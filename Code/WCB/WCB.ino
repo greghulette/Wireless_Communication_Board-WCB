@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_231706ROCT2026                                  *****////
+///*****                                          Version 7.0.1_231921ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -203,7 +203,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_231706ROCT2026";
+String SoftwareVersion = "7.0.1_231921ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1240,6 +1240,25 @@ typedef struct __attribute__((packed)) {
 #define MGMT_RX_MAX_CHUNKS      MGMT_MAX_CHUNKS
 #endif
 static_assert(MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS && MGMT_FWD_MAX_CHUNKS <= 32, "the receive mask is 32-bit");
+
+// What this board says about those two limits in its own WDP advert: capability tags (TLV 0x0D CAPTAGS, which WCBs
+// only read until 2026-10-23), also its ?WDP,DUMP self row. "mgmt.fwd<N>": as a relay it forwards a push session of up
+// to N chunks; "mgmt.rx<N>": as a target it reassembles one of up to N. A tag is sent only past the 16 every released
+// relay and target take, so the classic ESP32 sends "mgmt.fwd24" and the ESP32-S3 "mgmt.fwd24 mgmt.rx24" (12 / 22
+// bytes of the 200-byte advert, ahead of the port labels). The Wizard sends one command longer than a session as one
+// long session only when the target's rx and the relay's fwd both cover it (WCBParser.relayLongChunks); a board whose
+// tags it has not seen gets one session at most. A literal, so it costs flash, not RAM (docs/WDP_DESIGN.md §3).
+#define WCB_CAPTAG_STR_(x) #x
+#define WCB_CAPTAG_STR(x)  WCB_CAPTAG_STR_(x)
+const char *wcbOwnCapTags() {
+#if MGMT_RX_MAX_CHUNKS > MGMT_MAX_CHUNKS
+  return "mgmt.fwd" WCB_CAPTAG_STR(MGMT_FWD_MAX_CHUNKS) " mgmt.rx" WCB_CAPTAG_STR(MGMT_RX_MAX_CHUNKS);
+#elif MGMT_FWD_MAX_CHUNKS > MGMT_MAX_CHUNKS
+  return "mgmt.fwd" WCB_CAPTAG_STR(MGMT_FWD_MAX_CHUNKS);
+#else
+  return "";
+#endif
+}
 
 struct MgmtSession {
   bool     active;

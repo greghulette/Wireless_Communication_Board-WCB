@@ -1750,11 +1750,14 @@ def wdp_neighbour_table(bench):
         if nr is None:
             problems.append(f"NaviCore has no row for W{n}")
             continue
-        bad = {k: (nr.get(k), sr.get(k)) for k in ("ALIAS", "HW", "FW", "CAP", "CTRL", "MAESTRO") if nr.get(k) != sr.get(k)}
+        # CAPTAGS too: a WCB advertises its own since 2026-10-23 (mgmt.fwd24, + mgmt.rx24 on an S3; WDP_DESIGN.md §3),
+        # and WCB_Client decodes CAPTAGS from any sender - only DEVTYPE makes a row a client (CLIENT=1).
+        keys = ("ALIAS", "HW", "FW", "CAP", "CTRL", "MAESTRO", "CAPTAGS")
+        bad = {k: (nr.get(k), sr.get(k)) for k in keys if nr.get(k) != sr.get(k)}
         if bad:
             problems.append(f"W{n}: NaviCore's row / W{n}'s SELF row differ on {bad}")
-        if (nr.get("CLIENT"), nr.get("HWREV"), nr.get("CAPTAGS")) != ("0", "", ""):
-            problems.append(f"W{n}: CLIENT/HWREV/CAPTAGS {nr.get('CLIENT')}/{nr.get('HWREV')}/{nr.get('CAPTAGS')}")
+        if (nr.get("CLIENT"), nr.get("HWREV")) != ("0", ""):
+            problems.append(f"W{n}: CLIENT/HWREV {nr.get('CLIENT')}/{nr.get('HWREV')}")
         if n <= (quantity or 0) and nr.get("PEER") != "1":
             problems.append(f"W{n} is in the floor (quantity {quantity}) but PEER={nr.get('PEER')}")
         if _ifaces_of(v, n) != _ifaces_of(own, n):

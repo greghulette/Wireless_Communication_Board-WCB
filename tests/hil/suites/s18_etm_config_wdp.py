@@ -1256,8 +1256,17 @@ def _expected_cap(tokens, n):
     return cap
 
 
-@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration", needs=["wcb1"], links=[])
+def _own_tags(hw):
+    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): every build forwards a
+    24-chunk push session as a relay (mgmt.fwd24); the ESP32-S3 build (HW 3.1 / 3.2) also takes one as a target."""
+    return "mgmt.fwd24 mgmt.rx24" if hw in (31, 32) else "mgmt.fwd24"
+
+
+@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration; a WCB's CAPTAGS are its build's own tags (mgmt.fwd24, and mgmt.rx24 on an ESP32-S3), on its self row and on W1's row for W2", needs=["wcb1"], links=[])
 def dump_fields(bench):
+    """The self row carries what the board advertises (WCB_WDP.cpp printWdpDump); W2's row what W1 decoded from W2's
+    advert, CAPTAGS included (TLV 0x0D, which a WCB sends about itself since 2026-10-23). The Wizard reads those tags to
+    size a relay push (WCBParser.relayLongChunks), so a row that drops or garbles them costs the long ?SEQ,SAVE."""
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
     t1, t2 = snapshot(bench, me), snapshot(bench, 2)
@@ -1271,6 +1280,9 @@ def dump_fields(bench):
                        ("CTRL", "20" if "?CONTROLLER,ON,20" in t1 else _field(self_row, "CTRL"))):
         if _field(self_row, name) != want:
             bad.append(f"self {name}={_field(self_row, name)}, expected {want}")
+    hw1 = int(_field(self_row, "HW") or 0)
+    if _field(self_row, "CAPTAGS") != _own_tags(hw1):
+        bad.append(f"self CAPTAGS={_field(self_row, 'CAPTAGS')!r}, expected {_own_tags(hw1)!r} (HW {hw1})")
     for t in t1:
         m = re.match(r"^\?LABEL,S(\d),(.+)$", t)
         if m and f"[WDPIF:N={me},S={m.group(1)},DEV={m.group(2)[:24]}]" not in dump:
@@ -1287,7 +1299,11 @@ def dump_fields(bench):
         if int(_field(row2, "AGE") or 999) > 75:
             bad.append(f"W2 AGE {_field(row2, 'AGE')}")
         if _field(row2, "FW") != fw:
-            bench.note(f"W2 runs {_field(row2, 'FW')}, W1 runs {fw}")
+            bench.note(f"W2 runs {_field(row2, 'FW')}, W1 runs {fw}: its CAPTAGS are not checked")
+        else:
+            hw2 = int(_field(row2, "HW") or 0)
+            if _field(row2, "CAPTAGS") != _own_tags(hw2):
+                bad.append(f"W2 CAPTAGS={_field(row2, 'CAPTAGS')!r}, expected {_own_tags(hw2)!r} (HW {hw2})")
     if row20 is not None:
         for name, want in (("CLIENT", "1"), ("CAP", "0000"), ("CTRL", "0"), ("PEER", "0")):
             if _field(row20, name) != want:

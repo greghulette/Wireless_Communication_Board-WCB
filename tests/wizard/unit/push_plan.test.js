@@ -34,6 +34,26 @@ test('utf8Chunks: at most 179 bytes a chunk, never inside a character, and the c
   assert.deepEqual(P.utf8Chunks('', 179), []);
 });
 
+test('capTagChunks / relayLongChunks: the long session needs the target\'s mgmt.rx and the relay\'s mgmt.fwd (WDP CAPTAGS)', () => {
+  assert.equal(P.capTagChunks('mgmt.fwd24 mgmt.rx24', 'mgmt.rx'), 24);
+  assert.equal(P.capTagChunks('mgmt.fwd24 mgmt.rx24', 'mgmt.fwd'), 24);
+  assert.equal(P.capTagChunks('  MGMT.RX32  rc ', 'mgmt.rx'), 32);
+  assert.equal(P.capTagChunks('mgmt.fwd24', 'mgmt.rx'), 0);
+  assert.equal(P.capTagChunks('mgmt.rxx mgmt.rx', 'mgmt.rx'), 0);
+  assert.equal(P.capTagChunks('', 'mgmt.rx'), 0);
+  assert.equal(P.capTagChunks(undefined, 'mgmt.rx'), 0);
+  const S3 = 'mgmt.fwd24 mgmt.rx24', W = 'mgmt.fwd24';
+  assert.equal(P.relayLongChunks(S3, W), 24);                        // an S3 target through any relay with today's firmware
+  assert.equal(P.relayLongChunks(S3, S3), 24);
+  assert.equal(P.relayLongChunks(W, W), 0);                          // a classic ESP32 target takes 16
+  assert.equal(P.relayLongChunks(S3, ''), 0);                        // a relay from before: it forwards 16
+  assert.equal(P.relayLongChunks(S3, undefined), 0);                 // a relay whose tags no dump has shown yet
+  assert.equal(P.relayLongChunks(undefined, W), 0);                  // a target likewise
+  assert.equal(P.relayLongChunks(S3, '', { relayForwardsAny: true }), 24);   // a WcbMgmt relay forwards any count
+  assert.equal(P.relayLongChunks('mgmt.rx32', 'mgmt.fwd24'), 24);    // the smaller of the two
+  assert.equal(P.relayLongChunks('mgmt.rx16', 'mgmt.fwd24'), 0);     // no more than one session anyway
+});
+
 const seqs = (n, len) => Array.from({ length: n }, (_, i) => `?SEQ,SAVE,s${i},;S1${'y'.repeat(len)}`);
 
 test('planRelayPush: what fits one session is one session, in the order given (as before)', () => {
