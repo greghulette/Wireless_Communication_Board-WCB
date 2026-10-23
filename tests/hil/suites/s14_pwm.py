@@ -71,7 +71,7 @@ class _DevConsole:
 
 def _clear_then_wdp_autoconfig(bench, w, c2, test_id):
     """W2 loses its S3 output to a direct clear while W1 still drives it, and WDP gives it back: the auto-config of an
-    output W2 lacks. Returns once W2 declares it again, after the reboot that applies it. c2: W2's Console.
+    output W2 lacks. Returns once W2 declares it again (applied live, no reboot). c2: W2's Console.
 
     Since channel sync (2026-10-21) a board solicits adverts right after its first boot advert (WCB_WDP.cpp), so W1's
     PWMTARGET reaches W2 within a second of the reboot the clear makes and W2 re-configures at once: the state the
@@ -93,13 +93,7 @@ def _clear_then_wdp_autoconfig(bench, w, c2, test_id):
         c2.expect(auto, timeout=8, since=cm)
         how = "on ?WDP,POLL"
     bench.note(f"{test_id}: W2 re-configured S3 from W1's advert {how}")
-    # The auto-config reboots W2 to apply it (rule 11's deferred restart): wait that out before pulling, from the line
-    # after the auto-config one - the clear's own reboot printed the same "Rebooting now". A mark is a line index into
-    # W2's own console; over ?RTERM (filtered lines) take the current one.
-    hits = [i for i, t in enumerate(c2.lines(cm)) if re.search(auto, t)]
-    am = cm + hits[-1] + 1 if hits and not c2.remote else c2.mark()
-    c2.expect(r"Rebooting now to apply PWM configuration", timeout=25, since=am)
-    c2.expect(r"Booting up the Wireless Communication Board", timeout=15, since=am)
+    # Applied live: an auto-configured output needs no reboot (run 20261022-213953: none came after the line).
     time.sleep(2.0)
     assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "WDP auto-config did not declare W2 S3"
 
