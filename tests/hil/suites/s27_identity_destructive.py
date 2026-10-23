@@ -671,7 +671,10 @@ def led_pin_moves_camera(bench):
     with config_guard(bench, 3) as before:
         if token(before[3], "?LED,PIN,") != "?LED,PIN,48":
             raise Skip(f"W3's chain does not hold ?LED,PIN,48 ({token(before[3], '?LED,PIN,')})")
-        ref = statistics.median(look("0_gpio48"))
+        try:
+            ref = statistics.median(look("0_gpio48"))
+        except benchcam.CameraMissing as e:   # before anything moved: a missing instrument, like a missing wire
+            raise Skip(str(e)) from None
         if ref < 150:
             raise Skip(f"the camera sees no lit LED in W3's window ({looks['0_gpio48']} blue pixels): check the camera "
                        f"and benchcam.W3_LED_WINDOW against led_w3_0_gpio48.jpg in the run folder")
