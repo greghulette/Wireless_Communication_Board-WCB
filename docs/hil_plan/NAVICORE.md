@@ -1410,7 +1410,12 @@ remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 >   variant would set Maestro 1's serial-error bit.
 > - `easing_repeat_frames` needs a passthrough knob with an output on the slot, as NC-WP5's `sbus.switch_easing_seed`
 >   does: a free knob on SBUS channel 0, never dispatched but counted by the re-apply, and two borrowed profiles with
->   random speeds.
+>   random speeds. Since 2026-10-22 it rides out one lost Kyber packet (NaviCore's WiFi driver now and then loses a
+>   broadcast it accepted: runs `20261022-154502`, `-213953`): on a hook image a step whose wire misses exactly one
+>   whole packet, while the DBG_WIRE copy shows the right frames, is counted from that copy and noted; two fail it.
+>   `ncdev.kyber_loss_audit` (added then) measures that loss: 600 setTarget broadcasts counted on W1 S1 and the W2 S1
+>   tap, checked against NaviCore's `[TXAUDIT:ACC=,LOST=]` (#L11, WCB_Client 1.19.1's transmit audit) where the image
+>   has it.
 > - Every config save re-applies easing and schedules two repeats 500 ms apart on every slot (processSwitches'
 >   seed, `NaviCore.ino:2466-2478`), which on this bench puts J4's Snappy speed on slot 2 into the stream. So
 >   `mae_remote_stream_exact` waits 1.5 s at its start and after its own save, `serial_action_bytes` checks only the

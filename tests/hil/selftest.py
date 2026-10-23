@@ -10192,13 +10192,24 @@ class NaviDevModel(NaviModel):
         return [f"[WIRE] {port} {o}/{len(data)}: {data[o:o + 48].hex(' ').upper()}" for o in range(0, len(data), 48)]
 
     def flush(self):
-        """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1."""
+        """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1. The kyber_lose_* mutations
+        are the WiFi driver losing packets it accepted, as NaviCore's did in HIL runs 20261022-154502 and -213953:
+        logged OK, reaching no WCB - 'one'/'two' the first one or two 28-byte packets (a remote restartScript,7,p<P>:
+        P's two channels and the subroutine frame), 'six*' the first 6-byte one (a setTarget), 'many' the first two.
+        #L11's [TXAUDIT:...] (hash_cmd) counts them as WCB_Client 1.19.1's transmit audit would."""
         if not self.stream:
             return []
         pkt = bytes(self.stream)
         self.stream.clear()
-        for k in ("W1S1", "W2S1"):
-            self.links[k].write(pkt)
+        size, budget = next(((n, b) for name, n, b in (("kyber_lose_one", 28, 1), ("kyber_lose_two", 28, 2),
+                                                         ("kyber_lose_many", 6, 2), ("kyber_lose_six", 6, 1))
+                             if any(m.startswith(name) for m in self.mut)), (0, 0))
+        self.lost, self.flushes = getattr(self, "lost", 0), getattr(self, "flushes", 0) + 1
+        if len(pkt) == size and self.lost < budget:
+            self.lost += 1
+        else:
+            for k in ("W1S1", "W2S1"):
+                self.links[k].write(pkt)
         return [f"[WCBStream] Broadcast (Kyber) {len(pkt)} bytes — OK"]
 
     def mwrite(self, i, cmd, payload=b""):
@@ -10596,6 +10607,13 @@ class NaviDevModel(NaviModel):
             return [f"[HCR TEST] -> {port} : SetEmotion(HAPPY,80) via hcrFormatCommand + raw frame"] + \
                 self.wire(port, HcrPy().fmt(2, 0, 80).encode()) + self.wire(port, b"<OH80,QEH>\n") + \
                 ["[HCR TEST] sent — watch the HCR; check TX wiring to HCR RX, common ground"]
+        if fn == 11 and any(m.endswith(("_audited", "_air")) for m in self.mut):
+            # WCB_Client 1.19.1's transmit audit in #L11: '_audited' counts the lost packets, '_air' does not (they
+            # completed - lost on the air, not in the driver).
+            lost = getattr(self, "lost", 0) if any(m.endswith("_audited") for m in self.mut) else 0
+            acc = getattr(self, "flushes", 0)
+            return [f"  Transmit audit: {acc} frame(s) accepted since boot, {lost} lost by the WiFi driver (no send "
+                    f"completion)", f"[TXAUDIT:ACC={acc},LOST={lost}]"] + super().hash_cmd(text)
         return super().hash_cmd(text)
 
     def _resume(self, ms):
@@ -10721,6 +10739,8 @@ def t_ncdev_helpers(tmp):
     """The pure parts of s44: wire_log joins one port's [WIRE] blocks and names each block a lost line left short (a
     missing head, a missing middle, a missing tail) while other ports are ignored; kyber_packets reads the WCBStream's
     flush lines; stream_packets cuts a burst between frames only (32 six-byte frames and a subroutine frame: 174 + 22);
+    step_packets cuts NaviCore's WCBStream copy into its Kyber packets, and refuses a copy a lost line or a FAIL left
+    short; lost_packet finds the one whole packet a wire missed, and nothing for two, half of one, or a reordering;
     pololu, frame_lengths and dev_stream build, measure and filter Pololu frames; hcr_payload reassembles a local HCR
     dispatch line whose payload spans lines; aux_label, free_profiles, profile_without and managed_channels read a
     config. And the tables agree with this file's ports of the WcbCmd codecs and of NaviCore's formatters - HcrCodec and
@@ -10742,6 +10762,25 @@ def t_ncdev_helpers(tmp):
                             "[WCBStream] Broadcast (Kyber) 22 bytes — FAIL"]) == [(174, "OK"), (22, "FAIL")]
     assert S.stream_packets([6] * 32 + [4]) == [174, 22] and S.stream_packets([6] * 29) == [174]
     assert S.stream_packets([6] * 30) == [174, 6] and S.stream_packets([3, 4]) == [7] and S.stream_packets([]) == []
+    # step_packets / lost_packet: NaviCore's [WIRE] copy cut into its Kyber packets, and a wire missing exactly one.
+    spd, acc, sub = S.pololu(4, 0x07, 5, 290), S.pololu(4, 0x09, 5, 18), S.pololu(4, 0x27, 7)
+    other = S.pololu(2, 0x07, 0, 30)                     # another device's frame in the same packet: not kept
+    step = ([f"[WIRE] WCBStream 0/{len(b)}: {b.hex(' ').upper()}" for b in (spd, acc, other)] +
+            ["[WCBStream] Broadcast (Kyber) 18 bytes — OK", "noise",
+             f"[WIRE] WCBStream 0/4: {sub.hex(' ').upper()}", "[WCBStream] Broadcast (Kyber) 4 bytes — OK"])
+
+    def dev4(d, c, ch, v):
+        return d == 4
+    per = S.step_packets(step, dev4)
+    assert per == [[(7, 5, 290), (9, 5, 18)], [(39, 7, None)]], per
+    assert S.lost_packet(per, [(39, 7, None)]) == 0 and S.lost_packet(per, [(7, 5, 290), (9, 5, 18)]) == 1
+    assert S.lost_packet(per, []) is None and S.lost_packet(per, [(7, 5, 290)]) is None   # two lost, or half of one
+    assert S.lost_packet(per, [(39, 7, None), (7, 5, 290), (9, 5, 18)]) is None           # out of order is not a loss
+    assert S.lost_packet([[], [(39, 7, None)]], [(39, 7, None)]) is None                  # nothing of ours went missing
+    assert S.step_packets(step[1:], dev4) is None                                         # a [WIRE] line lost
+    assert S.step_packets(step[:5] + step[6:], dev4) is None                              # ...the second packet's
+    assert S.step_packets(step[:4], dev4) == [[(7, 5, 290), (9, 5, 18)]]                  # the step cut after packet 1
+    assert S.step_packets([x.replace("4 bytes — OK", "4 bytes — FAIL") for x in step], dev4) is None
     assert S.pololu(4, 0x84, 5, 6000) == bytes.fromhex("AA 04 04 05 70 2E")
     assert S.pololu(4, 0x27, 200) == b"\xaa\x04\x27\xc8" and S.pololu(2, 0x22) == b"\xaa\x02\x22"
     burst = S.pololu(4, 0x07, 5, 105) + S.pololu(2, 0x22) + S.pololu(4, 0x27, 0)
@@ -10839,7 +10878,8 @@ def _run_dev_suite(tmp, ids=None, mut=()):
             model.w2audio = None
     patches = [(S44, "link", lambda bench, w, p: model.links[f"W{w}{p}"]), (S44, "_hcr_w2", hcr_w2),
                (S44, "_w2_audio", w2_audio), (S44, "config_guard", lambda bench, *w: contextlib.nullcontext()),
-               (S44, "snapshot", lambda bench, n: ["?WLED,1:W2S2:115200"]), (S44, "_settle_maestro2", lambda w: None)]
+               (S44, "snapshot", lambda bench, n: ["?WLED,1:W2S2:115200"]), (S44, "_settle_maestro2", lambda w: None),
+               (S44, "KYBER_AUDIT_N", 120), (S44, "KYBER_AUDIT_GAP_S", 0.0)]   # the loss audit's 2 min, cut short
     saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
     for mod, name, value in patches:
         setattr(mod, name, value)
@@ -10870,7 +10910,7 @@ def t_ncdev_suite_against_model(tmp):
     res, model, x = _run_dev_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCDEV_SHOULD else 'PASS'}) {r['detail'][:400]}"
            for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCDEV_SHOULD else "PASS")]
-    assert len(res) == x["count"] == 22, (len(res), x["count"])
+    assert len(res) == x["count"] == 23, (len(res), x["count"])
     assert not bad, "\n".join(bad)
     for tid, dnc in NCDEV_SHOULD.items():
         assert f"(should, {dnc})" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
@@ -10879,12 +10919,19 @@ def t_ncdev_suite_against_model(tmp):
     assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
 
 
-# (test, model mutation, the status it must then get, a piece of its detail): a break of the behaviour each test exists
-# to catch, and each D-NC fix its (should) test asks for. The byte tables need no break of their own here: every row is
+# (test, model mutation, the status it must then get, a piece of its detail - of its session.log notes for a PASS): a
+# break of the behaviour each test exists to catch, each D-NC fix its (should) test asks for, and the lone lost Kyber
+# packet a test must ride out. The byte tables need no break of their own here: every row is
 # compared byte-exact, t_ncdev_helpers checks each against its codec port, and the whole-suite run passes on them.
 NCDEV_MUTATIONS = (
     ("ncdev.mae_remote_stream_exact", "cut_mid_frame", "FAIL", "expected [174, 22]"),
     ("ncdev.easing_repeat_frames", "repeat_zero", "FAIL", "setEasing,off"),
+    ("ncdev.easing_repeat_frames", "kyber_lose_one", "PASS", "one Kyber packet NaviCore logged OK never reached W1 S1"),
+    ("ncdev.easing_repeat_frames", "kyber_lose_two", "FAIL", "2 Kyber packets NaviCore broadcast never reached W1 S1"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six", "PASS", "both wires missed 1 (0.83 %)"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six_audited", "PASS", "transmit audit: 1 of 120 frames lost"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six_air", "FAIL", "the rest went on the air"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_many", "FAIL", "reached neither wire: over 1 %"),
     ("ncdev.mae_remote_read", "no_relay_marker", "FAIL", "[TERM:20]"),
     ("ncdev.mesh_forward_burst", "queue_5", "FAIL", "expected the first 4"),
     ("ncdev.bcast_out_opt_in", "json_fanned", "FAIL", "declined JSON"),
@@ -10901,13 +10948,17 @@ NCDEV_MUTATIONS = (
 def t_ncdev_mutations(tmp):
     """The s44 tests catch what they exist to catch: against a NaviDevModel broken in one way each - a burst cut inside a
     frame, an easing repeat that drives 0, a remote read never mirrored to the bridge, a 5-deep forward queue, declined
-    JSON fanned out, a local fade that outlives the save that moved the HCR - the test fails and says why; and with
+    JSON fanned out, a local fade that outlives the save that moved the HCR, two Kyber packets the WiFi driver lost
+    (one is passed, from NaviCore's [WIRE] copy), a lost broadcast the transmit audit did not count, over 1 % of
+    broadcasts lost (one in 120 is counted and passed, audited or not) - the test fails and says why; and with
     each D-NC fix in the model (D-NC56, D-NC23, D-NC57, D-NC59, D-NC58, D-NC60) its (should) test passes. Each runs
     alone on a fresh model."""
     for tid, mut, want, why in NCDEV_MUTATIONS:
-        res, _, _ = _run_dev_suite(tmp, ids={tid}, mut={mut})
+        res, _, x = _run_dev_suite(tmp, ids={tid}, mut={mut})
         r = res[tid]
-        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+        # A FAIL's piece is in its detail; a PASS's, if it has one, in the note it left in session.log.
+        assert r["status"] == want and why in (r["detail"] if want == "FAIL" else x["log"]), \
+            (tid, mut, r["status"], r["detail"][:300])
 
 
 # ---------------------------------------------------------------------------- NC-WP12: NaviCore's recorder (s48)

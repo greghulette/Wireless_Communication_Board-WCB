@@ -118,6 +118,34 @@ def kyber_packets(lines):
     return [(int(m.group(1)), m.group(2)) for x in lines for m in [KYBER_LINE.match(x.rstrip())] if m]
 
 
+def step_packets(lines, keep):
+    """NaviCore's own account of one step, from a hook image's DBG_WIRE copy: the bytes it wrote to the broadcast
+    WCBStream (wire_log) cut into the Kyber packets it then sent (kyber_packets: a packet is cut between frames, never
+    inside one), each as the [(cmd, ch, value)] of its frames that `keep(dev, cmd, ch, value)` takes -> one list per
+    packet, or None when that account is not whole: a [WIRE] line lost, a packet not 'OK', or packets that do not add
+    up to the bytes written."""
+    data, gaps = wire_log(lines, "WCBStream")
+    pkts = kyber_packets(lines)
+    if gaps or not pkts or any(s != "OK" for _, s in pkts) or sum(n for n, _ in pkts) != len(data):
+        return None
+    out, at = [], 0
+    for n, _ in pkts:
+        out.append([(c, ch, v) for d, c, ch, v in pololu_frames(data[at:at + n]) if keep(d, c, ch, v)])
+        at += n
+    return out
+
+
+def lost_packet(per_packet, got):
+    """The index of the ONE packet of `per_packet` (step_packets) whose frames a wire is missing while every other
+    packet's arrived whole and in order - `got` is exactly the rest - else None. That is a lone Kyber broadcast the
+    sender's WiFi driver accepted and never put on the air (espressif/esp-idf #19269; WCB_Client 1.19.1's transmit
+    audit names it): no receiver gets it, and nothing acknowledges a broadcast."""
+    for k, pk in enumerate(per_packet):
+        if pk and [f for i, p in enumerate(per_packet) if i != k for f in p] == got:
+            return k
+    return None
+
+
 def stream_packets(lengths, cap=WCBSTREAM_CAP):
     """The packet sizes a burst of Pololu frames of these lengths, written in one loop() pass, leaves NaviCore in:
     maestroWrite flushes what is buffered before a frame that would not fit whole (NaviCore.ino:668-670 for a
@@ -650,13 +678,6 @@ def mae_subroutine_msb(bench):
     assert not bad, "(should, D-NC23) " + "; ".join(bad)
 
 
-def _easing_frames(l11, since, dev, chans):
-    """The frames for Maestro `dev` W1 S1 received since `since` that are speed/accel on `chans` or a subroutine frame, as
-    (cmd, ch, value) - the bench knob J4's own channel 0 on the same slot is left out."""
-    return [(c, ch, v) for d, c, ch, v in pololu_frames(l11.received(since)) if d == dev and
-            (c == CMD_SUB or (c in (CMD_SPEED, CMD_ACCEL) and ch in chans))]
-
-
 @test("ncdev.easing_repeat_frames", "Easing on a remote slot as frames on W1 S1: setEasing,p<P> sends the knob-driven "
       "channel's speed and accel at once and again 500 and 1000 ms later (probe clock); setEasing,off sends 0/0 once "
       "and no repeat; restartScript,n loads its own profile, the switch's when it has none, the switch's over its own "
@@ -674,12 +695,21 @@ def easing_repeat_frames(bench):
     by an earlier run cannot hide a write), and a free knob on SBUS channel 0 - never dispatched (processKnobs skips
     it) yet counted by the re-apply - driving X with no profile of its own, so X follows the switch. Frames of the bench
     knob J4 on the slot's channel 0 are left out. The slot's easing ends released, as it began (RAM only). Device 4 is
-    hosted nowhere: nothing moves."""
+    hosted nowhere: nothing moves.
+
+    The Kyber broadcast is unacknowledged, and NaviCore's WiFi driver now and then loses one it accepted: logged 'OK',
+    on no WCB's wire (runs 20261022-154502 and -213953: one packet each time, missed by every probe watching; 7 in
+    ~11,600 in the full runs of 2026-10-05..15, one of them here on 2026-10-09 on a step this test does not check). A
+    step cannot be sent again to make up for it, as Wires does - setEasing's re-apply is cache-gated and its repeats are
+    scheduled from the first send - so on a hook image (DBG_WIRE) a step whose wire misses exactly one whole packet, while
+    NaviCore's [WIRE] copy shows it wrote exactly the expected frames in the packets it logged OK, is counted from that
+    copy and noted. One such loss in the test is the driver's; two fail it, as does any step NaviCore wrote wrong."""
     l11 = link(bench, 1, "S1")
     nc = _nc(bench)
     cfg = nc.config()
     slot, dev = _remote_slot(cfg)
-    problems, notes = [], []
+    hook = _hooks(nc)
+    problems, notes, lost = [], [], []
     with nc_guard(bench) as g:
         nc = g.nc
         knobs, profs = _free_knobs(g.before), free_profiles(g.before)
@@ -702,49 +732,151 @@ def easing_repeat_frames(bench):
         Q = [(CMD_SPEED, x, sq), (CMD_ACCEL, x, aq)]
         zero = [(CMD_SPEED, x, 0), (CMD_ACCEL, x, 0)]
 
-        def act(cmd, wait):
-            m = l11.mark()
+        def easing(d, c, ch, v):   # speed/accel on X or Y, or a subroutine frame: the bench knob J4's channel 0 left out
+            return d == dev and (c == CMD_SUB or (c in (CMD_SPEED, CMD_ACCEL) and ch in chans))
+
+        def act(cmd, wait, keep=easing):
+            """-> (probe mark, the frames `keep` takes that W1 S1 received, NaviCore's lines for the step)."""
+            m, nm = l11.mark(), nc.dev.mark()
             nc.test_action(_maestro(slot, cmd))
             time.sleep(wait)
-            return m, _easing_frames(l11, m, dev, chans)
+            lines = _trace(nc, nm, 0.05) if hook else []   # before the wire is read: the wire covers what it logged
+            return m, [(c, ch, v) for d, c, ch, v in pololu_frames(l11.received(m)) if keep(d, c, ch, v)], lines
 
-        def expect(what, got, want):
-            if got != want:
-                problems.append(f"{what}: W1 S1 got {got}, expected {want}")
+        def expect(what, got, want, lines, keep=easing):
+            if got == want:
+                return
+            per = step_packets(lines, keep) if hook else None
+            wrote = None if per is None else [f for pk in per for f in pk]
+            k = lost_packet(per, got) if wrote == want else None
+            if k is not None:
+                lost.append(f"{what}: packet {k + 1} of {len(per)} ({per[k]}), logged OK by NaviCore")
+                return
+            note = "" if wrote is None else f" (NaviCore's [WIRE] copy: {wrote} in {len(per)} Kyber packet(s))"
+            problems.append(f"{what}: W1 S1 got {got}, expected {want}{note}")
 
-        with nc.debug(DBG_MAESTRO):
-            m, got = act(f"setEasing,p{p}", 1.6)
-            expect(f"setEasing,p{p}", got, P * 3)
+        with nc.debug(DBG_MAESTRO | (DBG_WIRE if hook else 0)):
+            m, got, tr = act(f"setEasing,p{p}", 1.6)
+            expect(f"setEasing,p{p}", got, P * 3, tr)
             t = [_probe_ms(l11, m, pololu(dev, CMD_SPEED, x, sp), nth=i) for i in range(3)]
             if None not in t:
                 notes.append(f"repeats at +{t[1] - t[0]} and +{t[2] - t[0]} ms")
                 if not (400 <= t[1] - t[0] <= 650 and 900 <= t[2] - t[0] <= 1200):
                     problems.append(f"setEasing,p{p}: the repeats came {t[1] - t[0]} and {t[2] - t[0]} ms after the "
                                     f"first send, expected 500 and 1000")
-            m, got = act("setEasing,off", 1.6)
-            expect("setEasing,off (0/0 once, never repeated)", got, zero)
-            m, got = act("setEasing,release", 1.3)
-            expect("setEasing,release (already 0: nothing)", got, [])
-            m, got = act("restartScript,7", 0.8)
-            expect("restartScript,7, released", got, [(CMD_SUB, 7, None)])
-            m, got = act(f"restartScript,7,p{p}", 0.8)
-            expect(f"restartScript,7,p{p}", got, P + Py + [(CMD_SUB, 7, None)])
+            elif lost:
+                notes.append("the repeat timing not measured: one of its three packets was lost")
+            m, got, tr = act("setEasing,off", 1.6)
+            expect("setEasing,off (0/0 once, never repeated)", got, zero, tr)
+            m, got, tr = act("setEasing,release", 1.3)
+            expect("setEasing,release (already 0: nothing)", got, [], tr)
+            m, got, tr = act("restartScript,7", 0.8)
+            expect("restartScript,7, released", got, [(CMD_SUB, 7, None)], tr)
+            m, got, tr = act(f"restartScript,7,p{p}", 0.8)
+            expect(f"restartScript,7,p{p}", got, P + Py + [(CMD_SUB, 7, None)], tr)
             act(f"setEasing,p{q}", 1.6)
-            m, got = act("restartScript,7", 0.8)
-            expect(f"restartScript,7 under setEasing,p{q}", got, Q + [(CMD_SUB, 7, None)])
-            m, got = act(f"restartScript,7,p{p}", 0.8)
-            expect(f"restartScript,7,p{p} under p{q} (its own wins)", got, P + Py + [(CMD_SUB, 7, None)])
-            m, got = act(f"restartScript,7,p{p},o", 0.8)
-            expect(f"restartScript,7,p{p},o under p{q} (the switch overrides)", got, Q + [(CMD_SUB, 7, None)])
+            m, got, tr = act("restartScript,7", 0.8)
+            expect(f"restartScript,7 under setEasing,p{q}", got, Q + [(CMD_SUB, 7, None)], tr)
+            m, got, tr = act(f"restartScript,7,p{p}", 0.8)
+            expect(f"restartScript,7,p{p} under p{q} (its own wins)", got, P + Py + [(CMD_SUB, 7, None)], tr)
+            m, got, tr = act(f"restartScript,7,p{p},o", 0.8)
+            expect(f"restartScript,7,p{p},o under p{q} (the switch overrides)", got, Q + [(CMD_SUB, 7, None)], tr)
             act("setEasing,off", 1.6)
-            m = l11.mark()
-            nc.test_action(_maestro(slot, "restartScript,7"))
-            time.sleep(0.8)
-            reset = [(c, ch, v) for d, c, ch, v in pololu_frames(l11.received(m)) if d == dev]
+
+            def mine(d, c, ch, v):   # every frame for the device: the Off reset names every managed channel
+                return d == dev
+
+            m, reset, tr = act("restartScript,7", 0.8, keep=mine)
             want = [f for ch in managed for f in ((CMD_SPEED, ch, 0), (CMD_ACCEL, ch, 0))] + [(CMD_SUB, 7, None)]
-            expect("restartScript,7 under setEasing,off (every managed channel zeroed)", reset, want)
+            expect("restartScript,7 under setEasing,off (every managed channel zeroed)", reset, want, tr, keep=mine)
             act("setEasing,release", 1.3)
+    if len(lost) > 1:
+        problems.append(f"{len(lost)} Kyber packets NaviCore broadcast never reached W1 S1 in one test (one is the WiFi "
+                        f"driver's lone loss, more is not): " + "; ".join(lost))
+    elif lost:
+        notes.append("one Kyber packet NaviCore logged OK never reached W1 S1 (the WiFi driver's lone loss, counted "
+                     "from NaviCore's [WIRE] copy): " + lost[0])
     bench.note(f"slot {slot} (device {dev}) ch {x}/{y}: P=p{p} {sp}/{ap}, Q=p{q} {sq}/{aq}; " + "; ".join(notes))
+    assert not problems, "; ".join(problems)
+
+
+KYBER_AUDIT_N = 600          # frames: at 2026-10-05..15's ~0.06 % about 0.4 lost, at 2026-10-22's ~0.75 % about 4
+KYBER_AUDIT_GAP_S = 0.2      # between TEST_ACTIONs: the pace ncdev.easing_repeat_frames lost its packets at
+TXAUDIT_LINE = re.compile(r"\[TXAUDIT:ACC=(\d+),LOST=(\d+)\]")
+
+
+def _txaudit(nc):
+    """NaviCore's transmit-audit counters from #L11 (WCB_Client 1.19.1 and the NaviCore that prints them) -> (frames
+    accepted, frames the WiFi driver lost), or None on an image without them."""
+    lines = nc.cli("#L11", until=r"\[CHSYNC:EN=|Mode=\d+")
+    for x in lines:
+        m = TXAUDIT_LINE.search(x)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None
+
+
+@test("ncdev.kyber_loss_audit", "Every Kyber broadcast NaviCore logs OK reaches both Maestro_Remote WCBs, or it is one "
+      "its WiFi driver lost: setTarget frames on a remote slot, one TEST_ACTION every 200 ms, each its own target, "
+      "counted on W1 S1 and the W2 S1 tap; a frame both missed was never on the air, and on a WCB_Client 1.19.1 image "
+      "the transmit audit counts it (no send completion), or it was lost on the air instead; no more than 1 % lost "
+      "(remote slot: nothing moves)", needs=["navicore", "wcb1"], links=["W1S1", "W2S1"])
+def kyber_loss_audit(bench):
+    """The measurement behind ncdev.easing_repeat_frames' lone-loss rule. Run 20261022-154502 lost three Kyber packets
+    NaviCore logged '[WCBStream] Broadcast (Kyber) N bytes — OK' (WCBStream.cpp _flushBuffer: esp_now_send returned
+    ESP_OK), and every probe missed each - W1 S1, the W2 S1 tap and W3's - so the frame never went on the air; the full
+    runs of 2026-10-05..15 lost 7 of about 11,600 the same way. The cause named upstream (espressif/esp-idf #19269,
+    #18682; tracker #112's single-frame form): ESP-NOW's insert into the WiFi driver's TX queue races the driver's own
+    dequeue, the frame is dropped, and its send callback never comes. WCB_Client 1.19.1 counts exactly that (the transmit
+    audit: completions against accepted frames, WCB_TXAUDIT_SETTLE_MS), and NaviCore prints the counts in #L11 as
+    [TXAUDIT:ACC=,LOST=]. Here KYBER_AUDIT_N frames AA <dev> 04 <ch> <pos> go out one per TEST_ACTION; a frame missed
+    by both wires is a lost broadcast, one missed by one wire is that WCB's or its probe's. With the audit, the driver
+    must account for every frame both wires missed (LOST rose by at least as many) - more missed than it counted were
+    lost on the air, a cause this test then names. Without it (navicore-fix18, WCB_Client 1.18.1, or 1.19.0) the counts
+    alone are the A/B: the same test on each image. Fails over 1 % lost. Device 4 is hosted nowhere: nothing moves."""
+    l11, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
+    nc = _nc(bench)
+    cfg = nc.config()
+    slot, dev = _remote_slot(cfg)
+    ch = _free_channels(cfg, slot, 1)[0]
+    before = _txaudit(nc)
+    m1, m2, nm = l11.mark(), tap.mark(), nc.dev.mark()
+    sent, refused = [], []
+    for i in range(KYBER_AUDIT_N):
+        pos = 4000 + 4 * i                     # every frame its own target: each told apart, none a cached repeat
+        ack = nc.test_action(_maestro(slot, f"setTarget,{ch},{pos}"))
+        (sent if ack.get("ok") else refused).append(pos)
+        time.sleep(KYBER_AUDIT_GAP_S)
+    time.sleep(1.0)
+    after = _txaudit(nc)
+    pk = kyber_packets(nc.dev.since(nm))
+    fails = sum(1 for _, s in pk if s != "OK")
+
+    def targets(data):
+        return {v for d, c, chn, v in pololu_frames(data) if d == dev and c == CMD_TARGET and chn == ch}
+    got1, got2 = targets(l11.received(m1)), targets(tap.received(m2))
+    miss1, miss2 = [p for p in sent if p not in got1], [p for p in sent if p not in got2]
+    both = [p for p in miss1 if p in miss2]
+    only = len(miss1) + len(miss2) - 2 * len(both)
+    audit = "no transmit audit on this image"
+    problems = []
+    if before is not None and after is not None:
+        acc, lost = after[0] - before[0], after[1] - before[1]
+        audit = f"transmit audit: {lost} of {acc} frames lost by the WiFi driver meanwhile (all senders, all frames)"
+        if len(both) > lost:
+            problems.append(f"{len(both)} frame(s) both wires missed, but NaviCore's WiFi driver lost only {lost}: "
+                            f"the rest went on the air and were lost there (targets {both[:10]})")
+    bench.note(f"slot {slot} (device {dev}) ch {ch}: {len(sent)} sent, {len(pk)} Kyber packet(s) logged ({fails} not OK); "
+               f"both wires missed {len(both)} ({100.0 * len(both) / max(1, len(sent)):.2f} %), one wire only {only} "
+               f"(W1 S1 {len(miss1)}, W2 S1 tap {len(miss2)}); {audit}")
+    if refused:
+        problems.append(f"NaviCore refused {len(refused)} setTarget TEST_ACTION(s) (first: {refused[0]})")
+    if fails:
+        problems.append(f"{fails} Kyber packet(s) logged FAIL: esp_now_send refused them")
+    if len(both) * 100 > len(sent):
+        problems.append(f"{len(both)} of {len(sent)} broadcasts reached neither wire: over 1 %")
+    if only * 100 > len(sent):
+        problems.append(f"{only} frame(s) reached one wire and not the other: over 1 %")
     assert not problems, "; ".join(problems)
 
 
