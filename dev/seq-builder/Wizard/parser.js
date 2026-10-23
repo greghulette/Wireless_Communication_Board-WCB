@@ -2267,6 +2267,106 @@ function createPullCollector(wantWCB) {
 }
 
 // ─────────────────────────────────────────────
+// A relay push, planned (docs/MGMT_RELAY.md §10)
+// ─────────────────────────────────────────────
+// A push to a board behind a relay goes as ?MGMT,FRAG sessions: chunks of at most 179 BYTES (the relay copies a chunk
+// into a 180-byte field and refuses a longer one: WCB.ino handleMgmtForward), at most 16 a session
+// (a released target reassembles 16 and tracks them in a 16-bit mask). One session holds 2864 bytes; a push longer than
+// that goes as several, each a whole number of commands, which the target runs one session at a time.
+//
+// utf8Chunks(str, maxBytes): str cut into pieces of at most maxBytes UTF-8 bytes, never inside a character (a JS
+// string cannot hold half of one, and the relay counts bytes: a chunk of 179 characters with an 'é' in it was 180
+// bytes and REJECTED, so the session never completed and the push was lost while the Wizard reported it sent).
+function utf8Chunks(str, maxBytes = 179) {
+  const out = [];
+  let cur = '', curBytes = 0;
+  for (const ch of String(str ?? '')) {             // by code point: a surrogate pair stays together
+    const cp = ch.codePointAt(0);
+    const n = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (curBytes + n > maxBytes && cur) { out.push(cur); cur = ''; curBytes = 0; }
+    cur += ch;
+    curBytes += n;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+// planRelayPush(cmdString, opts) -> { sessions: [{ text, chunks, cmds, list }], split, problem }   (list: its commands)
+//   cmdString  the push chain, funcChar-led commands joined by delim (buildCommandString)
+//   opts       { funcChar, delim, reboot (append ?reboot), chunkBytes 179, maxChunks 16, maxCmds 150,
+//                longChunks: 0, or the most chunks the target and relay take for ONE command too long for one session
+//                (24 on an ESP32-S3 board and relay with the firmware that takes them),
+//                wcbChange: the push changes the board's number (?WCB,<n> with a new n) }
+// Everything that fits one session is ONE session, in the order given, exactly as before. A longer push is split at
+// command boundaries into sessions of at most maxChunks chunks and maxCmds commands (the target queues a session's
+// commands at once, from its WiFi task, which never waits for room in its 200-slot queue, so a session of more than
+// that lost the rest while the push reported it sent; maxCmds leaves the queue room). Then order matters across
+// sessions, so the commands after which the target cannot be reached, or restarts on its own, go in the LAST one:
+// MAC octets and the mesh password (the next session would be filtered out), every PWM mapping, ?PX and ?ERASE (each
+// queues a restart, which a gap between sessions longer than its 4 s quiet window would let run mid-push) and the
+// ?reboot. A board-number CHANGE (wcbChange) cannot be moved after the commands that use the number, and a session sent
+// after it would be addressed to the old one: such a push must fit one session, or it is refused (a ?WCB,<n> that
+// repeats the number, as a full push sends it, is an ordinary command). `problem` is a refusal in words; nothing is
+// sent then.
+const _RELAY_LATE = (verb, sub) => verb === 'MAC' || verb === 'EPASS' || (verb === 'MAP' && sub === 'PWM') ||
+  /^PX\d*$/.test(verb) || verb === 'ERASE' || verb === 'REBOOT';
+function planRelayPush(cmdString, opts = {}) {
+  const { funcChar = '?', delim = '^', reboot = false, chunkBytes = 179, maxChunks = 16, maxCmds = 150,
+          longChunks = 0, wcbChange = false } = opts;
+  const chain = String(cmdString ?? '');
+  const cmds = chain ? chain.split(delim + funcChar).map((p, i) => (i === 0 ? p : funcChar + p)).filter(Boolean) : [];
+  if (reboot) cmds.push(funcChar + 'reboot');
+  const one = cmds.join(delim);
+  const chunksOf = (t) => utf8Chunks(t, chunkBytes);
+  const sessionOf = (list) => { const text = list.join(delim); return { text, chunks: chunksOf(text), cmds: list.length, list }; };
+  if (!cmds.length) return { sessions: [], split: false, problem: '' };
+  const whole = sessionOf(cmds);
+  if (whole.chunks.length <= maxChunks && cmds.length <= maxCmds) return { sessions: [whole], split: false, problem: '' };
+  if (cmds.length === 1) {
+    if (longChunks && whole.chunks.length <= longChunks) return { sessions: [whole], split: false, problem: '' };
+    return { sessions: [], split: false,
+             problem: `one command is ${new TextEncoder().encode(one).length} bytes, more than one relay session carries`
+                      + ` (${maxChunks * chunkBytes} bytes${longChunks ? `; ${longChunks * chunkBytes} for this board` : ''})` };
+  }
+  const verbOf = (c) => c.slice(funcChar.length).toUpperCase().split(',');
+  if (wcbChange && cmds.some((c) => verbOf(c)[0] === 'WCB')) {
+    return { sessions: [], split: false,
+             problem: 'it changes the board number and is too long for one relay session; push the number change on '
+                      + 'its own first, then the rest to the board under its new number' };
+  }
+  const early = [], late = [];
+  for (const c of cmds) (_RELAY_LATE(...verbOf(c)) ? late : early).push(c);
+  const sessions = [];
+  let cur = [];
+  const fits = (list) => list.length <= maxCmds && chunksOf(list.join(delim)).length <= maxChunks;
+  for (const c of early) {
+    if (cur.length && !fits([...cur, c])) { sessions.push(sessionOf(cur)); cur = []; }
+    if (!fits([c])) {
+      // One command too long for a session of its own (a long ?SEQ,SAVE): a long session, where the target takes one.
+      if (!(longChunks && chunksOf(c).length <= longChunks)) {
+        return { sessions: [], split: true,
+                 problem: `one command is ${new TextEncoder().encode(c).length} bytes, more than one relay session carries`
+                          + ` (${maxChunks * chunkBytes} bytes${longChunks ? `; ${longChunks * chunkBytes} for this board` : ''})` };
+      }
+      if (cur.length) { sessions.push(sessionOf(cur)); cur = []; }
+      sessions.push(sessionOf([c]));
+      continue;
+    }
+    cur.push(c);
+  }
+  if (late.length) {
+    if (cur.length && fits([...cur, ...late])) cur.push(...late);
+    else {
+      if (cur.length) sessions.push(sessionOf(cur));
+      cur = [...late];
+      if (!fits(cur)) return { sessions: [], split: true, problem: 'its network and restart commands do not fit one relay session' };
+    }
+  }
+  if (cur.length) sessions.push(sessionOf(cur));
+  return { sessions, split: true, problem: '' };
+}
+
+// ─────────────────────────────────────────────
 // Channel sync lines in a ?WDP,DUMP and a ?CHSYNC (docs/CHANNEL_SYNC.md §2, §7)
 // ─────────────────────────────────────────────
 // Both are KEY=value lists. They are read by key, not by position, so a field a later firmware adds or moves does not
@@ -2519,6 +2619,8 @@ const WCB_PARSER_API = {
   parseConfigError,
   verifyConfigReply,
   createPullCollector,
+  utf8Chunks,
+  planRelayPush,
   CHSYNC_REGIONS,
   regionMaxChannel,
   wifiTokenProblem,
