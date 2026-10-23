@@ -90,7 +90,9 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # paged sequence-names wait, db5b1a4) with the hooks, against WCB_Client 1.19.0 from the WCBClient chansync checkout
 # (`build --library`, b1c44a7; the sketchbook's copy is 1.18.1), App SHA 383707811897fd08, v0.2.0_220941ROCT26.
 # navicore-fix18 stays beside it as the way back.
-BENCH_IMAGE = "navicore-chansync"
+# navicore-relay since 2026-10-23 11:40: NaviCore main 9e3d8b7 (mesh results in parts) with the hooks, against
+# WCB_Client 1.20.0 499fe6a (`build --library`), App SHA d721f5157076ef19, v0.2.0_231110ROCT26; navicore-chansync kept.
+BENCH_IMAGE = "navicore-relay"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.
