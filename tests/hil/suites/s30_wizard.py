@@ -81,7 +81,7 @@ _FAKE_PUSH = (
     ("bidir", "a mapping row touched but not changed re-sends no mapping, so a PWM input does not reboot the board (W-5)"),
     ("reboot_matchers", "the reboot and network-group checks read each command, not a substring of a label or a sequence (W-8)"),
     ("relay_sessions", "a relay push over one 16-chunk session goes as several, whole commands each, the mesh password in the last; the network-group confirm and the bootstrap still come first (F14, docs/MGMT_RELAY.md §10)"),
-    ("relay_wcb_change", "a push that changes the board number and does not fit one session is refused before the confirm, the bootstrap or any send; one that fits goes to the number the board has now"),
+    ("relay_wcb_change", "a push that changes the board number and does not fit one session goes in two steps: the first session, ?WCB,<new> first, to the number the board has now, every later one to the new number in two chunks at least; refused through a WcbMgmt relay or onto a number another board has, before the bootstrap or any send; one that fits goes to the number the board has now"),
     ("relay_long_command", "one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24, an ESP32-S3) and the relay forwards it (mgmt.fwd24, or a WcbMgmt relay); a classic ESP32, older firmware or tags not seen yet are refused"),
     ("relay_chars", "a relay push with a character change the board would refuse on the way sends nothing, and a ',' target takes ?D^ first (W-2)"),
     ("relay_push", "a relay push still asks before a network-group change, bootstraps a new function id first, and frames the chain in 179-char chunks"),

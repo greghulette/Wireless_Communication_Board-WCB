@@ -417,29 +417,71 @@ test('wizard.push_fake_relay_sessions a relay push over one 16-chunk session goe
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.push_fake_relay_wcb_change a push that changes the board number and does not fit one session is refused before the confirm, the bootstrap or any send; one that fits goes to the number the board has now', async ({ page }) => {
-  await relayBoard(page, RELAY_CHAIN);
-  await page.evaluate(() => {
-    window.sleep = () => Promise.resolve();
-    const cfg = boardConfigs[2];
-    cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
-    populateUIFromConfig(2, cfg);
-    cfg.wcbNumber = 5;
-    document.getElementById('g-funcchar').value = '!';
-    window.__go = boardGo(2);
-  });
-  await page.waitForTimeout(1500);
-  let r = await page.evaluate(() => ({
-    modal: document.getElementById('network-group-change-modal').classList.contains('open'),
-    sent: [...__sent], outcome: boardPushOutcome[2],
-    btn: [document.getElementById('b2-btn-go').disabled, document.getElementById('b2-btn-go').textContent],
-  }));
+test('wizard.push_fake_relay_wcb_change a push that changes the board number and does not fit one session goes in two steps: the first session, ?WCB,<new> first, to the number the board has now, every later one to the new number in two chunks at least; refused through a WcbMgmt relay or onto a number another board has, before the bootstrap or any send; one that fits goes to the number the board has now', async ({ page }) => {
+  const renumberPush = async (setup) => {
+    await relayBoard(page, RELAY_CHAIN);
+    if (setup) await setup();
+    await page.evaluate(() => {
+      window.sleep = () => Promise.resolve();
+      const cfg = boardConfigs[2];
+      cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
+      populateUIFromConfig(2, cfg);
+      cfg.wcbNumber = 5;
+      document.getElementById('g-funcchar').value = '!';
+      window.__go = boardGo(2);
+    });
+    await page.waitForTimeout(1500);
+    return page.evaluate(() => ({
+      modal: document.getElementById('network-group-change-modal').classList.contains('open'),
+      sent: [...__sent], outcome: boardPushOutcome[2], baseline: boardBaselines[2].wcbNumber,
+      btn: [document.getElementById('b2-btn-go').disabled, document.getElementById('b2-btn-go').textContent],
+    }));
+  };
+
+  // Through a WCB relay: the bootstrap, then session 1 to WCB 2 opening with ?WCB,5, then the rest to WCB 5.
+  let r = await renumberPush();
   expect(r.modal).toBe(false);
-  expect(r.sent, 'nothing reaches the relay: no bootstrap, no chunk').toEqual([]);
-  expect(r.outcome.ok).toBe(false);
-  expect(r.outcome.reason).toMatch(/board number/);
-  expect(r.btn).toEqual([false, 'Push Config']);
-  expect(await page.locator('#toast-container').textContent()).toContain('cannot go via a relay');
+  expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+  expect(r.baseline, 'the baseline is the pushed config, under its new number').toBe(5);
+  const boot = r.sent.filter((s) => s.endsWith(',0,1,?FUNCCHAR,!'));
+  expect(boot.length).toBe(3);
+  expect(boot.every((s) => s.startsWith('?MGMT,FRAG,2,')), 'the bootstrap goes to the number the board has now').toBe(true);
+  const sessions = sessionsOf(r.sent.filter((s) => !s.endsWith('?FUNCCHAR,!')));
+  expect(sessions.length, 'more than one session').toBeGreaterThan(1);
+  expect(sessions[0].target).toBe(2);
+  expect(sessions[0].chunks.join('').startsWith('!WCB,5^'), 'the first session opens with the number change').toBe(true);
+  for (const x of sessions.slice(1)) {
+    expect(x.target, 'every later session to the new number').toBe(5);
+    expect(x.total, 'a broadcast session: two chunks at least').toBeGreaterThanOrEqual(2);
+  }
+  for (const x of sessions) {
+    expect(x.idx).toEqual(x.chunks.map((_, i) => i));
+    expect(x.chunks.length).toBe(x.total);
+    expect(x.total).toBeLessThanOrEqual(16);
+  }
+  const all = sessions.map((x) => x.chunks.join('')).join('^');
+  expect(all.match(/!WCB,5/g).length, 'the number change once').toBe(1);
+  for (let i = 0; i < 20; i++) expect(all).toContain(`!SEQ,SAVE,s${i},;S1${'x'.repeat(180)}`);
+  expect(sessions[sessions.length - 1].chunks.join('').endsWith('!reboot'), 'the restart last').toBe(true);
+
+  // Refused before the bootstrap or any send: through a WcbMgmt relay (it sends every chunk to the board's radio
+  // address, which follows the new number only at the restart), and onto a number another board is heard on.
+  for (const [why, setup, reason] of [
+    ['a WcbMgmt relay', () => page.evaluate(() => { boardConfigs[1] = { ...(boardConfigs[1] || {}), isRelay: true }; }),
+     /board number.*radio address/],
+    ['WCB 5 on the mesh', () => feedWdpDump(page, wdpDump([{ n: 1, tags: 'mgmt.fwd24', peer: 3 }, { n: 2, tags: 'mgmt.fwd24' },
+                                                          { n: 5, alias: 'Other', tags: 'mgmt.fwd24', peer: 2 }])),
+     /board number to 5 .*WCB 5 is already on the mesh/],
+  ]) {
+    r = await renumberPush(setup);
+    expect(r.modal, why).toBe(false);
+    expect(r.sent, `${why}: nothing reaches the relay - no bootstrap, no chunk`).toEqual([]);
+    expect(r.outcome.ok, why).toBe(false);
+    expect(r.outcome.reason, why).toMatch(reason);
+    expect(r.baseline, why).toBe(2);
+    expect(r.btn, why).toEqual([false, 'Push Config']);
+    expect(await page.locator('#toast-container').textContent()).toContain('cannot go via a relay');
+  }
 
   // The number change alone: one session, addressed to WCB 2 - the board takes 5 only once it has run it.
   await relayBoard(page, RELAY_CHAIN);
@@ -450,10 +492,10 @@ test('wizard.push_fake_relay_wcb_change a push that changes the board number and
     return { sent: [...__sent], outcome: boardPushOutcome[2] };
   });
   expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
-  const sessions = sessionsOf(r.sent);
-  expect(sessions.length).toBe(1);
-  expect(sessions[0].target).toBe(2);
-  expect(sessions[0].chunks.join('')).toContain('?WCB,5');
+  const alone = sessionsOf(r.sent);
+  expect(alone.length).toBe(1);
+  expect(alone[0].target).toBe(2);
+  expect(alone[0].chunks.join('')).toContain('?WCB,5');
   expect(page.wizErrors).toEqual([]);
 });
 

@@ -4,15 +4,16 @@ the ;T timer's 30-minute cap and a ;T chain received over the mesh, the ?MGMT an
 banner on both boards, checked line by line against each board's own config chain.
 
 Restore if aborted: ?DEBUG,OFF / ?DEBUG,MGMT,OFF / ?STOP / ?TRACK,ON on W1's USB console; ?MAESTRO,CLEAR,M8:W11S1 if a
-chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF. Nothing here moves a servo.
+chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF; ?WCB,2 on W2's USB console if W2 answers to
+another number (mesh.relay_renumber_sessions). Nothing here moves a servo.
 """
 import re
 import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, config_guard, fault, fault_off, marker, require_tokens, snapshot, token, usb_wcb,
-                           wifi_mode_token, wire, ws_token)
+from suites.common import (Console, absent_wcbs, config_guard, fault, fault_off, marker, require_tokens, snapshot, token,
+                           usb_wcb, wifi_mode_token, wire, ws_token)
 from suites.s22_maestro_kyber import _wdp_off
 
 
@@ -702,6 +703,63 @@ def mgmt_errors(bench):
                     problems.append(f"{cmd} printed {out}, expected nothing")
         finally:
             w.run("?DEBUG,MGMT,OFF")
+    assert not problems, "; ".join(problems)
+
+
+@test("mesh.relay_renumber_sessions", "A board renumbered by a relayed ?WCB,<new> takes the sessions after it as the "
+      "Wizard sends them (planRelayPush, docs/MGMT_RELAY.md §10): W1 relays ?WCB,<n> to W2 (one chunk, ETM, to 2); a "
+      "two-chunk session to <n> then runs on W2 before any restart, while a one-chunk session to <n> (an ETM unicast to "
+      "<n>'s address, which W2 takes only at a restart) and one to 2 do not; a two-chunk ?WCB,2 puts it back (no reboot)",
+      needs=["wcb1", "wcb2"], links=[])
+def relay_renumber_sessions(bench):
+    """What the Wizard's two-step renumber relies on. saveWCBNumberToPreferences (WCB_Storage.cpp) sets WCB_Number at
+    once; handleMgmtPacket (WCB.ino) reassembles a FRAG session only when the number in it is WCB_Number; the radio
+    address follows the number only at the next boot (esp_wifi_set_mac in setup()). handleMgmtForward broadcasts each
+    chunk of a session of two or more, and sends a one-chunk session as an ETM unicast to the address of the number it
+    names. W2's ?WDP,STATUS line on its own USB console shows which sessions ran. W2's number is put back over the mesh
+    and, if that fails, over its USB in the finally; config_guard proves it is."""
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    new = absent_wcbs(bench)[0]
+    problems = []
+
+    def session(target, chunks, wait=2.0):
+        sid = marker()[3:7]
+        m = w2.dev.mark()
+        for i, c in enumerate(chunks):
+            w.send(f"?MGMT,FRAG,{target},{sid},{i},{len(chunks)},{c}")
+            time.sleep(0.03)
+        time.sleep(wait)
+        return [x.rstrip() for x in w2.dev.since(m)]
+
+    ran = lambda out: _has(out, "[WDP:en=")   # ?WDP,STATUS's one line
+    back = False
+    with config_guard(bench, 2):
+        try:
+            out = session(2, [f"?WCB,{new}"])
+            if not _has(out, f"Changed WCB Number to: {new}"):
+                back = True                          # it never left 2
+                raise AssertionError(f"W2 did not take ?WCB,{new} relayed to WCB 2: {out[-4:]}")
+            for what, target, chunks, want in (
+                    (f"a two-chunk session to {new}", new, ["?WDP,", "STATUS"], True),
+                    (f"a one-chunk session to {new}", new, ["?WDP,STATUS"], False),
+                    ("a one-chunk session to 2", 2, ["?WDP,STATUS"], False),
+                    ("a two-chunk session to 2", 2, ["?WDP,", "STATUS"], False)):
+                got = ran(session(target, chunks))
+                if got != want:
+                    problems.append(f"{what} {'ran' if got else 'did not run'} on W2 (renumbered {new}, not restarted)")
+            out = session(new, ["?WCB,", "2"])
+            back = _has(out, "Changed WCB Number to: 2")
+            if not back:
+                problems.append(f"a two-chunk ?WCB,2 to {new} did not put W2 back: {out[-4:]}")
+            # Back on 2, its address and number agree again: a one-chunk (ETM) session to 2 runs. ETM can lose one.
+            elif not any(ran(session(2, ["?WDP,STATUS"])) for _ in range(3)):
+                problems.append("W2, back on 2, did not run a one-chunk session to 2")
+        finally:
+            if not back:
+                w2.run("?WCB,2")                     # over its own USB: never leave W2 on another number
     assert not problems, "; ".join(problems)
 
 

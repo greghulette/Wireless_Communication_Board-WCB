@@ -9113,6 +9113,25 @@ function _relayLongChunks(relayN, n) {
                                    { relayForwardsAny: !!relay?.isRelay, maxChunks: MGMT_MAX_CHUNKS });
 }
 
+// Why board n may not take newNum in a push of more than one session, or '' when nothing says another device has it.
+// The sessions after the first are addressed to newNum, and through a WCB relay they are broadcasts that every board
+// answering to that number reassembles and runs - so a second board on it would take the rest of this board's config,
+// its mesh password and its restart included. Read from what the Wizard knows: the relay's own number, another slot's
+// pulled or connected board, and the last ?WDP,DUMP row for that number (_meshSeen, heard within its TTL).
+function _renumberTaken(n, newNum, relayN) {
+  const num = +newNum;
+  if (+(boardConfigs[relayN]?.wcbNumber || relayN) === num) return `WCB ${num} is the relay's own number`;
+  for (const k of Object.keys(boardConfigs)) {
+    if (+k === +n || +k === +relayN) continue;
+    const pulled = boardBaselines[k]?.wcbNumber === num;
+    const live   = boardConnections[k]?.isConnected?.() && boardConfigs[k]?.wcbNumber === num;
+    if (pulled || live) return `WCB ${num} is already a board here (slot ${k})`;
+  }
+  const seen = _meshSeen.get(num);
+  if (seen?.live) return `WCB ${num} is already on the mesh (${seen.client ? 'a client device' : 'a WCB'} heard by WDP)`;
+  return '';
+}
+
 // The commands one relay session may carry: the target queues them all at once, from its WiFi task, and its command
 // queue holds 200 (WCB.ino) - a session of more lost the rest.
 const MGMT_PUSH_MAX_CMDS = 150;
@@ -9233,15 +9252,27 @@ async function boardGoRemote(n, opts = {}) {
   // several, each whole commands, the network and restart commands in the last; one fits one, in its own order, as
   // before. Planned BEFORE the network-group confirm and the character bootstrap below (F14, W-9): a push that cannot
   // be sent is refused before the user is asked to approve it and before a bootstrap switches the target's delimiter or
-  // function identifier. Refused only for what cannot be carried at all (a board-number change too long for one
-  // session; one command longer than this board and relay take) - nothing is sent then.
+  // function identifier. Refused only for what cannot be carried at all (one command longer than this board and relay
+  // take; a board-number change too long for one session through a WcbMgmt relay, or onto a number another board
+  // answers to) - nothing is sent then.
   // Addressed to the number the board answers to NOW - its baseline's. A push that changes it (?WCB,<new>) used to go
-  // to the new number, which the board only takes once that push runs, so it never arrived.
+  // to the new number, which the board only takes once that push runs, so it never arrived. A push that changes it
+  // and needs more than one session goes in two steps (planRelayPush): the first session, ?WCB,<new> first, to the
+  // number it has now, and every later one to the new number (session.to 'new').
   const relayPushTarget = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
+  const relayNewTarget  = config.wcbNumber || relayPushTarget;
   const plan = WCBParser.planRelayPush(cmdString, {
     funcChar, delim, reboot: needsReboot && !skipReboot, chunkBytes: MGMT_CHUNK_SIZE, maxChunks: MGMT_MAX_CHUNKS,
     maxCmds: MGMT_PUSH_MAX_CMDS, longChunks: _relayLongChunks(relayN, n),
-    wcbChange: !!boardBaselines[n] && boardBaselines[n].wcbNumber !== config.wcbNumber });
+    wcbChange: !!boardBaselines[n] && boardBaselines[n].wcbNumber !== config.wcbNumber,
+    relayBroadcasts: !boardConfigs[relayN]?.isRelay });
+  // The sessions after a renumber are broadcasts that every board answering to the new number runs: never onto one
+  // that another board has (_renumberTaken).
+  if (!plan.problem && plan.sessions.some((x) => x.to === 'new')) {
+    const taken = _renumberTaken(n, relayNewTarget, relayN);
+    if (taken) plan.problem = `it changes the board number to ${relayNewTarget} in more than one relay session, and ${taken}: `
+                            + `the sessions after the first would run on that board too`;
+  }
   if (plan.problem) {
     boardPushOutcome[n].reason = `cannot be pushed via a relay: ${plan.problem}`;
     showToast(`WCB ${n}: this push cannot go via a relay — ${plan.problem}. Push it over USB.`, 'error', 12000);
@@ -9308,8 +9339,11 @@ async function boardGoRemote(n, opts = {}) {
   }
 
   const sessions = plan.sessions;
+  const renumbered = sessions.some((x) => x.to === 'new');
   termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s)`
-                + (sessions.length > 1 ? ` in ${sessions.length} sessions` : ''), 'sys');
+                + (sessions.length > 1 ? ` in ${sessions.length} sessions` : '')
+                + (renumbered ? `: the first to WCB ${relayPushTarget}, which takes the number ${relayNewTarget}, `
+                              + `the rest to WCB ${relayNewTarget}` : ''), 'sys');
 
   let pushSucceeded = false;
   try {
@@ -9317,7 +9351,7 @@ async function boardGoRemote(n, opts = {}) {
     // (auto-migration, relay setups). The single-chunk MGMT paths already resolve wcbNumber;
     // this multi-chunk push must match or a mismatched board's config lands on the wrong WCB.
     for (let s = 0; s < sessions.length; s++) {
-      await _sendRelaySession(relayConn, relayN, relayPushTarget, sessions[s]);
+      await _sendRelaySession(relayConn, relayN, sessions[s].to === 'new' ? relayNewTarget : relayPushTarget, sessions[s]);
       // The target runs a session's commands from its queue: let it, and let a session that lost a chunk lapse
       // (_relaySessionGap), before the next one arrives.
       if (s < sessions.length - 1) await sleep(_relaySessionGap(sessions[s], funcChar));
@@ -14162,9 +14196,9 @@ function _wdpAttr(s) {
 
 // What the Wizard last read about each device in a ?WDP,DUMP (the mesh poll, the panel's Refresh), by number - the
 // queried board's own row (PEER=3) included: { capTags, live, client, at }. A WCB's capability tags say what its
-// firmware takes (docs/WDP_DESIGN.md §3; _relayLongChunks); live says it was heard within the WDP TTL. An entry is
-// replaced by the next row that names its number, and kept while none does: a board that drops out of a dump has not
-// changed its firmware.
+// firmware takes (docs/WDP_DESIGN.md §3; _relayLongChunks); live says it was heard within the WDP TTL
+// (_renumberTaken). An entry is replaced by the next row that names its number, and kept while none does: a board
+// that drops out of a dump has not changed its firmware.
 const _meshSeen = new Map();
 function _noteMeshDump(nodes) {
   const at = Date.now();
@@ -14439,7 +14473,7 @@ async function wdpMeshRefresh() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
-    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks)
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks, _renumberTaken)
     // Who leads: asked only here, and only of a board whose dump shows it has channel sync (its own [WDPCH] line).
     if (parsed.chanSeen) {
       const st = WCBParser.parseChanSyncStatus(await t.conn.sendAndCollect(`${t.fc}CHSYNC`, 2500, '[CHSYNC:'));
@@ -14607,7 +14641,7 @@ async function meshAutoDiscoverTick() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
-    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks)
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks, _renumberTaken)
     if (!parsed.nodes || !parsed.nodes.length) return;
     renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);   // keep the panel live (covers clients)
     // Feed EVERY relay card from this sweep — any connected board's dump shows the whole mesh,
