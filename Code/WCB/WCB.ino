@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_222040ROCT2026                                  *****////
+///*****                                          Version 7.0.1_231519ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -202,7 +202,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_222040ROCT2026";
+String SoftwareVersion = "7.0.1_231519ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1087,6 +1087,7 @@ static bool delimCharOk(char nc) {
 volatile bool rebootPending = false;
 void reboot(){
   Serial.println("Reboot queued - restarting once the command queue is quiet");
+  wcbEspNowForgetWedgeReboots();   // a restart asked for: not one of the transmit wedge's automatic ones in a row
   rebootPending = true;
 }
 
@@ -6560,7 +6561,8 @@ static void espNowRestartForWedge(bool wifiToo) {
 static void espNowTxService() {
   const bool hold = chanSyncRadioAway() || rebootPending || pwmRebootPending;
   const uint8_t remedy = wcbEspNowService(hold, espNowWifiRestartRefusal());
-  if (remedy) espNowRestartForWedge(remedy == 2);
+  if (remedy == 3) rebootPending = true;          // out of remedies: the deferred restart (its line is printed)
+  else if (remedy) espNowRestartForWedge(remedy == 2);
 }
 
 //*******************************

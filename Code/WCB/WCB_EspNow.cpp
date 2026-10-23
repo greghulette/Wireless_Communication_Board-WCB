@@ -78,6 +78,24 @@ static std::atomic<int>      s_simHeld{0};           // simulated frames holding
 
 static const char *SIM_TAG = " (simulated, ?DEBUG,FAULT,TXWEDGE)";   // hil/runner.py ignores lines carrying it
 
+// Out of remedies, the board restarts itself (Greg, 2026-10-23: a wedged board is off the mesh anyway), at most
+// ESPNOW_WEDGE_REBOOTS_MAX times in a row. The count is in RTC memory, which a software restart keeps and power loss
+// garbles (the magic word tells): it ends once the board has run ESPNOW_WEDGE_REBOOT_CLEAR_MS without a wedge, and any
+// other restart (?reboot, a config change - wcbEspNowForgetWedgeReboots) starts it again.
+static constexpr uint8_t  ESPNOW_WEDGE_REBOOTS_MAX     = 2;
+static constexpr uint32_t ESPNOW_WEDGE_REBOOT_CLEAR_MS = 600000;
+static constexpr uint32_t WEDGE_REBOOT_MAGIC           = 0x7ED6EB07UL;
+RTC_NOINIT_ATTR static uint32_t s_wedgeRebootMagic;
+RTC_NOINIT_ATTR static uint32_t s_wedgeReboots;
+static bool s_wedgeBootChecked = false;   // loop() only
+
+static uint32_t wedgeRebootsInARow() {
+  if (s_wedgeRebootMagic != WEDGE_REBOOT_MAGIC) { s_wedgeRebootMagic = WEDGE_REBOOT_MAGIC; s_wedgeReboots = 0; }
+  return s_wedgeReboots;
+}
+
+void wcbEspNowForgetWedgeReboots() { s_wedgeRebootMagic = WEDGE_REBOOT_MAGIC; s_wedgeReboots = 0; }
+
 // Give a slot back, never below zero: a stall reset may have zeroed the count under a frame still
 // in the air, whose completion then arrives.
 static void releaseSlot() {
@@ -240,6 +258,25 @@ static bool wedgedNow(uint32_t now) {
 
 static unsigned long wedgeSecs(uint32_t now) { return (unsigned long)(msSince(now, s_wedgeStartMs) / 1000); }
 
+// The ladder is out of remedies: restart the board if the run of automatic restarts allows (returns 3, loop() sets
+// rebootPending - deferred, rule 11), else say only a reboot by hand clears it and go on retrying (returns 0).
+static uint8_t wedgeOutOfRemedies(uint32_t now, const char *what, const char *tag) {
+  s_wedgeLevel = 3;
+  s_wedgeActMs = now;
+  const uint32_t n = wedgeRebootsInARow();
+  if (n < ESPNOW_WEDGE_REBOOTS_MAX) {
+    s_wedgeReboots = n + 1;
+    Serial.printf("[MESH] ESP-NOW transmit wedged %lus and %s did not clear it - restarting the board (automatic "
+                  "restart %lu of %u in a row)%s\n", wedgeSecs(now), what, (unsigned long)(n + 1),
+                  (unsigned)ESPNOW_WEDGE_REBOOTS_MAX, tag);
+    return 3;
+  }
+  Serial.printf("[MESH] ESP-NOW transmit wedged %lus and %s did not clear it; %u automatic restarts in a row did not "
+                "keep it clear - only a reboot by hand clears it now (?reboot)%s\n", wedgeSecs(now), what,
+                (unsigned)ESPNOW_WEDGE_REBOOTS_MAX, tag);
+  return 0;
+}
+
 static uint8_t watchWedge(bool hold, const char *noWifiWhy, uint32_t now) {
   const char *tag = s_wedgeSim ? SIM_TAG : "";
   if (s_wedgeLevel && s_completions.load() != s_wedgeDoneAt) {   // a frame completed: transmit is back
@@ -304,16 +341,10 @@ static uint8_t watchWedge(bool hold, const char *noWifiWhy, uint32_t now) {
         return 2;
       }
       Serial.printf("[MESH] ESP-NOW transmit wedged %lus and the ESP-NOW restart did not clear it; the WiFi driver is "
-                    "not restarted (%s) - only a reboot clears it (?reboot)%s\n", wedgeSecs(now), noWifiWhy, tag);
-      s_wedgeLevel = 3;
-      s_wedgeActMs = now;
-      return 0;
+                    "not restarted (%s)%s\n", wedgeSecs(now), noWifiWhy, tag);
+      return wedgeOutOfRemedies(now, "the ESP-NOW restart", tag);
     case 2:
-      Serial.printf("[MESH] ESP-NOW transmit wedged %lus and the WiFi driver restart did not clear it - only a reboot "
-                    "clears it (?reboot)%s\n", wedgeSecs(now), tag);
-      s_wedgeLevel = 3;
-      s_wedgeActMs = now;
-      return 0;
+      return wedgeOutOfRemedies(now, "the WiFi driver restart", tag);
     default:
       if ((uint32_t)(now - s_wedgeActMs) < ESPNOW_WEDGE_RETRY_MS) return 0;
       Serial.printf("[MESH] ESP-NOW transmit wedged %lus - trying the ESP-NOW restart again%s\n",
@@ -326,6 +357,15 @@ static uint8_t watchWedge(bool hold, const char *noWifiWhy, uint32_t now) {
 
 uint8_t wcbEspNowService(bool hold, const char *noWifiWhy) {
   const uint32_t now = millis();
+  if (!s_wedgeBootChecked) {   // the first pass after a boot: say so if the wedge's own restart caused it
+    s_wedgeBootChecked = true;
+    if (const uint32_t n = wedgeRebootsInARow())
+      Serial.printf("[MESH] this boot follows an automatic restart for an ESP-NOW transmit wedge (%lu of %u in a row)\n",
+                    (unsigned long)n, (unsigned)ESPNOW_WEDGE_REBOOTS_MAX);
+  }
+  // A run of automatic restarts ends once the board has gone ESPNOW_WEDGE_REBOOT_CLEAR_MS without a wedge in hand.
+  if (s_wedgeReboots && !s_wedgeLevel && msSince(now, s_wedges ? s_wedgeActMs : 0) >= ESPNOW_WEDGE_REBOOT_CLEAR_MS)
+    s_wedgeReboots = 0;
   const uint32_t d = s_dropped.load();
   watchStall(d, now);
   reportDrops(d, now);

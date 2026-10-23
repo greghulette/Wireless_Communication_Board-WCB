@@ -267,7 +267,9 @@ changing before editing.**
     `ESP_ERR_ESPNOW_NO_MEM`, heartbeats included, while the board still receives. `wcbEspNowService()` (loop) calls it
     a wedge after 10 s of frames with no completion and puts the radio back without a reboot: ESP-NOW restarted, then
     the WiFi driver too on a board that booted with WiFi OFF (`espNowRestartForWedge`, `WCB.ino`); an AP or JOIN board
-    is never torn down and says only a reboot clears it. Every line starts `[MESH] ESP-NOW transmit wedge`. So judge
+    is never torn down; out of remedies, the board restarts itself, at most twice in a row (RTC count, ended by
+    10 min clear or any other restart), then says only a reboot by hand clears it. Every line starts
+    `[MESH] ESP-NOW transmit wedge`. So judge
     the radio by completions, never by what `esp_now_send` accepted; a path that calls `esp_now_add_peer` off the loop
     task checks `wcbEspNowRestarting()` first; a new kind of standing peer is registered again in
     `espNowRegisterPeersAgain`. `?DEBUG,FAULT,TXWEDGE[,1-3]` simulates it (HIL `etm.tx_wedge_*`).

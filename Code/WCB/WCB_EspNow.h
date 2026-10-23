@@ -32,9 +32,12 @@
 // ESPNOW_WEDGE_MIN_TRIES of them, and not one completed - and has loop() put the radio back without a reboot:
 //  1. ESP-NOW restarted (esp_now_deinit/init, both callbacks, every peer registered again from RAM);
 //  2. still wedged ESPNOW_WEDGE_MS later: the WiFi driver restarted too, on a board that booted with WiFi OFF only -
-//     an access point or a joined network is never torn down under its clients (docs/WIFI_DESIGN.md §4). A board
-//     that runs one says that only a reboot clears it;
-//  3. still wedged: the line every ESPNOW_STALL_REPEAT_MS, the ladder tried again every ESPNOW_WEDGE_RETRY_MS.
+//     an access point or a joined network is never torn down under its clients (docs/WIFI_DESIGN.md §4), so such
+//     a board goes straight to 3;
+//  3. still wedged: the board restarts itself (deferred, rule 11), at most ESPNOW_WEDGE_REBOOTS_MAX (2) times in a row -
+//     the count is in RTC memory and ends after 10 min with no wedge or on any other restart; past that, the line every
+//     ESPNOW_STALL_REPEAT_MS says only a reboot by hand clears it, and the ladder is tried again every
+//     ESPNOW_WEDGE_RETRY_MS. (Greg, 2026-10-23: a wedged board is off the mesh anyway.)
 // Never while the radio is away on another channel or a restart is pending (rule 18, rule 11). Each step prints one
 // ungated "[MESH] ESP-NOW transmit wedged ..." line, and its end one "[MESH] ESP-NOW transmit wedge cleared ..." line,
 // which the HIL harness greps (hil/runner.py). ?DEBUG,FAULT,TXWEDGE[,1-3] simulates the wedge (wcbEspNowSimulateWedge);
@@ -50,10 +53,12 @@ uint32_t  wcbEspNowDropped();        // frames given up since boot or the last ?
 void      wcbEspNowResetStats();     // resetESPNowStats()
 
 // loop(), every pass: the drop line (one a second while frames are given up), stalls, and the wedge watch. Returns
-// the remedy loop() is to run now - 0 none, 1 restart ESP-NOW, 2 restart the WiFi driver and ESP-NOW - as
+// the remedy loop() is to run now - 0 none, 1 restart ESP-NOW, 2 restart the WiFi driver and ESP-NOW, 3 restart the
+// board (rebootPending; out of remedies) - for 1 and 2 as
 // wcbEspNowRestartBegin(), the restart, wcbEspNowRestartEnd(). hold: the radio is away or a restart is pending, so no
 // remedy now. noWifiWhy: why the WiFi driver may not be restarted on this board now, or nullptr when it may.
-uint8_t   wcbEspNowService(bool hold, const char *noWifiWhy);
+uint8_t   wcbEspNowService(bool hold, const char *noWifiWhy);   // 3: out of remedies, restart the board (deferred)
+void      wcbEspNowForgetWedgeReboots();   // a restart for any other reason starts the count of automatic ones again
 void      wcbEspNowRestartBegin(bool wifiToo);   // senders refused from here; wifiToo: the WiFi task is forgotten
 void      wcbEspNowRestartEnd(uint8_t level, esp_err_t initResult, int peers);   // counters reset, says what it did
 bool      wcbEspNowRestarting();     // a remedy is putting ESP-NOW back: make no esp_now_* call (peer adds included)

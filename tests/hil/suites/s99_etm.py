@@ -1073,9 +1073,16 @@ WIFI_RESTARTED_RX = (r"^\[MESH\] ESP-NOW transmit wedged: (WiFi driver and ESP-N
 TO_WIFI_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the ESP-NOW restart did not clear it - restarting the WiFi "
               r"driver \(this board runs no WiFi interface\), no reboot" + _SIM)
 NO_WIFI_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the ESP-NOW restart did not clear it; the WiFi driver is "
-              r"not restarted \((.*)\) - only a reboot clears it \(\?reboot\)" + _SIM)
-OUT_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and the WiFi driver restart did not clear it - only a reboot "
-          r"clears it \(\?reboot\)" + _SIM)
+              r"not restarted \((.*)\)" + _SIM)
+# Out of remedies (2026-10-23, Greg): the board restarts itself, at most twice in a row, then says only a reboot by hand
+# clears it.
+AUTO_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and (the ESP-NOW restart|the WiFi driver restart) did not clear "
+           r"it - restarting the board \(automatic restart (\d+) of (\d+) in a row\)" + _SIM)
+CAPPED_RX = (r"^\[MESH\] ESP-NOW transmit wedged (\d+)s and (the ESP-NOW restart|the WiFi driver restart) did not "
+             r"clear it; (\d+) automatic restarts in a row did not keep it clear - only a reboot by hand clears it now "
+             r"\(\?reboot\)" + _SIM)
+AUTO_BOOT_RX = (r"^\[MESH\] this boot follows an automatic restart for an ESP-NOW transmit wedge \((\d+) of (\d+) "
+                r"in a row\)")
 CLEARED_RX = r"^\[MESH\] ESP-NOW transmit wedge cleared after (\d+)s: (.*), frames complete again, no reboot" + _SIM
 CHSYNC_RX = re.compile(r"\[CHSYNC:EN=\d,CH=(\d+),")
 WEDGE_FIND_S = 40.0     # ESPNOW_WEDGE_MS (10 s) of frames lost, from the first one the knob takes, plus margin
@@ -1213,41 +1220,71 @@ def tx_wedge_wifi_restart(bench):
 
 
 @test("etm.tx_wedge_only_reboot_clears", "Tracker #112's transmit wedge that no remedy clears, simulated on W1 "
-      "(?DEBUG,FAULT,TXWEDGE,3): W1 restarts ESP-NOW, then says only a reboot clears it - at once on a board running "
-      "an access point or a network join ('the WiFi driver is not restarted (this board runs WiFi ...)'), after a WiFi "
-      "driver restart on one with WiFi OFF - and restarts nothing more for 15 s; with the knob off its frames complete "
-      "again and it says the wedge cleared after the remedies ran out, never having rebooted", needs=["wcb1"])
+      "(?DEBUG,FAULT,TXWEDGE,3): W1 restarts ESP-NOW (and, with WiFi OFF, the WiFi driver), then restarts itself - "
+      "'automatic restart 1 of 2 in a row' and, booted, 'this boot follows an automatic restart ... (1 of 2 in a row)' "
+      "- and again 2 of 2; the third time it restarts nothing for 15 s and says only a reboot by hand clears it now; "
+      "with the knob off its frames complete again, and a ?reboot by hand starts the count again (no automatic-restart "
+      "line after it)", needs=["wcb1"])
 def tx_wedge_only_reboot_clears(bench):
-    """watchWedge's level 3 (WCB_EspNow.cpp): out of remedies, the ladder is tried again only every 5 min
-    (ESPNOW_WEDGE_RETRY_MS), and an access point or a joined network is never torn down under its clients
-    (docs/WIFI_DESIGN.md §4). Which branch W1 takes follows its booted WiFi mode, read from its saved ?WIFI. Restore if
-    aborted: ?DEBUG,FAULT,OFF on W1 (RAM only)."""
+    """watchWedge out of remedies (WCB_EspNow.cpp wedgeOutOfRemedies, 2026-10-23): a board restarts itself at most
+    ESPNOW_WEDGE_REBOOTS_MAX (2) times in a row, the count in RTC memory, ended by 10 min without a wedge or by any
+    other restart (reboot() calls wcbEspNowForgetWedgeReboots). An access point or a joined network is still never
+    torn down under its clients by a WiFi driver restart (docs/WIFI_DESIGN.md §4); which branch W1 takes follows its
+    booted WiFi mode, read from its saved ?WIFI. The simulated wedge is in RAM, so each restart ends it. Restore if
+    aborted: ?DEBUG,FAULT,OFF on W1, and a ?reboot to clear the count."""
     w = usb_wcb(bench)
     wifi_off = _booted_wifi_off(bench, 1)
+    notes = []
+
+    def ladder(m):
+        _wedge_wait(w, 2, WEDGED_RX, m, WEDGE_FIND_S, "W1 never found its simulated wedge")
+        if wifi_off:
+            _wedge_wait(w, 2, TO_WIFI_RX, m, 30.0, "W1 (WiFi OFF) never went on to the WiFi driver restart")
+        else:
+            nw = _wedge_wait(w, 2, NO_WIFI_RX, m, 30.0, "W1 never said why the WiFi driver is not restarted")
+            assert nw.group(2).startswith("this board runs WiFi"), f"the reason given: {nw.group(2)}"
+
     with config_guard(bench, 1):
+        w.reboot()                                 # by hand: no automatic restarts in a row to start from
         _peers_online(bench, w)
+        for k in (1, 2):
+            m = w.dev.mark()
+            try:
+                fault(w, "TXWEDGE,3")
+                ladder(m)
+                auto = _wedge_wait(w, 2, AUTO_RX, m, 30.0, f"W1 never said it restarts itself ({k} of 2)")
+            except BaseException:
+                fault_off(w)
+                raise
+            assert (auto.group(3), auto.group(4)) == (str(k), "2"), f"automatic restart {auto.group(3)} of " \
+                f"{auto.group(4)}, expected {k} of 2"
+            w.wait_boot(m, timeout=45.0)           # deferred (rule 11): the queue's quiet window, then the restart
+            boot = w.dev.expect(AUTO_BOOT_RX, timeout=20.0, since=m)
+            assert (boot.group(1), boot.group(2)) == (str(k), "2"), f"the boot line says {boot.group(0)!r}"
+            notes.append(f"restart {k}: {auto.group(2)} failed after {auto.group(1)} s")
+            _peers_online(bench, w)
         m = w.dev.mark()
         try:
             fault(w, "TXWEDGE,3")
-            _wedge_wait(w, 2, WEDGED_RX, m, WEDGE_FIND_S, "W1 never found its simulated wedge")
-            if wifi_off:
-                _wedge_wait(w, 2, TO_WIFI_RX, m, 30.0, "W1 (WiFi OFF) never went on to the WiFi driver restart")
-                out = _wedge_wait(w, 2, OUT_RX, m, 30.0, "W1 never said only a reboot clears it")
-            else:
-                out = _wedge_wait(w, 2, NO_WIFI_RX, m, 30.0, "W1 never said only a reboot clears it")
+            ladder(m)
+            capped = _wedge_wait(w, 2, CAPPED_RX, m, 30.0, "W1 never said its automatic restarts ran out")
             hold = w.dev.mark()
             time.sleep(15.0)
             more = [x.rstrip() for x in w.dev.since(hold) if re.search(RESTARTED_RX, x.rstrip())]
         finally:
             fault_off(w)
         cleared = _wedge_wait(w, 2, CLEARED_RX, m, 20.0, "W1 never said the wedge cleared once the knob was off")
-        bench.note(f"etm.tx_wedge_only_reboot_clears: WiFi {'OFF' if wifi_off else 'on'}; {out.group(0)[:160]}; "
-                   f"cleared after {cleared.group(1)} s: {cleared.group(2)}")
-        assert not w.rebooted_since(m), "W1 rebooted: the remedies must not restart the board"
-        if not wifi_off:
-            assert out.group(2).startswith("this board runs WiFi"), f"the reason given: {out.group(2)}"
-        assert not more, f"W1 restarted again while out of remedies: {more[:2]}"
+        assert not w.rebooted_since(m), "W1 restarted a third time: the cap is 2 in a row"
+        assert capped.group(3) == "2", f"the cap line names {capped.group(3)} restarts"
+        assert not more, f"W1 restarted ESP-NOW again while out of remedies: {more[:2]}"
         assert cleared.group(2) == "after the remedies ran out", f"cleared, but: {cleared.group(2)}"
+        rm = w.dev.mark()
+        w.reboot()                                 # by hand: the run of automatic restarts ends
+        after = [x for x in w.dev.since(rm) if re.search(AUTO_BOOT_RX, x.rstrip())]
+        assert not after, f"after a ?reboot by hand W1 still counts automatic restarts: {after[0].rstrip()}"
+        bench.note(f"etm.tx_wedge_only_reboot_clears: WiFi {'OFF' if wifi_off else 'on'}; {'; '.join(notes)}; then "
+                   f"capped ({capped.group(0)[:120]}); cleared after {cleared.group(1)} s")
         w2name = bench.usb_wcbs().get(2)
         if w2name:
+            _peers_online(bench, w)
             assert _reaches(w, bench.dev(w2name), 2), "with the knob off W1's unicast no longer reaches W2"

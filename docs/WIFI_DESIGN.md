@@ -129,8 +129,11 @@ too, or the core's STA_START handler puts modem sleep back), the region
 (`chanSyncReapplyRegion`), channel sync's home channel, the mesh MAC - and ESP-NOW with its
 peers. Only on a board that **booted** with WiFi OFF (`wcbWifiBootedOff`): nothing of ours
 runs on the driver there but ESP-NOW. An access point or a joined network is never torn
-down under its clients, sockets and WebSocket sessions; such a board says that only a
-reboot clears the wedge. Not during an OTA session, while the radio is away on another
+down under its clients, sockets and WebSocket sessions. Out of remedies - an AP or JOIN
+board after the ESP-NOW restart, a WiFi-off one after the driver restart - the board restarts
+itself (`rebootPending`, deferred), at most twice in a row: the count is in RTC memory, ended
+by 10 min with no wedge or by any other restart (`reboot()`), and past it the board says only a
+reboot by hand clears it. Not during an OTA session, while the radio is away on another
 channel, or with a restart pending.
 
 ---
@@ -551,6 +554,7 @@ claim.
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-23 | — | §4: out of remedies, a wedged board restarts itself, at most twice in a row (Greg: a wedged board is off the mesh anyway); `[MESH] this boot follows an automatic restart ...` says so after the boot. |
 | 2026-10-22 | — | §4: the stall and wedge watches measure time from a completion or first-try stamp with a signed difference (`msSince`, WCB_EspNow.cpp). Those stamps are written on other tasks and can be a ms after loop()'s `now`; the unsigned difference wrapped and printed `transmit stalled 4294967s` right after a wedge cleared (HIL run `20261022-123743`, all three `etm.tx_wedge_*` failed on it), and could have declared a healthy radio wedged. A cleared wedge also ends its stall, so its end is said once. |
 | 2026-10-22 | — | §6a, §7: a client's CLOSE is echoed with its status code and the session then closes with a FIN. `wsHandler` reads the CLOSE's payload first: left unread, it made lwIP close the socket with a reset right behind the echo, and a Windows client lost the echo unread (HIL `ws.ping_pong_and_close`, run `20261022-072416`, the PC; the Mac read it first). A frame part-way out is finished first when the socket takes it. `wsClose` no longer sets `SO_LINGER` 0: the core's lwIP is built without `SO_LINGER`, the option was always refused, and every close was already a FIN (or a reset over unread bytes) - so what a vanished client never ACKed waits for TCP to give up, not "freed at once" as #113 said. |
 | 2026-10-22 | — | §4: power save goes off through `WiFi.setSleep(false)` before `WiFi.mode(WIFI_STA)` as well as `esp_wifi_set_ps`: the core's STA_START handler applied modem sleep after `setup()` turned it off whenever it ran second (a race on every ESP-NOW-only and JOIN board; not on an AP). The transmit-wedge line reports the power save in force. |
