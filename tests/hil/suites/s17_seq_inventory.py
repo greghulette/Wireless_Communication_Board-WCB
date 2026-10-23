@@ -1288,15 +1288,15 @@ SEQ_LADDER = (2950, 2400, 2000, 1800, 1600, 1400, 1200, 1000, 900)
 SEQGET_TRIES = 4           # ~1 in 4 multi-frag replies was lost on the bench (small sample): 4 tries leave ~1 %
 
 
-@test("inv.seqget_largest", "The longest W1 sequence on a 2950..900 ladder round-trips exactly, locally and via W2 (TOOBIG past 2903); refusals are clean", needs=["wcb1"], links=[])
+@test("inv.seqget_largest", "The longest W1 sequence on a 2950..900 ladder round-trips exactly, locally and via W2 (in parts past 2903, docs/MGMT_RELAY.md §10); refusals are clean", needs=["wcb1"], links=[])
 def seqget_largest(bench):
     """Replaces inv.seqget_toobig, whose >2903-character stored value W1 cannot hold (tracker #58). Two walls, neither
     a defect: ?SEQ,SAVE holds ~7 full-length String copies while it makes the 8th (WCB_Storage.cpp:675) against
     ~27 KB of byte-addressable heap (the old 'largest block 38900' was the 32-bit-only IRAM heap), and an NVS string
     cannot span a page, so a configured board refuses long values (WCB_Storage.cpp:703-706). The largest storable
     length moves as NVS fills, so this asserts behaviour, not a number: each refusal names its cause and leaves no
-    phantom key, the stored value comes back byte-exact, and TOOBIG (WCB.ino:3845-3849) is checked by this same test
-    on the day a value over 2903 characters stores."""
+    phantom key, the stored value comes back byte-exact, and on the day a value over 2903 characters stores this same
+    test checks it comes back whole in parts (TOOBIG until 2026-10-23; inv.seqget_parts does it on W3, which can)."""
     w = usb_wcb(bench)
     key = "HILTB"
     head = f";S1{marker('a')}^***"      # a recall would send only the marker; the filler is a comment
@@ -1375,23 +1375,185 @@ def seqget_largest(bench):
                     elif got != want and not (c2.remote and len(got) >= min(len(want), 150) and want.startswith(got)):
                         bad.append(f"W2 relayed {len(got)} chars, not the {n}-character value: {got[:80]}...")
                 else:
-                    top = RELAY_MAX_PAYLOAD - len(key) - 4      # 2903
-                    cm = c2.mark()
-                    w.send(f";W2,?MGMT,SEQGET,1,{key}")
-                    try:
-                        w.dev.expect(rf"^\[MGMT\] Sequence '{key}' is {n} chars — too large to relay \(max {top}\)", timeout=5, since=wm)
-                    except AssertionError:
-                        bad.append(f"W1 did not report the {n}-character value too large to relay (max {top})")
-                    try:
-                        got = c2.expect(rf"\[MGMT:SEQVAL,1\]{key},", timeout=6, since=cm).string[len(c2.prefix):].rstrip()
-                        if got != f"[MGMT:SEQVAL,1]{key},TOOBIG,":
-                            bad.append(f"W2 printed {got[:80]!r}, not {key},TOOBIG,")
-                    except AssertionError:
-                        bad.append(f"W2 printed no [MGMT:SEQVAL,1] line for the {n}-character value")
+                    # Past one reply (2903 characters with the key and ',OK,') W2 asks for parts and gets the value
+                    # whole, a part per request (docs/MGMT_RELAY.md §10): TOOBIG until 2026-10-23, and still what a
+                    # relay before parts gets (inv.seqget_parts checks that with ?DEBUG,ONEREPLY).
+                    want, got = f"[MGMT:SEQVAL,1]{key},OK,{value}", None
+                    for attempt in range(1, SEQGET_TRIES + 1):
+                        cm = c2.mark()
+                        w.send(f";W2,?MGMT,SEQGET,1,{key}")
+                        try:
+                            got = c2.expect(rf"\[MGMT:SEQVAL,1\]{key},", timeout=12, since=cm).string[len(c2.prefix):].rstrip()
+                            break
+                        except AssertionError:
+                            bench.note(f"relayed fetch {attempt}/{SEQGET_TRIES} of the {n}-character value: no line")
+                            time.sleep(3)
+                    if got is None:
+                        bad.append(f"W2 printed no [MGMT:SEQVAL,1] line for the {n}-character value in {SEQGET_TRIES} tries")
+                    elif got != want and not (c2.remote and len(got) >= min(len(want), 150) and want.startswith(got)):
+                        bad.append(f"W2 relayed {len(got)} chars, not the {n}-character value whole: {got[:80]}...")
+                    if any("too large to relay" in x for x in w.dev.since(wm)):
+                        bad.append(f"W1 called the {n}-character value too large to relay, to a relay that takes parts")
         finally:
             _clear_seq(w, key)      # before the guard's snapshot, which would report the stored value as a leak
     assert stored and stored[0] >= 900, f"no length on the ladder stored; refused {', '.join(refused)}"
     assert not bad, "; ".join(bad)
+
+
+SEQVAL_FAILED = re.compile(r"^\[MGMT\] Sequence '([^']*)' from WCB(\d+): ")      # rpSay: a pull that could not finish
+VALUE_PART = re.compile(r"^\[MGMT\] Sequence-value request '([^']*)' from WCB(\d+) \(part (\d+) of (\d+)\)$")
+
+
+def _w3_or_skip(bench):
+    """W3 on its own USB console: an ESP32-S3, the only bench board with the heap to store a 3,999-character value
+    (seq.value_over_3999_refused) - a classic ESP32 stops near 2,400 (inv.seqget_largest)."""
+    if 3 not in bench.usb_wcbs():
+        raise Skip("W3 has no USB console here")
+    return WCB(bench.dev(bench.usb_wcbs()[3]))
+
+
+def _save_long_on(w3, key, value):
+    """?SEQ,SAVE of a long value on W3's own console, paced (send_paced) -> True when it says Stored."""
+    m = w3.dev.mark()
+    w3.dev.send_paced(f"?SEQ,SAVE,{key},{value}")
+    w3.dev.send(f";S0,HILEND{nonce()}")
+    time.sleep(2.0)
+    out = [x.rstrip() for x in w3.dev.since(m)]
+    if _has(out, "Out of memory"):
+        raise Skip(f"W3 ran out of heap copying the {len(value)}-character line")
+    return _has(out, f"Stored: Key='{key}'")
+
+
+@test("inv.seqget_parts", "A sequence too long for one reply comes whole, in parts: with a 3,999-character value stored on W3 (an ESP32-S3), ?MGMT,SEQGET,3,<key> on W1 prints exactly ONE [MGMT:SEQVAL,3] line, the value byte for byte, and no 'Sequence ... from WCB3' failure line; W3 (?DEBUG,MGMT) logs part 1 of 2 and part 2 of 2; with ?DEBUG,ONEREPLY,ON on W1 (a relay before parts) the same request gets <key>,TOOBIG, as before; the store is as it was after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb3"], links=[])
+def seqget_parts(bench):
+    """One reply carries 2,912 characters; '<key>,OK,<value>' of a 15-character key and a 3,999-character value is
+    4,018. W1 asks part 0 with SEQVAL_PART_REQ (31) x3 and the old SEQVAL_REQ (15) x3 behind it (rpStart); W3 reads
+    the value from its store again for every part and sends it as type 34 under the value's CRC (answerSeqVal); W1
+    joins the parts in one buffer of the exact length and prints the line with one write (rpTakePart). The value is a
+    ;S0 marker and a comment, never recalled; it is cleared in a finally, and config_guard proves W3's store is back."""
+    w, w3 = usb_wcb(bench), _w3_or_skip(bench)
+    _store_or_skip(w3)
+    key = "HILPARTSVALUE15"                 # 15 characters: the longest key, the longest reply
+    head = f";S0{marker('v')}^***"
+    value = head + "v" * (3999 - len(head))
+    want = f"[MGMT:SEQVAL,3]{key},OK,{value}"
+    problems, notes = [], []
+    with config_guard(bench, 3):
+        _clear_seq(w3, key)
+        try:
+            if not _save_long_on(w3, key, value):
+                raise AssertionError(f"setup: W3 did not store the {len(value)}-character {key}")
+            if _seqval(w3, key) != f"[MGMT:SEQVAL,3]{key},OK,{value}":
+                raise AssertionError("setup: W3's own ?SEQ,GET does not give the value back whole")
+            assert _has(w3.run("?DEBUG,MGMT,ON"), "MGMT debugging enabled"), "W3 did not turn MGMT debugging on"
+            got, parts = None, []
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    time.sleep(RELAY_SPACING_S + 1.0)
+                m, m3 = w.dev.mark(), w3.dev.mark()
+                w.send(f"?MGMT,SEQGET,3,{key}")
+                try:
+                    w.dev.expect(rf"^\[MGMT:SEQVAL,3\]{key},", timeout=15, since=m)
+                except AssertionError:
+                    failed = [x.rstrip() for x in w.dev.since(m) if SEQVAL_FAILED.match(x.rstrip())]
+                    notes.append(f"try {attempt}: no [MGMT:SEQVAL,3] line" + (f" ({failed[-1]})" if failed else ""))
+                    continue
+                time.sleep(1.0)
+                lines = [x.rstrip() for x in w.dev.since(m) if x.startswith("[MGMT:SEQVAL,3]")]
+                if len(lines) != 1:
+                    problems.append(f"W1 printed {len(lines)} [MGMT:SEQVAL,3] lines, not one")
+                got = lines[0]
+                if any(SEQVAL_FAILED.match(x.rstrip()) for x in w.dev.since(m)):
+                    problems.append("W1 also printed a 'Sequence ... from WCB3' failure line")
+                parts = sorted({(int(g.group(3)), int(g.group(4))) for g in
+                                (VALUE_PART.match(x.rstrip()) for x in w3.dev.since(m3)) if g and g.group(1) == key})
+                break
+            if got is None:
+                problems.append("W1 never printed the value in 3 tries: " + "; ".join(notes))
+            elif got != want:
+                first = next((i for i, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
+                problems.append(f"W1 printed {len(got)} characters, the whole line is {len(want)}; first difference at "
+                                f"{first}")
+            if got is not None and parts != [(1, 2), (2, 2)]:
+                problems.append(f"W3 logged the parts {parts}, not part 1 of 2 and part 2 of 2")
+            # A relay before parts: one SEQVAL_REQ, answered TOOBIG as it always was.
+            if not _has(w.run("?DEBUG,ONEREPLY,ON"), "One-reply requests on"):
+                problems.append("W1 does not take ?DEBUG,ONEREPLY,ON")
+            else:
+                time.sleep(RELAY_SPACING_S)
+                old = _seqget_line(w, 3, key, timeout=5)
+                if old is None:
+                    time.sleep(RELAY_SPACING_S)
+                    old = _seqget_line(w, 3, key, timeout=5)
+                if old != f"[MGMT:SEQVAL,3]{key},TOOBIG,":
+                    problems.append(f"the one-reply request got {(old or 'nothing')[:60]!r}, not {key},TOOBIG,")
+        finally:
+            w.run("?DEBUG,ONEREPLY,OFF")
+            w3.run("?DEBUG,MGMT,OFF")
+            _clear_seq(w3, key)
+    bench.note("inv.seqget_parts: " + ("; ".join(notes) or "first try"))
+    assert not problems, "; ".join(problems)
+
+
+LONG_KEY = "HILLONGPUSH"
+
+
+@test("inv.push_long_sequence", "A ?SEQ,SAVE longer than one push session reaches an ESP32-S3: W1 relays a 3,999-character value to W3 as ONE ?MGMT,FRAG session of 23 chunks (a relay forwards 24 since 2026-10-23), W3 stores it and reads it back byte for byte on its own console, and W1 gets it back whole through ?MGMT,SEQGET,3 (in parts); the same session to W2, a classic ESP32 that takes 16, stores nothing; both cleared after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2", "wcb3"], links=[])
+def push_long_sequence(bench):
+    """handleMgmtForward (WCB.ino) forwards up to MGMT_FWD_MAX_CHUNKS (24) chunks; an ESP32-S3 target reassembles up to
+    MGMT_RX_MAX_CHUNKS (24) and a classic one 16 - it could not run a ?SEQ,SAVE that long anyway (about 7 times its
+    length in heap). The chunks go out 30 ms apart, as inv.seqget_multichunk sends them, each 179 characters at most
+    (a longer one is refused); a session that loses one is sent again, under a new session id."""
+    w, w3 = usb_wcb(bench), _w3_or_skip(bench)
+    w2 = WCB(bench.dev("wcb2"))
+    _store_or_skip(w3)
+    head = f";S0{marker('l')}^***"
+    value = head + "l" * (3999 - len(head))
+    payload = f"?SEQ,SAVE,{LONG_KEY},{value}"
+    chunks = [payload[i:i + 179] for i in range(0, len(payload), 179)]
+    problems, notes = [], []
+
+    def push(target):
+        sid = nonce()[:4].upper()
+        for i, chunk in enumerate(chunks):
+            w.send(f"?MGMT,FRAG,{target},{sid},{i},{len(chunks)},{chunk}")
+            time.sleep(0.03)
+        time.sleep(3.0)
+
+    if len(chunks) != 23:
+        raise AssertionError(f"setup: the payload is {len(payload)} characters in {len(chunks)} chunks, not 23")
+    with config_guard(bench, 2, 3):
+        _clear_seq(w3, LONG_KEY)
+        try:
+            stored = None
+            for attempt in range(1, 4):
+                push(3)
+                stored = _seqval(w3, LONG_KEY)
+                if stored and ",OK," in stored:
+                    break
+                notes.append(f"push {attempt}: W3 has no {LONG_KEY} yet (a chunk lost on the air?)")
+            if stored != f"[MGMT:SEQVAL,3]{LONG_KEY},OK,{value}":
+                problems.append(f"W3 stored {len(stored or '')} characters under {LONG_KEY}, not the {len(value)}-character "
+                                f"value whole")
+            else:
+                time.sleep(RELAY_SPACING_S)
+                got = None
+                for _ in range(3):
+                    got = _seqget_line(w, 3, LONG_KEY, timeout=15)
+                    if got is not None:
+                        break
+                    time.sleep(RELAY_SPACING_S + 1.0)
+                if got != f"[MGMT:SEQVAL,3]{LONG_KEY},OK,{value}":
+                    problems.append(f"?MGMT,SEQGET,3 gave back {len(got or '')} characters, not the value whole")
+            # W2, a classic ESP32, takes 16 chunks a session: the 23-chunk session is dropped whole, nothing runs.
+            push(2)
+            if _seqval(w2, LONG_KEY) != f"[MGMT:SEQVAL,2]{LONG_KEY},NOTFOUND,":
+                problems.append(f"W2 stored {LONG_KEY} from a 23-chunk session it cannot take")
+        finally:
+            _clear_seq(w3, LONG_KEY)
+            _clear_seq(w2, LONG_KEY)
+    bench.note("inv.push_long_sequence: " + ("; ".join(notes) or "first push"))
+    assert not problems, "; ".join(problems)
 
 
 @test("inv.mgmt_seq_w2_relay", "W2 as relay: ;W2,?MGMT,SEQ,1 yields W1's inventory, matching W1's ?SEQ,NAMES", needs=["wcb1"], links=[])
@@ -1689,9 +1851,9 @@ def store_accounting(bench):
 @test("seq.store_full", "The sequence store fills to its 32768 bytes and no further: the save that does not fit says 'the sequence store is full' and leaves nothing listed or in ?backup; every stored one is in ?backup, whose chains stay whole; W2 still pulls W1's whole config in parts; a clear on the full store works and makes room for a save; all of it comes back out", needs=["wcb1", "wcb2"], links=[])
 def store_full(bench):
     """SEQ_FILE_MAX (WCB_SeqStore.h). Under half the 128 KB partition, so replacing or removing a sequence (a second
-    copy of the file, then a rename) always has room - the clear here runs on the full store; and small enough that
-    the whole config still fits a config pull's 16 parts of 2880 bytes (48 KB answered ERROR TOOBIG). The fill values
-    are a ;S0 marker and a comment, and nothing recalls them."""
+    copy of the file, then a rename) always has room - the clear here runs on the full store. The whole config pulls
+    in parts (up to 64 of 2880 bytes since 2026-10-23, docs/MGMT_RELAY.md §10; with 1000-character values this store is
+    about 12). The fill values are a ;S0 marker and a comment, and nothing recalls them."""
     w = usb_wcb(bench)
     n0, b0, cap = _store_or_skip(w)
     keys, refused, problems = [], [], []

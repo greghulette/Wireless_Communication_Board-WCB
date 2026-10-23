@@ -360,10 +360,25 @@ async function relayBoard(page, chain) {
 const RELAY_CHAIN = `?HW,32^?WCB,2^?WCBQ,2^?WCBCH,1^?MAC,2,05^?MAC,3,4B^?EPASS,${EPASS}^?CMDCHAR,;`;
 const frags = (sent) => sent.filter((s) => s.includes('MGMT,FRAG,'));
 
-test('wizard.push_fake_relay_cap a relay push over 16 chunks is refused before the network-group confirm, the bootstrap or any send (W-9, F14)', async ({ page }) => {
+// The FRAG lines of a push, as sessions: { id, total, chunks: [payload] } in the order sent.
+function sessionsOf(sent) {
+  const out = [];
+  for (const s of frags(sent)) {
+    const m = /^.MGMT,FRAG,(\d+),([0-9A-F]{4}),(\d+),(\d+),([\s\S]*)$/.exec(s);
+    if (!m) continue;
+    let cur = out[out.length - 1];
+    if (!cur || cur.id !== m[2]) { cur = { target: Number(m[1]), id: m[2], total: Number(m[4]), idx: [], chunks: [] }; out.push(cur); }
+    cur.idx.push(Number(m[3]));
+    cur.chunks.push(m[5]);
+  }
+  return out;
+}
+
+test('wizard.push_fake_relay_sessions a relay push over one 16-chunk session goes as several, whole commands each, the mesh password in the last; the network-group confirm and the bootstrap still come first (F14, docs/MGMT_RELAY.md §10)', async ({ page }) => {
   // Twenty long sequences (~3.9 KB of changes, over 16 x 179), a new mesh password and a new function identifier.
   await relayBoard(page, RELAY_CHAIN);
   await page.evaluate(() => {
+    window.sleep = () => Promise.resolve();          // the chunk and session gaps: real time on the bench, none here
     const cfg = boardConfigs[2];
     cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
     populateUIFromConfig(2, cfg);
@@ -371,18 +386,107 @@ test('wizard.push_fake_relay_cap a relay push over 16 chunks is refused before t
     document.getElementById('g-funcchar').value = '!';
     window.__go = boardGo(2);
   });
+  await expect(page.locator('#network-group-change-modal.open')).toBeVisible();
+  expect(await page.evaluate(() => [...__sent]), 'nothing before the confirm').toEqual([]);
+  await page.locator('#network-group-change-confirm').click();
+  await page.evaluate(() => window.__go);
+  const r = await page.evaluate(() => ({ sent: [...__sent], outcome: boardPushOutcome[2] }));
+  expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+  const boot = r.sent.filter((s) => s.endsWith(',0,1,?FUNCCHAR,!'));
+  expect(boot.length).toBe(3);
+  expect(r.sent.indexOf(boot[0])).toBe(0);
+  const sessions = sessionsOf(r.sent.filter((s) => !s.endsWith('?FUNCCHAR,!')));
+  expect(sessions.length, 'more than one session').toBeGreaterThan(1);
+  const texts = [];
+  for (const x of sessions) {
+    expect(x.target).toBe(2);
+    expect(x.total).toBeLessThanOrEqual(16);
+    expect(x.idx).toEqual(x.chunks.map((_, i) => i));
+    expect(x.chunks.length).toBe(x.total);
+    for (const c of x.chunks) expect(Buffer.byteLength(c, 'utf8')).toBeLessThanOrEqual(179);
+    const t = x.chunks.join('');
+    expect(t.startsWith('!'), 'every session starts on a command').toBe(true);
+    texts.push(t);
+  }
+  expect(new Set(sessions.map((x) => x.id)).size, 'a session id each').toBe(sessions.length);
+  const all = texts.join('^');
+  for (let i = 0; i < 20; i++) expect(all).toContain(`!SEQ,SAVE,s${i},;S1${'x'.repeat(180)}`);
+  expect(texts[texts.length - 1]).toContain('!EPASS,a_new_mesh_password');
+  expect(texts.slice(0, -1).join('^')).not.toContain('EPASS');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.push_fake_relay_wcb_change a push that changes the board number and does not fit one session is refused before the confirm, the bootstrap or any send; one that fits goes to the number the board has now', async ({ page }) => {
+  await relayBoard(page, RELAY_CHAIN);
+  await page.evaluate(() => {
+    window.sleep = () => Promise.resolve();
+    const cfg = boardConfigs[2];
+    cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
+    populateUIFromConfig(2, cfg);
+    cfg.wcbNumber = 5;
+    document.getElementById('g-funcchar').value = '!';
+    window.__go = boardGo(2);
+  });
   await page.waitForTimeout(1500);
-  const r = await page.evaluate(() => ({
+  let r = await page.evaluate(() => ({
     modal: document.getElementById('network-group-change-modal').classList.contains('open'),
     sent: [...__sent], outcome: boardPushOutcome[2],
     btn: [document.getElementById('b2-btn-go').disabled, document.getElementById('b2-btn-go').textContent],
   }));
-  expect(r.modal, 'the confirm must not open for a push that cannot be sent').toBe(false);
+  expect(r.modal).toBe(false);
   expect(r.sent, 'nothing reaches the relay: no bootstrap, no chunk').toEqual([]);
   expect(r.outcome.ok).toBe(false);
-  expect(r.outcome.reason).toMatch(/too large/);
+  expect(r.outcome.reason).toMatch(/board number/);
   expect(r.btn).toEqual([false, 'Push Config']);
-  expect(await page.locator('#toast-container').textContent()).toContain('too large to push via a relay');
+  expect(await page.locator('#toast-container').textContent()).toContain('cannot go via a relay');
+
+  // The number change alone: one session, addressed to WCB 2 - the board takes 5 only once it has run it.
+  await relayBoard(page, RELAY_CHAIN);
+  r = await page.evaluate(async () => {
+    window.sleep = () => Promise.resolve();
+    boardConfigs[2].wcbNumber = 5;
+    await boardGo(2, { skipReboot: true });
+    return { sent: [...__sent], outcome: boardPushOutcome[2] };
+  });
+  expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+  const sessions = sessionsOf(r.sent);
+  expect(sessions.length).toBe(1);
+  expect(sessions[0].target).toBe(2);
+  expect(sessions[0].chunks.join('')).toContain('?WCB,5');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) is refused for a classic ESP32 or old firmware, and goes as one long session of 23 chunks to an ESP32-S3 on firmware that takes it', async ({ page }) => {
+  const value = ';S1' + 'v'.repeat(3996);
+  for (const [hw, fw, relayFw, ok] of [[24, '7.0.2_011200RNOV2026', '7.0.2_011200RNOV2026', false],
+                                       [32, '7.0.1_231523ROCT2026', '7.0.2_011200RNOV2026', false],
+                                       [32, '7.0.2_011200RNOV2026', '7.0.1_231523ROCT2026', false],
+                                       [32, '7.0.2_011200RNOV2026', '7.0.2_011200RNOV2026', true]]) {
+    await relayBoard(page, RELAY_CHAIN);
+    const r = await page.evaluate(async ({ hw, fw, relayFw, value }) => {
+      window.sleep = () => Promise.resolve();
+      boardConfigs[2].hwVersion = hw;
+      boardBaselines[2].hwVersion = hw;
+      boardConfigs[2].fwVersion = fw;
+      if (!boardConfigs[1]) boardConfigs[1] = {};
+      boardConfigs[1].fwVersion = relayFw;
+      boardConfigs[2].sequences = [{ key: 'abcdefghijklmno', value }];
+      populateUIFromConfig(2, boardConfigs[2]);
+      await boardGo(2, { skipReboot: true });
+      return { sent: [...__sent], outcome: boardPushOutcome[2] };
+    }, { hw, fw, relayFw, value });
+    if (!ok) {
+      expect(r.outcome.ok, `hw ${hw} fw ${fw} relay ${relayFw}`).toBe(false);
+      expect(r.outcome.reason).toMatch(/one command is 4025 bytes/);
+      expect(frags(r.sent)).toEqual([]);
+      continue;
+    }
+    expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+    const sessions = sessionsOf(r.sent);
+    expect(sessions.length).toBe(1);
+    expect(sessions[0].total).toBe(23);
+    expect(sessions[0].chunks.join('')).toBe(`?SEQ,SAVE,abcdefghijklmno,${value}`);
+  }
   expect(page.wizErrors).toEqual([]);
 });
 

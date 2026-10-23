@@ -3942,6 +3942,12 @@ def t_mgmt_pull_parts(tmp):
         assert [col.feed(x) for x in (p[1], p[1], noise[1], noise[5], "plain text", p[2])] == \
             ["partial", "duplicate", "ignored", "malformed", "ignored", "partial"]
         assert col.feed(p[0]) == "complete" and col.reply[1] == reply
+        # more parts than the 16 a pull carried until 2026-10-23 (CFGP_MAX_PARTS is 64): 20 parts join; 65 is no part
+        p20 = parts_of(reply, list(range(6, 6 * 20, 6)))
+        col = W.PullCollector(2)
+        assert len(p20) == 20 and [col.feed(x) for x in p20] == ["partial"] * 19 + ["complete"], len(p20)
+        assert col.reply[1] == reply
+        assert W.parse_part("P1A2B,64,64:x~")[2] == 64 and W.parse_part("P1A2B,65,65:x~") is None
         # a missing part: a timeout that names what arrived, and nothing else
         e = fails(lambda: W.pull_config(answer(p[0], p[2]), 2, timeout=0.3))
         assert not isinstance(e, W.PullRefused) and "parts [1, 3] of 3 under id 1A2B" in str(e), e

@@ -715,6 +715,87 @@ def char_relay_roundtrip(bench):
     assert got == want, f"W1's relayed block recommends {got} ms, W2 printed {want} ms"
 
 
+ETM_HEAD = re.compile(r"^-{12} WCB(\d+) ETM Network Characterization -{12}$")
+ETM_RULE = "-" * 60
+
+
+def _etm_result_block(lines, wcb):
+    """The result block buildETMCharResultsString makes - its header through its closing rule - from console lines,
+    or [] when there is none. Lines in between that are not the block's (a [TAG] line another task printed between
+    two parts of a relayed result) are left out."""
+    start = next((k for k, x in enumerate(lines) if ETM_HEAD.match(x.strip()) and ETM_HEAD.match(x.strip()).group(1) == str(wcb)), None)
+    if start is None:
+        return []
+    out = []
+    for x in lines[start:]:
+        if x.startswith("[") and not x.startswith("[MGMT:ETM,"):
+            continue
+        out.append(x)
+        if x.strip() == ETM_RULE:
+            return out
+    return []
+
+
+@test("etm.char_relay_parts", "An ETM characterization result in parts: with W2's result part size at 512 bytes (?DEBUG,RESULTPART,512, RAM only), ?MGMT,ETM,CHAR,2 on W1 prints ONE [MGMT:ETM,2] reply whose result block is line for line the one W2 printed itself, and W2 (?DEBUG,MGMT) logs 2 or more parts sent (19 peers' result is ~5.2 KB, past one reply; docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2"])
+def char_relay_parts(bench):
+    """The relayed run (etm.char_relay_roundtrip) with the result too long for one reply. W1 asks with RESULT_REQ (30)
+    x3 and the old ETM_REQ behind it (rpStart); W2 runs the characterization once (the copies are duplicates of the run
+    it started for W1, handleETMReqFrom), holds the result when the load is off the air (sendResultWholeOrHold) and sends
+    part 0 unasked, then a part per request (answerResultPart), each split after a line; W1 prints each as it comes. A
+    bench of three or four boards makes about 900 bytes, so the knob cuts the parts at 512. One lost reply is asked for
+    again once W2 has finished."""
+    own = bench.usb_wcbs().get(2)
+    if not own:
+        raise Skip("W2 has no USB console here: there is nothing to compare the relayed result with")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own))
+    require_tokens(bench, 1, "?ETM,ON")
+    require_tokens(bench, 2, "?ETM,ON")
+    _peers_online(bench, w)
+    notes, problems, got, want, sent = [], [], [], [], []
+    try:
+        if not any("Result part size: 512 bytes" in x for x in w2.run("?DEBUG,RESULTPART,512")):
+            raise AssertionError("W2 does not take ?DEBUG,RESULTPART,512 - is it running firmware with results in parts?")
+        w2.run("?DEBUG,MGMT,ON")
+        for attempt in (1, 2):
+            m1, m2 = w.dev.mark(), w2.dev.mark()
+            w.send("?MGMT,ETM,CHAR,2")
+            try:
+                w2.dev.expect(REC_TIMEOUT.pattern, timeout=90, since=m2)
+            except AssertionError:
+                raise AssertionError(f"try {attempt}: W2 never finished the characterisation it was asked for") from None
+            try:
+                w.dev.expect(rf"^{ETM_RULE}$", timeout=20, since=m1)
+            except AssertionError:
+                failed = [x.rstrip() for x in w.dev.since(m1) if x.startswith("[MGMT] ETM characterization results from")]
+                notes.append(f"try {attempt}: no whole [MGMT:ETM,2] reply within 20 s of W2's result"
+                             + (f" ({failed[-1]})" if failed else ""))
+                time.sleep(12.0)                      # past the 10 s load W2's run started, and its held result's 10 s
+                continue
+            time.sleep(1.0)
+            lines = [x.rstrip() for x in w.dev.since(m1)]
+            tags = [k for k, x in enumerate(lines) if x.startswith("[MGMT:ETM,2]")]
+            if len(tags) != 1:
+                problems.append(f"W1 printed {len(tags)} [MGMT:ETM,2] lines, not one")
+            got = _etm_result_block(lines[tags[0]:] if tags else [], 2)
+            own_lines = [x.rstrip() for x in w2.dev.since(m2)]
+            want = _etm_result_block(own_lines, 2)
+            sent = [x for x in own_lines if re.match(r"^\[MGMT\] ETM characterization part \d+ of \d+ ", x)]
+            break
+        if not got:
+            problems.append("W1 printed no relayed result block: " + "; ".join(notes))
+        elif got != want:
+            first = next((k for k, (a, b) in enumerate(zip(got, want)) if a != b), min(len(got), len(want)))
+            problems.append(f"the relayed block ({len(got)} lines) differs from the {len(want)} W2 printed, first at line "
+                            f"{first}")
+        if got and len(sent) < 2:
+            problems.append(f"W2 logged {len(sent)} part(s) sent (?DEBUG,MGMT): the result did not go in parts")
+    finally:
+        w2.run("?DEBUG,RESULTPART,OFF")
+        w2.run("?DEBUG,MGMT,OFF")
+    bench.note("etm.char_relay_parts: " + "; ".join(notes + [f"{len(sent)} parts, {len(got)} lines"]))
+    assert not problems, "; ".join(problems)
+
+
 @test("etm.char_guard_wcbq", "A local ?ETM,CHAR refuses to run on a board whose mesh floor (?WCBQ) is under 2 - 'ETM Char requires at least 2 WCBs in the network (?WCBQ).' - and runs nothing (W1 at ?WCBQ,1 for a moment, then put back)", needs=["wcb1"])
 def char_guard_wcbq(bench):
     """WCB-WP24 row 4, the local WCBQ half (wcb.etm.char_guards_abort). startETMChar (WCB.ino) refuses with WCBQ < 2

@@ -59,9 +59,11 @@ enum : int {
 // SEQVAL, the Wizard - ever sees a longer sequence than it did.
 #define SEQ_VALUE_MAX 3999
 // The most the file may hold. Two limits meet here. Replacing or removing a sequence writes a second copy of the file,
-// so it must stay under half the 128 KB partition. And a config pull carries at most 16 parts of 2880 bytes (46 KB,
-// WCB_ConfigParts.h), with every sequence riding it as a ?SEQ,SAVE token beside every other setting: at 32 KB a full
-// store still pulls, where 48 KB answered ERROR TOOBIG. A few hundred typical sequences - NVS held about 50.
+// so it must stay under half the 128 KB partition. And a config pull carries at most 64 parts of 2880 bytes (184,320
+// characters, CFGP_MAX_PARTS in WCB_ConfigParts.h), with every sequence riding it as a ^?SEQ,SAVE token (its line +
+// 10) beside every other setting: a full store of the shortest sequences (6,572 of them) makes 98,488 characters of
+// config, which the 16 parts the pull carried until 2026-10-23 (46,080) did not. Raise one, re-derive the other
+// (docs/MGMT_RELAY.md §10). A few hundred typical sequences - NVS held about 50.
 #define SEQ_FILE_MAX  (32 * 1024)
 
 void   seqStoreBegin();          // setup(), before migrateOldStoredCommands(): mount, move NVS sequences in, report

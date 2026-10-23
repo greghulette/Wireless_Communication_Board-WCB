@@ -46,15 +46,22 @@ static const size_t   CFGP_LEGACY_MAX    = CFGP_MSG_MAX;   // a reply this long 
 static const size_t   CFGP_PART_DATA     = 2880;   // default part data size D (and the largest ?DEBUG,PULLPART takes)
 static const size_t   CFGP_PART_DATA_MIN = 512;    // smallest D: the WIFI,AP|JOIN passphrase and EPASS sit in the
                                                    // chain's first ~300 characters, so they stay whole inside part 1
-static const unsigned CFGP_MAX_PARTS     = 16;     // K above this is ERROR TOOBIG
+// K above this is ERROR TOOBIG, which no board reaches (docs/MGMT_RELAY.md §10): 64 x 2880 = 184,320 characters. The
+// largest config a board can hold is under 142,000: a full sequence store is 32,768 bytes of '<key>,<value>' lines,
+// each riding the pull as '^?SEQ,SAVE,<key>,<value>' (its line + 10), and at its most sequences (94 one-character keys,
+// then two-character ones with one-character values: 6,572 lines) that is 98,488 characters; 100 variables add
+// 3,700; every other setting lives in the 20 KB settings store and adds less than 40,000. It was 16 (46,080), which a
+// store of a few thousand short sequences passed. Every pull requester since F13 reads K as up to 2 digits (the
+// Wizard's parseConfigPart, the harness's parse_part), so raising it changes no line format.
+static const unsigned CFGP_MAX_PARTS     = 64;
 static const unsigned CFGP_UTF8_BACKOFF  = 3;      // a UTF-8 character has at most 3 continuation bytes
-static const size_t   CFGP_PART_HDR_MAX  = 12;     // "P" + 4 hex + "," + "16" + "," + "16" + ":"
+static const size_t   CFGP_PART_HDR_MAX  = 12;     // "P" + 4 hex + "," + "64" + "," + "64" + ":"
 static const size_t   CFGP_PART_MSG_MAX  = CFGP_PART_HDR_MAX + CFGP_PART_DATA + CFGP_UTF8_BACKOFF + 1;   // + '~' = 2896
 static const size_t   CFGP_ERR_MAX       = CFGP_CHUNK_BYTES;   // an error is exactly one chunk
 
 static_assert(CFGP_PART_MSG_MAX <= CFGP_MSG_MAX, "a part (header + D+3 data bytes + '~') must fit one relay session");
 static_assert(CFGP_PART_DATA_MIN > CFGP_UTF8_BACKOFF + 1, "grid windows must not overlap");
-static_assert((unsigned long)CFGP_MAX_PARTS * CFGP_PART_DATA < 65536UL, "split points are stored as uint16_t");
+static_assert(CFGP_MAX_PARTS <= 99, "k and K are at most 2 digits in the part header (CFGP_PART_HDR_MAX)");
 
 // ── CRC-32 ────────────────────────────────────────────────────────
 // Reflected CRC-32, poly 0xEDB88320: the same function as WCB.ino's crc32Update, which the
@@ -157,15 +164,23 @@ static inline size_t cfgpBackOff(size_t x, const uint8_t win[4]) {
 
 static inline size_t cfgpPartCount(size_t L, size_t D) { return D ? (L + D - 1) / D : 0; }
 
-// Fills split[0..K] (split[0] = 0, split[K] = L) from a measure walk's grid. Returns K, or 0
-// when K would exceed CFGP_MAX_PARTS (ERROR TOOBIG). Part k is stream bytes [split[k-1], split[k]).
-static inline unsigned cfgpSplit(size_t L, size_t D, const uint8_t (*grid)[4], uint16_t *split) {
+// Fills back[0..K-2] from a measure walk's grid: split_k = k*D - back[k-1], for 0 < k < K. Returns K,
+// or 0 when K would exceed CFGP_MAX_PARTS (ERROR TOOBIG). A split point is kept as its back-off (0..3)
+// rather than as an offset: offsets pass 65,535 once K*D does, and the job keeps one per part in .bss,
+// which comes out of the AP-mode heap (CLAUDE.md rule 14).
+static inline unsigned cfgpSplit(size_t L, size_t D, const uint8_t (*grid)[4], uint8_t *back) {
   const size_t K = cfgpPartCount(L, D);
   if (K == 0 || K > CFGP_MAX_PARTS) return 0;
-  split[0] = 0;
-  for (size_t k = 1; k < K; k++) split[k] = (uint16_t)cfgpBackOff(k * D, grid[k - 1]);
-  split[K] = (uint16_t)L;
+  for (size_t k = 1; k < K; k++) back[k - 1] = (uint8_t)(k * D - cfgpBackOff(k * D, grid[k - 1]));
   return (unsigned)K;
+}
+
+// split_k for 0 <= k <= K: 0, the grid points backed off as cfgpSplit recorded, then L. Part k (1-based)
+// is stream bytes [split_{k-1}, split_k).
+static inline size_t cfgpSplitAt(unsigned k, unsigned K, size_t L, size_t D, const uint8_t *back) {
+  if (k == 0) return 0;
+  if (k >= K) return L;
+  return (size_t)k * D - back[k - 1];
 }
 
 // D for a requested ?DEBUG,PULLPART value: 0 = the default, 512..2880 as given, else 0 (invalid).
@@ -184,7 +199,7 @@ static inline uint8_t cfgpPlan(size_t L, bool partsOk, size_t D) {
   return CFGP_PLAN_PARTS;
 }
 
-// "P<id>,<k>,<K>:" into out. Returns its length (<= CFGP_PART_HDR_MAX for k, K <= 16).
+// "P<id>,<k>,<K>:" into out. Returns its length (<= CFGP_PART_HDR_MAX for k, K <= CFGP_MAX_PARTS).
 static inline size_t cfgpPartHeader(char *out, size_t cap, uint16_t id, unsigned k, unsigned K) {
   if (cap == 0) return 0;
   const int n = snprintf(out, cap, "P%04X,%u,%u:", (unsigned)id, k, K);

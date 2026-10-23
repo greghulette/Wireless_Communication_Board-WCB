@@ -1190,7 +1190,8 @@ FILL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 12
       "?SEQ,SAVE reaches W2 as an ordinary command and is stored; an over-long ?MGMT line is refused with '[mgmt] line "
       "too long' and sends nothing", needs=["navicore", "wcb1", "wcb2"], links=[])
 def mgmt_stats_frag(bench):
-    """WcbMgmt::handleLine (WCB_Client WCB_Mgmt.h:367-403). STATS sends one PT_STATS_REQ (7) raw packet (:398); W2
+    """WcbMgmt::handleLine (WCB_Client WCB_Mgmt.h). STATS sends RESULT_REQ (30) x3 and one PT_STATS_REQ (7) behind it
+    (1.20.0; ncmesh.mgmt_stats_parts is a reply past one reply); W2
     answers with buildStatsString (WCB.ino:4653-4662, :2105-2242) as type-9 fragments in broadcast frames, in two
     passes since 2026-10-06 (sendResultFrags; tracker #109, once before), which service() prints in ONE printf as
     '[MGMT:STATS,2]<text>' (WCB_Mgmt.h:496-511) - the text keeps its newlines, so its rows follow on lines of their own.
@@ -1307,7 +1308,10 @@ def mgmt_frag_multichunk(bench):
       "W2 printed; a reply W2 sent that never arrived is asked for once more (slow: about 10 s an ask)",
       needs=["navicore", "wcb2"], links=[])
 def mgmt_etm_char(bench):
-    """WcbMgmt sends ONE PT_ETM_REQ (8) raw packet for ETM,CHAR (WCB_Mgmt.h:399; a PULL goes three times, :265-267). W2
+    """WcbMgmt sends the parts request RESULT_REQ (30) three times and ONE PT_ETM_REQ (8) behind it for ETM,CHAR
+    (WCB_Client 1.20.0 ResultPuller; before, the 8 alone): W2 starts one run and logs the copies as 'Duplicate ETM char
+    request', so it still logs ONE 'ETM char request from WCB<nid>' an ask; a result past one reply comes in parts
+    (etm.char_relay_parts). W2
     runs its characterization for NaviCore (handleETMReqPacket, WCB.ino:4766-4785; a request while a run is going is
     ignored, :4773-4776, and one that cannot run is answered at once with the reason, which is a reply too) and at the
     end sends the result with sendResultFrags: type-10 frags as broadcast frames 20 ms apart. Until 2026-10-06 they
@@ -2396,8 +2400,9 @@ def seq_pull(bench):
     answer comes back through seqNamesReply / seqValueReply (:423-442) as WCB_SEQ {"hash","names":[...]} (buildWcbSeq
     :352-375: each name cut to 15 characters, then JSON-hostile characters dropped) or WCB_SEQVAL {"key","status",
     "value"} (0 OK, 1 NOTFOUND, 2 TOOBIG, :380-393); over the bridge the reply goes back fragmented (_seqDeliver
-    :414-419, tick :1549-1554). Status 2 is not produced: a WCB answers TOOBIG only when the key, the value and a
-    4-character header pass 2912 characters, 16 chunks of 182 (WCB.ino:4748-4754). A WCB's own ?SEQ,NAMES is
+    :414-419, tick :1549-1554). Status 2 is not produced: a WCB answers TOOBIG only to a requester that cannot take
+    parts, for a value that with its key and ',OK,' passes 2912 characters (ncmesh.seqval_parts reads one in parts). A
+    WCB's own ?SEQ,NAMES is
     '[MGMT:SEQ,n]<hash>,<count>,<names>' (s17 _names). The value test writes its own plain sequence on W2 inside
     config_guard(bench, 2); the bench's sequences' values are never pulled (a value could hold a credential and the
     bridged reply crosses W1's unredacted console) - names only. The test clears its sequence in a finally; config_guard
@@ -2608,6 +2613,88 @@ def seqval_verbatim(bench):
     assert got["status"] == 0 and got["value"] == val, (f"(should, D-NC46) GET_WCB_SEQVAL returned {got['value']!r} for a "
                                                         f"sequence W2 stores as {val!r}: rc_telemetry.h:340-346 drops "
                                                         f"'\"' and '\\' instead of escaping them")
+
+
+@test("ncmesh.mgmt_stats_parts", "NaviCore's management relay carries a ?STATS too long for one reply whole: with 20 made-up "
+      "?STATS,RPT rows on W2, ?MGMT,STATS,2 on NaviCore prints ONE [MGMT:STATS,2] reply holding every made-up row and "
+      "'--- End of ESP-NOW Statistics ---', and no 'Stats from WCB2' failure line (WCB_Client 1.20.0 ResultPuller; it "
+      "printed the [ERROR] text before); ?STATS,RESET clears the rows", needs=["navicore", "wcb2"], links=[])
+def mgmt_stats_parts(bench):
+    """WcbMgmt::ResultPuller (WCB_Client WCB_Mgmt.h) asks with RESULT_REQ (30) x3 and STATS_REQ behind it, unicast; W2
+    holds the ~4 KB result and sends a part per request as type 32; service() prints each part in one write, part 0
+    behind the tag and the last with the line end, so NaviCore prints the one reply an older WCB sends. Typed on
+    NaviCore's USB; W2's rows are RAM only."""
+    from suites.s03_wcb import STATS_END, STATS_ROW, _fill_reported_rows
+    nc, w2 = _nc(bench), _w2(bench)
+    problems, notes, block = [], [], None
+    try:
+        rows = _fill_reported_rows(w2)
+        if len(rows) < 19:
+            problems.append(f"W2's ?STATS shows {len(rows)} of the 20 reported rows")
+        for ask in (1, 2, 3):
+            nm = nc.dev.mark()
+            nc.dev.send("?MGMT,STATS,2")
+            try:
+                _nav_regex(nc, nm, re.escape(STATS_END), 15, "the whole [MGMT:STATS,2] reply")
+            except AssertionError:
+                failed = [x.rstrip() for x in nc.dev.since(nm) if x.startswith("[MGMT] Stats from WCB2")]
+                notes.append(f"ask {ask}: no whole reply" + (f" ({failed[-1]})" if failed else ""))
+                time.sleep(3.0)
+                continue
+            time.sleep(0.5)
+            lines = [x.rstrip() for x in nc.dev.since(nm)]
+            tags = [k for k, x in enumerate(lines) if x.startswith("[MGMT:STATS,2]")]
+            if len(tags) != 1:
+                problems.append(f"NaviCore printed {len(tags)} [MGMT:STATS,2] lines, not one")
+            block = lines[tags[0]:] if tags else []
+            if any(x.startswith("[MGMT] Stats from WCB2") or "Result too large to relay" in x for x in lines):
+                problems.append("NaviCore also printed a failure or too-large line")
+            break
+        if block is None:
+            problems.append("NaviCore never printed W2's whole ?STATS in 3 asks: " + "; ".join(notes))
+        else:
+            got = sorted(STATS_ROW.match(x).group(1) for x in block if STATS_ROW.match(x))
+            if got != sorted(STATS_ROW.match(x).group(1) for x in rows):
+                problems.append(f"the relayed reply has {len(got)} made-up rows, W2's own ?STATS {len(rows)}")
+    finally:
+        w2.run("?STATS,RESET")
+    bench.note("ncmesh.mgmt_stats_parts: " + ("; ".join(notes) or "first ask"))
+    assert not problems, "; ".join(problems)
+
+
+@test("ncmesh.seqval_parts", "GET_WCB_SEQVAL of a sequence too long for one mesh reply answers status 0 and the whole "
+      "value: W3 (an ESP32-S3) stores 3,999 characters, NaviCore's requestSequence (WCB_Client 1.20.0) reads it a part "
+      "at a time and the WCB_SEQVAL line carries it byte for byte (TOOBIG before); W3's store is as it was after",
+      needs=["navicore", "wcb3"], links=[])
+def seqval_parts(bench):
+    """WCB_Client::requestSequence asks part 0 with SEQVAL_PART_REQ (31) x3 and SEQVAL_REQ (15) x3 behind it, joins the
+    type-34 parts in one heap buffer of the exact length, checks the CRC and fires onSequenceValue once; NaviCore's
+    seqValueReply builds the WCB_SEQVAL line (JSON-escaped, rc_telemetry.h) and waits past its 6 s while the library
+    still holds the pull (sequenceNamesPending). The value is a ;S0 marker and a comment, never recalled."""
+    from suites.s17_seq_inventory import _save_long_on, _w3_or_skip
+    nc, w3 = _nc(bench), _w3_or_skip(bench)
+    key = "HILNCPARTS"
+    head = f";S0{marker('n')}^***"
+    value = head + "n" * (3999 - len(head))
+    notes, got = [], None
+    with config_guard(bench, 3):
+        try:
+            if not _save_long_on(w3, key, value):
+                raise AssertionError(f"setup: W3 did not store the {len(value)}-character {key}")
+            for ask in (1, 2, 3):
+                try:
+                    got = nc.seqval(3, key, timeout=25)
+                    break
+                except AssertionError as e:
+                    notes.append(f"ask {ask}: {str(e)[:120]}")
+                    time.sleep(3.0)
+        finally:
+            w3.run(f"?SEQ,CLEAR,{key}")
+    if notes:
+        bench.note("ncmesh.seqval_parts: " + "; ".join(notes))
+    assert got is not None, "NaviCore never answered GET_WCB_SEQVAL for W3's long sequence: " + "; ".join(notes)
+    assert got["status"] == 0, f"GET_WCB_SEQVAL answered status {got['status']}, not 0 (2 is TOOBIG: no parts)"
+    assert got["value"] == value, f"GET_WCB_SEQVAL returned {len(got['value'] or '')} characters, not the {len(value)} stored"
 
 
 @test("ncmesh.telemetry_fields_rates", "The telemetry W1 relays: rc_hb every 2 s with NaviCore's id, firmware, mode and a "

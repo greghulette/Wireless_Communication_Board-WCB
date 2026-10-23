@@ -429,6 +429,37 @@ def pull_parts_many(bench):
     assert not problems, "; ".join(problems)
 
 
+@test("wcb.pull_parts_over_16", "A config in more parts than the 16 a pull carried until 2026-10-23: with W2 grown past 16 x 512 characters and its part size at 512 (?DEBUG,PULLPART,512), ?MGMT,PULL,2,P arrives in K = ceil(L/512) >= 17 parts of one id that join into W2's factory chain, CRC-valid, never a [MGMT:CFGERR,2]TOOBIG (CFGP_MAX_PARTS is 64; docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2"])
+def pull_parts_over_16(bench):
+    """A full sequence store of short sequences makes a config of up to ~98 KB, which the old 16 parts of 2880 bytes
+    (46,080) could not carry; no bench board holds that, so the knob shrinks the parts until 17 or more are needed.
+    Every requester since F13 reads k and K as up to 2 digits, so a K over 16 changes no line format."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    d, keys, problems = 512, [], []
+    with config_guard(bench, 2):
+        try:
+            ver = w2.version()
+            n = _grow(w2, ver, keys, 16 * d + 400)
+            if n <= 16 * d:
+                raise Skip(f"W2's reply reached {n} characters before its store refused more; the test needs over {16 * d}")
+            _knob(w2, f"?DEBUG,PULLPART,{d}")
+            want = _factory_reply(w2, ver)
+            r = w1.pull_reply(2, timeout=20, verify=False)
+            time.sleep(1.0)
+            bench.note(f"W2 at {len(want)} characters with {d}-byte parts: {r.count} {r.kind}")
+            problems += _reply_problems(r, want, keys, "parts") + _part_problems(r, d) + _secret_problems(r)
+            if r.count <= 16:
+                problems.append(f"{r.count} parts; the test needs more than 16")
+            if _pull_lines(w1.dev, r.mark, 2)["CFGERR"]:
+                problems.append("W1 printed a [MGMT:CFGERR,2] line")
+        except PullRefused as e:
+            problems.append(f"the pull was refused {e.code}")
+        finally:
+            _knob(w2, "?DEBUG,PULLPART,OFF", check=False)
+            _clear(w2, keys)
+    assert not problems, "; ".join(problems)
+
+
 @test("wcb.pull_error_oom_legacy", "Out of memory for a config under 2912 characters (?DEBUG,PULLFAULT,OOM on W2: one-shot, RAM only): W1 prints [MGMT:CFGERR,2]NOMEM, then the empty [MGMT:CONFIG,2] an old Wizard shows as 'empty config response', no config text in either; the next pull is whole (F13)", needs=["wcb1", "wcb2"])
 def pull_error_oom_legacy(bench):
     """The fault fails the reply buffer's malloc on every retry, so the real NOMEM branch runs: 1 s of 200 ms retries,
@@ -974,28 +1005,106 @@ def pull_knobs(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("wcb.mgmt_result_too_large", "A ?MGMT,STATS reply over 16 x 182 characters is refused in words: with 20 made-up ?STATS,RPT rows on W2, W1 prints [MGMT:STATS,2][ERROR] Result too large to relay (...) and W2 prints its own '[MGMT] Result too large to relay:' line; ?STATS,RESET clears the rows (WCB-WP25)", needs=["wcb1", "wcb2"])
+STATS_ROW = re.compile(r"^WCB(\d+): Sent: 4294967295, ACKd: 4294967295, .*Unguaranteed")
+STATS_HEAD = re.compile(r"^--- WCB2 ESP-NOW Statistics \(Since Last Reboot\) ---$")
+STATS_END = "--- End of ESP-NOW Statistics ---"
+
+
+def _fill_reported_rows(w2):
+    """20 made-up ?STATS,RPT rows on W2, seven 10-digit counters each (about 156 characters a row): its ?STATS passes
+    16 x 182 characters even if NaviCore's own 30 s report overwrites one. RAM only: ?STATS,RESET clears them."""
+    for k in range(1, 21):
+        w2.run(f"?STATS,RPT,{k}" + ",4294967295" * 7)
+    return [x for x in w2.run("?STATS", timeout=6) if STATS_ROW.match(x)]
+
+
+@test("wcb.mgmt_stats_parts", "A ?MGMT,STATS reply over 16 x 182 characters comes whole, in parts: with 20 made-up ?STATS,RPT rows on W2, W1 prints ONE [MGMT:STATS,2] reply - W2's header first, every made-up row once, '--- End of ESP-NOW Statistics ---' last - and no '[MGMT] Stats from WCB2' failure line, where it printed the [ERROR] text until 2026-10-23; W2 (?DEBUG,MGMT) logs sending 2 or more parts; ?STATS,RESET clears the rows (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2"])
+def mgmt_stats_parts(bench):
+    """A full fleet's ?STATS is up to ~6.6 KB. W1 asks with RESULT_REQ (30) x3 and the old STATS_REQ behind it
+    (rpStart); W2 holds the result it built (answerStats / sendResultWholeOrHold) and sends a part per request as type
+    32, split after a line; W1 prints each part as it comes, one write each, the tag in front of part 0 and the line
+    end after the last, so the text is the one reply an old relay would print. A line another task prints can land
+    between two parts, never inside a line: such lines are skipped here, not counted."""
+    w1, w2 = usb_wcb(bench), _w2(bench)
+    problems, notes = [], []
+    try:
+        rows = _fill_reported_rows(w2)
+        if len(rows) < 19:
+            problems.append(f"W2's ?STATS shows {len(rows)} of the 20 reported rows")
+        _knob(w2, "?DEBUG,MGMT,ON")
+        block, sent = None, []
+        for attempt in range(1, 4):
+            m1, m2 = w1.dev.mark(), w2.dev.mark()
+            w1.dev.send("?MGMT,STATS,2")
+            try:
+                w1.dev.expect(re.escape(STATS_END), timeout=12, since=m1)
+            except AssertionError:
+                failed = [x.rstrip() for x in w1.dev.since(m1) if x.startswith("[MGMT] Stats from WCB2")]
+                notes.append(f"try {attempt}: no whole reply" + (f" ({failed[-1]})" if failed else ""))
+                time.sleep(3.0)
+                continue
+            time.sleep(0.5)
+            lines = [x.rstrip() for x in w1.dev.since(m1)]
+            sent = [x for x in (y.rstrip() for y in w2.dev.since(m2)) if re.match(r"^\[MGMT\] Stats part \d+ of \d+ ", x)]
+            tags = [k for k, x in enumerate(lines) if x.startswith("[MGMT:STATS,2]")]
+            if len(tags) != 1:
+                problems.append(f"W1 printed {len(tags)} [MGMT:STATS,2] lines, not one")
+            if tags:
+                block = lines[tags[0]:]
+            if any(x.startswith("[MGMT] Stats from WCB2") for x in lines):
+                problems.append("W1 also printed a 'Stats from WCB2' failure line")
+            if any("Result too large to relay" in x for x in lines):
+                problems.append("W1 printed the too-large text to a requester that takes parts")
+            break
+        if block is None:
+            problems.append("W1 never printed W2's whole ?STATS in 3 tries: " + "; ".join(notes))
+        else:
+            got_rows = [x for x in block if STATS_ROW.match(x)]
+            if sorted(STATS_ROW.match(x).group(1) for x in got_rows) != sorted(STATS_ROW.match(x).group(1) for x in rows):
+                problems.append(f"the relayed reply has {len(got_rows)} made-up rows, W2's own ?STATS {len(rows)}")
+            head = next((k for k, x in enumerate(block) if STATS_HEAD.match(x)), None)
+            end = next((k for k, x in enumerate(block) if x == STATS_END), None)
+            first_row = next((k for k, x in enumerate(block) if STATS_ROW.match(x)), None)
+            if head is None or end is None or first_row is None or not head < first_row < end:
+                problems.append(f"header at line {head}, the first made-up row at {first_row}, the end at {end}")
+            if len(sent) < 2:
+                problems.append(f"W2 logged {len(sent)} part(s) sent (?DEBUG,MGMT): the reply did not go in parts")
+            notes.append(f"{len(sent)} parts, {len(got_rows)} made-up rows relayed")
+    finally:
+        w2.run("?DEBUG,MGMT,OFF")
+        w2.run("?STATS,RESET")
+    left = [x for x in w2.run("?STATS", timeout=6) if "4294967295" in x]
+    bench.note("wcb.mgmt_stats_parts: " + "; ".join(notes))
+    assert not left, f"?STATS,RESET left {len(left)} made-up row(s) on W2"
+    assert not problems, "; ".join(problems)
+
+
+@test("wcb.mgmt_result_too_large", "A requester from before results in parts still gets its answer in words: with ?DEBUG,ONEREPLY,ON on W1 (it then asks the way a relay before 2026-10-23 did, one STATS_REQ) and 20 made-up ?STATS,RPT rows on W2, W1 prints [MGMT:STATS,2][ERROR] Result too large to relay (...) and W2 prints its own '[MGMT] Result too large to relay:' line; ?STATS,RESET clears the rows (WCB-WP25; Greg 2026-10-23: keep the error)", needs=["wcb1", "wcb2"])
 def mgmt_result_too_large(bench):
-    """sendResultFrags (WCB.ino) refuses a STATS, SEQ-names or ETM result longer than MGMT_MAX_CHUNKS x 182 with an
-    ungated line and a short '[ERROR] Result too large to relay (<n> chars, max 2912). ...' sent in its place. A row
-    storeReportedStats keeps prints about 156 characters with seven 10-digit counters, so 20 of them pass 2912 even if
-    NaviCore's own 30 s report overwrites one. RAM only: resetESPNowStats clears the reported rows too."""
+    """sendResultFrags (WCB.ino) refuses a STATS, SEQ-names or ETM result longer than MGMT_MAX_CHUNKS x 182 to a
+    requester that cannot take parts, with an ungated line and a short '[ERROR] Result too large to relay (<n> chars,
+    max 2912). ...' sent in its place. Every relay before results in parts is such a requester; ?DEBUG,ONEREPLY makes
+    W1 one (RAM only, turned off in a finally). A row storeReportedStats keeps prints about 156 characters with seven
+    10-digit counters, so 20 of them pass 2912 even if NaviCore's own 30 s report overwrites one. RAM only:
+    resetESPNowStats clears the reported rows too. wcb.mgmt_stats_parts is the same request from a relay that takes
+    parts."""
     w1, w2 = usb_wcb(bench), _w2(bench)
     problems = []
     try:
-        for k in range(1, 21):
-            w2.run(f"?STATS,RPT,{k}" + ",4294967295" * 7)
-        rows = [x for x in w2.run("?STATS", timeout=6) if re.match(r"^WCB\d+: Sent: 4294967295, .*Unguaranteed", x)]
+        rows = _fill_reported_rows(w2)
         if len(rows) < 19:
             problems.append(f"W2's ?STATS shows {len(rows)} of the 20 reported rows")
+        if not any("One-reply requests on" in x for x in w1.run("?DEBUG,ONEREPLY,ON")):
+            raise AssertionError("W1 does not take ?DEBUG,ONEREPLY,ON - is it running firmware with results in parts?")
         line = None
-        for _ in range(2):                      # sent once and unacknowledged (handleMgmtStatsRequest): ask twice
+        for _ in range(2):                      # sent once and unacknowledged (oneReplyRequest): ask twice
             m1, m2 = w1.dev.mark(), w2.dev.mark()
             w1.dev.send("?MGMT,STATS,2")
             try:
                 line = w1.dev.expect(r"^\[MGMT:STATS,2\].*", timeout=5, since=m1).group(0)
                 break
             except AssertionError:
+                time.sleep(2.0)                 # past W2's 1.5 s dedup of this requester
                 continue
         if line is None:
             problems.append("W1 printed no [MGMT:STATS,2] line for two requests")
@@ -1010,6 +1119,7 @@ def mgmt_result_too_large(bench):
             except AssertionError:
                 problems.append("W2 did not print '[MGMT] Result too large to relay:'")
     finally:
+        w1.run("?DEBUG,ONEREPLY,OFF")
         w2.run("?STATS,RESET")
     left = [x for x in w2.run("?STATS", timeout=6) if "4294967295" in x]
     assert not left, f"?STATS,RESET left {len(left)} made-up row(s) on W2"

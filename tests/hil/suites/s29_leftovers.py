@@ -688,7 +688,7 @@ def mgmt_errors(bench):
                 (f"?MGMT,FRAG,21,{sid},0,1,x", "[MGMT] Invalid parameters"),
                 (f"?MGMT,FRAG,0,{sid},0,1,x", "[MGMT] Invalid parameters"),
                 (f"?MGMT,FRAG,2,{sid},0,0,x", "[MGMT] Invalid parameters"),
-                (f"?MGMT,FRAG,2,{sid},0,17,x", "[MGMT] Invalid parameters"),
+                (f"?MGMT,FRAG,2,{sid},0,25,x", "[MGMT] Invalid parameters"),   # a relay forwards up to 24 chunks (MGMT_FWD_MAX_CHUNKS)
                 ("?MGMT,PULL,0", "[MGMT] PULL: invalid targetWCB"),
                 ("?MGMT,PULL,21", "[MGMT] PULL: invalid targetWCB"),
             ]

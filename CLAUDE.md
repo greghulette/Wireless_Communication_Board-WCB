@@ -18,7 +18,7 @@ changing before editing.**
 | Channel sync — `?CHSYNC`, `?REGION`, MOVE/PROBE/REPLY (ETM types 25-27), WDP TLV `0x14`, JOIN following its network | [docs/CHANNEL_SYNC.md](docs/CHANNEL_SYNC.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
-| Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
+| Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly; everything else the relay carries — `?MGMT,STATS` / `ETM,CHAR` / `SEQGET` results in parts (`WCB_ResultWire.h`, packet types 30-34, shared byte-identical with `WCB_Client`), the Wizard's push in sessions (§10) | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
 | Device command translation | it's in [`WcbCmd`](https://github.com/greghulette/WcbCmd), not here |
 | Hardware-in-the-loop tests — `tests/hil`, the `wcb_probe` firmware | [docs/HIL_TESTING.md](docs/HIL_TESTING.md) |
 
@@ -282,8 +282,11 @@ changing before editing.**
       store call can fail for want of heap, so every caller handles `SEQ_E_*`. Don't keep it mounted between calls:
       held for 3 s, it cost a 250-token restore four tokens to out-of-memory. Loop task only, never the ESP-NOW
       receive callback (rule 11): a replace rewrites the whole file.
-    - **`SEQ_FILE_MAX` (32 KB) is set by the config pull, not the partition**: a full store's config must still fit 16
-      parts of 2880 bytes (`WCB_ConfigParts.h`), and 48 KB did not. Raise one and you must re-derive the other.
+    - **`SEQ_FILE_MAX` (32 KB) and the config pull's `CFGP_MAX_PARTS` (64) are sized together**: a full store's config
+      must still pull. Its sequences ride the pull as `^?SEQ,SAVE,` tokens, each its line + 10, so the most short ones
+      (6,572) make 98,488 characters; with 100 variables (3,700) and every other setting (under 40,000) a config stays
+      under 142,000, inside 64 parts of 2880 (184,320; `WCB_ConfigParts.h`). The 16 parts (46,080) it had did not cover
+      that. Raise one and you must re-derive the other (docs/MGMT_RELAY.md §10).
     - **NVS still decides when sequences are erased.** The Wizard's factory reset blanks only the NVS partition; a boot
       that finds the file without `stored_cmds/seq_mig_done` clears it. Keep that marker in NVS and keep it written
       at every boot that lacks it (`migrateOldStoredCommands`), or a factory reset stops clearing sequences.
@@ -323,6 +326,8 @@ g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./w
 g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test && ./config_parts_test
 # sequence names in pages (split, header, join; WCB_SeqNamesWire.h, shared with WCB_Client)
 g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test && ./seqnames_page_test
+# STATS / ETM / SEQGET results in parts (split, header, join, the requester's clock; WCB_ResultWire.h, shared too)
+g++ -std=c++11 -Wall -Wextra -O2 tests/result_parts_test.cpp -o result_parts_test && ./result_parts_test
 
 # Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
 python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log

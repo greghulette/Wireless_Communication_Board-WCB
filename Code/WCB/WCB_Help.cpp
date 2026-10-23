@@ -41,7 +41,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  MGMT,OFF          Disable MGMT debug"));
         Serial.println(F("  RAW,ON            Enable raw serial forwarding debug"));
         Serial.println(F("  RAW,OFF           Disable raw serial debug"));
-        Serial.println(F("\nTest knobs (mesh config pull, see ?MGMT?):"));
+        Serial.println(F("\nTest knobs (mesh config pull and results, see ?MGMT?):"));
         Serial.println(F("  PULLFAULT,OOM     The next config pull this board accepts fails its"));
         Serial.println(F("                      reply buffer allocation and answers CFGERR"));
         Serial.println(F("                      NOMEM (+ an empty reply if it fits one line)."));
@@ -55,6 +55,13 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      after moves them back into the store"));
         Serial.println(F("  PULLPART,<n>      Data bytes per part when this board sends a"));
         Serial.println(F("                      config in parts (512-2880; 0 or OFF = 2880)"));
+        Serial.println(F("  RESULTPART,<n>    A STATS, ETM or SEQGET result this board sends"));
+        Serial.println(F("                      over <n> bytes goes in parts of <n> to a relay"));
+        Serial.println(F("                      that takes parts (512-2880; 0 or OFF = one"));
+        Serial.println(F("                      reply up to 2912, parts of 2880 past it)"));
+        Serial.println(F("  ONEREPLY,ON|OFF   This board, as a relay, asks for ?MGMT,STATS /"));
+        Serial.println(F("                      ETM,CHAR / SEQGET results in one reply only,"));
+        Serial.println(F("                      as a relay before results in parts did"));
         Serial.println(F("\nFault knobs (?DEBUG,FAULT,<NAME>), for the bench tests: each drives"));
         Serial.println(F("one failure branch. RAM only: a knob fires once and lapses unfired"));
         Serial.println(F("after 60 s; FAULT,OFF and a reboot clear it."));
@@ -95,8 +102,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?DEBUG,PULLPART,600    - Split a large config into more parts"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Debug settings are NOT saved to NVS and reset on reboot"));
-        Serial.println(F("  - PULLFAULT, PULLPART, SEQNVS and the FAULT knobs are never in"));
-        Serial.println(F("    ?backup; all but FAULT BAUD0/HWOTHER/SEQDAMAGE are RAM-only"));
+        Serial.println(F("  - PULLFAULT, PULLPART, RESULTPART, ONEREPLY, SEQNVS and the FAULT"));
+        Serial.println(F("    knobs are never in ?backup; all but FAULT BAUD0/HWOTHER/SEQDAMAGE"));
+        Serial.println(F("    are RAM-only"));
         Serial.println(F("  - ETM debug is very verbose during characterization runs"));
         Serial.println(F("  - PWM debug will print for every pulse received"));
         Serial.println(F("\nLegacy commands:"));
@@ -799,6 +807,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  SEQ,<n>           WCB n's sequence names:  [MGMT:SEQ,n]"));
         Serial.println(F("  SEQGET,<n>,<key>  One sequence from WCB n:  [MGMT:SEQVAL,n]"));
         Serial.println(F("  ETM,CHAR,<n>      ETM characterization on WCB n:  [MGMT:ETM,n]"));
+        Serial.println(F("                      STATS, SEQ, SEQGET and ETM results too long for"));
+        Serial.println(F("                      one reply come in parts and print here whole,"));
+        Serial.println(F("                      as one reply would; one that cannot finish"));
+        Serial.println(F("                      prints an untagged [MGMT] line saying why"));
         Serial.println(F("  FRAG,...          One fragment of a Wizard config push"));
         Serial.println(F("\nPull errors ([MGMT:CFGERR,n]<CODE>,<detail>):"));
         Serial.println(F("  NOMEM             The target was out of memory - try again"));
@@ -806,7 +818,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  NOPARTS           Over 2912 characters and no request for parts"));
         Serial.println(F("                      arrived (every ,P copy lost, or an older"));
         Serial.println(F("                      Wizard/relay): ask again with ,P"));
-        Serial.println(F("  TOOBIG            Too large even in parts: ?backup over USB"));
+        Serial.println(F("  TOOBIG            Over 64 parts, which no board's config reaches"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?MGMT,PULL,3         - Config of WCB3"));
         Serial.println(F("  ?MGMT,PULL,3,P       - Config of WCB3, in parts if it is large"));
@@ -814,7 +826,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - A config pull carries the mesh password and any WiFi passphrase"));
         Serial.println(F("  - Older relays treat PULL,<n>,P as PULL,<n>"));
-        Serial.println(F("  - Test knobs, on the TARGET: ?DEBUG,PULLPART and ?DEBUG,PULLFAULT"));
+        Serial.println(F("  - Test knobs, on the TARGET: ?DEBUG,PULLPART, ?DEBUG,PULLFAULT and"));
+        Serial.println(F("    ?DEBUG,RESULTPART; on the RELAY: ?DEBUG,ONEREPLY"));
 
     // ================================================================
     } else if (c == "OTA" || c == "OTALOCAL") {

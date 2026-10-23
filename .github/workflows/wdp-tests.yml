@@ -8,6 +8,8 @@ name: WDP wire tests
 #                       Code/WCB/WCB_ConfigParts.h itself, so it tests the firmware's code
 #   seqnames_page_test  the sequence-names reply in pages (split, header, join): it includes
 #                       Code/WCB/WCB_SeqNamesWire.h itself, the file WCB_Client ships too
+#   result_parts_test   ?MGMT,STATS / ETM,CHAR / SEQGET results in parts (split, header, join, the
+#                       requester's clock): it includes Code/WCB/WCB_ResultWire.h, shipped by WCB_Client too
 # One job each, so one failing never hides another's result. All run on any test's
 # paths: the workflow name is kept so existing links and badges still resolve.
 
@@ -21,6 +23,8 @@ on:
       - 'Code/WCB/WCB_ConfigParts.h'
       - 'tests/seqnames_page_test.cpp'
       - 'Code/WCB/WCB_SeqNamesWire.h'
+      - 'tests/result_parts_test.cpp'
+      - 'Code/WCB/WCB_ResultWire.h'
       - '.github/workflows/wdp-tests.yml'
   pull_request:
     paths:
@@ -31,6 +35,8 @@ on:
       - 'Code/WCB/WCB_ConfigParts.h'
       - 'tests/seqnames_page_test.cpp'
       - 'Code/WCB/WCB_SeqNamesWire.h'
+      - 'tests/result_parts_test.cpp'
+      - 'Code/WCB/WCB_ResultWire.h'
       - '.github/workflows/wdp-tests.yml'
   workflow_dispatch:
 
@@ -61,3 +67,12 @@ jobs:
         run: g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test
       - name: Run
         run: ./seqnames_page_test
+
+  result-parts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++11 -Wall -Wextra -O2 tests/result_parts_test.cpp -o result_parts_test
+      - name: Run
+        run: ./result_parts_test

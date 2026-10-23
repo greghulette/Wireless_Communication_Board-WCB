@@ -116,6 +116,10 @@ const MGMT_MAX_CHUNKS  = 16;    // must match MGMT_MAX_CHUNKS in Code/WCB/WCB.in
                                 // reassembles into chunks[16][181] and tracks arrival in a
                                 // uint16_t bitmask, so a 17th chunk has nowhere to land
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
+// The longest command the relay takes as ONE chunk, in bytes, for its ETM shortcut (WCB.ino handleMgmtForward): 198
+// characters, but 186 when the relay runs ?ETM,CHKSM (ETM_MAX_CMD_WITH_CRC - 1), which the Wizard cannot see. Over
+// 186 a single command goes as a session of 179-byte chunks, which any relay takes.
+const MGMT_SINGLE_MAX  = 186;
 
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
@@ -5459,29 +5463,27 @@ async function updateSequence(n, rowId) {
       logTarget = relayN;
       // A sequence is easily longer than one packet. Sending it as chunkIdx 0 of 1 used to hand
       // the relay a payload it could not carry: the relay's single-chunk ETM shortcut only takes
-      // payload.length() <= 198 (Code/WCB/WCB.ino:2626), and anything longer fell through to the
-      // FRAG path where strncpy truncated it to 179 — storing half a sequence under a green
-      // "updated" toast. Fragment properly when it does not fit the shortcut.
-      if (cmd.length <= 198) {
+      // payload.length() <= 198 BYTES (186 under ?ETM,CHKSM; WCB.ino handleMgmtForward), and anything
+      // longer fell through to the FRAG path, where one chunk over 179 bytes is refused. Fragment
+      // properly when it does not fit the shortcut, by bytes (a value can hold multi-byte characters).
+      if (new TextEncoder().encode(cmd).length <= MGMT_SINGLE_MAX) {
         await sendMgmtReliable(relayConn,
           `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
         showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
       } else {
-        const chunks = fragmentString(cmd, MGMT_CHUNK_SIZE);
-        if (chunks.length > MGMT_MAX_CHUNKS) {
-          showToast(`Sequence "${key}" is too long to send via a relay `
-                  + `(${cmd.length} chars, max ${MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE})`, 'error');
+        // One command: one session, of up to MGMT_MAX_CHUNKS chunks, or a long one where this board and relay take
+        // it (_relayLongChunks: an ESP32-S3 target, both on firmware that takes it) - docs/MGMT_RELAY.md §10.
+        const plan = WCBParser.planRelayPush(cmd, { funcChar, delim, chunkBytes: MGMT_CHUNK_SIZE,
+                                                    maxChunks: MGMT_MAX_CHUNKS, longChunks: _relayLongChunks(relayN, n) });
+        if (plan.problem || plan.sessions.length !== 1) {
+          showToast(`Sequence "${key}" is too long to send via this relay (${plan.problem || 'more than one session'}). `
+                  + `Save it over USB, or update the board and relay firmware.`, 'error', 10000);
           return;
         }
-        for (let i = 0; i < chunks.length; i++) {
-          await sendMgmtReliable(relayConn,
-            `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},${i},${chunks.length},${chunks[i]}`,
-            i === 0 ? relayN : null);
-          if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
-        }
+        await _sendRelaySession(relayConn, relayN, seqSaveTargetWCB, plan.sessions[0]);
         // The multi-chunk path is broadcast and un-ACKed, so we cannot claim success the way the
         // single-chunk ETM path can. Say what actually happened rather than showing a green tick.
-        showToast(`Sequence "${key}" sent to WCB ${n} in ${chunks.length} parts — `
+        showToast(`Sequence "${key}" sent to WCB ${n} in ${plan.sessions[0].chunks.length} parts — `
                 + `pull the board to confirm it stored`, 'info');
       }
     } else {
@@ -9089,12 +9091,54 @@ function removeEtmListener(relayN) {
   delete _etmCallbacks[relayN];
 }
 
+// A relay push, a session at a time (WCBParser.planRelayPush, docs/MGMT_RELAY.md §10). Chunks are cut by UTF-8 BYTES
+// (WCBParser.utf8Chunks): the relay counts bytes, and a 179-character chunk holding an 'é' was refused there.
 function fragmentString(str, chunkSize) {
-  const chunks = [];
-  for (let i = 0; i < str.length; i += chunkSize) {
-    chunks.push(str.slice(i, i + chunkSize));
+  return WCBParser.utf8Chunks(str, chunkSize);
+}
+
+// The most chunks ONE command may take through relayN to board n, where it is longer than one session: a long
+// ?SEQ,SAVE (up to 4025 characters, 23 chunks). An ESP32-S3 target reassembles MGMT_LONG_MAX_CHUNKS since firmware built
+// on or after RELAY_LONG_SINCE, and a WCB relay forwards them from then; a WcbMgmt relay (NaviCore, MgmtRelay) forwards
+// any count. A classic ESP32 target never needs it: a ?SEQ,SAVE costs about 7x its length in heap while it runs, so it
+// stops near 2,400 characters, under one session. 0 = one session at most, as before. The date is the firmware's first
+// build with it, as its version stamp reads (US Eastern; a release is stamped when it is published, later).
+const MGMT_LONG_MAX_CHUNKS = 24;
+const RELAY_LONG_SINCE     = new Date(2026, 9, 23, 17, 0);
+function _relayLongChunks(relayN, n) {
+  const fwAtLeast = (cfg) => {
+    const built = parseWCBVersion(String(cfg?.fwVersion || ''));
+    return !!built && built >= RELAY_LONG_SINCE;
+  };
+  const target = boardConfigs[n], relay = boardConfigs[relayN];
+  const s3 = target && (target.hwVersion === 31 || target.hwVersion === 32);
+  return s3 && fwAtLeast(target) && (relay?.isRelay || fwAtLeast(relay)) ? MGMT_LONG_MAX_CHUNKS : 0;
+}
+
+// The commands one relay session may carry: the target queues them all at once, from its WiFi task, and its command
+// queue holds 200 (WCB.ino) - a session of more lost the rest.
+const MGMT_PUSH_MAX_CMDS = 150;
+
+// How long to wait after a session before the next: long enough for the target to run what it queued (a ?SEQ,SAVE or
+// ?SEQ,CLEAR rewrites the sequence store, up to a few hundred ms; most commands take a few) and at least the 2 s after
+// which a target gives up a session that lost a chunk (handleMgmtPacket's busy guard), so a lost chunk costs that
+// session, never the next one too.
+const RELAY_SESSION_GAP_MS = 2500;
+function _relaySessionGap(session, funcChar = '?') {
+  const seq = session.list.filter((c) => /^SEQ,(SAVE|CLEAR),/i.test(c.slice(funcChar.length))).length;
+  return Math.max(RELAY_SESSION_GAP_MS, seq * 250 + (session.cmds - seq) * 25);
+}
+
+// One session's chunks through the relay, MGMT_CHUNK_DELAY apart, under a session id of its own.
+async function _sendRelaySession(relayConn, relayN, targetWCB, session) {
+  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const total = session.chunks.length;
+  for (let i = 0; i < total; i++) {
+    const cmd = `${_relayFuncChar(relayN)}MGMT,FRAG,${targetWCB},${sessionId},${i},${total},${session.chunks[i]}\r`;
+    termLog(relayN, cmd.trim(), 'in');
+    await relayConn.send(cmd);
+    if (i < total - 1) await sleep(MGMT_CHUNK_DELAY);
   }
-  return chunks;
 }
 
 async function boardGoRemote(n, opts = {}) {
@@ -9186,27 +9230,28 @@ async function boardGoRemote(n, opts = {}) {
   // MGMT reboot session unreachable.  Appending the reboot to the same session
   // ensures the sequence is: config change → reboot, all inside one session
   // execution, with no ESP-NOW exchange in between.
-  const cmdToSend = (needsReboot && !skipReboot) ? cmdString + delim + funcChar + 'reboot' : cmdString;
-  const chunks    = fragmentString(cmdToSend, MGMT_CHUNK_SIZE);
-  const total     = chunks.length;
-
-  // The relay rejects a session claiming more than MGMT_MAX_CHUNKS chunks, and the target
-  // reassembles into a fixed 16-slot array with a uint16_t arrival mask — so an oversized push was
-  // discarded WHOLESALE at the far end while this side happily streamed every chunk and then
-  // reported success and advanced the baseline. Refuse up front and say what to trim.
-  // Up front means BEFORE the network-group confirm and the character bootstrap below (F14, W-9): refused after
-  // them, the user was asked to approve a push that could never be sent, and a bootstrap had already switched the
-  // target's delimiter or function identifier - leaving it on characters the rest of the push never arrived in.
-  if (total > MGMT_MAX_CHUNKS) {
-    const maxChars = MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE;
-    boardPushOutcome[n].reason = `too large to push via a relay (${cmdToSend.length} chars, max ${maxChars})`;
-    showToast(`WCB ${n}: config is too large to push via a relay (${cmdToSend.length} chars, `
-            + `max ${maxChars}). Push it over USB, or reduce stored sequences/variables.`, 'error', 12000);
-    termLog(relayN, `[Remote] Refusing push for WCB ${n}: ${total} chunks exceeds the `
-                  + `${MGMT_MAX_CHUNKS}-chunk relay limit (${cmdToSend.length} > ${maxChars} chars)`, 'err');
+  // The push as relay sessions (WCBParser.planRelayPush, docs/MGMT_RELAY.md §10). The relay forwards a session of at
+  // most MGMT_MAX_CHUNKS chunks and a released target reassembles no more, so a push longer than one session goes as
+  // several, each whole commands, the network and restart commands in the last; one fits one, in its own order, as
+  // before. Planned BEFORE the network-group confirm and the character bootstrap below (F14, W-9): a push that cannot
+  // be sent is refused before the user is asked to approve it and before a bootstrap switches the target's delimiter or
+  // function identifier. Refused only for what cannot be carried at all (a board-number change too long for one
+  // session; one command longer than this board and relay take) - nothing is sent then.
+  // Addressed to the number the board answers to NOW - its baseline's. A push that changes it (?WCB,<new>) used to go
+  // to the new number, which the board only takes once that push runs, so it never arrived.
+  const relayPushTarget = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
+  const plan = WCBParser.planRelayPush(cmdString, {
+    funcChar, delim, reboot: needsReboot && !skipReboot, chunkBytes: MGMT_CHUNK_SIZE, maxChunks: MGMT_MAX_CHUNKS,
+    maxCmds: MGMT_PUSH_MAX_CMDS, longChunks: _relayLongChunks(relayN, n),
+    wcbChange: !!boardBaselines[n] && boardBaselines[n].wcbNumber !== config.wcbNumber });
+  if (plan.problem) {
+    boardPushOutcome[n].reason = `cannot be pushed via a relay: ${plan.problem}`;
+    showToast(`WCB ${n}: this push cannot go via a relay — ${plan.problem}. Push it over USB.`, 'error', 12000);
+    termLog(relayN, `[Remote] Refusing push for WCB ${n}: ${plan.problem}`, 'err');
     if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
     return false;
   }
+  const total = plan.sessions.reduce((t, x) => t + x.chunks.length, 0);
 
   // ── Network-group change guard ─────────────────────────────────────
   // MAC octets and password define the ESP-NOW network group.  After our
@@ -9238,7 +9283,7 @@ async function boardGoRemote(n, opts = {}) {
   {
     const bootstrap = charPlan.commands;
     if (bootstrap.length) {
-      const bootTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      const bootTargetWCB = relayPushTarget;
       termLog(relayN, `[Remote] WCB ${n}: switching command characters before the push`, 'sys');
       for (const bcmd of bootstrap) {
         const bSession = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
@@ -9264,23 +9309,20 @@ async function boardGoRemote(n, opts = {}) {
     showToast(`⚠️ WCB ${n}: board will reboot after push — remote connection may be lost`, 'warning', 6000);
   }
 
-  // Generate a random 4-char hex session ID
-  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-
-  termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s), session ${sessionId}`, 'sys');
+  const sessions = plan.sessions;
+  termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s)`
+                + (sessions.length > 1 ? ` in ${sessions.length} sessions` : ''), 'sys');
 
   let pushSucceeded = false;
   try {
     // Route by the board's configured WCB NUMBER, not its UI slot — the two can differ
     // (auto-migration, relay setups). The single-chunk MGMT paths already resolve wcbNumber;
     // this multi-chunk push must match or a mismatched board's config lands on the wrong WCB.
-    const pushTargetWCB = boardConfigs[n]?.wcbNumber || n;
-    for (let i = 0; i < chunks.length; i++) {
-      const relayFcPush = _relayFuncChar(relayN);
-      const cmd = `${relayFcPush}MGMT,FRAG,${pushTargetWCB},${sessionId},${i},${total},${chunks[i]}\r`;
-      termLog(relayN, cmd.trim(), 'in');
-      await relayConn.send(cmd);
-      if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
+    for (let s = 0; s < sessions.length; s++) {
+      await _sendRelaySession(relayConn, relayN, relayPushTarget, sessions[s]);
+      // The target runs a session's commands from its queue: let it, and let a session that lost a chunk lapse
+      // (_relaySessionGap), before the next one arrives.
+      if (s < sessions.length - 1) await sleep(_relaySessionGap(sessions[s], funcChar));
     }
     showToast(`WCB ${n}: ${changeLabel} sent via WCB ${relayN}`, 'success');
     termLog(relayN, `[Remote] All chunks sent for WCB ${n}`, 'sys');

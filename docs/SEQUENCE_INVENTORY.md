@@ -311,30 +311,44 @@ Same 230-byte frag struct, through the same `sendResultFrags()`. Payload:
 ```
 
 `status` is `OK`, `NOTFOUND`, or `TOOBIG`. The value may itself contain commas, so a
-parser takes everything after the **second** comma verbatim. A store the target cannot read
+parser takes everything after the **second** comma verbatim.
+
+**A value longer than one reply comes in parts** (`?MGMT,SEQGET` on this firmware, `WCB_Client`
+1.20.0; [MGMT_RELAY.md](MGMT_RELAY.md) §10). The requester asks part 0 with a 59-byte
+`SEQVAL_PART_REQ` (31: the part and the 15-byte key) three times and the old 15 three times
+behind it; a target with parts answers the first 31 and takes the rest for copies, an older one
+answers a 15. A reply that fits goes out as type 16, as it always has; a longer one (with a
+15-character key, a value over 2,893 characters) goes as type-34 parts,
+`<id>,<part>,<parts>,<len>,<crc>:<data>`, the target reading the value from its store again for
+every part, the CRC in each header saying when it changed. The requester joins them in one
+buffer of the exact length and prints ONE `[MGMT:SEQVAL,<n>]<key>,OK,<value>` line /
+fires `onSequenceValue()` once. A requester that cannot take parts still gets `TOOBIG`. A store the target cannot read
 right then (§3d) gets no answer at all, and the requester retries: `WCB_Client` reads any
 status it does not know as `NOTFOUND`, which would be wrong.
 
-**The reply is sent once and nothing acknowledges it.** Every chunk is one ESP-NOW
-broadcast, 20 ms apart, with no second pass (unlike the config pull, which sends two).
-Lose one chunk and the requester gets nothing: no partial value, no error. Its
-half-built session is cleared silently after 10 s. So a requester must retry on
-timeout, at least 1.5 s after its last request for the same key, or the dedup above
-eats the retry. On the HIL bench, about 1 in 4 replies of 5-7 chunks was lost on the
-first try.
+**Nothing acknowledges the reply.** Every chunk is one ESP-NOW broadcast, 20 ms apart, sent
+in two passes 100 ms apart (since 2026-10-06, HIL_FIX_TRACKER #109; once before). Lose one chunk
+from both passes and the requester gets nothing: no partial value, no error. Its half-built
+session is cleared silently after 10 s. So a requester must retry on timeout, at least 1.5 s
+after its last request for the same key, or the dedup above eats the retry; a part of a value
+in parts is asked again by the requester itself. On the HIL bench, before the second pass,
+about 1 in 4 replies of 5-7 chunks was lost on the first try.
 
-**`TOOBIG` is reported explicitly.** `sendResultFrags()` silently refuses anything
-over 16 chunks, so the handler checks the budget first and answers with a status
-instead of nothing. Silence is what makes a config pull through older firmware unusable here (§1) and
-reintroducing it in the replacement would recreate the very bug this routes around.
-The budget allows a 2,903-character value, and the store takes up to 3,999 (§3d), so a
-long enough sequence answers `TOOBIG`. What usually stops a long value first is the heap a
-save costs (§3b): on a classic ESP32 about 2,400 characters. HIL `inv.seqget_largest` finds the
-largest value a board actually stores and round-trips it.
+**`TOOBIG` is reported explicitly**, to a requester that cannot take parts. `sendResultFrags()`
+refuses anything over 16 chunks, so the handler checks the budget first and answers with a
+status instead of nothing. Silence is what makes a config pull through older firmware unusable
+here (§1) and reintroducing it in the replacement would recreate the very bug this routes around.
+One reply allows a 2,903-character value (with a 5-character key), and the store takes up to
+3,999 (§3d): past one reply a requester with parts gets the value in parts, an older one
+`TOOBIG`. What usually stops a long value first is the heap a save costs (§3b): on a classic
+ESP32 about 2,400 characters, so only an ESP32-S3 holds one past one reply. HIL
+`inv.seqget_largest` finds the largest value a board actually stores and round-trips it;
+`inv.seqget_parts` pulls a 3,999-character one from W3 (an ESP32-S3) whole, and the old requester's
+`TOOBIG` with `?DEBUG,ONEREPLY`.
 
 ### Why one at a time
 
-A single value is bounded — ~1800 chars is about 10 of the 16 chunks. The whole set
+A single value is bounded — at most 3,999 characters, a reply or two. The whole set
 is not. A consumer pulls the name list, then walks it:
 
 ```
@@ -639,7 +653,8 @@ wcb.onSequenceNames([](uint8_t n, uint32_t hash, uint16_t count, const char* nam
 // 2. What's in one of them
 wcb.onSequenceValue([](uint8_t n, const char* key, WCBSeqStatus st, const char* value) {
     if (st == WCB_SEQ_OK) { /* value = ";M1,1^;S5,…" */ }
-    // else WCB_SEQ_NOTFOUND / WCB_SEQ_TOOBIG — always check before trusting value
+    // else WCB_SEQ_NOTFOUND / WCB_SEQ_TOOBIG (only from a WCB older than values in parts) —
+    // always check before trusting value
 });
 wcb.requestSequence(3, "wave");
 
@@ -679,6 +694,11 @@ Constraints worth knowing:
   times, no heap for the list, 60 s) is abandoned with a `[WCB_Client] sequence names ...` line
   on `Serial` and no callback; so is a one-reply answer that is not a list (an older WCB's
   `[ERROR] Result too large` text, which 1.18.1 and earlier delivered as an empty list).
+- **A value longer than one reply comes in parts and the callback fires once** (1.20.0, §3a):
+  `onSequenceValue()` gets `WCB_SEQ_OK` and the whole value, CRC-checked; the joined reply is
+  held in heap for the pull, its exact size (about 4 KB at most). `sequenceNamesPending()` stays
+  true while it pages. A pull that cannot finish is abandoned with a `[WCB_Client] sequence
+  '<key>' ...` line and no callback.
 - Interception of `SEQ_FRAG` is armed only once `onSequenceNames()` is registered. Until
   then those packets fall through to `onRawPacket()` exactly as before, so existing sketches
   (NaviCore's OTA raw hook) are unaffected.
@@ -730,6 +750,7 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | §3a: a value longer than one reply comes in parts (`SEQVAL_PART_REQ` 31, `SEQVAL_PART` 34, `WCB_ResultWire.h`, shared with `WCB_Client` 1.20.0; [MGMT_RELAY.md](MGMT_RELAY.md) §10), joined by the requester and delivered once; `TOOBIG` only to a requester that cannot take parts. The SEQVAL dedup is on (requester, key, part), an old request counting as part 0. HIL `inv.seqget_parts`, `inv.push_long_sequence`; `inv.seqget_largest` expects the value whole past one reply. | — |
 | 2026-10-23 | §3: an old one-reply request for a list too long for one reply gets the `[ERROR] Result too large to relay` text again instead of no answer (Greg: keep the error). | — |
 | 2026-10-22 | §3: the names list in pages. One reply carries 2,912 characters, about 180 names, and the store holds a few hundred, so a longer list could not be listed over the mesh at all (`?MGMT,SEQ` printed `[ERROR] Result too large to relay`, which `WCB_Client` read as an empty list). A requester now asks for page 0 with a 59-byte `SEQ_PAGE_REQ` (28) ahead of the old 13; a list that fits still goes as type 14, one that does not goes a page per request as type 29 (`<hash>,<count>,<page>,<pages>,<keyBytes>,<keys>`, greedy pages of up to 2,880 bytes of key text, `WCB_SeqNamesWire.h`, shared with `WCB_Client` 1.19.0), and the requester joins them and prints one line / fires the callback once. An old one-reply request for a list that does not fit is not answered. The dedup is on (requester, page), timed from the end of the answer. The target and `?SEQ,NAMES` walk the keys alone (`seqStoreForEachKey`) instead of building the list three times in heap. §3's sizing (80 keys, `MAX_STORED_COMMANDS`) predated the file store and is replaced. Host test `tests/seqnames_page_test.cpp`; HIL `inv.mgmt_seq_paged`, `ncmesh.seq_pull_paged`. | — |
 | 2026-09-29 | §3d: the store is mounted for each call and unmounted as it returns. Held for 3 s after a call, a `?backup` left its 1.7 KB in use under a 250-token one-line restore, which lost four tokens to out-of-memory (HIL `backup.one_line_restore`, run `20260929-194057`). Bench-verified: a full store (32,727 bytes, 36 sequences) still pulls whole, in 12 of 16 parts. | `8e5d24f` |
