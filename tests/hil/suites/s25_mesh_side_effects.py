@@ -566,27 +566,15 @@ def output_prior_flags_survive_reboot(bench):
 
 def _auto_configure_w2_s3(bench, w, w2):
     """The first half of pwm.wdp_selfheal_missed_clear: W1 maps S3 -> W2S3 (a W1 reboot), which declares W2's S3 by an
-    explicit command (a MANUAL output, tag 0); a direct clear takes it away (a W2 reboot); ?WDP,POLL then has W2
-    auto-configure it from W1's advert, tagged with W1 as its source. Returns W2's console mark before the poll."""
+    explicit command (a MANUAL output, tag 0); a direct clear takes it away (a W2 reboot) and WDP has W2 auto-configure
+    it from W1's advert, tagged with W1 as its source: at W2's boot since channel sync's boot solicit, else on
+    ?WDP,POLL (s14 _clear_then_wdp_autoconfig)."""
     m = w.send("?MAP,PWM,S3,W2S3")
     _pwm_reboot(w, m)
     if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
         raise AssertionError("setup: W2 did not take the output")
-    time.sleep(5.0)              # W1's boot burst of adverts would re-auto-configure W2's S3 in its quiet window
-    for _ in range(3):
-        _clear_remote_out(w, "S3")
-        if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
-            break
-    if "?MAP,PWM,OUT,S3" in snapshot(bench, 2):
-        raise AssertionError("setup: W2 still declares S3 after the direct clear")
-    cm = w2.dev.mark()
-    if not _has(w.run("?WDP,POLL"), "[WDP] polled"):
-        raise AssertionError("?WDP,POLL did not confirm")
-    w2.dev.expect(r"\[WDP\] WCB1 drives our S3 .* auto-configuring PWM output", timeout=8, since=cm)
-    time.sleep(2.0)
-    if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
-        raise AssertionError("setup: WDP auto-config did not declare W2 S3")
-    return cm
+    time.sleep(5.0)              # W1's own boot burst after its PWM reboot
+    _clear_then_wdp_autoconfig(bench, w, w2, "pwm (W2 S3 auto-configured)")
 
 
 def _clear_all_while_deaf(bench, w, bad):

@@ -52,6 +52,23 @@ def _clear_remote_out(w, port):
     _w2_reboot_wait(w, m)
 
 
+class _DevConsole:
+    """A WCB's own serial device read the way suites.common.Console reads it (mark / expect / lines)."""
+    remote = False
+
+    def __init__(self, dev):
+        self.dev = dev
+
+    def mark(self):
+        return self.dev.mark()
+
+    def expect(self, pattern, timeout=4.0, since=None):
+        return self.dev.expect(pattern, timeout=timeout, since=since)
+
+    def lines(self, since):
+        return self.dev.since(since)
+
+
 def _clear_then_wdp_autoconfig(bench, w, c2, test_id):
     """W2 loses its S3 output to a direct clear while W1 still drives it, and WDP gives it back: the auto-config of an
     output W2 lacks. Returns once W2 declares it again, after the reboot that applies it. c2: W2's Console.
@@ -61,7 +78,8 @@ def _clear_then_wdp_autoconfig(bench, w, c2, test_id):
     tests used to wait for - W2 without S3 while W1 still drives it - lasts under a second, no pull sees it, and three
     clears in a row all lost (full run 20261022-154502; on 10-15 W2 first heard W1 5.5 s after its boot). That boot
     re-configuration IS the auto-config. A W2 that hears W1 later (no boot solicit) is left without the output, and
-    ?WDP,POLL makes it, as before."""
+    ?WDP,POLL makes it, as before. c2 may also be W2's WCB on its own USB (a WCB from hil.ncmesh.deaf, say)."""
+    c2 = c2 if hasattr(c2, "remote") else _DevConsole(c2.dev)
     cm = c2.mark()
     _clear_remote_out(w, "S3")
     auto = r"\[WDP\] WCB1 drives our S3 .* auto-configuring PWM output"
