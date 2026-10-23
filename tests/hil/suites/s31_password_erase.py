@@ -774,17 +774,17 @@ def chain_restore_funcchar(bench):
 # collectConfigCommands (WCB.ino) emits one family after another; each family's rank, in emit order. A verb is matched by
 # its prefix only, so a message can name a family without quoting the token (?WIFI and ?EPASS carry secrets).
 _ORDER = (("HW", r"\?HW,"), ("LED,PIN", r"\?LED,PIN,"), ("MAC,2", r"\?MAC,2,"), ("MAC,3", r"\?MAC,3,"),
-          ("WCB", r"\?WCB,"), ("ALIAS", r"\?ALIAS,"), ("WCBQ", r"\?WCBQ,"), ("WCBCH", r"\?WCBCH,"), ("WIFI", r"\?WIFI,"),
+          ("WCB", r"\?WCB,"), ("ALIAS", r"\?ALIAS,"), ("WCBQ", r"\?WCBQ,"), ("REGION", r"\?REGION,"), ("WCBCH", r"\?WCBCH,"), ("WIFI", r"\?WIFI,"),
           ("PEERSLIVE", r"\?PEERSLIVE,"), ("EPASS", r"\?EPASS,"), ("DELIM", r"\?DELIM,"), ("FUNCCHAR", r"\?FUNCCHAR,"),
           ("CMDCHAR", r"\?CMDCHAR,"), ("Kyber release", r"\?(MAESTRO,REMOTE|KYBER,CLEAR)$"), ("BAUD", r"\?BAUD,S[1-5],"),
           ("LABEL", r"\?LABEL,S[1-5],"), ("BCAST,OUT", r"\?BCAST,OUT,S[0-5],"), ("BCAST,IN", r"\?BCAST,IN,S[1-5],"),
           ("MAP,SERIAL", r"\?MAP,SERIAL,"), ("MAESTRO", r"\?MAESTRO,M\d"), ("MP3", r"\?MP3,"), ("DFP", r"\?DFP,"),
           ("HCR", r"\?HCR,"), ("WLED", r"\?WLED,"), ("VAR", r"\?VAR,SET,"), ("KYBER,LOCAL", r"\?KYBER,LOCAL"),
-          ("ETM", r"\?ETM,"), ("CONTROLLER", r"\?CONTROLLER,"), ("WDP", r"\?WDP,"), ("SEQ,SAVE", r"\?SEQ,SAVE,"),
+          ("ETM", r"\?ETM,"), ("CONTROLLER", r"\?CONTROLLER,"), ("WDP", r"\?WDP,"), ("CHSYNC", r"\?CHSYNC,"), ("SEQ,SAVE", r"\?SEQ,SAVE,"),
           ("MAP,PWM,OUT", r"\?MAP,PWM,OUT,"), ("MAP,PWM", r"\?MAP,PWM,S\d"))
 # Families every chain carries, and the exact token sequence of the fixed ones.
-_ALWAYS = ("HW", "MAC,2", "MAC,3", "WCB", "WCBQ", "WCBCH", "WIFI", "EPASS", "CMDCHAR", "Kyber release", "BAUD",
-           "BCAST,OUT", "BCAST,IN", "ETM")
+_ALWAYS = ("HW", "MAC,2", "MAC,3", "WCB", "WCBQ", "REGION", "WCBCH", "WIFI", "EPASS", "CMDCHAR", "Kyber release",
+           "BAUD", "BCAST,OUT", "BCAST,IN", "ETM", "CHSYNC")
 _INNER = {"BAUD": [f"?BAUD,S{p}," for p in range(1, 6)],
           "BCAST,OUT": [f"?BCAST,OUT,S{p}," for p in (1, 2, 3, 4, 5, 0)],
           "BCAST,IN": [f"?BCAST,IN,S{p}," for p in range(1, 6)],
@@ -833,7 +833,7 @@ def _chain_order_problems(tokens, who):
     return p
 
 
-@test("backup.chain_order", "Every bench WCB's configured chain follows collectConfigCommands' order: ?HW first (?LED,PIN next on HW 3.x), identity, ?WIFI (present on every board, OFF included), ?EPASS, ?CMDCHAR, the Kyber release (?MAESTRO,REMOTE or ?KYBER,CLEAR) before the first ?BAUD, BAUD S1-S5, labels by port, BCAST OUT S1-S5 then S0, BCAST IN S1-S5, serial mappings, the Maestro / MP3 / DFP / HCR / WLED / VAR lines, ?KYBER,LOCAL after the last ?MAESTRO, the eight ?ETM tokens in order, the controller, the WDP OFF lines, every ?SEQ,SAVE after the ETM block, and the PWM lines last; no factory-only token (read-only)", needs=["wcb1"], links=[])
+@test("backup.chain_order", "Every bench WCB's configured chain follows collectConfigCommands' order: ?HW first (?LED,PIN next on HW 3.x), identity with ?REGION before ?WCBCH, ?WIFI (present on every board, OFF included), ?EPASS, ?CMDCHAR, the Kyber release (?MAESTRO,REMOTE or ?KYBER,CLEAR) before the first ?BAUD, BAUD S1-S5, labels by port, BCAST OUT S1-S5 then S0, BCAST IN S1-S5, serial mappings, the Maestro / MP3 / DFP / HCR / WLED / VAR lines, ?KYBER,LOCAL after the last ?MAESTRO, the eight ?ETM tokens in order, the controller, the WDP OFF lines, ?CHSYNC, every ?SEQ,SAVE after the ETM block, and the PWM lines last; no factory-only token (read-only)", needs=["wcb1"], links=[])
 def chain_order(bench):
     """Coverage re-scan 2026-10-12, backup.chain_order. collectConfigCommands (WCB.ino) is the one emitter behind
     ?backup and the config pull, and its order is the restore order: the Kyber release before the BAUD/BCAST lines so a
