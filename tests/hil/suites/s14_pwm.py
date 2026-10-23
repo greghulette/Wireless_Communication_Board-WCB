@@ -52,6 +52,40 @@ def _clear_remote_out(w, port):
     _w2_reboot_wait(w, m)
 
 
+def _clear_then_wdp_autoconfig(bench, w, c2, test_id):
+    """W2 loses its S3 output to a direct clear while W1 still drives it, and WDP gives it back: the auto-config of an
+    output W2 lacks. Returns once W2 declares it again, after the reboot that applies it. c2: W2's Console.
+
+    Since channel sync (2026-10-21) a board solicits adverts right after its first boot advert (WCB_WDP.cpp), so W1's
+    PWMTARGET reaches W2 within a second of the reboot the clear makes and W2 re-configures at once: the state the
+    tests used to wait for - W2 without S3 while W1 still drives it - lasts under a second, no pull sees it, and three
+    clears in a row all lost (full run 20261022-154502; on 10-15 W2 first heard W1 5.5 s after its boot). That boot
+    re-configuration IS the auto-config. A W2 that hears W1 later (no boot solicit) is left without the output, and
+    ?WDP,POLL makes it, as before."""
+    cm = c2.mark()
+    _clear_remote_out(w, "S3")
+    auto = r"\[WDP\] WCB1 drives our S3 .* auto-configuring PWM output"
+    try:
+        c2.expect(auto, timeout=8, since=cm)
+        how = "at W2's boot (its boot solicit)"
+    except AssertionError:
+        assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "setup: W2 still declares S3 after the direct clear"
+        cm = c2.mark()
+        assert _has(w.run("?WDP,POLL"), "[WDP] polled")
+        c2.expect(auto, timeout=8, since=cm)
+        how = "on ?WDP,POLL"
+    bench.note(f"{test_id}: W2 re-configured S3 from W1's advert {how}")
+    # The auto-config reboots W2 to apply it (rule 11's deferred restart): wait that out before pulling, from the line
+    # after the auto-config one - the clear's own reboot printed the same "Rebooting now". A mark is a line index into
+    # W2's own console; over ?RTERM (filtered lines) take the current one.
+    hits = [i for i, t in enumerate(c2.lines(cm)) if re.search(auto, t)]
+    am = cm + hits[-1] + 1 if hits and not c2.remote else c2.mark()
+    c2.expect(r"Rebooting now to apply PWM configuration", timeout=25, since=am)
+    c2.expect(r"Booting up the Wireless Communication Board", timeout=15, since=am)
+    time.sleep(2.0)
+    assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "WDP auto-config did not declare W2 S3"
+
+
 def _clear_local_mapping(w, port):
     m = w.send(f"?MAP,PWM,CLEAR,{port}")
     try:
@@ -1041,36 +1075,7 @@ def wdp_autoconfig_and_selfheal(bench):
             # Let W1's boot burst (~4.2 s after its PWM reboot) finish first.
             time.sleep(5.0)
             with Console(bench, 2) as c2:
-                # W2 loses the output and WDP gives it back. Since channel sync (2026-10-21) a board solicits adverts
-                # right after its first boot advert (WCB_WDP.cpp), so W1's PWMTARGET reaches W2 within a second of
-                # the reboot the clear makes and W2 re-configures at once: the state this setup used to wait for -
-                # W2 without S3 while W1 still drives it - lasts under a second, no pull sees it, and three clears in
-                # a row all lost (run 20261022-154502). That boot re-configuration IS the auto-config of an output W2
-                # lacks. A W2 that hears W1 later (no boot solicit) is left without it, and ?WDP,POLL makes it, as
-                # before.
-                cm = c2.mark()
-                _clear_remote_out(w, "S3")
-                auto = r"\[WDP\] WCB1 drives our S3 .* auto-configuring PWM output"
-                try:
-                    c2.expect(auto, timeout=8, since=cm)
-                    how = "at W2's boot (its boot solicit)"
-                except AssertionError:
-                    assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "setup: W2 still declares S3"
-                    cm = c2.mark()
-                    assert _has(w.run("?WDP,POLL"), "[WDP] polled")
-                    c2.expect(auto, timeout=5, since=cm)
-                    how = "on ?WDP,POLL"
-                bench.note(f"pwm.wdp_autoconfig_and_selfheal: W2 re-configured S3 from W1's advert {how}")
-                # The auto-config reboots W2 to apply it (rule 11's deferred restart): wait that out before pulling.
-                # From the line after the auto-config one: the clear's own reboot printed the same "Rebooting now".
-                # A mark is a line index into W2's own console; over ?RTERM (filtered lines) take the current one.
-                got = c2.lines(cm)
-                hits = [i for i, t in enumerate(got) if re.search(auto, t)]
-                am = cm + hits[-1] + 1 if hits and not c2.remote else c2.mark()
-                c2.expect(r"Rebooting now to apply PWM configuration", timeout=25, since=am)
-                c2.expect(r"Booting up the Wireless Communication Board", timeout=15, since=am)
-                time.sleep(2.0)
-                assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "WDP auto-config did not declare W2 S3"
+                _clear_then_wdp_autoconfig(bench, w, c2, "pwm.wdp_autoconfig_and_selfheal")
                 wm = w.dev.mark()
                 cm = c2.mark()
                 m = w.send("?MAP,PWM,CLEAR,ALL")

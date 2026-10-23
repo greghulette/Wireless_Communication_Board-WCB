@@ -26,8 +26,8 @@ from hil.runner import Skip, test
 from hil.wcb import WCB
 from suites.common import Console, config_guard, link, nonce, require_tokens, snapshot, token, usb_wcb
 from suites.s03_wcb import _w2_online
-from suites.s14_pwm import (_clear_local_mapping, _clear_remote_out, _dump_cap, _has, _inline_clear_out, _no_pwm,
-                            _pwm_reboot, _w2_reboot_wait)
+from suites.s14_pwm import (_clear_local_mapping, _clear_remote_out, _clear_then_wdp_autoconfig, _dump_cap, _has,
+                            _inline_clear_out, _no_pwm, _pwm_reboot, _w2_reboot_wait)
 from suites.s19_client_mesh import _client
 from suites.s22_maestro_kyber import _m_lines, _port_devices, _slot
 
@@ -55,17 +55,8 @@ def wdp_selfheal_missed_clear(bench):
             m = w.send("?MAP,PWM,S3,W2S3")
             _pwm_reboot(w, m)
             assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "setup: W2 did not take the output"
-            time.sleep(5.0)
-            for _ in range(3):
-                _clear_remote_out(w, "S3")
-                if "?MAP,PWM,OUT,S3" not in snapshot(bench, 2):
-                    break
-            assert "?MAP,PWM,OUT,S3" not in snapshot(bench, 2), "setup: W2 still declares S3 after the direct clear"
-            cm = c2.mark()
-            assert _has(w.run("?WDP,POLL"), "[WDP] polled")
-            c2.expect(r"\[WDP\] WCB1 drives our S3 .* auto-configuring PWM output", timeout=8, since=cm)
-            time.sleep(2.0)
-            assert "?MAP,PWM,OUT,S3" in snapshot(bench, 2), "setup: WDP auto-config did not declare W2 S3"
+            time.sleep(5.0)                    # W1's own boot burst after its PWM reboot
+            _clear_then_wdp_autoconfig(bench, w, c2, "pwm.wdp_selfheal_missed_clear")
 
             # 2. W2 goes deaf: the explicit clear W1 is about to send never arrives. W1 must see W2 online first:
             #    a peer is offline to a W1 that has just rebooted until its next packet, and a unicast to an offline
