@@ -10195,14 +10195,14 @@ class NaviDevModel(NaviModel):
         """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1. The kyber_lose_* mutations
         are the WiFi driver losing packets it accepted, as NaviCore's did in HIL runs 20261022-154502 and -213953:
         logged OK, reaching no WCB - 'one'/'two' the first one or two 28-byte packets (a remote restartScript,7,p<P>:
-        P's two channels and the subroutine frame), 'six*' the first 6-byte one (a setTarget), 'many' the first two.
+        P's two channels and the subroutine frame), 'six*' the first 6-byte one (a setTarget), 'many*' the first eight (6.7 % of the audit's 120).
         #L11's [TXAUDIT:...] (hash_cmd) counts them as WCB_Client 1.19.1's transmit audit would."""
         if not self.stream:
             return []
         pkt = bytes(self.stream)
         self.stream.clear()
         size, budget = next(((n, b) for name, n, b in (("kyber_lose_one", 28, 1), ("kyber_lose_two", 28, 2),
-                                                         ("kyber_lose_many", 6, 2), ("kyber_lose_six", 6, 1))
+                                                         ("kyber_lose_many", 6, 8), ("kyber_lose_six", 6, 1))
                              if any(m.startswith(name) for m in self.mut)), (0, 0))
         self.lost, self.flushes = getattr(self, "lost", 0), getattr(self, "flushes", 0) + 1
         if len(pkt) == size and self.lost < budget:
@@ -10930,8 +10930,9 @@ NCDEV_MUTATIONS = (
     ("ncdev.easing_repeat_frames", "kyber_lose_two", "FAIL", "2 Kyber packets NaviCore broadcast never reached W1 S1"),
     ("ncdev.kyber_loss_audit", "kyber_lose_six", "PASS", "both wires missed 1 (0.83 %)"),
     ("ncdev.kyber_loss_audit", "kyber_lose_six_audited", "PASS", "transmit audit: 1 of 120 frames lost"),
-    ("ncdev.kyber_loss_audit", "kyber_lose_six_air", "FAIL", "the rest went on the air"),
-    ("ncdev.kyber_loss_audit", "kyber_lose_many", "FAIL", "reached neither wire: over 1 %"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six_air", "PASS", "were lost on the air"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_many", "FAIL", "reached neither wire: over 5 %"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_many_audited", "FAIL", "NaviCore's WiFi driver lost 8 frame(s)"),
     ("ncdev.mae_remote_read", "no_relay_marker", "FAIL", "[TERM:20]"),
     ("ncdev.mesh_forward_burst", "queue_5", "FAIL", "expected the first 4"),
     ("ncdev.bcast_out_opt_in", "json_fanned", "FAIL", "declined JSON"),

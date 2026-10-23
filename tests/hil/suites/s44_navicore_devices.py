@@ -802,6 +802,7 @@ def easing_repeat_frames(bench):
 
 KYBER_AUDIT_N = 600          # frames: at 2026-10-05..15's ~0.06 % about 0.4 lost, at 2026-10-22's ~0.75 % about 4
 KYBER_AUDIT_GAP_S = 0.2      # between TEST_ACTIONs: the pace ncdev.easing_repeat_frames lost its packets at
+KYBER_AUDIT_MAX_PCT = 5      # lost to a wire: air losses come in bursts (13 of 600 on 2026-10-23, fix18) - only a gross loss fails
 TXAUDIT_LINE = re.compile(r"\[TXAUDIT:ACC=(\d+),LOST=(\d+)\]")
 
 
@@ -816,11 +817,11 @@ def _txaudit(nc):
     return None
 
 
-@test("ncdev.kyber_loss_audit", "Every Kyber broadcast NaviCore logs OK reaches both Maestro_Remote WCBs, or it is one "
-      "its WiFi driver lost: setTarget frames on a remote slot, one TEST_ACTION every 200 ms, each its own target, "
-      "counted on W1 S1 and the W2 S1 tap; a frame both missed was never on the air, and on a WCB_Client 1.19.1 image "
-      "the transmit audit counts it (no send completion), or it was lost on the air instead; no more than 1 % lost "
-      "(remote slot: nothing moves)", needs=["navicore", "wcb1"], links=["W1S1", "W2S1"])
+@test("ncdev.kyber_loss_audit", "How many Kyber broadcasts NaviCore logs OK never reach a Maestro_Remote WCB, and why: "
+      "setTarget frames on a remote slot, one TEST_ACTION every 200 ms, each its own target, counted on W1 S1 and the "
+      "W2 S1 tap; on a WCB_Client 1.19.1 image the transmit audit says how many the WiFi driver lost, the rest were "
+      "lost on the air (unacknowledged broadcasts, never re-sent); fails on a driver loss rate of 1 % or more, or "
+      "over 5 % lost to either wire (remote slot: nothing moves)", needs=["navicore", "wcb1"], links=["W1S1", "W2S1"])
 def kyber_loss_audit(bench):
     """The measurement behind ncdev.easing_repeat_frames' lone-loss rule. Run 20261022-154502 lost three Kyber packets
     NaviCore logged '[WCBStream] Broadcast (Kyber) N bytes — OK' (WCBStream.cpp _flushBuffer: esp_now_send returned
@@ -833,7 +834,15 @@ def kyber_loss_audit(bench):
     by both wires is a lost broadcast, one missed by one wire is that WCB's or its probe's. With the audit, the driver
     must account for every frame both wires missed (LOST rose by at least as many) - more missed than it counted were
     lost on the air, a cause this test then names. Without it (navicore-fix18, WCB_Client 1.18.1, or 1.19.0) the counts
-    alone are the A/B: the same test on each image. Fails over 1 % lost. Device 4 is hosted nowhere: nothing moves."""
+    alone are the A/B: the same test on each image. Device 4 is hosted nowhere: nothing moves.
+
+    The A/B (2026-10-23, three audits per leg 4-12 min after a NaviCore boot): navicore-kyber 1, 1, 2 of 600 missed by
+    both wires with the driver losing 0; the same with chanSync off 3, 3, 3, driver 0; navicore-fix18 (WCB_Client
+    1.18.1) 0, 0, 13. So the losses that day were on the air, not in the driver nor from channel sync: a broadcast is
+    never acknowledged nor retried, and a busy 2.4 GHz band takes some, in bursts. Greg's call: a lost Kyber/Maestro
+    frame is not re-sent (the next one supersedes it). So this test reports the split and fails only on what a firmware
+    change could cause: the driver losing frames (1 % or more of the frames sent: upstream's race, not seen that day),
+    a send refused or logged FAIL, or a loss over KYBER_AUDIT_MAX_PCT to either wire."""
     l11, tap = link(bench, 1, "S1"), link(bench, 2, "S1")
     nc = _nc(bench)
     cfg = nc.config()
@@ -862,10 +871,12 @@ def kyber_loss_audit(bench):
     problems = []
     if before is not None and after is not None:
         acc, lost = after[0] - before[0], after[1] - before[1]
-        audit = f"transmit audit: {lost} of {acc} frames lost by the WiFi driver meanwhile (all senders, all frames)"
-        if len(both) > lost:
-            problems.append(f"{len(both)} frame(s) both wires missed, but NaviCore's WiFi driver lost only {lost}: "
-                            f"the rest went on the air and were lost there (targets {both[:10]})")
+        air = max(0, len(both) - lost)
+        audit = (f"transmit audit: {lost} of {acc} frames lost by the WiFi driver meanwhile (all senders, all frames), "
+                 f"so {air} of the {len(both)} both wires missed were lost on the air")
+        if lost * 100 >= max(1, len(sent)):
+            problems.append(f"NaviCore's WiFi driver lost {lost} frame(s) it had accepted (no send completion): the "
+                            f"single-frame form of tracker #112 (espressif/esp-idf #19269)")
     bench.note(f"slot {slot} (device {dev}) ch {ch}: {len(sent)} sent, {len(pk)} Kyber packet(s) logged ({fails} not OK); "
                f"both wires missed {len(both)} ({100.0 * len(both) / max(1, len(sent)):.2f} %), one wire only {only} "
                f"(W1 S1 {len(miss1)}, W2 S1 tap {len(miss2)}); {audit}")
@@ -873,10 +884,10 @@ def kyber_loss_audit(bench):
         problems.append(f"NaviCore refused {len(refused)} setTarget TEST_ACTION(s) (first: {refused[0]})")
     if fails:
         problems.append(f"{fails} Kyber packet(s) logged FAIL: esp_now_send refused them")
-    if len(both) * 100 > len(sent):
-        problems.append(f"{len(both)} of {len(sent)} broadcasts reached neither wire: over 1 %")
-    if only * 100 > len(sent):
-        problems.append(f"{only} frame(s) reached one wire and not the other: over 1 %")
+    if len(both) * 100 > KYBER_AUDIT_MAX_PCT * len(sent):
+        problems.append(f"{len(both)} of {len(sent)} broadcasts reached neither wire: over {KYBER_AUDIT_MAX_PCT} %")
+    if only * 100 > KYBER_AUDIT_MAX_PCT * len(sent):
+        problems.append(f"{only} frame(s) reached one wire and not the other: over {KYBER_AUDIT_MAX_PCT} %")
     assert not problems, "; ".join(problems)
 
 
