@@ -12578,7 +12578,8 @@ def t_bridge_hooks(tmp):
 def t_intellex_wifi_flash_helpers(tmp):
     """suites/s35_intellex_wifi.py and s36_intellex_flash.py's pure helpers and the harness pieces IX-WP9/10 added:
     status_view keeps what the host is attached to and scrubs lastError's network names; rterm_starts counts one relay's
-    session starts; move_order_problems wants each 'network changed' before its 'reconnected'; bounce_problems fails
+    session starts; move_order_problems wants each 'network changed' before its 'reconnected' and says a 'reconnected'
+    from before the hop as that (move_lines picks the lines); bounce_problems fails
     any sample of the internet adapter off 'connected'; the W2 image's checks (partition rows, the version it carries),
     its release names and seed (a file left out on request); flash_log_problems on an Update's log, a region missing or
     unverified, an esptool 4 spelling, a refusal; percent_path; w2_want / nc_want; IntellexHost hide and copy_logs take
@@ -12607,6 +12608,14 @@ def t_intellex_wifi_flash_helpers(tmp):
     assert len(S35.move_order_problems(["reconnected  ws://192.168.4.1/ws"])) == 1
     p = S35.move_order_problems(["reconnected  WCB 192.168.4.1 → mesh"] + good[:1])
     assert any("before its first" in x for x in p) and any("no 'reconnected'" in x for x in p), p
+    # Run 20261022-145043: a reattach before the hop (the attach raced by Intellex's reconnect loop) is said as that,
+    # not as the hop's reattach under the old role; the hop's own lines are judged alone.
+    early = S35.move_lines(["serving   http://127.0.0.1:1/", "reconnected  ws://192.168.4.1/ws"])
+    assert early == ["reconnected  ws://192.168.4.1/ws"], early
+    p = S35.move_order_problems(early + good, before=len(early))
+    assert len(p) == 1 and "before the hop" in p[0] and "before its first" not in p[0], p
+    p = S35.move_order_problems(early + ["reconnected  WCB 192.168.4.1 → mesh"] + good[:1], before=1)
+    assert any("before the hop" in x for x in p) and any("before its first" in x for x in p), p
     ok = [(0.0, {"Wi-Fi": "connected", "Wi-Fi 2": "connected"}), (0.5, {"Wi-Fi": "Connected", "Wi-Fi 2": "disconnected"})]
     assert S35.bounce_problems(ok, "Wi-Fi", "Wi-Fi 2") == ([], {"samples": 2, "spare_not_connected": 1})
     bad, _ = S35.bounce_problems(ok + [(1.0, {"Wi-Fi": "disconnecting", "Wi-Fi 2": "connected"})], "Wi-Fi", "Wi-Fi 2")

@@ -456,6 +456,23 @@ Found on the bench in IX-WP9 (run `20260929-202852`, Intellex `e9f95f2`):
     - Fixed in Intellex `cfa973a`: it declines there and says to rejoin from the adapter's utility (a built-in Wi-Fi
       port is still power-cycled). The test passes on the Mac: declined, both adapters connected throughout
       (`20261007-175637`).
+23. **Every WiFi attach was dropped by the reconnect loop a second after it answered.** Found 2026-10-22, the first
+    Mac runs on Intellex chansync `f9f8cd9` (the access token): `20261022-145043`, `20261022-153103`.
+    - `f9f8cd9` has `WebSocketTransport.open()` wait up to `PROMPT_WAIT_S` (1 s) for an `[AUTH:REQUIRED]` that a board
+      with no token never sends (NaviCore here: `login token: none`). For that second the link reads as wanted and
+      down, and the reconnect loop (one pass a second) took it for a drop: on the Mac its move check probed the board
+      (NaviCore's USB shows the probe's PONG and `Unknown command: ?RELAY,WIFI` inside the attach), then its reattach
+      dropped the link `/_api/attach` had just published and closed every page on it. Every WiFi host's log has a
+      `reconnected  ws://192.168.4.1/ws` about 1 s after the attach answered; on Oct 15 (Intellex 0.1/0.2.0, an open
+      of tens of ms) none has.
+    - `intellex.wifi_link_loss`: page A's `/_link` closed 0.5 s into its PING ("the host closed the socket").
+      `intellex.wifi_ap_hop_reidentify`: that `reconnected` line came before the hop's first `network changed`, which
+      the test read as the hop's reattach under the old role (`move_order_problems` now says a reattach before the
+      hop as that). `wifi_nc_tool` and the Wizard tests survived it: their pages reconnect.
+    - Fixed in Intellex `4bf1e6a` (branch `fix/wifi-link`, off chansync): `Bridge` counts the attaches inside `open()` and the loop waits
+      while one is; its own reattach is `attach(..., if_down=True)`, claimed only while the link is down and its spec
+      still the target, so an attach made during the loop's move check is not reattached over either (that put the
+      loop's old spec back over the new target). Intellex `tools/smoke_ws_auth.py` K; not yet on the bench.
 
 ---
 
@@ -1395,3 +1412,4 @@ suites that follow are not affected (the F21 precedent).
 | 2026-10-04 | Full run `20260929-203948`: the three W2 flashes failed - esptool's write never reached W2's ROM loader ("Wrong boot mode (0x17)") with probe2 bound to W2's ports; `s36` releases W2's probe channels before esptool resets it (`park_probes`) and the spec judges the flash before the re-pull (DX47). `wifi_link_loss` failed there as in `20260929-202852` (finding 19, the stale association; reworked in `d402aba`). Commit `_(pending)_`. |
 | 2026-10-04 | IX-WP9 and IX-WP10 bench-verified. `20261004-125412`: the three W2 flashes pass with the probes released, and `flash_navicore_app` passes; findings 18 and 19 and the other flash `(should)` tests fail as designed. `20261004-130438`: all six unattended WiFi tests pass, `wifi_link_loss` included (noticed at 21.8 s: Intellex's 15 s plus finding 19's stall). That needed the harness's NaviCore join to prove the link: `pc_on_ap(reach=)` takes a TCP connect after the lease, because in `-125412` three joins held a lease and carried nothing. The probe note no longer calls W2's GPIO4 a strapping pin (it is not: GPIO0, 2, 5, 12 and 15 are). |
 | 2026-10-04 | Findings 1-5, 12-15 and 17-19 fixed on Intellex main (`e9f95f2..7d9014d`, D75; status note in §1.6) and every `(should)` test bench-verified (`20261004-202118`: 77 pass, the attended three skip, and the three shipped-bundle tests failed only because a fresh worktree has no downloaded bundles - they pass with them, `20261004-211236`). `intellex.flash_pipeline_fake` gives the fake esptool the board's partition table, since Update FW now reads it (finding 5). Finding 20 added. |
+| 2026-10-22 | Finding 23 (`20261022-145043`, `20261022-153103`): Intellex chansync's token prompt wait let the reconnect loop drop every WiFi attach a second after it answered, failing `intellex.wifi_link_loss` and `intellex.wifi_ap_hop_reidentify`. Fixed in Intellex `4bf1e6a` (`fix/wifi-link`); s35 `move_order_problems` says a reattach before the hop as that, and `wifi_link_loss` names the host's reattach lines when its page loses the link. |
