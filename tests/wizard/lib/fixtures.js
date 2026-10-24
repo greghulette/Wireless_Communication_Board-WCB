@@ -21,6 +21,13 @@ const test = base.test.extend({
       baseURL,
       viewport: { width: 1400, height: 900 },
     });
+    // The Wizard asks the GitHub API for the firmware list at every start (fetchLatestFirmwareVersion), and so did
+    // every spec's page: a run of a few hundred spent the 60 calls an hour GitHub allows a computer without a sign-in,
+    // and whatever really needs GitHub later in the run (Intellex's online checks, a push's CI watch) met HTTP 403.
+    // An empty list here, which the Wizard reads as "no firmware listed". A spec that mocks GitHub itself
+    // (page.route, or a later context.route) takes precedence.
+    await context.route('https://api.github.com/**', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
     await use(context);
     await context.close();   // closes the Web Serial port, so the harness can take it back
   },
