@@ -128,7 +128,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '23.18:07.R.OCT.2026';
+const UI_VERSION = '23.21:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -3699,7 +3699,8 @@ function populateUIFromConfig(n, config) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (tbody) {
     tbody.innerHTML = '';
-    for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
+    for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value, { bulk: true });
+    updateSequencePlayButtons(n);
     refreshAllSeqSharedIndicators();   // board n's keys changed → refresh every board's hints
     _seqPager(n).page = 1;
     applySeqPager(n);                  // one page of them, with the filter kept
@@ -5200,7 +5201,8 @@ function seqPagerSize(n, value) {
   }
 }
 
-function appendSequenceRow(n, key, value) {
+// bulk: one of many rows a load appends (populateUIFromConfig), which updates the play buttons once after them all.
+function appendSequenceRow(n, key, value, { bulk = false } = {}) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (!tbody) return;
   const rowId = `seq-row-${n}-${++_rowIdCounter}`;
@@ -5254,7 +5256,9 @@ function appendSequenceRow(n, key, value) {
   tr._seqLoaded = { value, text: ta ? ta.value : lines, delim };
   window.SeqBuilder?.renderRowThumb(n, rowId);
 
-  updateSequencePlayButtons(n);
+  // Every row's buttons, so once per load: per append, a board with thousands of sequences took ~15 s to load
+  // (2,970 rows, each re-reading all the rows before it).
+  if (!bulk) updateSequencePlayButtons(n);
   // NB: the "⇄ also on Wx" hint is populated by the caller — populateUIFromConfig runs one
   // refreshAllSeqSharedIndicators() after its append loop, and a single addSequenceRow starts
   // with an empty key (nothing to hint) and gets refreshed on the key's oninput. Refreshing
@@ -6268,28 +6272,51 @@ class BoardConnection {
     }
   }
 
-  // Send a command and collect all response lines until timeout or sentinel
-  async sendAndCollect(command, timeoutMs = 8000, sentinel = 'End of Backup') {
+  // Send a command and collect all response lines until timeout or sentinel. timeoutMs is the wait for an answer.
+  // With idleMs, once the board answers the read lasts while it keeps sending: it ends after idleMs with no BYTES (not
+  // lines: _rxAt), and maxMs caps the whole read - so an answer of any length arrives whole. A full store of the
+  // shortest sequences prints ~190 KB of ?backup, ~18 s over a classic ESP32's 115200-baud USB, and each of its two
+  // one-line chains is ~62 KB, over 5 s for one line. With startMarker, lines before it are dropped and the sentinel
+  // counts only after it, so the tail of an earlier answer still arriving (a boot probe's) is never taken for this one.
+  async sendAndCollect(command, timeoutMs = 8000, sentinel = 'End of Backup',
+                       { idleMs = 0, maxMs = 0, startMarker = '' } = {}) {
     return new Promise((resolve) => {
       const lines = [];
-      let timer;
+      let timer, capTimer;
       let done = false;
+      let started = !startMarker;
 
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        clearTimeout(capTimer);
         this._dataCallbacks = this._dataCallbacks.filter(cb => cb !== onLine);
         resolve(lines.join('\n'));
       };
 
+      // Quiet for idleMs counts from the last bytes that arrived: a long line still arriving is not quiet.
+      const idleCheck = () => {
+        const quiet = Date.now() - (this._rxAt || 0);
+        if (quiet < idleMs) timer = setTimeout(idleCheck, idleMs - quiet);
+        else finish();
+      };
       const onLine = (line) => {
+        if (idleMs) {                        // the board is talking: wait for it to go quiet
+          clearTimeout(timer);
+          timer = setTimeout(idleCheck, idleMs);
+        }
+        if (!started) {
+          if (!line.includes(startMarker)) return;
+          started = true;
+        }
         lines.push(line);
         if (line.includes(sentinel)) finish();
       };
 
       this._dataCallbacks.push(onLine);
       timer = setTimeout(finish, timeoutMs);
+      if (idleMs && maxMs) capTimer = setTimeout(finish, maxMs);
       this.send(command + '\r').catch(finish);
     });
   }
@@ -6469,7 +6496,8 @@ class BoardConnection {
     this._shared = true;
     this._hub = hub;
     // The same splitter as the direct reader (parser.js makeLineSplitter): one streaming decoder per connection.
-    this._onHubData = WCBParser.makeLineSplitter(line => this._handleLine(line));
+    const splitHub = WCBParser.makeLineSplitter(line => this._handleLine(line));
+    this._onHubData = (bytes) => { this._rxAt = Date.now(); splitHub(bytes); };   // _rxAt: sendAndCollect's idle read
     this._onHubState = (st) => {
       // Reflect the shared port's open/closed state as this board's connection state.
       // Always re-apply (idempotent) so a card rebuilt mid-session can't get stuck
@@ -6561,6 +6589,7 @@ class BoardConnection {
           const { value, done } = await this.reader.read();
           if (done) { termLog(this.boardIndex, '[sr] reader done', 'sys'); break outer; }
           if (value?.length > 0 && !this._srDataSeen) { this._srDataSeen = true; termLog(this.boardIndex, `[sr] first data: ${value.length} bytes`, 'sys'); }
+          if (value?.length > 0) this._rxAt = Date.now();   // bytes, not lines: sendAndCollect's idle read
           splitLines(value);
         }
       } catch (e) {
@@ -7871,6 +7900,10 @@ async function boardAutoDetect(n) {
 //  cleared on reconnect) and re-send ?backup every 10 s until the board
 //  answers.  The moment "End of Backup" arrives in any received line the
 //  listener resolves immediately.
+// How a USB pull reads a backup (BoardConnection.sendAndCollect): as long as the board keeps sending - 3 s of quiet
+// ends it, 2 min caps it - and from its own header on. Nothing about it depends on how much the board has stored.
+const USB_PULL_READ = { idleMs: 3000, maxMs: 120000, startMarker: 'WCB Configuration Backup' };
+
 async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs = 5000 } = {}) {
   termLog(n, '⏳ Waiting for firmware to boot…', 'sys');
   if (preDelayMs > 0) await sleep(preDelayMs);
@@ -7880,6 +7913,11 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
     let tickTimer = null;
     const startedAt = Date.now();
     let sendAttempt = 0;
+    // A backup on its way: its header seen, its end not yet, and bytes within the last 5 s (a one-line chain of a full
+    // store takes longer than that). A probe sent meanwhile would queue another whole backup behind it (a full
+    // sequence store's takes up to ~18 s), so none is.
+    let backupAt = 0;
+    const answering = () => backupAt && Date.now() - Math.max(backupAt, conn._rxAt || 0) < 5000;
 
     // ── Persistent listener ───────────────────────────────────────────────
     // Registered once; _startReading dispatches every incoming line here.
@@ -7889,6 +7927,7 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
       // NB: do NOT echo every received line here — the normal terminal already shows
       // them, so echoing would double every line (and tag anything the user types
       // during the boot-watch with a "[wait]" prefix). We only watch for the sentinel.
+      if (line.includes('WCB Configuration Backup') || (backupAt && !line.includes('End of Backup'))) backupAt = Date.now();
       if (line.includes('End of Backup')) {
         done = true;
         clearTimeout(tickTimer);
@@ -7920,15 +7959,16 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
 
       termLog(n, `⏳ Still waiting… (${elapsed}s, probe ${sendAttempt}) connected=${connected} reader=${hasReader}`, 'sys');
 
-      if (connected && hasReader) {
+      if (connected && hasReader && !answering()) {
         // Always try the fixed bootstrap command first — works regardless of the
-        // board's configured funcChar (new firmware).  Then also send the
-        // funcChar-prefixed form as a fallback for pre-bootstrap firmware.
+        // board's configured funcChar (new firmware).  Then the funcChar-prefixed
+        // form as a fallback for pre-bootstrap firmware, unless a backup has
+        // started meanwhile (a second would only queue behind it).
         const pullFuncChar = _liveFuncChar(n);
         try {
           await conn.send('WCB_WEBTOOL_CONFIG_PULL\r');
-          await sleep(200);
-          if (!done) await conn.send(`${pullFuncChar}backup\r`);
+          await sleep(200);   // a board that takes it starts its backup's header well inside this
+          if (!done && !answering()) await conn.send(`${pullFuncChar}backup\r`);
         }
         catch (e) { termLog(n, `⚠ backup probe send failed: ${e?.message ?? e}`, 'sys'); }
       }
@@ -7983,13 +8023,16 @@ async function boardPull(n, opts = {}) {
   // Tier 2: funcChar-prefixed fallback — for firmware that pre-dates the
   //   bootstrap command.  Uses the best-known funcChar from the config/baseline,
   //   falling back to '?' (firmware default) for fresh boards.
+  // Each waits for the board to go quiet, not a fixed time: a full sequence store's backup takes ~9 s over a classic
+  // ESP32's 115200-baud USB, and the fixed 3 s and 8 s cut it off part way (USB_PULL_READ). The bootstrap's answer
+  // arriving after the fallback was sent then ended the fallback's read with no beginning.
   const BOOTSTRAP_CMD = 'WCB_WEBTOOL_CONFIG_PULL';
   termLog(n, BOOTSTRAP_CMD, 'in');
-  let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000);
+  let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000, 'End of Backup', USB_PULL_READ);
   if (!raw.includes('End of Backup')) {
     const pullFuncChar = _liveFuncChar(n);
     termLog(n, `${pullFuncChar}backup`, 'in');
-    raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
+    raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000, 'End of Backup', USB_PULL_READ);
   }
 
   // A backup MUST be terminated by its end marker. Without this check a truncated or empty
@@ -9580,6 +9623,12 @@ const PULL_RETRY_MS     = 2500;
 // 12, sized for a board that is still rebooting) gets a full PULL_TIMEOUT_MS + PULL_RETRY_MS more per extra attempt,
 // so its ~100 s budget is not cut to 40 s.
 const PULL_DEADLINE_MS  = 40000;
+// ...and a parts reply gets as long as its parts take, whatever their number and pace: every NEW part moves the cap out
+// to (parts still to come) x PULL_PART_MS + PULL_TIMEOUT_MS from now, if that is later. Parts come ~0.65 s apart for a
+// config of long sequences and ~1.26 s for 2,972 short ones (22 parts in 27.7 s, wizard.remote_pull_many_sequences: a
+// part costs the target a walk of the config up to it). With one lost part and the retry, a pull like that ran past
+// 40 s. A job is still bounded: K parts, each within PULL_TIMEOUT_MS of the one before.
+const PULL_PART_MS      = 1500;
 
 // One pull attempt on the air per relay. The relay reassembles ONE reply at a time and a new session wipes the one
 // in progress (WCB.ino handleConfigFragPacket; WcbMgmt the same), so two targets answering through one relay at once
@@ -9666,7 +9715,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
     deadlineMs: PULL_DEADLINE_MS + Math.max(0, maxAttempts - MAX_PULL_ATTEMPTS) * (PULL_TIMEOUT_MS + PULL_RETRY_MS),
     conn: null, onLine: null, ticket: null,
     onAir: false, settled: false, finished: false,
-    attemptTimer: null, retryTimer: null, deadlineTimer: null, deadlineAt: 0,
+    attemptTimer: null, retryTimer: null, deadlineTimer: null, deadlineAt: 0, calledAt: Date.now(),
     notUtf8Id: null,   // the job id of the first join that held U+FFFD (_pullNotUtf8)
     firstSent: false, resolveFirst: null, rejectFirst: null,
   };
@@ -9757,6 +9806,7 @@ function _pullOnLine(pull, line) {
         clearTimeout(pull.attemptTimer);
         pull.attemptTimer = setTimeout(() => _pullAttemptFailed(pull, null), PULL_TIMEOUT_MS);
       }
+      if (r.progress) _pullBudgetParts(pull, r.K, r.have);
       return;
     case 'legacy':
       _pullSucceeded(pull, r.body);
@@ -9833,6 +9883,17 @@ function _pullFailNow(pull, reason) {
   showToast(`WCB${pull.targetN}: ${reason}`, 'error');
   termLog(pull.relayN, `[Remote] Config pull from WCB${pull.targetN} stopped: ${reason}`, 'err');
   _pullSettle(pull, false);
+}
+
+// A new part of a job of K, `have` of them in: the pull's cap moves out to cover the rest from now, if that is later.
+function _pullBudgetParts(pull, K, have) {
+  if (!(K > 0)) return;
+  const until = Date.now() + Math.max(0, K - (have || 0)) * PULL_PART_MS + PULL_TIMEOUT_MS;
+  if (until <= pull.deadlineAt) return;
+  pull.deadlineAt = until;
+  pull.deadlineMs = until - pull.calledAt;
+  clearTimeout(pull.deadlineTimer);
+  pull.deadlineTimer = setTimeout(() => _pullGiveUp(pull), until - Date.now());
 }
 
 function _pullGiveUp(pull) {
