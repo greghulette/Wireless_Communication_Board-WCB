@@ -365,6 +365,22 @@
   </div>
 </div>
 
+<!-- ─── Board Number Taken Confirmation Modal ─────────────────────── -->
+<!-- Shown when a push gives a board a number another board already has (USB or relay, confirmWcbNumberTaken). -->
+<!-- Cancel has the focus: Enter, Escape and a click outside all cancel. -->
+<div class="modal-overlay" id="wcb-number-taken-modal">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ Board Number Already in Use</span>
+    </div>
+    <div class="modal-body" id="wcb-number-taken-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="wcb-number-taken-cancel">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="wcb-number-taken-confirm">Push anyway — two boards on one number</button>
+    </div>
+  </div>
+</div>
+
 <!-- ─── Factory Reset Modal ──────────────────────────────────────── -->
 <div class="modal-overlay" id="factory-reset-modal" onclick="closeFactoryResetModal(event)">
   <div class="modal-dialog" style="width:480px;max-width:94vw">
