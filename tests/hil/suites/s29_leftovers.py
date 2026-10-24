@@ -5,15 +5,16 @@ banner on both boards, checked line by line against each board's own config chai
 
 Restore if aborted: ?DEBUG,OFF / ?DEBUG,MGMT,OFF / ?STOP / ?TRACK,ON on W1's USB console; ?MAESTRO,CLEAR,M8:W11S1 if a
 chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF; ?WCB,2 and ?reboot on W2's USB console if
-W2 answers to another number (mesh.relay_renumber_reboot), and ?WDP,FORGET,<n> on W1. Nothing here moves a servo.
+W2 answers to another number (mesh.relay_renumber_reboot), then ?WDP,FORGET,<n> on W1 and W3 and, for each Maestro
+W2 hosts, ?MAESTRO,CLEAR,M<id>:W<n>S1 on both (WDP auto-adds a proxy to the new number). Nothing here moves a servo.
 """
 import re
 import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, absent_wcbs, config_guard, fault, fault_off, marker, require_tokens, snapshot, token,
-                           usb_wcb, wifi_mode_token, wire, ws_token)
+from suites.common import (Console, absent_wcbs, config_guard, fault, fault_off, marker, remote_wcbs, require_tokens,
+                           snapshot, token, usb_wcb, wifi_mode_token, wire, ws_token)
 from suites.s22_maestro_kyber import _wdp_off
 from suites.s18_etm_config_wdp import _forget_everywhere
 
@@ -710,7 +711,8 @@ def mgmt_errors(bench):
 @test("mesh.relay_renumber_reboot", "A board renumbered through a relay in two steps, as the Wizard does it (planRelayPush, "
       "docs/MGMT_RELAY.md §10): W1 relays ?WCB,<n>^?reboot to W2 (one chunk, ETM, to 2); W2 restarts as <n>, and W1's "
       "?WDP,DUMP shows a WCB row for <n> heard since then within 45 s; a two-chunk session to <n> then runs on W2; a "
-      "two-chunk ?WCB,2^?reboot to <n> puts it back, and W1 hears it as 2 again (<n> forgotten everywhere; 2 W2 reboots)",
+      "two-chunk ?WCB,2^?reboot to <n> puts it back, and W1 hears it as 2 again (<n> forgotten everywhere and the Maestro "
+      "proxies the other WCBs learned for it cleared; 2 W2 reboots)",
       needs=["wcb1", "wcb2"], links=[])
 def relay_renumber_reboot(bench):
     """What the Wizard's two-step renumber relies on. saveWCBNumberToPreferences (WCB_Storage.cpp) sets WCB_Number at
@@ -721,7 +723,9 @@ def relay_renumber_reboot(bench):
     picks by the number in them (handleMgmtForward / handleMgmtPacket). Whether W1 already takes a one-chunk session to
     <n> is noted, not judged. W2's ?WDP,STATUS line on its own USB console shows which sessions ran. W2 is put back over
     the mesh and, failing that, over its USB; <n> is forgotten on every WCB and NaviCore, which learn it from its adverts
-    (_forget_everywhere); config_guard proves both boards are as they were."""
+    (_forget_everywhere). Every other WCB also auto-adds a remote proxy for each Maestro W2 advertises as <n>
+    (maestroAutoAddRemote, WCB_Maestro.cpp), which by design stays until cleared, so those are cleared too; config_guard
+    on every WCB proves the bench is as it was."""
     own2 = bench.usb_wcbs().get(2)
     if not own2:
         raise Skip("W2 has no USB console here")
@@ -751,7 +755,8 @@ def relay_renumber_reboot(bench):
 
     ran = lambda m: _has([x.rstrip() for x in w2.dev.since(m)], "[WDP:en=")   # ?WDP,STATUS's one line
     back = False
-    with config_guard(bench, 1, 2):
+    with config_guard(bench, *bench.wcb_numbers()) as before:
+        hosted = sorted({int(m.group(1)) for t in before[2] for m in [re.match(r"^\?MAESTRO,M(\d):W2S\d", t)] if m})
         try:
             t0 = time.monotonic()
             m = session(2, [f"?WCB,{new}^?reboot"], wait=0.5)
@@ -785,6 +790,12 @@ def relay_renumber_reboot(bench):
                 w2.run("?WCB,2")                     # over its own USB: never leave W2 on another number
                 w2.reboot()
             _forget_everywhere(bench, new, navicore=True)
+            for mid in hosted:                       # the proxies W1 and W3 learned from W2's adverts as <n>
+                w.run(f"?MAESTRO,CLEAR,M{mid}:W{new}S1")
+                for k in remote_wcbs(bench):
+                    if k != 2:
+                        w.send(f";W{k},?MAESTRO,CLEAR,M{mid}:W{new}S1")
+                        time.sleep(0.4)
     bench.note("mesh.relay_renumber_reboot: " + "; ".join(notes))
     assert not problems, "; ".join(problems)
 
