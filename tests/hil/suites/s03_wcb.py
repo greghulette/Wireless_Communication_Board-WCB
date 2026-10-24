@@ -153,13 +153,14 @@ def _w2(bench):
     return WCB(bench.dev("wcb2"))
 
 
-def _factory_reply(w2, ver, tries=3):
+def _factory_reply(w2, ver, tries=3, timeout=10):
     """What a pull of W2 must come to: '[VER:<fw>]' + the factory chain of W2's own ?backup, the chain buildConfigString
     puts behind its version. Carries the password: compare it, never print it. A chain that fails its CRC is read
     again (?backup only reads): one longer than the 2 KB write buffer leaves in pieces, and a line printed on the WiFi
-    task can still land between two of them (audit F18). backup_large_config is what tests the chain itself."""
+    task can still land between two of them (audit F18). backup_large_config is what tests the chain itself. timeout is
+    one ?backup's read: a full store of the shortest sequences prints for ~18 s at 115200 baud."""
     for _ in range(tries):
-        line = backup_chain_lines(w2.run("?backup", timeout=10))["factory"] or ""
+        line = backup_chain_lines(w2.run("?backup", timeout=timeout))["factory"] or ""
         m = CHK_LINE.match(line)
         if m and m.group(1) and chain_crc(m.group(1)) == m.group(2).upper():
             return f"[VER:{ver}]{line}"

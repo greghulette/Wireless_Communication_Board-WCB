@@ -61,6 +61,7 @@ _FAKE_PULL = (
     ("fifo", "one attempt on the air per relay: a second board waits until the first settles"),
     ("errors", "CFGERR NOMEM and NOPARTS retry, TOOBIG stops at once, not-UTF-8 retries once and stops on a second job's, empty replies fail after 3 attempts, a CRC failure retries"),
     ("deadline", "parts that trickle in forever end the pull at PULL_DEADLINE_MS from the call, once, including a pull queued behind dead targets"),
+    ("many_parts", "a 43-part reply (600 sequences) whose first job loses a part completes on the retry 63 s after the call, and 35 parts 1.3 s apart 46 s after it: the cap follows the parts still to come"),
     ("display", "a throwing listener costs no other listener its line, pull lines are summarised, a relayed or direct stats capture skips them"),
     ("reader", "parts read in small chunks, cut inside multi-byte characters, reassemble through both readers"),
     ("edges", "a relay that is not connected, a send that throws, and a superseded pull each settle once"),
@@ -120,6 +121,102 @@ def seq_bytes_match_board(bench):
     bench.note(f"wizard.seq_bytes_match_board: W1 {count} sequence(s), {used} of {cap} bytes - the page showed the same")
 
 
+# ======================================================================================================================
+# A full sequence store loads (Greg 2026-10-23: "it shouldn't matter how many he has. it should work as long as it has
+# enough room to store it in the board"). The board's store is the only limit: a full one of long sequences (41 of
+# ~800 characters: ~9 s of ?backup over a classic ESP32's 115200-baud USB, past the Wizard's old fixed 3 s and 8 s
+# reads) and one of the most sequences it holds (the shortest values, thousands of them), over USB and through a relay.
+SEQ_STORE_LINE = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes")
+FULL_SIZES = (1000, 200, 40)        # seq.store_full's fill (s17): long values, then what still fits
+MANY_VALUE = ";S0"                  # the shortest value worth storing: a write to the USB console, never recalled
+MANY_BURST = 8                      # saves sent back to back before the echo: ~25 bytes each, inside the RX buffer
+
+
+def _store_line(w):
+    line = next((x.rstrip() for x in w.run("?NVS", timeout=6) if x.startswith("Sequences:")), "")
+    m = SEQ_STORE_LINE.match(line)
+    if not m:
+        raise Skip(f"{w.dev.name}'s ?NVS has no sequence-store line ({line[:80]!r}): firmware before the file store")
+    return tuple(int(v) for v in m.groups())       # count, bytes, cap
+
+
+def _fill_store(w, many):
+    """Fill w's sequence store with throwaway sequences until it refuses one: FULL_SIZES (seq.store_full's fill) or,
+    with many, MANY_VALUE under 6-character keys, MANY_BURST saves to a burst. Each value is a ;S0 write that nothing
+    recalls. -> {key: value length} of every one stored. Stops at the first refusal; any other reply fails the fill."""
+    stored, n = {}, 0
+    sizes = (len(MANY_VALUE),) if many else FULL_SIZES
+    for size in sizes:
+        full = False
+        while not full:
+            burst = []
+            for _ in range(MANY_BURST if many else 1):
+                n += 1
+                key = f"HM{n:04d}" if many else f"HILSF{n:02d}"
+                head = MANY_VALUE if many else f";S0{marker('f')}^***"
+                burst.append((key, head + "x" * (size - len(head))))
+            m = w.dev.mark()
+            for key, value in burst[:-1]:
+                w.dev.send(f"?SEQ,SAVE,{key},{value}")
+            w.run(f"?SEQ,SAVE,{burst[-1][0]},{burst[-1][1]}", timeout=10)
+            out = [x.rstrip() for x in w.dev.since(m)]
+            for key, value in burst:
+                if any(f"Stored: Key='{key}'" in x for x in out):
+                    stored[key] = len(value)
+                else:
+                    full = True
+            if full and not any("the sequence store is full" in x for x in out):
+                raise AssertionError(f"filling {w.dev.name}'s sequence store: a save was refused with no 'store is full' "
+                                     f"line ({len(stored)} stored)")
+            if n > 9999:
+                raise AssertionError(f"{w.dev.name}'s sequence store took {n} saves without filling")
+    return stored
+
+
+def _empty_store(w, before):
+    """?SEQ,CLEAR,ALL, then the board's own sequences saved again in their order (before: its config tokens)."""
+    out = w.run("?SEQ,CLEAR,ALL", timeout=15)
+    if not any("All stored sequences cleared" in x for x in out):
+        raise AssertionError(f"?SEQ,CLEAR,ALL on {w.dev.name} was not confirmed")
+    for t in before:
+        if t.upper().startswith("?SEQ,SAVE,"):
+            w.run(t, timeout=8)
+
+
+def _pull_full_store(bench, test_id, many):
+    w = usb_wcb(bench)
+    _store_line(w)
+    with config_guard(bench, 1) as before:
+        try:
+            t0 = time.monotonic()
+            seqs = _fill_store(w, many)
+            fill_s = round(time.monotonic() - t0)
+            count, used, cap = _store_line(w)
+            if cap - used > (len(MANY_VALUE) + 8 if many else 49):
+                raise AssertionError(f"the fill stopped with {cap - used} of {cap} bytes free")
+            bench.note(f"{test_id}: W1's store full: {count} sequences, {used} of {cap} bytes ({len(seqs)} throwaway, "
+                       f"filled in {fill_s} s)")
+            run_wizard_test(bench, test_id, args={"seqs": seqs, "count": count, "bytes": used, "cap": cap},
+                            timeout=900.0)
+        finally:
+            _empty_store(w, before[1])
+
+
+@test("wizard.pull_full_store", "The Wizard pulls W1 over USB with its sequence store full of long sequences (seq.store_full's "
+      "fill: ~9 s of ?backup at 115200 baud, past the old fixed 3 s and 8 s reads): every sequence in the page, whole, the "
+      "pager counting them all and showing the board's bytes; the store emptied and W1's own sequences saved back after",
+      needs=["wcb1"])
+def pull_full_store(bench):
+    _pull_full_store(bench, "wizard.pull_full_store", many=False)
+
+
+@test("wizard.pull_many_sequences", "The Wizard pulls W1 over USB with its sequence store full of the shortest sequences - the "
+      "most it holds, thousands - every one in the page, whole, and the pager counting them all; the store emptied and "
+      "W1's own sequences saved back after", needs=["wcb1"])
+def pull_many_sequences(bench):
+    _pull_full_store(bench, "wizard.pull_many_sequences", many=True)
+
+
 @test("wizard.push_label", "A label typed into the Wizard and pushed lands in W1's saved config", needs=["wcb1"])
 def push_label(bench):
     with config_guard(bench, 1) as before:
@@ -176,6 +273,40 @@ def remote_pull_parts(bench):
     _remote_pull(bench, "wizard.remote_pull_parts", over=True)
 
 
+def _remote_pull_full_store(bench, test_id, many):
+    """_remote_pull with W2's sequence store full (_fill_store on W2's own USB), pulled through W1 by the real Wizard."""
+    w2 = WCB(bench.dev("wcb2"))
+    _store_line(w2)
+    with config_guard(bench, 1, 2) as before:
+        try:
+            ver = w2.version()
+            seqs = _fill_store(w2, many)
+            count, used, cap = _store_line(w2)
+            chain = _factory_reply(w2, ver, timeout=60)
+            bench.note(f"{test_id}: W2's store full: {count} sequences, {used} of {cap} bytes; its reply is {len(chain)} "
+                       f"characters")
+            run_wizard_test(bench, test_id, args={"relay": 1, "target": 2, "ver": ver, "seqs": seqs,
+                                                  "length": len(chain), "minParts": 2}, timeout=900.0)
+        finally:
+            w2.run("?RTERM,STOP")
+            _empty_store(w2, before[2])
+
+
+@test("wizard.remote_pull_full_store", "The Wizard, connected to W1 only, pulls W2 through it with W2's sequence store full of "
+      "long sequences: the config in parts, joined and checked, every sequence whole (W2's store emptied and its own "
+      "sequences saved back after)", needs=["wcb1", "wcb2"])
+def remote_pull_full_store(bench):
+    _remote_pull_full_store(bench, "wizard.remote_pull_full_store", many=False)
+
+
+@test("wizard.remote_pull_many_sequences", "The Wizard, connected to W1 only, pulls W2 through it with W2's sequence store full "
+      "of the shortest sequences - the most it holds, the longest config a board makes: every part joined, every sequence "
+      "whole, the pull not given up while its parts arrive (W2's store emptied and its own sequences saved back after)",
+      needs=["wcb1", "wcb2"])
+def remote_pull_many_sequences(bench):
+    _remote_pull_full_store(bench, "wizard.remote_pull_many_sequences", many=True)
+
+
 # ======================================================================================================================
 # WCB-WP20, WP40 and WP41 (docs/hil_plan/WCB.md §2): the rest of the push side, the app.js logic and panels, the
 # editors and the flasher, against fake boards in the page - no board, so CI runs them too (wizard-tests.yml runs every
@@ -192,6 +323,8 @@ _FAKE_MORE = (
     ("push_fake_reboot_path", "A USB push that needs a reboot sends ?reboot 1.5 s after the last ACK, closes and reopens the port, and pulls 3 s after the reconnect"),
     ("push_fake_shared_reboot_repull", "(should) A push that reboots a board on the shared port pulls it again afterwards, as a USB push does (W-14)"),
     ("pull_fake_usb_guards", "The USB pull: a cut backup changes nothing, the fixed pull command goes first, ?RELAY,1 becomes a relay card, a board reporting another number moves slot, a duplicate number warns, the first pull seeds General"),
+    ("pull_fake_many_sequences", "A board with 2,970 sequences (a full store of the shortest) loads in seconds, every row in the page and the pager counting them all; a push with no edit sends nothing"),
+    ("pull_fake_usb_long_backup", "A USB backup that takes 12 s to arrive (a full sequence store at 115200 baud is ~9 s) loads every sequence: the read lasts while the board sends, an earlier backup's tail is not taken for it, and no fallback ?backup lands in its middle; a cut one changes nothing"),
     ("push_fake_general_fields", "The General fields reach every board's push: a differing password opens the keep/use modal; Keep sends the first board's (with the network-group confirm through a relay), Use incoming rewrites General"),
     ("push_fake_planned_verbs", "The bench specs' pre-flight (tests/wizard/lib/wizard.js plannedVerbs) names the verbs a push then sends, directly and through a relay, sends nothing itself, and would stop a push carrying another board's WCB quantity"),
     ("push_fake_general_wcbq", "(should) A second board whose WCB quantity differs is named in the keep/use modal, like every other General field every push writes (W-16)"),

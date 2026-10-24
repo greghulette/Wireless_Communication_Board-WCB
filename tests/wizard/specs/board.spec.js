@@ -39,6 +39,37 @@ test('wizard.seq_bytes_match_board the pager shows the bytes the board reports f
   expect(page.wizErrors).toEqual([]);
 });
 
+// A full sequence store pulled over USB (s30 _pull_full_store): the harness fills W1's store and passes the throwaway
+// keys with their value lengths, the store's count and bytes. Never a value: only lengths are compared.
+async function expectFullStorePulled(page, hilCtx) {
+  const { seqs, count, bytes, cap } = hilCtx.args;
+  await openWizard(page);
+  const t0 = Date.now();
+  const n = await connectBoard(page, hilCtx);
+  const ms = Date.now() - t0;
+  const got = await page.evaluate(({ n, keys }) => {
+    const want = new Set(keys), lens = {};
+    for (const s of boardBaselines[n]?.sequences || []) if (want.has(s.key)) lens[s.key] = String(s.value).length;
+    return { lens, inPage: getSequencesFromUI(n).length, baseline: (boardBaselines[n]?.sequences || []).length };
+  }, { n, keys: Object.keys(seqs) });
+  expect(got.lens, 'every throwaway sequence in the pulled config, whole').toEqual(seqs);
+  expect(got.baseline, 'the pulled config holds every sequence on the board').toBe(count);
+  expect(got.inPage, 'every sequence in the page').toBe(count);
+  const fmt = (v) => v.toLocaleString('en-US');
+  await expect(page.locator(`#b${n}-seq-pager .seq-pager-info`), 'the pager counts them all').toContainText(`of ${count} sequences`);
+  await expect(page.locator(`#b${n}-seq-bytes`), 'the pager\'s byte figure').toHaveText(`· ${fmt(bytes)} of ${fmt(cap)} bytes`);
+  expect(page.wizErrors).toEqual([]);
+  await hil.note(`pulled ${count} sequences (${fmt(bytes)} bytes) over USB in ${(ms / 1000).toFixed(1)} s`);
+}
+
+test('wizard.pull_full_store pulls a board whose sequence store is full of long sequences over USB', async ({ page, hilCtx }) => {
+  await expectFullStorePulled(page, hilCtx);
+});
+
+test('wizard.pull_many_sequences pulls a board whose sequence store is full of the shortest sequences over USB', async ({ page, hilCtx }) => {
+  await expectFullStorePulled(page, hilCtx);
+});
+
 test('wizard.push_label pushes a port label typed into the board card', async ({ page, hilCtx }) => {
   const { port, label } = hilCtx.args;
   await openWizard(page);
