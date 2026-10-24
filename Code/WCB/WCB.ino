@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_240307ROCT2026                                  *****////
+///*****                                          Version 7.0.1_241316ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -203,7 +203,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_240307ROCT2026";
+String SoftwareVersion = "7.0.1_241316ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -2609,6 +2609,17 @@ void printETMCharResults(int* peers, int peerCount) {
 }
 
 static void sendResultWholeOrHold(uint8_t kind, String &result, uint8_t requester, bool parts);   // results in parts
+
+// Gives a String's heap buffer back. `s = String()` does not: arduino-esp32 3.x moves an empty String into one that has
+// a buffer by keeping the buffer (String::move: its capacity is >= 0), so a dropped held ?STATS result stayed ~4 KB of
+// W2's heap, and a sent ETM characterization result ~1 KB, until the next one (ncmesh.mgmt_stats_parts and
+// mgmt_etm_char, run 20261023-213338: with the OTA queue, 8 KB of a classic board's ~19 KB). A null C string frees it
+// (copy -> invalidate), and "" then fits the String's own small buffer, so nothing is taken back.
+static inline void stringRelease(String &s) {
+  s = (const char *)nullptr;
+  s = "";
+}
+
 // Sends a relayed run's held result once etmCharHeldUntilMs has passed, or at once with `force` (a new run is starting).
 // Called from loop() beside processETMChar().
 void sendHeldETMCharResult(bool force) {
@@ -2619,7 +2630,7 @@ void sendHeldETMCharResult(bool force) {
     // Whole when it fits one reply (or the requester predates parts: the [ERROR] text past one reply, as before); else
     // held for the requester to page through (sendResultWholeOrHold takes the String), part 0 now.
     sendResultWholeOrHold(rparts::KIND_ETM, etmCharHeldResult, to, etmCharHeldParts);
-    etmCharHeldResult = String();
+    stringRelease(etmCharHeldResult);
     etmCharHeldParts  = false;
     if (debugMGMT) Serial.printf("[MGMT] ETM char results sent to WCB%d via relay\n", to);
 }
@@ -5084,7 +5095,7 @@ static const char *resultKindName(uint8_t kind) {
 
 static void resultJobDrop(int i) {
   ResultJob &j = s_rjob[i];
-  j.text = String();      // gives the buffer back
+  stringRelease(j.text);  // gives the buffer back (j.text = String() did not)
   j.id = 0;
   j.parts = 0;
 }
