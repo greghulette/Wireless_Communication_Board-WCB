@@ -128,7 +128,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '21.23:08.R.OCT.2026';
+const UI_VERSION = '23.18:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -734,7 +734,7 @@ function addBoardSection(n) {
 // fires the same 'change' path a manual edit does (→ onSerialFieldChange).
 // A single body-level popup (not a per-input one) avoids serial-table clipping
 // and works for boards/ports added later via event delegation.
-let _devPop = null, _devInput = null, _devOpts = [], _devActive = -1;
+let _devPop = null, _devInput = null, _devOpts = [], _devActive = -1, _devAt = { left: 0, top: 0 };
 
 function _devLabels() {
   return (typeof WCB_DEVICE_LABELS !== 'undefined' && Array.isArray(WCB_DEVICE_LABELS)) ? WCB_DEVICE_LABELS : [];
@@ -776,12 +776,15 @@ function initDeviceCombobox() {
     const left = _devInput;
     setTimeout(() => { if (_devInput === left) _devHide(); }, 150);
   });
-  // A fixed popup can't track the input while the PAGE scrolls, so close it —
-  // but NOT when the scroll is the list's own internal scroll (capture phase
-  // catches both; the list stays put since it's position:fixed).
-  window.addEventListener('scroll', (e) => {
-    if (_devPop && (e.target === _devPop || (e.target.nodeType === 1 && _devPop.contains(e.target)))) return;
-    _devHide();
+  // A fixed popup can't track the input while the page (or a pane the input sits in) scrolls, so close it then - but
+  // only when the input has moved since the list was placed. The capture phase sees every scroll on the page: the
+  // list's own, an unrelated pane's (the terminal following its output) and a page scroll event that lands after the
+  // list was placed (Playwright's click scrolls the field into view first; on a slow CI runner that event came after
+  // the typing and closed the list) leave the field where it was, so the list stays.
+  window.addEventListener('scroll', () => {
+    if (!_devPop || _devPop.style.display === 'none' || !_devInput) return;
+    const r = _devInput.getBoundingClientRect();
+    if (Math.round(r.left) !== _devAt.left || Math.round(r.bottom + 2) !== _devAt.top) _devHide();
   }, true);
   window.addEventListener('resize', _devHide);
 }
@@ -805,8 +808,9 @@ function _devRender() {
     _devOpts.push(el);
   }
   const r = input.getBoundingClientRect();
-  _devPop.style.left     = Math.round(r.left) + 'px';
-  _devPop.style.top      = Math.round(r.bottom + 2) + 'px';
+  _devAt = { left: Math.round(r.left), top: Math.round(r.bottom + 2) };   // where the field was: the scroll check
+  _devPop.style.left     = _devAt.left + 'px';
+  _devPop.style.top      = _devAt.top + 'px';
   _devPop.style.minWidth = Math.max(160, Math.round(r.width)) + 'px';
   _devPop.style.display  = 'block';
 }
