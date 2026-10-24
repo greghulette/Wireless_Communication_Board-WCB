@@ -156,8 +156,8 @@ async function relayFake(page, relay, targets) {
 }
 
 // One ?WDP,DUMP row, as printWdpDump (WCB_WDP.cpp) prints it. tags is the CAPTAGS field: a WCB's own capability tags
-// since 2026-10-23 - "mgmt.fwd24" on a classic ESP32, "mgmt.fwd24 mgmt.rx24" on an ESP32-S3 - and "" from firmware
-// before. peer 3 is the queried board's own row.
+// since 2026-10-23 - "mgmt.fwd24" on a classic ESP32, "mgmt.rx24" on an ESP32-S3 (it forwards what it takes) - and ""
+// from firmware before. peer 3 is the queried board's own row.
 function wdpRow({ n, client = 0, alias = '', hw = 24, hwrev = '', fw = '7.0.2_TEST', cap = '0000', ctrl = 0, tags = '',
                   maestro = '-', age = 0, seen = 1, peer = 1 }) {
   return `[WDP:N=${n},CLIENT=${client},ALIAS=${alias},HW=${hw},HWREV=${hwrev},FW=${fw},CAP=${cap},CTRL=${ctrl},` +

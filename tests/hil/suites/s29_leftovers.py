@@ -4,8 +4,8 @@ the ;T timer's 30-minute cap and a ;T chain received over the mesh, the ?MGMT an
 banner on both boards, checked line by line against each board's own config chain.
 
 Restore if aborted: ?DEBUG,OFF / ?DEBUG,MGMT,OFF / ?STOP / ?TRACK,ON on W1's USB console; ?MAESTRO,CLEAR,M8:W11S1 if a
-chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF; ?WCB,2 on W2's USB console if W2 answers to
-another number (mesh.relay_renumber_sessions). Nothing here moves a servo.
+chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF; ?WCB,2 and ?reboot on W2's USB console if
+W2 answers to another number (mesh.relay_renumber_reboot), and ?WDP,FORGET,<n> on W1. Nothing here moves a servo.
 """
 import re
 import time
@@ -15,6 +15,7 @@ from hil.wcb import WCB
 from suites.common import (Console, absent_wcbs, config_guard, fault, fault_off, marker, require_tokens, snapshot, token,
                            usb_wcb, wifi_mode_token, wire, ws_token)
 from suites.s22_maestro_kyber import _wdp_off
+from suites.s18_etm_config_wdp import _forget_everywhere
 
 
 def _has(lines, text):
@@ -706,24 +707,27 @@ def mgmt_errors(bench):
     assert not problems, "; ".join(problems)
 
 
-@test("mesh.relay_renumber_sessions", "A board renumbered by a relayed ?WCB,<new> takes the sessions after it as the "
-      "Wizard sends them (planRelayPush, docs/MGMT_RELAY.md §10): W1 relays ?WCB,<n> to W2 (one chunk, ETM, to 2); a "
-      "two-chunk session to <n> then runs on W2 before any restart, while a one-chunk session to <n> (an ETM unicast to "
-      "<n>'s address, which W2 takes only at a restart) and one to 2 do not; a two-chunk ?WCB,2 puts it back (no reboot)",
+@test("mesh.relay_renumber_reboot", "A board renumbered through a relay in two steps, as the Wizard does it (planRelayPush, "
+      "docs/MGMT_RELAY.md §10): W1 relays ?WCB,<n>^?reboot to W2 (one chunk, ETM, to 2); W2 restarts as <n>, and W1's "
+      "?WDP,DUMP shows a WCB row for <n> heard since then within 45 s; a two-chunk session to <n> then runs on W2; a "
+      "two-chunk ?WCB,2^?reboot to <n> puts it back, and W1 hears it as 2 again (<n> forgotten everywhere; 2 W2 reboots)",
       needs=["wcb1", "wcb2"], links=[])
-def relay_renumber_sessions(bench):
+def relay_renumber_reboot(bench):
     """What the Wizard's two-step renumber relies on. saveWCBNumberToPreferences (WCB_Storage.cpp) sets WCB_Number at
-    once; handleMgmtPacket (WCB.ino) reassembles a FRAG session only when the number in it is WCB_Number; the radio
-    address follows the number only at the next boot (esp_wifi_set_mac in setup()). handleMgmtForward broadcasts each
-    chunk of a session of two or more, and sends a one-chunk session as an ETM unicast to the address of the number it
-    names. W2's ?WDP,STATUS line on its own USB console shows which sessions ran. W2's number is put back over the mesh
-    and, if that fails, over its USB in the finally; config_guard proves it is."""
+    once, but the radio address follows it only at the next boot (esp_wifi_set_mac in setup()), so step 1 carries the
+    restart; the Wizard sends step 2 once the relay's ?WDP,DUMP has a fresh row for the new number (_awaitBoardAs).
+    Step 2's sessions go as two chunks at least: a relay sends a one-chunk session as an ETM unicast, which needs the new
+    number in its ESP-NOW peer table (only once WDP auto-join has learned it), while two go as broadcasts the board
+    picks by the number in them (handleMgmtForward / handleMgmtPacket). Whether W1 already takes a one-chunk session to
+    <n> is noted, not judged. W2's ?WDP,STATUS line on its own USB console shows which sessions ran. W2 is put back over
+    the mesh and, failing that, over its USB; <n> is forgotten on every WCB and NaviCore, which learn it from its adverts
+    (_forget_everywhere); config_guard proves both boards are as they were."""
     own2 = bench.usb_wcbs().get(2)
     if not own2:
         raise Skip("W2 has no USB console here")
     w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
     new = absent_wcbs(bench)[0]
-    problems = []
+    problems, notes = [], []
 
     def session(target, chunks, wait=2.0):
         sid = marker()[3:7]
@@ -732,34 +736,56 @@ def relay_renumber_sessions(bench):
             w.send(f"?MGMT,FRAG,{target},{sid},{i},{len(chunks)},{c}")
             time.sleep(0.03)
         time.sleep(wait)
-        return [x.rstrip() for x in w2.dev.since(m)]
+        return m
 
-    ran = lambda out: _has(out, "[WDP:en=")   # ?WDP,STATUS's one line
+    def heard_as(num, since_t, timeout=45.0):
+        """W1's ?WDP,DUMP has a WCB row for num heard after since_t -> (seconds it took, its PEER), or None."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for x in w.run("?WDP,DUMP", timeout=8):
+                m = re.match(rf"^\[WDP:N={num},CLIENT=0,.*,AGE=(\d+),SEEN=1(?:,PEER=(\d))?", x.rstrip())
+                if m and int(m.group(1)) <= time.monotonic() - since_t:
+                    return round(time.monotonic() - since_t, 1), m.group(2)
+            time.sleep(2.0)
+        return None
+
+    ran = lambda m: _has([x.rstrip() for x in w2.dev.since(m)], "[WDP:en=")   # ?WDP,STATUS's one line
     back = False
-    with config_guard(bench, 2):
+    with config_guard(bench, 1, 2):
         try:
-            out = session(2, [f"?WCB,{new}"])
-            if not _has(out, f"Changed WCB Number to: {new}"):
+            t0 = time.monotonic()
+            m = session(2, [f"?WCB,{new}^?reboot"], wait=0.5)
+            w2.wait_boot(m, timeout=45)
+            if not _has([x.rstrip() for x in w2.dev.since(m)], f"Changed WCB Number to: {new}"):
                 back = True                          # it never left 2
-                raise AssertionError(f"W2 did not take ?WCB,{new} relayed to WCB 2: {out[-4:]}")
-            for what, target, chunks, want in (
-                    (f"a two-chunk session to {new}", new, ["?WDP,", "STATUS"], True),
-                    (f"a one-chunk session to {new}", new, ["?WDP,STATUS"], False),
-                    ("a one-chunk session to 2", 2, ["?WDP,STATUS"], False),
-                    ("a two-chunk session to 2", 2, ["?WDP,", "STATUS"], False)):
-                got = ran(session(target, chunks))
-                if got != want:
-                    problems.append(f"{what} {'ran' if got else 'did not run'} on W2 (renumbered {new}, not restarted)")
-            out = session(new, ["?WCB,", "2"])
-            back = _has(out, "Changed WCB Number to: 2")
+                raise AssertionError(f"W2 did not take ?WCB,{new} relayed to WCB 2")
+            heard = heard_as(new, t0)
+            if heard is None:
+                problems.append(f"W1's ?WDP,DUMP showed no fresh row for WCB {new} within 45 s of step 1: the Wizard "
+                                f"would stop there")
+            else:
+                notes.append(f"W1 heard WCB {new} {heard[0]} s after step 1 (PEER={heard[1]})")
+                if not ran(session(new, ["?WDP,", "STATUS"])):
+                    problems.append(f"a two-chunk session to {new} did not run on W2 after its restart")
+                one = ran(session(new, ["?WDP,STATUS"]))
+                notes.append(f"a one-chunk session to {new} {'ran' if one else 'did not run'}")
+            t1 = time.monotonic()
+            m = session(new, ["?WCB,", "2^?reboot"], wait=0.5)
+            try:
+                w2.wait_boot(m, timeout=45)
+            except AssertionError:
+                pass
+            back = _has([x.rstrip() for x in w2.dev.since(m)], "Changed WCB Number to: 2")
             if not back:
-                problems.append(f"a two-chunk ?WCB,2 to {new} did not put W2 back: {out[-4:]}")
-            # Back on 2, its address and number agree again: a one-chunk (ETM) session to 2 runs. ETM can lose one.
-            elif not any(ran(session(2, ["?WDP,STATUS"])) for _ in range(3)):
-                problems.append("W2, back on 2, did not run a one-chunk session to 2")
+                problems.append(f"a two-chunk ?WCB,2^?reboot to {new} did not put W2 back")
+            elif heard_as(2, t1) is None:
+                problems.append("W1 did not hear W2 as WCB 2 again within 45 s")
         finally:
             if not back:
                 w2.run("?WCB,2")                     # over its own USB: never leave W2 on another number
+                w2.reboot()
+            _forget_everywhere(bench, new, navicore=True)
+    bench.note("mesh.relay_renumber_reboot: " + "; ".join(notes))
     assert not problems, "; ".join(problems)
 
 

@@ -1498,7 +1498,7 @@ def seqget_parts(bench):
 LONG_KEY = "HILLONGPUSH"
 
 
-@test("inv.push_long_sequence", "A ?SEQ,SAVE longer than one push session reaches an ESP32-S3: W1 relays a 3,999-character value to W3 as ONE ?MGMT,FRAG session of 23 chunks (a relay forwards 24 since 2026-10-23, and W1's ?WDP,DUMP says what each takes first: mgmt.fwd24 on its own row, mgmt.rx24 on W3's, no mgmt.rx on W2's), W3 stores it and reads it back byte for byte on its own console, and W1 gets it back whole through ?MGMT,SEQGET,3 (in parts); the same session to W2, a classic ESP32 that takes 16, stores nothing; both cleared after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2", "wcb3"], links=[])
+@test("inv.push_long_sequence", "A ?SEQ,SAVE longer than one push session reaches an ESP32-S3: W1 relays a 3,999-character value to W3 as ONE ?MGMT,FRAG session of 23 chunks (a relay forwards 24 since 2026-10-23, and W1's ?WDP,DUMP says what each takes first: mgmt.fwd24 or mgmt.rx24 on its own row, mgmt.rx24 on W3's, no mgmt.rx on W2's), W3 stores it and reads it back byte for byte on its own console, and W1 gets it back whole through ?MGMT,SEQGET,3 (in parts); the same session to W2, a classic ESP32 that takes 16, stores nothing; both cleared after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2", "wcb3"], links=[])
 def push_long_sequence(bench):
     """handleMgmtForward (WCB.ino) forwards up to MGMT_FWD_MAX_CHUNKS (24) chunks; an ESP32-S3 target reassembles up to
     MGMT_RX_MAX_CHUNKS (24) and a classic one 16 - it could not run a ?SEQ,SAVE that long anyway (about 7 times its
@@ -1528,8 +1528,9 @@ def push_long_sequence(bench):
     tags = {int(m.group(1)): m.group(2).split() for x in dump
             for m in [re.match(r"^\[WDP:N=(\d+),.*?,CAPTAGS=([^,]*),", x)] if m}
     me = bench.usb_wcb_number()
-    if "mgmt.fwd24" not in tags.get(me, []):
-        problems.append(f"W{me}'s own row says CAPTAGS {tags.get(me)}, not mgmt.fwd24: the Wizard would not relay the session")
+    if not {"mgmt.fwd24", "mgmt.rx24"} & set(tags.get(me, [])):   # an S3 says mgmt.rx24 alone: rx implies fwd
+        problems.append(f"W{me}'s own row says CAPTAGS {tags.get(me)}, neither mgmt.fwd24 nor mgmt.rx24: the Wizard would "
+                        f"not relay the session")
     if "mgmt.rx24" not in tags.get(3, []):
         problems.append(f"W{me}'s row for W3 says CAPTAGS {tags.get(3)}, without mgmt.rx24: the Wizard would refuse the push")
     if 2 in tags and any(t.startswith("mgmt.rx") for t in tags[2]):

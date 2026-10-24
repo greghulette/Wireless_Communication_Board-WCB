@@ -92,7 +92,7 @@ static void wdpDaTxTick(unsigned long now);
 #define WDP_TLV_DEVTYPE  0x0B    // string — canonical device type name (from the vocabulary)
 #define WDP_TLV_HWREV    0x0C    // string — hardware revision (distinct from numeric HWVER)
 #define WDP_TLV_CAPTAGS  0x0D    // string — space-separated capability tags (optional). A WCB sends its own
-                                 // (wcbOwnCapTags, WCB.ino) since 2026-10-23: mgmt.fwd<N> / mgmt.rx<N>
+                                 // (wcbOwnCapTags, WCB.ino) since 2026-10-23: mgmt.fwd<N> or mgmt.rx<N>
 #define WDP_TLV_PWMTARGET 0x10   // [targetWCB(1)][port(1)] pairs — this board's REMOTE PWM
                                  // outputs. Each named board self-configures that output port
                                  // (receiver-side), so a target that was powered off when the
@@ -319,8 +319,8 @@ static int wdpBuildPayload(uint8_t *buf, int max) {
   o = chanSyncPutTlv(buf, o, max);
   // This board's own capability tags (TLV 0x0D CAPTAGS, wcbOwnCapTags in WCB.ino): what its firmware takes, which the
   // Wizard reads from a ?WDP,DUMP row to decide how long a relay push session may be. Before the labels too: the
-  // Wizard acts on it. 12 bytes on the classic ESP32, 22 on the S3, so the identity and every record above still fit
-  // the 200 bytes with the largest of each (165 classic, 175 S3); the labels get what is left. Every receiver parses it
+  // Wizard acts on it. 12 bytes on the classic ESP32, 11 on the S3, so the identity and every record above still fit
+  // the 200 bytes with the largest of each (165 classic, 164 S3); the labels get what is left. Every receiver parses it
   // already (WCBs and WCB_Client into capTags, 1.8.0 on) or skips it by length.
   {
     const char *tags = wcbOwnCapTags();

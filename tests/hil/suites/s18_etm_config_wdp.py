@@ -1257,12 +1257,13 @@ def _expected_cap(tokens, n):
 
 
 def _own_tags(hw):
-    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): every build forwards a
-    24-chunk push session as a relay (mgmt.fwd24); the ESP32-S3 build (HW 3.1 / 3.2) also takes one as a target."""
-    return "mgmt.fwd24 mgmt.rx24" if hw in (31, 32) else "mgmt.fwd24"
+    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): the classic build
+    forwards a 24-chunk push session as a relay (mgmt.fwd24); the ESP32-S3 build (HW 3.1 / 3.2) takes one as a target,
+    and so forwards one too (mgmt.rx24 alone: rx implies fwd)."""
+    return "mgmt.rx24" if hw in (31, 32) else "mgmt.fwd24"
 
 
-@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration; a WCB's CAPTAGS are its build's own tags (mgmt.fwd24, and mgmt.rx24 on an ESP32-S3), on its self row and on W1's row for W2", needs=["wcb1"], links=[])
+@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration; a WCB's CAPTAGS are its build's own tags (mgmt.fwd24, or mgmt.rx24 on an ESP32-S3), on its self row and on W1's row for W2", needs=["wcb1"], links=[])
 def dump_fields(bench):
     """The self row carries what the board advertises (WCB_WDP.cpp printWdpDump); W2's row what W1 decoded from W2's
     advert, CAPTAGS included (TLV 0x0D, which a WCB sends about itself since 2026-10-23). The Wizard reads those tags to

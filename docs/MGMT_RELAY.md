@@ -222,7 +222,7 @@ those sizes.
 | `?MGMT,SEQGET,<n>,<key>` | target → requester | type 16, one session | 2,912: `TOOBIG` for a value over 2,912 - 4 - its key | `<key>,OK,<value>` of 15 + 4 + 3,999 = 4,018 (`SEQ_VALUE_MAX`) | in parts, type 34 |
 | `?MGMT,SEQ,<n>` names | target → requester | type 14, or type 29 pages | 64 pages of 2,880 bytes of key text (`WCB_SeqNamesWire.h`) | 29,120 bytes (1,820 keys of 15 characters); 19,623 (6,572 of 1-2) | in pages ([SEQUENCE_INVENTORY.md](SEQUENCE_INVENTORY.md) §3); the WCB relay joins them in one heap buffer of the exact size and says so when the heap has no such block (a list over about 14 KB on an access-point W1) |
 | `?MGMT,FRAG` push, one session | requester → target | 226-byte chunks of 179 bytes | 16 chunks, 2,864 bytes (a released relay and target take no more; the Wizard refused a longer push) | a push is the config's diff: up to the whole config, under 142,000 | the Wizard sends it as several sessions of whole commands (`planRelayPush`, below) |
-| `?MGMT,FRAG`, one command longer than a session | requester → target | one session | 16 chunks | a `?SEQ,SAVE` of a 15-character key and 3,999 characters: 4,025 bytes, 23 chunks | one long session: a relay forwards 24 chunks (`MGMT_FWD_MAX_CHUNKS`), an ESP32-S3 target takes 24 (`MGMT_RX_MAX_CHUNKS`), and each says so in its WDP capability tags (`mgmt.fwd24`, `mgmt.rx24`), which the Wizard reads; a classic ESP32 cannot run a command that long (a `?SEQ,SAVE` costs about 7 times its length in heap, so it stops near 2,400 characters, under 16 chunks) |
+| `?MGMT,FRAG`, one command longer than a session | requester → target | one session | 16 chunks | a `?SEQ,SAVE` of a 15-character key and 3,999 characters: 4,025 bytes, 23 chunks | one long session: a relay forwards 24 chunks (`MGMT_FWD_MAX_CHUNKS`), an ESP32-S3 target takes 24 (`MGMT_RX_MAX_CHUNKS`), and each says so in its WDP capability tags (classic `mgmt.fwd24`, S3 `mgmt.rx24`, which implies forwarding 24), which the Wizard reads; a classic ESP32 cannot run a command that long (a `?SEQ,SAVE` costs about 7 times its length in heap, so it stops near 2,400 characters, under 16 chunks) |
 | `?MGMT,FRAG` chunk | requester → relay | one serial line | 179 BYTES (the relay refuses a longer chunk) | - | the Wizard cuts chunks by UTF-8 bytes (`utf8Chunks`); it cut them by JavaScript characters, so a chunk with an `é` in it was 180 bytes and refused. And no chunk but the last ends in whitespace: the chunk ends its relay line, which the relay trims (`processIncomingSerial`, the WebSocket reader), so a cut just after a space dropped it from the command |
 | `?MGMT,FRAG` single-chunk ETM shortcut | relay → target | one ETM command | 198 bytes, 186 under `?ETM,CHKSM` | - | the Wizard sends one chunk only up to 186 bytes (`MGMT_SINGLE_MAX`); a longer single command goes as a session of 179-byte chunks |
 | The relay's output ring (`s_mgmtOut`) | relay → console | 3 slots of 2,960 bytes | a tag, one reply or one part (2,912) and its CRLF | one reply or one part | bounded: a STATS / ETM part is printed from its session, a joined SEQVAL or names line from its own heap buffer, never the ring |
@@ -312,26 +312,42 @@ these go in the **last** one, in their order: `?MAC,2|3` and `?EPASS` (a session
 sessions could give it), and the `?reboot`. A push is addressed to the number the board has now (its baseline's): it
 went to the new one, and never arrived.
 
-**A board-number change** (`?WCB,<n>` with a new n) in a push longer than one session goes in two steps (Greg,
-2026-10-23: "refusing would prevent [changing the number on purpose]"). The board takes `?WCB,<new>` at once
-(`saveWCBNumberToPreferences` sets `WCB_Number` live) and from then on reassembles only a session addressed to the new
-number (`handleMgmtPacket` checks the number in each chunk), while its radio address stays the old number's until it
-restarts (`esp_wifi_set_mac` from `WCB_Number` at boot). A WCB relay sends a session of two chunks or more as broadcasts
-(`handleMgmtForward`), which reach it under either address; a session of one chunk as an ETM unicast to the address of
-the number it names. So:
+**A board-number change** (`?WCB,<n>` with a new n) in a push longer than one session goes in two steps, with a
+restart between (Greg, 2026-10-23: "refusing would prevent [changing the number on purpose]"). The board takes
+`?WCB,<new>` at once (`saveWCBNumberToPreferences` sets `WCB_Number` live) and from then on reassembles only a session
+addressed to the new number (`handleMgmtPacket` checks the number in each chunk), while its radio address - from which
+a relay's unicasts and every board's peers are derived - stays the old number's until it restarts (`esp_wifi_set_mac`
+from `WCB_Number` at boot). So, through a WCB relay or a WcbMgmt one (NaviCore, MgmtRelay) alike:
 
-- the first session opens with `?WCB,<new>` and goes to the old number, so it lands before the number changes (a
-  one-chunk first session is an ETM unicast to the board as it is, ACKed);
-- every later session goes to the new number, as two chunks at least (a short one is cut in two);
-- the late commands and the `?reboot` stay in the last session, and every command after `?WCB,<new>` runs under the new
-  number, as in one session. The push ends as a one-session renumber does: the baseline is the pushed config, under
-  the new number, and the board restarts on it.
+- **step 1** is one session to the old number: `?WCB,<new>` and `?reboot` (a one-chunk session: an ETM unicast to the
+  board as it is, ACKed);
+- the Wizard then reads the relay's `?WDP,DUMP` every 2 s until it has a WCB row for the new number heard since step 1
+  went (`_awaitBoardAs`; a board's adverts before its restart carry the new number from the old address, which every
+  receiver drops by the sender-MAC binding, so such a row is the board back). The restart waits for 4 s of quiet (20 s
+  at most), a boot takes about 5 s and its first advert follows; after 45 s with no such row the push stops, says that
+  the rest was not sent and that the board is to be pulled (it is asked for under the new number), and the slot stays;
+- **step 2** is the rest of the push as a push of its own to the new number: its own sessions, the late commands last, a
+  `?reboot` only if the rest needs one. Every session goes as two chunks at least: a relay sends a one-chunk session as a
+  unicast that needs the new number in its peer table (a WCB relay's ETM unicast, `sendESPNowMessage`; a WcbMgmt relay's
+  `WCB_Client::send`), which it is only once WDP auto-join has learned the board, while two chunks go as broadcasts the
+  board picks by the number in them (a WCB relay) or as raw frames that register the peer on demand (WcbMgmt
+  `sendRawPacket`). Every command of step 2 runs under a number and an address that agree.
 
-Refused before anything is sent: through a WcbMgmt relay (NaviCore, MgmtRelay), which sends every chunk unicast to the
-address the number names, so no session after the first could reach the board before it restarts ("push the number
-change on its own first"); and onto a number the Wizard knows another board has - the relay's, another slot's pulled
-or connected board's, or one its last `?WDP,DUMP` showed live - because every board answering to that number would run
-the sessions after the first (`_renumberTaken`). A renumber that fits one session goes as before, unchecked.
+The one-session renumber is as before: one session to the old number, the `?reboot` at its end. Either way the push
+ends with the board shown once, under its new number (`_moveRemoteBoardToNumber`): its config, baseline, relay route,
+terminal pane and mesh records move to the new number's slot (the old slot is dropped, or left as an empty placeholder
+inside the WCBQ floor), the ETM listener maps a number to its slot (`_slotForWcbNumber`), so `[ETM] WCB<new> came
+ONLINE` pulls it, and the stale row every board keeps for the old number surfaces no section and counts as no board
+until it is heard again (`_rowLeftByRenumber`). When the new number's slot holds another board, it stays where it is,
+with a toast. A two-step push whose step 2 fails moves the board too (it was heard under the new number); one whose
+board is never heard back does not. While a push runs, the ETM listener leaves its board alone: a pull then would
+replace the config the push is sending, and the two-step restart announces the board mid-push.
+
+**A new number another board already has** - the relay's, another slot's pulled or connected board's, or one the last
+`?WDP,DUMP` showed live (`_renumberTaken`) - is not refused: the push asks first, by USB or through a relay, one session
+or two (`confirmWcbNumberTaken`): the two boards will share one number and radio address until one is changed, and in
+two steps the rest may reach the other board too. Cancel has the focus (Enter, Escape and a click outside cancel too);
+Cancel sends nothing.
 
 Between sessions the Wizard waits `max(2.5 s, 250 ms per ?SEQ,SAVE / CLEAR + 25 ms per other command)`: the target runs
 what it queued, and a session that lost a chunk is given up (the target's 2 s busy guard) before the next arrives, so one
@@ -341,9 +357,9 @@ unacknowledged, as before.
 One command longer than a session (a `?SEQ,SAVE` of more than about 2,830 characters) goes as one long session of up to
 24 chunks (the firmware's `MGMT_FWD_MAX_CHUNKS`, `MGMT_RX_MAX_CHUNKS`), only where the WDP capability tags say it gets
 across ([WDP_DESIGN.md](WDP_DESIGN.md) §3): the target's `mgmt.rx<N>` (the ESP32-S3 build sends `mgmt.rx24`) and the
-relay's `mgmt.fwd<N>` (every WCB build with it sends `mgmt.fwd24`; a WcbMgmt relay forwards any count) -
-`WCBParser.relayLongChunks`, the smaller of the two, when it is past 16. The Wizard reads the tags from every `?WDP,DUMP` it takes (the 12 s mesh poll, the panel's Refresh;
-`_meshSeen`): the target's from its row, the relay's from its own row or another board's. A board or relay whose tags it
+relay's `mgmt.fwd<N>` or `mgmt.rx<N>`, which implies it (the classic build sends `mgmt.fwd24`, the S3 `mgmt.rx24`; a
+WcbMgmt relay forwards any count) - `WCBParser.relayLongChunks`, the smaller of the two, when it is past 16. The Wizard
+reads the tags from every `?WDP,DUMP` it takes (the 12 s mesh poll, the panel's Refresh; `_meshSeen`): the target's from its row, the relay's from its own row or another board's. A board or relay whose tags it
 has not seen yet, or whose firmware sends none, gets one session at most, and a longer command is refused before
 anything is sent, as a push over one session was. (It read the firmware's build date until 2026-10-23.) A relay or
 target from before forwards or takes 16 at most and drops a longer session whole; a target reassembles a command whole
@@ -353,6 +369,7 @@ or not at all (a failed String append used to run it with a chunk missing).
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-23 | — | §10: a renumber in more than one session goes in two steps with a restart between, through a WCB or a WcbMgmt relay alike: `?WCB,<new>^?reboot` to the old number, then, once the relay's `?WDP,DUMP` shows the board under the new number (`_awaitBoardAs`, 45 s, else the push stops and says so), the rest as a push of its own to the new number, two chunks a session (a one-chunk session needs the new number in the relay's peer table). It replaces the same-day broadcast version, which could not cross a WcbMgmt relay and ran the rest under a number its address did not match. A number another board has is asked about, not refused (`confirmWcbNumberTaken`, Cancel the default), by USB too and for one session too. After a relay renumber the board shows once, under its new number (`_moveRemoteBoardToNumber`). The ESP32-S3 advertises `mgmt.rx24` alone (rx implies forwarding). |
 | 2026-10-23 | — | §10: a board-number change too long for one session is no longer refused (Greg: "do in two steps"): `?WCB,<new>` opens the first session, addressed to the old number, and every later session goes to the new number, two chunks at least, since a WCB relay sends a one-chunk session to the address of the number it names, which the board takes only at its restart. Refused only through a WcbMgmt relay (it sends every chunk to that address) or onto a number another board has (every board on it would run the later sessions). The Wizard never ends a chunk but the last on whitespace: the relay trims the end of every line, and a cut just after a space dropped it from the command. |
 | 2026-10-23 | — | §10: the long relay session is decided by a capability flag, not a build date (Greg): every WCB advertises WDP capability tags (`mgmt.fwd24`; `mgmt.rx24` on the ESP32-S3, WDP_DESIGN.md §3) and the Wizard sends one command longer than a session as one long session only where the target's `mgmt.rx` and the relay's `mgmt.fwd` cover it (`RELAY_LONG_SINCE` removed; a board whose tags it has not seen gets one session at most). |
 | 2026-10-23 | — | §10 new: the audit of everything the relay carries, and every path that could not carry what a board stores now does (Greg: "make sure we can transport everything across the relay"). `?MGMT,STATS`, `?MGMT,ETM,CHAR` and `?MGMT,SEQGET` results longer than one reply come in parts (`WCB_ResultWire.h`, types 30-34, shared with WCB_Client 1.20.0; host test `tests/result_parts_test.cpp`): STATS and ETM held on the target as built and printed by the relay as they come, a sequence read again per part and joined; an old requester or target gets what it always got. The config pull carries 64 parts, not 16 (§3, §8; the largest config is under 142,000 characters, 16 parts were 46,080), its split points kept as back-offs. The Wizard pushes in sessions (`planRelayPush`): chunks by UTF-8 bytes, at most 150 commands a session, the network and restart commands last, a board-number change only in one session, addressed to the board's current number; one long `?SEQ,SAVE` as one session of up to 24 chunks to an ESP32-S3 (`MGMT_FWD_MAX_CHUNKS`, `MGMT_RX_MAX_CHUNKS`). A target runs a pushed command whole or not at all. Test knobs `?DEBUG,RESULTPART`, `?DEBUG,ONEREPLY`. |

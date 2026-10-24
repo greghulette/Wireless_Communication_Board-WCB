@@ -638,10 +638,11 @@ static void test_chan(){
 }
 
 // A WCB's OWN capability tags (TLV 0x0D CAPTAGS), since 2026-10-23: wcbOwnCapTags (WCB.ino), from its push-session
-// limits MGMT_FWD_MAX_CHUNKS / MGMT_RX_MAX_CHUNKS - the classic ESP32 forwards 24 and takes 16, the S3 both 24. The
-// Wizard reads them from ?WDP,DUMP (WCBParser.relayLongChunks) to send one long ?SEQ,SAVE as one 23-chunk session.
+// limits MGMT_FWD_MAX_CHUNKS / MGMT_RX_MAX_CHUNKS - the classic ESP32 forwards 24 and takes 16 (mgmt.fwd24), the S3
+// takes 24 and so forwards 24 too (mgmt.rx24 alone: rx implies fwd). The Wizard reads them from ?WDP,DUMP
+// (WCBParser.relayLongChunks) to send one long ?SEQ,SAVE as one 23-chunk session.
 static const char OWN_TAGS_ESP32[] = "mgmt.fwd24";
-static const char OWN_TAGS_S3[]    = "mgmt.fwd24 mgmt.rx24";
+static const char OWN_TAGS_S3[]    = "mgmt.rx24";
 
 // wdpBuildPayload's order (WCB_WDP.cpp) with every field at its largest: alias 24, firmware 27, hw, capability flags,
 // controller, 9 Maestros (ids, then id+baud), 9 WLEDs, 10 PWM targets, the sequence hash, CHAN, CAPTAGS, then the five
@@ -699,7 +700,7 @@ static void test_own_captags(){
   }
   // The usual board - alias, firmware, hw, caps, one Maestro, the hash, CHAN - with five labels of `len` characters:
   // how many labels fit beside the tags. The tags cost the labels their last bytes, never an identity field: an S3
-  // board keeps five labels of up to 21 characters (24 before), a classic one up to 23.
+  // board or a classic one keeps five labels of up to 23 characters (24 before).
   auto usualLabels=[](const char*tags,int len,int*bytes){
     uint8_t buf[200]; memset(buf,0,sizeof(buf));
     int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
@@ -719,10 +720,10 @@ static void test_own_captags(){
   };
   int bNone=0, bW=0, bS3=0;
   int none24=usualLabels("",24,&bNone), w23=usualLabels(OWN_TAGS_ESP32,23,&bW), w24=usualLabels(OWN_TAGS_ESP32,24,&bW);
-  int s21=usualLabels(OWN_TAGS_S3,21,&bS3), s24=usualLabels(OWN_TAGS_S3,24,&bS3);
+  int s23=usualLabels(OWN_TAGS_S3,23,&bS3), s24=usualLabels(OWN_TAGS_S3,24,&bS3);
   printf("  a usual board, before its labels: %d bytes with no tags, %d classic, %d S3; five 24-char labels fit %d / %d / %d\n",
          bNone, bW, bS3, none24, w24, s24);
-  CHECK(none24==5 && w23==5 && s21==5, "five labels still fit: 24 characters without tags, 23 classic, 21 on an S3");
+  CHECK(none24==5 && w23==5 && s23==5, "five labels still fit: 24 characters without tags, 23 with either build's");
   CHECK(w24==4 && s24==4, "five labels of 24 characters lose the last one to the tags (the identity never)");
 }
 

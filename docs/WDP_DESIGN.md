@@ -133,21 +133,23 @@ SOLICIT **before** decoding, and return without touching the table
 
 | Tag | Means | Sent by |
 |---|---|---|
-| `mgmt.fwd<N>` | as a relay it forwards a push session of up to N chunks | every WCB since 2026-10-23: `mgmt.fwd24` |
-| `mgmt.rx<N>` | as a target it reassembles a push session of up to N chunks | the ESP32‑S3 build: `mgmt.rx24` |
+| `mgmt.fwd<N>` | as a relay it forwards a push session of up to N chunks | the classic ESP32 build since 2026-10-23: `mgmt.fwd24` |
+| `mgmt.rx<N>` | as a target it reassembles a push session of up to N chunks - and, since a board forwards at least what it takes (`MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS`), forwards N as a relay too | the ESP32‑S3 build: `mgmt.rx24` |
 
-A tag is sent only past the 16 chunks every released relay and target take, so the classic ESP32 advertises
-`mgmt.fwd24` (a 12‑byte TLV) and the S3 `mgmt.fwd24 mgmt.rx24` (22 bytes); firmware from before sends no CAPTAGS.
+A tag is sent only past the 16 chunks every released relay and target take, and `mgmt.fwd` only where it says more than
+`mgmt.rx`, so the classic ESP32 advertises `mgmt.fwd24` (a 12‑byte TLV) and the S3 `mgmt.rx24` alone (11 bytes);
+firmware from before sends no CAPTAGS.
 The same string is in the board's own `?WDP,DUMP` row (`PEER=3`), and `?WDP,<n>` shows a WCB neighbour's as
 `Tags`. The Wizard reads them from the dump rows - the target's from the relay's dump (or any board's), the relay's
 from its own row - and sends one command longer than a session as one long session only when the target's `mgmt.rx`
-and the relay's `mgmt.fwd` both cover it (`WCBParser.relayLongChunks`); tags it has not seen count as none.
+and the relay's `mgmt.fwd` or `mgmt.rx` both cover it (`WCBParser.relayLongChunks`); tags it has not seen count as
+none.
 
 The TLV goes after CHAN and before the port labels, so it always fits: with every field at its largest (24‑character
 alias, 27‑character firmware string, 9 Maestros, 9 WLEDs, 10 PWM targets) the payload before the labels is 153 bytes
-without tags, 165 with the classic tags and 175 with the S3's, of 200. The labels get what is left: a usual board (an
-alias, one Maestro) keeps five labels of up to 23 characters (classic) or 21 (S3), 24 before; a longer label set loses
-its last label, never an identity field (`tests/wdp_wire_test.cpp` `test_own_captags`).
+without tags, 165 with the classic tag and 164 with the S3's, of 200. The labels get what is left: a usual board (an
+alias, one Maestro) keeps five labels of up to 23 characters, 24 before; a longer label set loses its last label, never
+an identity field (`tests/wdp_wire_test.cpp` `test_own_captags`).
 
 Every receiver already takes it: a WCB (`wdpOnAdvertReceived`) and `WCB_Client` (`_handleWdpAdvert`, 1.8.0 on) copy
 CAPTAGS into the neighbour's `capTags` whatever the sender is - only DEVTYPE makes it a client - and a WcbMgmt dump
@@ -439,6 +441,7 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | **The ESP32-S3 sends `mgmt.rx24` alone** (11 bytes, not 22): `mgmt.rx<N>` now also means the board forwards N as a relay, as every build does what it takes, so `mgmt.fwd` is sent only where it would say more. The Wizard reads a relay's forwarding from either tag. 164 of 200 bytes at most before the labels on the S3. | — |
 | 2026-10-23 | **A WCB advertises its own CAPTAGS (`0x0D`)**, which until now only clients sent: `mgmt.fwd24` (it forwards a 24-chunk push session as a relay; every build) and, on the ESP32-S3, `mgmt.rx24` (it reassembles one as a target), from the firmware's `MGMT_FWD_MAX_CHUNKS` / `MGMT_RX_MAX_CHUNKS` (`wcbOwnCapTags`, a literal: no RAM). After CHAN, before the labels: 12 / 22 bytes, 175 of 200 at most before the labels. Also in the board's own `?WDP,DUMP` row and, for a WCB neighbour, `?WDP,<n>`'s `Tags` line. The Wizard reads them in place of a firmware build date to decide whether one long `?SEQ,SAVE` may go as one long relay session (Greg: a capability flag, not a date; [`MGMT_RELAY.md`](MGMT_RELAY.md) §10). No receiver changes: WCBs and `WCB_Client` 1.8.0+ already decode CAPTAGS from any sender (only DEVTYPE marks a client), WcbMgmt dumps print it, older code skips it by length. Host test: `tests/wdp_wire_test.cpp` `test_own_captags`. | — |
 | 2026-10-21 | **A boot SOLICIT with channel sync on**, after the first boot advert: every neighbor re-advertises (jittered), so channel sync has their CHAN facts long before its 40 s boot grace ends - without them every key is derived, SYNC off, and each board took itself for its group's leader. | — |
 | 2026-10-21 | Added TLV `0x14` **CHAN** — channel sync's channel, rank, PINNED/SYNC flags and region, in every advert ahead of the port labels, so in the change hash: associating, moving or `?CHSYNC,OFF` re-advertises within 500 ms. Decoded into `WdpNeighbor::hasChan` / `::chan` (`wdpNeighborGet` for channel sync); new `[WDPCH:...]` dump record, self first; `?WDP,<n>` shows it. Older peers skip it by length. Host test: `tests/wdp_wire_test.cpp` `test_chan`. See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md). | — |

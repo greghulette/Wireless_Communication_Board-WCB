@@ -53,7 +53,7 @@ test('utf8Chunks: no chunk but the last ends in whitespace (the relay trims the 
   assert.equal(P.utf8Chunks(' '.repeat(400), 179).join(''), ' '.repeat(400));
 });
 
-test('capTagChunks / relayLongChunks: the long session needs the target\'s mgmt.rx and the relay\'s mgmt.fwd (WDP CAPTAGS)', () => {
+test('capTagChunks / relayLongChunks: the long session needs the target\'s mgmt.rx and the relay\'s mgmt.fwd or mgmt.rx (WDP CAPTAGS)', () => {
   assert.equal(P.capTagChunks('mgmt.fwd24 mgmt.rx24', 'mgmt.rx'), 24);
   assert.equal(P.capTagChunks('mgmt.fwd24 mgmt.rx24', 'mgmt.fwd'), 24);
   assert.equal(P.capTagChunks('  MGMT.RX32  rc ', 'mgmt.rx'), 32);
@@ -61,16 +61,19 @@ test('capTagChunks / relayLongChunks: the long session needs the target\'s mgmt.
   assert.equal(P.capTagChunks('mgmt.rxx mgmt.rx', 'mgmt.rx'), 0);
   assert.equal(P.capTagChunks('', 'mgmt.rx'), 0);
   assert.equal(P.capTagChunks(undefined, 'mgmt.rx'), 0);
-  const S3 = 'mgmt.fwd24 mgmt.rx24', W = 'mgmt.fwd24';
-  assert.equal(P.relayLongChunks(S3, W), 24);                        // an S3 target through any relay with today's firmware
-  assert.equal(P.relayLongChunks(S3, S3), 24);
+  // What the firmware sends (wcbOwnCapTags): the S3 takes 24 and so forwards 24 (mgmt.rx24); the classic forwards 24.
+  const S3 = 'mgmt.rx24', W = 'mgmt.fwd24';
+  assert.equal(P.relayLongChunks(S3, W), 24);                        // an S3 target through a classic relay
+  assert.equal(P.relayLongChunks(S3, S3), 24);                       // ... through an S3 relay: rx24 says it forwards 24
   assert.equal(P.relayLongChunks(W, W), 0);                          // a classic ESP32 target takes 16
+  assert.equal(P.relayLongChunks(W, S3), 0);
   assert.equal(P.relayLongChunks(S3, ''), 0);                        // a relay from before: it forwards 16
   assert.equal(P.relayLongChunks(S3, undefined), 0);                 // a relay whose tags no dump has shown yet
   assert.equal(P.relayLongChunks(undefined, W), 0);                  // a target likewise
   assert.equal(P.relayLongChunks(S3, '', { relayForwardsAny: true }), 24);   // a WcbMgmt relay forwards any count
-  assert.equal(P.relayLongChunks('mgmt.rx32', 'mgmt.fwd24'), 24);    // the smaller of the two
-  assert.equal(P.relayLongChunks('mgmt.rx16', 'mgmt.fwd24'), 0);     // no more than one session anyway
+  assert.equal(P.relayLongChunks('mgmt.rx32', W), 24);               // the smaller of the two
+  assert.equal(P.relayLongChunks('mgmt.rx32', 'mgmt.fwd32 mgmt.rx24'), 32);  // both tags: a relay forwarding more
+  assert.equal(P.relayLongChunks('mgmt.rx16', W), 0);                // no more than one session anyway
 });
 
 const seqs = (n, len) => Array.from({ length: n }, (_, i) => `?SEQ,SAVE,s${i},;S1${'y'.repeat(len)}`);
@@ -84,6 +87,7 @@ test('planRelayPush: what fits one session is one session, in the order given (a
   assert.equal(p.sessions[0].text, chain + '^?reboot');
   assert.ok(p.sessions[0].chunks.length <= 16);
   assert.deepEqual(P.planRelayPush('', {}).sessions, []);
+  assert.deepEqual(P.planRelayPush('', { reboot: true }).sessions.map((x) => x.text), ['?reboot']);
 });
 
 test('planRelayPush: a push over one session goes as several, every command whole, the network and restart commands in the last', () => {
@@ -117,51 +121,61 @@ test('planRelayPush: the command cap splits a push of many short commands', () =
   assert.equal(p.sessions.flatMap((s) => s.list).length, 400);
 });
 
-test('planRelayPush: a board-number change too long for one session goes in two steps: ?WCB,<new> first to the old number, the rest to the new', () => {
+test('planRelayPush: a board-number change too long for one session goes in two steps with a restart between: ?WCB,<new> and ?reboot to the old number, then the rest to the new', () => {
   const early = ['?HW,32', ...seqs(30, 160), '?LABEL,S5,Holo'];
-  const chain = [early[0], '?WCB,5', ...early.slice(1), '?MAC,3,07', '?EPASS,a_new_mesh_password'].join('^');
-  const p = P.planRelayPush(chain, { wcbChange: true, reboot: true });
+  const late = ['?MAC,3,07', '?EPASS,a_new_mesh_password'];
+  const chain = [early[0], '?WCB,5', ...early.slice(1), ...late].join('^');
+  const asked = [];
+  const p = P.planRelayPush(chain, { wcbChange: true, reboot: true, restReboot: (rest) => { asked.push(rest); return true; } });
   assert.equal(p.problem, '');
-  assert.ok(p.split && p.sessions.length >= 2, `${p.sessions.length} session(s)`);
-  assert.equal(p.sessions[0].list[0], '?WCB,5', 'the number change opens the first session');
+  assert.ok(p.split && p.renumber);
+  // Step 1: the number change and the restart, one session to the number the board has now.
+  assert.deepEqual(p.sessions[0].list, ['?WCB,5', '?reboot']);
   assert.equal(p.sessions[0].to, 'old');
-  for (const s of p.sessions.slice(1)) assert.equal(s.to, 'new');
-  for (const s of p.sessions) {
-    assert.ok(s.chunks.length >= (s.to === 'new' ? 2 : 1) && s.chunks.length <= 16);
+  assert.equal(p.sessions[0].restart, true);
+  assert.equal(p.sessions[0].chunks.length, 1);
+  // Step 2: the rest as a push of its own, to the new number, two chunks a session at least, the late ones last.
+  const rest = p.sessions.slice(1);
+  assert.ok(rest.length >= 2, `${rest.length} session(s) after the restart`);
+  for (const s of rest) {
+    assert.equal(s.to, 'new');
+    assert.equal(s.restart, false);
+    assert.ok(s.chunks.length >= 2 && s.chunks.length <= 16, `a session of ${s.chunks.length} chunks`);
     assert.equal(s.chunks.join(''), s.text);
     assert.equal(s.list.join('^'), s.text);
   }
-  // Every command once: the number change, the rest in their order, the network and restart commands last.
-  assert.deepEqual(p.sessions.flatMap((s) => s.list), ['?WCB,5', ...early, '?MAC,3,07', '?EPASS,a_new_mesh_password', '?reboot']);
-  assert.deepEqual(p.sessions[p.sessions.length - 1].list.slice(-3), ['?MAC,3,07', '?EPASS,a_new_mesh_password', '?reboot']);
+  assert.deepEqual(rest.flatMap((s) => s.list), [...early, ...late, '?reboot']);
+  assert.deepEqual(rest[rest.length - 1].list.slice(-3), [...late, '?reboot']);
+  assert.deepEqual(asked, [[...early, ...late].join('^')], 'restReboot is asked about the rest, without the ?WCB');
 
-  // A later session short enough for one chunk still goes as two: a WCB relay sends a one-chunk session as an ETM
-  // unicast to the address of the number it names, which the board takes only when it restarts.
-  // (Two commands a session here, so the ?reboot is a session of its own.)
-  const short = P.planRelayPush('?WCB,5^?LABEL,S1,a^?LABEL,S2,b b^?LABEL,S3,c', { wcbChange: true, reboot: true, maxCmds: 2 });
-  assert.equal(short.problem, '');
-  assert.deepEqual(short.sessions.map((s) => [s.to, s.list]),
-                   [['old', ['?WCB,5', '?LABEL,S1,a']], ['new', ['?LABEL,S2,b b', '?LABEL,S3,c']], ['new', ['?reboot']]]);
-  assert.equal(short.sessions[0].chunks.length, 1, 'the first session as it is');
-  for (const s of short.sessions.slice(1)) {
-    assert.equal(s.chunks.length, 2);
-    assert.equal(s.chunks.join(''), s.text);
-    assert.ok(!/\s$/.test(s.chunks[0]), 'the first chunk does not end in whitespace');
-  }
+  // The rest gets a ?reboot only if it needs one of its own (here it does not); then it fits one session - still two
+  // chunks: a relay sends a one-chunk session as a unicast, which needs the new number in its peer table first.
+  const small = P.planRelayPush(['?WCB,5', '?LABEL,S1,a b', ...seqs(16, 160)].join('^'),
+                                { wcbChange: true, reboot: true, restReboot: () => false });
+  assert.equal(small.problem, '');
+  assert.equal(small.sessions[0].restart, true);
+  assert.ok(small.sessions.slice(1).every((s) => s.to === 'new' && !s.list.includes('?reboot')));
+  const tiny = P.planRelayPush('?WCB,5^?LABEL,S1,a b^?LABEL,S2,c', { wcbChange: true, maxCmds: 2 });
+  assert.deepEqual(tiny.sessions.map((s) => [s.to, s.restart, s.list]),
+                   [['old', true, ['?WCB,5', '?reboot']], ['new', false, ['?LABEL,S1,a b', '?LABEL,S2,c']]]);
+  assert.equal(tiny.sessions[1].chunks.length, 2);
+  assert.equal(tiny.sessions[1].chunks.join(''), tiny.sessions[1].text);
+  assert.ok(!/\s$/.test(tiny.sessions[1].chunks[0]), 'the first chunk does not end in whitespace');
 
-  // Through a WcbMgmt relay, which sends every chunk to that address: refused, nothing planned.
-  const mgmt = P.planRelayPush(chain, { wcbChange: true, relayBroadcasts: false });
-  assert.match(mgmt.problem, /board number/);
-  assert.deepEqual(mgmt.sessions, []);
+  // The rest has a command no relay session carries: refused before anything, as any push.
+  const long = P.planRelayPush(['?WCB,5', ...seqs(17, 160), `?SEQ,SAVE,k,${'v'.repeat(3999)}`].join('^'), { wcbChange: true });
+  assert.match(long.problem, /one command is/);
+  assert.deepEqual(long.sessions, []);
 
   // The same change in a push that fits one session goes as one, to the number the board has now, as before.
-  const one = P.planRelayPush('?WCB,5^?LABEL,S1,x', { wcbChange: true, relayBroadcasts: false });
+  const one = P.planRelayPush('?WCB,5^?LABEL,S1,x', { wcbChange: true, reboot: true });
   assert.equal(one.sessions.length, 1);
-  assert.equal(one.sessions[0].to, 'old');
-  // A ?WCB,<n> that only repeats the number (no wcbChange) is an ordinary command: every session to the board as it is.
+  assert.equal(one.renumber, false);
+  assert.deepEqual([one.sessions[0].to, one.sessions[0].restart], ['old', false]);
+  assert.equal(one.sessions[0].text, '?WCB,5^?LABEL,S1,x^?reboot');
+  // A ?WCB,<n> that only repeats the number (no wcbChange) is an ordinary command: no restart, every session as is.
   const same = P.planRelayPush(chain, { reboot: true });
-  assert.ok(same.sessions.every((s) => s.to === 'old'));
-  assert.notEqual(same.sessions[0].list[0], '?WCB,5');
+  assert.ok(same.sessions.every((s) => s.to === 'old' && !s.restart) && !same.renumber);
 });
 
 test('planRelayPush: one command longer than a session goes as a long session only where the board and relay take one', () => {
