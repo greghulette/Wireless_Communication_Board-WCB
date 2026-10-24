@@ -143,10 +143,13 @@ are such relays: a config over 2912 characters does not come through them, and t
 `parseConfigPart`, `parseConfigError`, `verifyConfigReply`, `createPullCollector`):
 
 - sends `?MGMT,PULL,<n>,P`; keeps its 5-argument positional signature and fires `onComplete` exactly once (Intellex's
-  shim calls `window.remoteBoardPull(slot, n, 1, 3, cb)` behind a 45 s watchdog);
+  shim calls `window.remoteBoardPull(slot, n, 1, 3, cb)` behind a 45 s watchdog that waits for the Wizard's own deadline
+  while the Wizard still holds the pull);
 - one attempt on the air per relay (a per-relay FIFO), because every relay has a single reassembly session;
 - a 6 s attempt timer that restarts on every new part; `PULL_DEADLINE_MS` (40 s) from the call caps a pull of up to
-  3 attempts, queue wait included;
+  3 attempts, queue wait included, and moves out to `K x PULL_PART_MS` (1 s) + 6 s from the first part of each job when
+  that is later, so a reply in parts gets as long as its parts take: a full sequence store of short sequences is ~35
+  parts, and with one part lost the retry ran past 40 s;
 - a single `[MGMT:CONFIG,<n>]` reply is checked like a join (`[VER:` head, `^?CHK` tail, CRC) before it is stored;
   its CRC may lack leading zeros, as 6.0.x printed it with `String(crc, HEX)`. A reply that fails, or has no `^?CHK`,
   never becomes the config or the baseline;
