@@ -3545,7 +3545,7 @@ def _hold_line(seconds):
     return ";S3" + padded("HOLD", int(seconds * HOLD_BAUD / 10))
 
 
-@test("etm.status_lines_dropped_reported", "With W1's loop() held over 10 s by a slow ;S3 line while W2 and W3 reboot together, their six boot announces overflow the five-line status ring: loop() prints the lines it kept and '[ETM] N status line(s) dropped - more peers came online at once than the queue holds', and printed plus dropped add up to the announces W1 received (W2 and W3 reboot; up to 2 tries)", needs=["wcb1", "wcb2"], links=[])
+@test("etm.status_lines_dropped_reported", "With W1's loop() held over 10 s by a slow ;S3 line while W2 and W3 reboot together, their six boot announces overflow the five-line status ring: loop() prints the lines it kept and '[ETM] N status line(s) dropped - more peers came online at once than the queue holds', and printed plus dropped add up to the announces W1 received (W2 and W3 reboot; up to 4 tries)", needs=["wcb1", "wcb2"], links=[])
 def status_lines_dropped_reported(bench):
     """Coverage re-scan 2026-10-12, etm.status_lines_queued_to_loop. espNowReceiveCallback queues '[ETM] WCBn came ONLINE
     (boot)' for every boot announce from an active peer (statusQueueOut, WCB.ino) into a six-slot ring - five lines -
@@ -3555,7 +3555,7 @@ def status_lines_dropped_reported(bench):
     each, which is the count the printed and dropped lines must add up to. The hold is a ;S3 line at 600 baud, which
     WcbSoftSerial::write sends on loop()'s task and waits out, started as the two boards restart: their announces come
     4-8 s later (run 20261013-002216: a 6 s hold caught four of six). An announce lost on the air leaves five, which
-    fit: that try is inconclusive and runs once more."""
+    fit: that try is inconclusive and runs again, up to four tries (run 20261015-145452 lost one in each of two)."""
     own2, own3 = bench.usb_wcbs().get(2), bench.usb_wcbs().get(3)
     if not own2 or not own3:
         raise Skip("W2 and W3 need their own USB consoles here (to reboot them at the same moment)")
@@ -3572,7 +3572,7 @@ def status_lines_dropped_reported(bench):
             w.run("?DEBUG,ETM,ON")
             if not _has(w.run(f"?BAUD,S3,{HOLD_BAUD}"), f"Baud rate for Serial3 updated to {HOLD_BAUD}"):
                 raise AssertionError(f"setup: ?BAUD,S3,{HOLD_BAUD} did not confirm")
-            for attempt in (1, 2):
+            for attempt in (1, 2, 3, 4):
                 m2, m3 = w2.dev.mark(), w3.dev.mark()
                 w2.send("?reboot")
                 w3.send("?reboot")
