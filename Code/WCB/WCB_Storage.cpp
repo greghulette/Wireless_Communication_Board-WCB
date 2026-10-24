@@ -935,12 +935,12 @@ static uint32_t seqInvHashFailMs = 0;   // when the store last could not be hash
 
 void invalidateSequenceInventoryHash() { seqInvHashValid = false; }
 
-uint32_t sequenceInventoryHash() {
+uint32_t sequenceInventoryHash(bool now) {
     if (seqInvHashValid) return seqInvHashCache;
     // A store that cannot be read right now (it will not mount below SEQ_MIN_FREE_HEAP) keeps the last fingerprint and
     // is tried again every few seconds - not at the WDP dirty-check's 2 Hz, and never cached wrong: a value that
     // could not be read used to be hashed as empty and advertised until the next save.
-    if (seqInvHashFailMs && millis() - seqInvHashFailMs < 5000) return seqInvHashCache;
+    if (!now && seqInvHashFailMs && millis() - seqInvHashFailMs < 5000) return seqInvHashCache;
     uint32_t h;
     if (seqStoreHash(h) != SEQ_OK) {
         seqInvHashFailMs = millis() | 1;
@@ -984,8 +984,8 @@ int buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo
     // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
     // the two directly, so they must never be computed two different ways. One
     // that could not be computed now makes no answer: a stale hash beside a
-    // current list would read as current.
-    const uint32_t h = sequenceInventoryHash();
+    // current list would read as current. A request asks now, past the background check's 5 s backoff.
+    const uint32_t h = sequenceInventoryHash(true);
     if (!seqInvHashValid) return SEQN_UNREAD;
     info = SeqNamesInfo{pg.count, pg.keyBytes, pg.pages()};
 
@@ -1024,7 +1024,7 @@ bool printSequenceNames() {
             return true;
         }) != SEQ_OK)
         return false;
-    const uint32_t h = sequenceInventoryHash();
+    const uint32_t h = sequenceInventoryHash(true);   // asked for: read now, not the background check's backoff
     if (!seqInvHashValid) return false;
 
     char head[48];

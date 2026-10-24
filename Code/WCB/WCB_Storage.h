@@ -233,8 +233,11 @@ bool     printSequenceNames();
 // Advertised as WDP_TLV_SEQHASH, so a peer re-pulls only when something actually
 // changed. CACHED: the WDP dirty-check rebuilds the advert twice a second, and
 // hashing values uncached would mean a walk of the whole store at 2 Hz forever. Every
-// write path must call invalidateSequenceInventoryHash().
-uint32_t sequenceInventoryHash();
+// write path must call invalidateSequenceInventoryHash(). A store that could not be read is tried again every 5 s
+// (for the 2 Hz check); now = true tries at once - an explicit request (?SEQ,NAMES, a peer's names request), which
+// answered "try again" for up to 5 s after the background check met a store it could not mount (ncmesh.seq_pull_paged,
+// run 20261023-213338: right after a burst of saves).
+uint32_t sequenceInventoryHash(bool now = false);
 void     invalidateSequenceInventoryHash();
 void eraseStoredCommandByName(const String &name);
 
