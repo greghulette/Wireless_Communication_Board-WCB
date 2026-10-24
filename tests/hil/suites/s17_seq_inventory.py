@@ -42,8 +42,19 @@ def _parse_names(line):
     return m.group(2), int(m.group(3)), names
 
 
-def _names(w):
-    return _parse_names(next(x for x in w.run("?SEQ,NAMES") if x.startswith("[MGMT:SEQ,")))
+def _names(w, tries=4):
+    """?SEQ,NAMES parsed. 'Could not read the sequence store right now - try again.' is asked again, 2 s apart, as the
+    firmware says: a store it could not mount a moment ago (low heap during a burst of saves) reads a moment later."""
+    for i in range(tries):
+        out = w.run("?SEQ,NAMES")
+        line = next((x for x in out if x.startswith("[MGMT:SEQ,")), None)
+        if line is not None:
+            return _parse_names(line)
+        if i + 1 < tries and any("try again" in x for x in out):
+            time.sleep(2.0)
+            continue
+        raise AssertionError(f"{w.dev.name}'s ?SEQ,NAMES printed no [MGMT:SEQ,...] line: {[x.rstrip()[:80] for x in out]}")
+    raise AssertionError(f"{w.dev.name}'s ?SEQ,NAMES could not read its sequence store in {tries} tries")
 
 
 def _seqval(w, key):

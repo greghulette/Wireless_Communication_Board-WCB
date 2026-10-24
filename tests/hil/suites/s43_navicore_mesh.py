@@ -1112,10 +1112,21 @@ def bridged_wcb_send_findings(bench):
     ACK the fragmented form."""
     l12 = link(bench, 1, "S2")
     nc, w1 = _nc(bench), usb_wcb(bench)
-    ghost = _free_id(nc, (17, 18, 16, 15, 14, 13, 12, 11))
-    usb = nc.wcb_send(ghost, "?HILNOOP")
-    if usb.get("ok") is not False:
-        raise Skip(f"a USB WCB_SEND to WCB{ghost} answered {usb}: NaviCore has a peer there, so no send can fail")
+    # The first id NaviCore cannot send to: one it does not know can still have an ESP-NOW peer left from an earlier
+    # send (this test's own, on the run before: run 20261024-053854 skipped on WCB17), so each is tried over USB.
+    ghost, tried = None, []
+    known = nc.wcb_status().get("known") or []
+    for p in (17, 18, 16, 15, 14, 13, 12, 11):
+        if p <= len(known) and known[p - 1]:
+            continue
+        usb = nc.wcb_send(p, "?HILNOOP")
+        if usb.get("ok") is False:
+            ghost = p
+            break
+        tried.append(p)
+    if ghost is None:
+        raise Skip(f"a USB WCB_SEND to each of WCB{tried} was ACKed ok: NaviCore has a peer at every candidate, so no "
+                   f"send can fail")
     nid = _open_relay(nc, w1)
     r = bridged(w1, {"type": "WCB_SEND", "target": ghost, "cmd": "?HILNOOP"}, r'"of":"WCB_SEND"', timeout=5.0,
                 target=nid)
@@ -2824,7 +2835,8 @@ def forget_peer_all(bench):
     probe), and the clear drops them too: ?WDP,CFG's PEERS (the ESP-NOW peer table: the floor's boards plus the
     learned) falls to the floor's count, and the WDP rows lose their PEER 2 flag. W1's ?WDP,POLL makes every WCB
     advertise within 600 ms (WCB_WDP.cpp:366-372); a non-temporary advert counted twice re-learns the board
-    (WCB_Client.cpp:2165-2170), so two polls bring W2 and W3 back, and the test ends with PEERS as it found it. The
+    (WCB_Client.cpp:2165-2170), so two polls bring W2 and W3 back (two more while one is missing, up to four rounds), and the test ends with PEERS
+    as it found it. The
     probe leaves before the re-learn (else it would be learned a second time); W1 and W2 learned it too and forget it
     in the finally (s18 _forget_everywhere). NVS writes on NaviCore: the learn, the clear, each re-learn - the
     opt-in."""
@@ -2868,17 +2880,24 @@ def forget_peer_all(bench):
             lines = _flushed(nc, nm, settle=0.5)
             flag, p1, learned1 = peer_flag(), peers(), learned_ids()
             probe.mesh_leave()
-        # bring the bench's own learned boards back: two advert rounds
+        # bring the bench's own learned boards back: two advert rounds, and two more while one is missing - a re-learn
+        # takes two adverts heard, and one lost on the air (W3's, run 20261023-213338) costs a round, not the test
         rm = nc.dev.mark()
-        for _ in range(2):
-            w1.run("?WDP,POLL")
-            time.sleep(1.5)
-        for b in learned0:
-            try:
-                _nav_regex(nc, rm, rf"^\[WCB_Client\] auto-joined WCB{b}$", 15.0, f"'auto-joined WCB{b}' line")
-                back.append(b)
-            except AssertionError:
-                pass
+        for rnd in range(4):
+            for _ in range(2):
+                w1.run("?WDP,POLL")
+                time.sleep(1.5)
+            for b in learned0:
+                if b in back:
+                    continue
+                try:
+                    _nav_regex(nc, rm, rf"^\[WCB_Client\] auto-joined WCB{b}$", 15.0 if rnd == 3 else 4.0,
+                               f"'auto-joined WCB{b}' line")
+                    back.append(b)
+                except AssertionError:
+                    pass
+            if len(back) == len(learned0):
+                break
         time.sleep(1.0)
         p2 = peers()
     finally:
