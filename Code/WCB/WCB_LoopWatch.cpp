@@ -10,6 +10,7 @@
 #include "WCB_WS.h"
 
 volatile uint32_t g_loopTick = 0;
+volatile uint32_t g_loopProgress = 0;
 const char *volatile g_loopStep = "setup";
 const char *volatile g_loopCmd = nullptr;
 
@@ -45,7 +46,7 @@ static void watchTick(void *) {
   static uint32_t seen = 0, since = 0, lastReport = 0;
   static bool reported = false;
   const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-  const uint32_t tick = g_loopTick;
+  const uint32_t tick = g_loopTick + g_loopProgress;   // a pass, or progress a long step reported
   if (tick != seen) {
     if (reported) esp_rom_printf("[HANG] loop() running again after %u s\n", (unsigned)((now - since) / 1000));
     seen = tick;

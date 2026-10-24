@@ -15,6 +15,7 @@
 #define LOOP_REPORT_EVERY_MS 30000UL
 
 extern volatile uint32_t g_loopTick;            // loop() passes
+extern volatile uint32_t g_loopProgress;        // progress reported inside one long step (loopWatchProgress)
 extern const char *volatile g_loopStep;         // the step loop() is in (a string literal)
 extern const char *volatile g_loopCmd;          // the command handleSingleCommand() is running, or nullptr
 
@@ -22,3 +23,9 @@ extern const char *volatile g_loopCmd;          // the command handleSingleComma
 #define LOOP_STEP(call) do { g_loopStep = #call; call; } while (0)
 
 void loopWatchBegin();   // from setup(), on the loop task: starts the watch
+
+// A step that runs long but is moving says so, and the watch does not count it as stuck. A ?backup of a full store of
+// the shortest sequences prints ~190 KB, ~18 s at 115200 baud: its "[HANG] loop() stuck" line, printed through the ROM
+// from the timer task, landed inside the factory chain, which then failed its checksum (wizard.remote_pull_many_
+// sequences, run 20261023-195917). Called from printBackupConfig's writer on every write.
+static inline void loopWatchProgress() { g_loopProgress = g_loopProgress + 1; }
