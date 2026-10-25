@@ -16,8 +16,9 @@
 // Each delay is capped at 30 minutes (parsedDelayLimit) and consecutive delays add up, so a longer gap is written as
 // several delays.
 const SB_DELAY_CAP_MS    = 1800000;
-// The store takes 1-3,999 characters; saving more than about 2,400 runs a classic ESP32 short of heap
-// (docs/SEQUENCE_INVENTORY.md §3b, §3d).
+// The store takes 1-3,999 characters. Saving more than about 2,400 ran a classic ESP32 short of heap on firmware before
+// 2026-10-24 (docs/SEQUENCE_INVENTORY.md §3b, §3d): warned only for a board that does not say it takes the whole
+// 3,999 (app.js boardTakesLongSave).
 const SB_VALUE_MAX       = 3999;
 const SB_VALUE_HEAP_WARN = 2400;
 
@@ -266,8 +267,8 @@ function sbAnalyze(model, ctx) {
   const len = (ctx.value || '').length;
   if (len > SB_VALUE_MAX) {
     out.push({ level: 'error', ids: [], text: `${len} characters: the board stores at most ${SB_VALUE_MAX}. Split it into sequences that run one another.` });
-  } else if (len > SB_VALUE_HEAP_WARN) {
-    out.push({ level: 'warn', ids: [], text: `${len} characters: a classic ESP32 (HW 2.x / 3.1) can run out of memory saving more than about ${SB_VALUE_HEAP_WARN}.` });
+  } else if (len > SB_VALUE_HEAP_WARN && !ctx.longSaveOk) {
+    out.push({ level: 'warn', ids: [], text: `${len} characters: a classic ESP32 (HW 1.0 / 2.x) on firmware before 7.1 can run out of memory saving more than about ${SB_VALUE_HEAP_WARN}.` });
   }
   return out;
 }
@@ -735,6 +736,7 @@ function sbCtx(n) {
     n,
     chars: sbChars({ delim: cfg.delimiter, cmd: cfg.cmdChar, func: cfg.funcChar }),
     self: cfg.wcbNumber || n,
+    longSaveOk: !!(app.fn('boardTakesLongSave') && app.fn('boardTakesLongSave')(n)),
     boardName: sbBoardName,
     portLabel: sbPortLabel,
   };
@@ -2198,7 +2200,8 @@ function sbRenderOut() {
   const len = value.length;
   const lenEl = $('sb-len');
   lenEl.textContent = `${len.toLocaleString('en-US')} / ${SB_VALUE_MAX.toLocaleString('en-US')} characters`;
-  lenEl.className = len > SB_VALUE_MAX ? 'sb-len-over' : len > SB_VALUE_HEAP_WARN ? 'sb-len-near' : '';
+  lenEl.className = len > SB_VALUE_MAX ? 'sb-len-over'
+                  : len > SB_VALUE_HEAP_WARN && !(S.ctx && S.ctx.longSaveOk) ? 'sb-len-near' : '';
   const keyWhy = S.key === S.baseKey && !S.isNew ? '' : sbKeyProblem(S.key);
   const all = keyWhy ? [{ level: 'error', ids: [], text: keyWhy }].concat(list) : list;
   $('sb-warn').innerHTML = all.map(w => `<li class="lvl-${w.level}"${w.ids && w.ids.length ? ` data-ids="${w.ids.join(',')}" title="Click to select"` : ''}>${esc(w.text)}</li>`).join('');

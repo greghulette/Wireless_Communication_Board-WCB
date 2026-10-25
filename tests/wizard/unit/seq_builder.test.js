@@ -206,6 +206,16 @@ test('analyze: the delimiter, a delay or an IF as a command, value verbs in a ti
   assert.strictEqual(run([ev(0, ';M11', { id: 1 }), ev(500, ';M12', { id: 2 })]).length, 0);
 });
 
+test('analyze: past 2,400 characters the heap warning is only for a board that does not take the whole 3,999', () => {
+  // A classic ESP32 stopped near 2,400 on firmware before 2026-10-24 (about 7x a save's length in heap); the firmware
+  // that saves from the queued line takes 3,999 on both chips and says so with mgmt.rx24 (app.js boardTakesLongSave).
+  const events = [ev(0, ';S1' + 'x'.repeat(2600), { id: 1 })];
+  const warns = (longSaveOk) => SB.sbAnalyze({ events, markers: [] }, { value: compile(events), longSaveOk })
+    .filter(w => w.level === 'warn' && /run out of memory/.test(w.text));
+  assert.strictEqual(warns(false).length, 1, 'a board that does not say it takes 3,999');
+  assert.strictEqual(warns(true).length, 0, 'a board that does');
+});
+
 test('library: the vendored DroidNet snapshot and the WCB boards load, normalized like NaviCore\'s', () => {
   const ids = LIB.boards.map(b => b.id);
   assert.ok(ids.length >= 24, `${ids.length} boards`);

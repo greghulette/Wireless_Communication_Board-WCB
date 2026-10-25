@@ -595,12 +595,14 @@ test('wizard.push_fake_wcb_number_taken a push that gives a board a number anoth
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24, an ESP32-S3) and the relay forwards it (mgmt.fwd24 or mgmt.rx24, or a WcbMgmt relay); a classic ESP32, older firmware or tags not seen yet are refused', async ({ page }) => {
+test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24: an ESP32-S3, or a classic ESP32 since 2026-10-24) and the relay forwards it (mgmt.fwd24 or mgmt.rx24, or a WcbMgmt relay); a target saying mgmt.fwd24 alone (a classic ESP32 on 2026-10-23 firmware), older firmware or tags not seen yet are refused', async ({ page }) => {
   const value = ';S1' + 'v'.repeat(3996);
-  const S3 = 'mgmt.rx24', W = 'mgmt.fwd24';   // what each build sends (wcbOwnCapTags): rx24 says it forwards 24 too
+  // What each build sends (wcbOwnCapTags): rx24 says it forwards 24 too. Both chips send rx24 since 2026-10-24; W is a
+  // classic ESP32 on the firmware of the day before, which forwarded 24 and took 16.
+  const S3 = 'mgmt.rx24', W = 'mgmt.fwd24';
   // [what, the relay's own row's tags (null: no dump at all), the target's row's tags (null: no row), WcbMgmt relay, ok]
   for (const [what, relayTags, targetTags, mgmtRelay, ok] of [
-    ['a classic ESP32 target', W, W, false, false],
+    ['a classic ESP32 target on 2026-10-23 firmware', W, W, false, false],
     ['an S3 target on firmware from before the tags', W, '', false, false],
     ['a relay on firmware from before the tags', '', S3, false, false],
     ['no dump read yet', null, null, false, false],

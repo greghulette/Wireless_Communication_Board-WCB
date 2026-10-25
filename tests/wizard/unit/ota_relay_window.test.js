@@ -149,7 +149,7 @@ test('a clean transfer on each link: every frame once, in order, every CRC right
 test('the windows fit the relays: a WCB\'s WebSocket queue (WS_QUEUE_DEPTH) and the target\'s OTA queue hold a whole window', () => {
   const src = (f) => fs.readFileSync(path.join(__dirname, '../../../Code/WCB', f), 'utf8');
   const wsDepth = +/WS_QUEUE_DEPTH\s*=\s*(\d+)/.exec(src('WCB_WS.cpp'))[1];
-  const otaDepth = +/otaPktQueue\s*=\s*xQueueCreate\((\d+)/.exec(src('WCB_OTA.cpp'))[1];
+  const otaDepth = +/OTA_PKT_QUEUE_DEPTH\s*=\s*(\d+)/.exec(src('WCB_OTA.cpp'))[1];
   // One line may still sit in the queue after a rewind, and an ABORT must find room.
   assert.ok(P.OTA_RELAY_LINKS.ws.window <= wsDepth - 2, `ws window ${P.OTA_RELAY_LINKS.ws.window}, WS_QUEUE_DEPTH ${wsDepth}`);
   for (const [k, v] of Object.entries(P.OTA_RELAY_LINKS)) assert.ok(v.window < otaDepth, `${k} window under the OTA queue (${otaDepth})`);
