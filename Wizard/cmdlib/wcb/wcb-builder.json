@@ -1,0 +1,218 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "wcb.pwmPort": {
+      "label": "Serial port",
+      "values": [
+        { "code": "1", "label": "Serial 1" },
+        { "code": "2", "label": "Serial 2" },
+        { "code": "3", "label": "Serial 3" },
+        { "code": "4", "label": "Serial 4" },
+        { "code": "5", "label": "Serial 5" }
+      ]
+    },
+    "dfp.onoff": {
+      "label": "Loop all",
+      "values": [ { "code": "0", "label": "Off" }, { "code": "1", "label": "On" } ]
+    },
+    "dfp.eq": {
+      "label": "EQ preset",
+      "values": [
+        { "code": "0", "label": "Normal" }, { "code": "1", "label": "Pop" }, { "code": "2", "label": "Rock" },
+        { "code": "3", "label": "Jazz" }, { "code": "4", "label": "Classic" }, { "code": "5", "label": "Bass" }
+      ]
+    },
+    "dfp.device": {
+      "label": "Storage",
+      "values": [
+        { "code": "1", "label": "USB" }, { "code": "2", "label": "SD card" }, { "code": "3", "label": "AUX" },
+        { "code": "4", "label": "Sleep" }, { "code": "5", "label": "Flash" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "wcb-maestro",
+      "name": "WCB · Maestro",
+      "kind": "wcb-verb",
+      "routing": { "class": "wcb-verb" },
+      "notes": "Ranges from WcbCmd/src/WcbMaestro.cpp: subroutine 0-127 (a 7-bit data byte), channel 0-127, target/speed/parameter 0-16383, accel 0-255. The Maestro id is the WCB slot id: 1-8 a device, 0 every Maestro, 9 every Maestro on this board. Supersedes the vendored `maestro` board, whose ranges are narrower than the firmware's. wcbmaestro.droidnet is DroidNet's own trigger for a Maestro sequence it holds by name (@A<name>), which DroidNet reads on the WCB's Serial 0 (USB): a device string, so it is written as ;S0@A<name> (processSerialMessage prints it on USB). defaultPort, laneName and shortName are builder hints: the port a new step goes to, the name of its lane, and what its steps are called on the timeline. caseInsensitive: the command is recognised whatever the case of its fixed text (@A or @a); new steps are written as the template spells it.",
+      "commands": [
+        { "id": "wcbmaestro.run", "name": "Run subroutine", "safety": "movement", "encoder": "template", "category": "Script",
+          "template": ";M{maestroId}{sequence}",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true },
+            { "name": "sequence", "label": "Subroutine # (0-127)", "type": "int", "min": 0, "max": 127, "default": 1, "required": true }
+          ],
+          "examples": [";M11"], "commentLabel": "Maestro run" },
+        { "id": "wcbmaestro.subParam", "name": "Run subroutine with a parameter", "safety": "movement", "encoder": "template", "category": "Script",
+          "template": ";M{maestroId},sub,{sub},{param}",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true },
+            { "name": "sub", "label": "Subroutine # (0-127)", "type": "int", "min": 0, "max": 127, "default": 0, "required": true },
+            { "name": "param", "label": "Parameter (0-16383)", "type": "int", "min": 0, "max": 16383, "default": 0, "required": true }
+          ],
+          "examples": [";M1,sub,4,2000"], "commentLabel": "Maestro sub" },
+        { "id": "wcbmaestro.stopScript", "name": "Stop the script", "safety": "movement", "encoder": "template", "category": "Script",
+          "template": ";M{maestroId},stopScript",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true }
+          ],
+          "examples": [";M1,stopScript"], "commentLabel": "Maestro stop" },
+        { "id": "wcbmaestro.droidnet", "name": "Run a DroidNet sequence (by name)", "safety": "movement", "encoder": "template", "category": "Script",
+          "template": "@A{name}",
+          "defaultPort": 0, "laneName": "Maestro via DroidNet", "shortName": "Run", "caseInsensitive": true,
+          "params": [
+            { "name": "name", "label": "Sequence name in DroidNet (e.g. MonsterMash)", "pattern": "^\\S(.*\\S)?$", "required": true }
+          ],
+          "examples": ["@AMonsterMash"], "commentLabel": "DroidNet Maestro" },
+        { "id": "wcbmaestro.setTarget", "name": "Set servo position", "safety": "movement", "encoder": "template", "category": "Servo",
+          "template": ";M{maestroId},setTarget,{channel},{position}",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true },
+            { "name": "channel", "label": "Channel", "type": "int", "min": 0, "max": 127, "default": 0, "required": true },
+            { "name": "position", "label": "Position", "type": "int", "unit": "servoPulse", "min": 0, "max": 16383, "default": 6000, "required": true }
+          ],
+          "examples": [";M1,setTarget,0,6000"], "commentLabel": "Maestro target" },
+        { "id": "wcbmaestro.goHome", "name": "Send all servos home", "safety": "movement", "encoder": "template", "category": "Servo",
+          "template": ";M{maestroId},goHome",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true }
+          ],
+          "examples": [";M1,goHome"], "commentLabel": "Maestro home" },
+        { "id": "wcbmaestro.setSpeed", "name": "Set speed limit", "safety": "movement", "encoder": "template", "category": "Motion",
+          "template": ";M{maestroId},setSpeed,{channel},{value}",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true },
+            { "name": "channel", "label": "Channel", "type": "int", "min": 0, "max": 127, "default": 0, "required": true },
+            { "name": "value", "label": "Speed (0-16383, 0 = unlimited)", "type": "int", "min": 0, "max": 16383, "default": 0, "required": true }
+          ],
+          "examples": [";M1,setSpeed,0,0"], "commentLabel": "Maestro speed" },
+        { "id": "wcbmaestro.setAccel", "name": "Set acceleration limit", "safety": "movement", "encoder": "template", "category": "Motion",
+          "template": ";M{maestroId},setAccel,{channel},{value}",
+          "params": [
+            { "name": "maestroId", "label": "Maestro (1-8, 0 = all, 9 = this board's)", "type": "int", "min": 0, "max": 9, "default": 1, "width": 1, "required": true },
+            { "name": "channel", "label": "Channel", "type": "int", "min": 0, "max": 127, "default": 0, "required": true },
+            { "name": "value", "label": "Accel (0-255, 0 = unlimited)", "type": "int", "min": 0, "max": 255, "default": 0, "required": true }
+          ],
+          "examples": [";M1,setAccel,0,0"], "commentLabel": "Maestro accel" }
+      ]
+    },
+    {
+      "id": "wcb-dfplayer",
+      "name": "WCB · DFPlayer Mini",
+      "kind": "wcb-verb",
+      "routing": { "class": "wcb-verb" },
+      "notes": "Ranges from WcbCmd/src/WcbDfPlayer.cpp. Volume runs 0 = silent to 30 = loudest, the inverse of the MP3 Trigger's 0-64.",
+      "commands": [
+        { "id": "dfp.play", "name": "Play track", "safety": "cosmetic", "encoder": "template", "category": "Sound",
+          "template": ";D,PLAY,{track}",
+          "params": [ { "name": "track", "label": "Track # (1-2999)", "type": "int", "min": 1, "max": 2999, "default": 1, "required": true } ],
+          "examples": [";D,PLAY,1"], "commentLabel": "DFP play" },
+        { "id": "dfp.playCb", "name": "Play track, then run a sequence", "safety": "cosmetic", "encoder": "template", "category": "Sound",
+          "template": ";D,PLAY,{track},ONFIN,{key}",
+          "params": [
+            { "name": "track", "label": "Track # (1-2999)", "type": "int", "min": 1, "max": 2999, "default": 1, "required": true },
+            { "name": "key", "label": "Sequence to run when it finishes", "source": "wcb.sequences", "pattern": "^[^,]{1,15}$", "required": true }
+          ],
+          "examples": [";D,PLAY,1,ONFIN,done"], "commentLabel": "DFP play + callback" },
+        { "id": "dfp.folder", "name": "Play folder/track", "safety": "cosmetic", "encoder": "template", "category": "Sound",
+          "template": ";D,FOLDER,{folder},{track}",
+          "params": [
+            { "name": "folder", "label": "Folder (1-99)", "type": "int", "min": 1, "max": 99, "default": 1, "required": true },
+            { "name": "track", "label": "Track (1-255)", "type": "int", "min": 1, "max": 255, "default": 1, "required": true }
+          ],
+          "examples": [";D,FOLDER,1,2"], "commentLabel": "DFP folder" },
+        { "id": "dfp.mp3folder", "name": "Play /MP3 folder track", "safety": "cosmetic", "encoder": "template", "category": "Sound",
+          "template": ";D,MP3FOLDER,{index}",
+          "params": [ { "name": "index", "label": "Index (1-9999)", "type": "int", "min": 1, "max": 9999, "default": 1, "required": true } ],
+          "examples": [";D,MP3FOLDER,1"], "commentLabel": "DFP /MP3" },
+        { "id": "dfp.stop", "name": "Stop", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,STOP", "params": [], "examples": [";D,STOP"], "commentLabel": "DFP stop" },
+        { "id": "dfp.next", "name": "Next track", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,NEXT", "params": [], "examples": [";D,NEXT"], "commentLabel": "DFP next" },
+        { "id": "dfp.prev", "name": "Previous track", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,PREV", "params": [], "examples": [";D,PREV"], "commentLabel": "DFP prev" },
+        { "id": "dfp.pause", "name": "Pause", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,PAUSE", "params": [], "examples": [";D,PAUSE"], "commentLabel": "DFP pause" },
+        { "id": "dfp.resume", "name": "Resume", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,RESUME", "params": [], "examples": [";D,RESUME"], "commentLabel": "DFP resume" },
+        { "id": "dfp.random", "name": "Play random", "safety": "cosmetic", "encoder": "template", "category": "Sound", "template": ";D,RANDOM", "params": [], "examples": [";D,RANDOM"], "commentLabel": "DFP random" },
+        { "id": "dfp.vol", "name": "Set volume", "safety": "cosmetic", "encoder": "template", "category": "Volume",
+          "template": ";D,VOL,{level}",
+          "params": [ { "name": "level", "label": "Volume (0 = silent … 30 = loudest)", "type": "int", "min": 0, "max": 30, "default": 20, "required": true } ],
+          "examples": [";D,VOL,20"], "commentLabel": "DFP volume" },
+        { "id": "dfp.volUp", "name": "Volume up", "safety": "cosmetic", "encoder": "template", "category": "Volume", "template": ";D,VOLUP", "params": [], "examples": [";D,VOLUP"], "commentLabel": "DFP vol up" },
+        { "id": "dfp.volDown", "name": "Volume down", "safety": "cosmetic", "encoder": "template", "category": "Volume", "template": ";D,VOLDN", "params": [], "examples": [";D,VOLDN"], "commentLabel": "DFP vol down" },
+        { "id": "dfp.loop", "name": "Loop track", "safety": "cosmetic", "encoder": "template", "category": "Loop",
+          "template": ";D,LOOP,{track}",
+          "params": [ { "name": "track", "label": "Track # (1-2999)", "type": "int", "min": 1, "max": 2999, "default": 1, "required": true } ],
+          "examples": [";D,LOOP,1"], "commentLabel": "DFP loop" },
+        { "id": "dfp.loopAll", "name": "Loop all", "safety": "cosmetic", "encoder": "template", "category": "Loop",
+          "template": ";D,LOOPALL,{on}",
+          "params": [ { "name": "on", "label": "Loop all", "enum": "dfp.onoff", "default": "1", "required": true } ],
+          "examples": [";D,LOOPALL,1"], "commentLabel": "DFP loop all" },
+        { "id": "dfp.loopFolder", "name": "Loop folder", "safety": "cosmetic", "encoder": "template", "category": "Loop",
+          "template": ";D,LOOPFOLDER,{folder}",
+          "params": [ { "name": "folder", "label": "Folder (1-99)", "type": "int", "min": 1, "max": 99, "default": 1, "required": true } ],
+          "examples": [";D,LOOPFOLDER,1"], "commentLabel": "DFP loop folder" },
+        { "id": "dfp.eq", "name": "Set EQ", "safety": "cosmetic", "encoder": "template", "category": "System",
+          "template": ";D,EQ,{eq}",
+          "params": [ { "name": "eq", "label": "EQ preset", "enum": "dfp.eq", "default": "0", "required": true } ],
+          "examples": [";D,EQ,0"], "commentLabel": "DFP EQ" },
+        { "id": "dfp.device", "name": "Select storage", "safety": "cosmetic", "encoder": "template", "category": "System",
+          "template": ";D,DEVICE,{dev}",
+          "params": [ { "name": "dev", "label": "Storage", "enum": "dfp.device", "default": "2", "required": true } ],
+          "examples": [";D,DEVICE,2"], "commentLabel": "DFP device" },
+        { "id": "dfp.reset", "name": "Reset module", "safety": "cosmetic", "encoder": "template", "category": "System", "template": ";D,RESET", "params": [], "examples": [";D,RESET"], "commentLabel": "DFP reset" }
+      ]
+    },
+    {
+      "id": "wcb-actions",
+      "name": "WCB · Actions",
+      "kind": "wcb-verb",
+      "routing": { "class": "wcb-verb" },
+      "notes": "The WCB's own verbs that are actions rather than setup. ;V,/;VP, from WCB_Variables.cpp processSetVariable (volatile / persistent). ;P<port><us> from WCB.ino processPWMOutput: port 1-5, 500-2500 us, refused on a port another device uses. Serial text has no leading command character, so it goes out a serial port like any device-native string; being nothing but one free field, it is never decoded (it would match anything). The variable commands with fixed words (TOGGLE, INC, DEC) come before the general set, so a decoder that takes the first match names them right.",
+      "commands": [
+        { "id": "wcb.serialText", "name": "Send text to a serial port", "safety": "cosmetic", "encoder": "template", "category": "Serial",
+          "template": "{text}",
+          "params": [ { "name": "text", "label": "Text (the device's own command)", "default": "", "required": true } ],
+          "examples": [":PP100"], "commentLabel": "Serial text" },
+        { "id": "wcb.varToggle", "name": "Toggle a variable (0 ↔ 1)", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";V,{name},TOGGLE",
+          "params": [ { "name": "name", "label": "Variable", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true } ],
+          "examples": [";V,armed,TOGGLE"], "commentLabel": "Toggle var" },
+        { "id": "wcb.varInc", "name": "Increase a variable", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";V,{name},INC,{step}",
+          "params": [
+            { "name": "name", "label": "Variable", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "step", "label": "By", "type": "int", "min": 1, "max": 32767, "default": 1, "required": true }
+          ],
+          "examples": [";V,count,INC,1"], "commentLabel": "Inc var" },
+        { "id": "wcb.varDec", "name": "Decrease a variable", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";V,{name},DEC,{step}",
+          "params": [
+            { "name": "name", "label": "Variable", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "step", "label": "By", "type": "int", "min": 1, "max": 32767, "default": 1, "required": true }
+          ],
+          "examples": [";V,count,DEC,1"], "commentLabel": "Dec var" },
+        { "id": "wcb.varSet", "name": "Set a variable", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";V,{name},{value}",
+          "params": [
+            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
+          ],
+          "examples": [";V,mode,2"], "commentLabel": "Set var" },
+        { "id": "wcb.varSetPersist", "name": "Set a variable and save it", "safety": "config", "encoder": "template", "category": "Variables",
+          "template": ";VP,{name},{value}",
+          "params": [
+            { "name": "name", "label": "Variable (1-15 letters, digits, _)", "source": "wcb.variables", "pattern": "^[A-Za-z0-9_]{1,15}$", "required": true },
+            { "name": "value", "label": "Value (a number, TRUE or FALSE)", "default": "1", "required": true }
+          ],
+          "examples": [";VP,mode,2"], "commentLabel": "Save var" },
+        { "id": "wcb.pwmPulse", "name": "PWM pulse out a serial port", "safety": "movement", "encoder": "template", "category": "PWM",
+          "template": ";P{port}{us}",
+          "params": [
+            { "name": "port", "label": "Port", "enum": "wcb.pwmPort", "default": "1", "width": 1, "required": true },
+            { "name": "us", "label": "Pulse width (500-2500 µs)", "type": "int", "min": 500, "max": 2500, "default": 1500, "required": true }
+          ],
+          "examples": [";P11500"], "commentLabel": "PWM pulse" }
+      ]
+    }
+  ]
+}

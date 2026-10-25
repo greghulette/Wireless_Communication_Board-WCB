@@ -1,0 +1,641 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "CHIRP Audio Trigger — joymonkey/CHIRP main, serial_commands.cpp (source-derived 2026-07)",
+  "enums": {
+    "chirp.bank": {
+      "label": "Sound Bank",
+      "values": [
+        {
+          "code": "1",
+          "label": "Bank 1 (Vocals)"
+        },
+        {
+          "code": "2",
+          "label": "Bank 2"
+        },
+        {
+          "code": "3",
+          "label": "Bank 3"
+        },
+        {
+          "code": "4",
+          "label": "Bank 4"
+        },
+        {
+          "code": "5",
+          "label": "Bank 5"
+        },
+        {
+          "code": "6",
+          "label": "Bank 6"
+        }
+      ]
+    },
+    "chirp.page": {
+      "label": "Page",
+      "values": [
+        {
+          "code": "A",
+          "label": "Page A"
+        },
+        {
+          "code": "B",
+          "label": "Page B"
+        },
+        {
+          "code": "C",
+          "label": "Page C"
+        },
+        {
+          "code": "D",
+          "label": "Page D"
+        },
+        {
+          "code": "E",
+          "label": "Page E"
+        },
+        {
+          "code": "F",
+          "label": "Page F"
+        },
+        {
+          "code": "G",
+          "label": "Page G"
+        },
+        {
+          "code": "H",
+          "label": "Page H"
+        },
+        {
+          "code": "I",
+          "label": "Page I"
+        },
+        {
+          "code": "J",
+          "label": "Page J"
+        },
+        {
+          "code": "K",
+          "label": "Page K"
+        },
+        {
+          "code": "L",
+          "label": "Page L"
+        },
+        {
+          "code": "M",
+          "label": "Page M"
+        },
+        {
+          "code": "N",
+          "label": "Page N"
+        },
+        {
+          "code": "O",
+          "label": "Page O"
+        },
+        {
+          "code": "P",
+          "label": "Page P"
+        },
+        {
+          "code": "Q",
+          "label": "Page Q"
+        },
+        {
+          "code": "R",
+          "label": "Page R"
+        },
+        {
+          "code": "S",
+          "label": "Page S"
+        },
+        {
+          "code": "T",
+          "label": "Page T"
+        },
+        {
+          "code": "U",
+          "label": "Page U"
+        },
+        {
+          "code": "V",
+          "label": "Page V"
+        },
+        {
+          "code": "W",
+          "label": "Page W"
+        },
+        {
+          "code": "X",
+          "label": "Page X"
+        },
+        {
+          "code": "Y",
+          "label": "Page Y"
+        },
+        {
+          "code": "Z",
+          "label": "Page Z"
+        }
+      ]
+    },
+    "chirp.stream": {
+      "label": "Stream",
+      "values": [
+        {
+          "code": "0",
+          "label": "Stream 0"
+        },
+        {
+          "code": "1",
+          "label": "Stream 1"
+        },
+        {
+          "code": "2",
+          "label": "Stream 2"
+        },
+        {
+          "code": "3",
+          "label": "Stream 3"
+        },
+        {
+          "code": "4",
+          "label": "Stream 4"
+        },
+        {
+          "code": "5",
+          "label": "Stream 5"
+        },
+        {
+          "code": "6",
+          "label": "Stream 6"
+        },
+        {
+          "code": "7",
+          "label": "Stream 7"
+        },
+        {
+          "code": "8",
+          "label": "Stream 8"
+        },
+        {
+          "code": "9",
+          "label": "Stream 9"
+        }
+      ]
+    },
+    "chirp.stream.all": {
+      "label": "Stream (or all)",
+      "values": [
+        {
+          "code": "*",
+          "label": "All streams"
+        },
+        {
+          "code": "0",
+          "label": "Stream 0"
+        },
+        {
+          "code": "1",
+          "label": "Stream 1"
+        },
+        {
+          "code": "2",
+          "label": "Stream 2"
+        },
+        {
+          "code": "3",
+          "label": "Stream 3"
+        },
+        {
+          "code": "4",
+          "label": "Stream 4"
+        },
+        {
+          "code": "5",
+          "label": "Stream 5"
+        },
+        {
+          "code": "6",
+          "label": "Stream 6"
+        },
+        {
+          "code": "7",
+          "label": "Stream 7"
+        },
+        {
+          "code": "8",
+          "label": "Stream 8"
+        },
+        {
+          "code": "9",
+          "label": "Stream 9"
+        }
+      ]
+    },
+    "chirp.baud": {
+      "label": "Baud Rate",
+      "values": [
+        {
+          "code": "2400",
+          "label": "2400"
+        },
+        {
+          "code": "9600",
+          "label": "9600"
+        },
+        {
+          "code": "19200",
+          "label": "19200"
+        },
+        {
+          "code": "38400",
+          "label": "38400"
+        },
+        {
+          "code": "57600",
+          "label": "57600"
+        },
+        {
+          "code": "115200",
+          "label": "115200"
+        }
+      ]
+    },
+    "chirp.msc": {
+      "label": "Mass Storage",
+      "values": [
+        {
+          "code": "1",
+          "label": "Enter SD mode (mount)"
+        },
+        {
+          "code": "0",
+          "label": "Exit SD mode (unmount)"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "chirp",
+      "name": "CHiRP Audio Trigger",
+      "kind": "device-native",
+      "confidence": "community",
+      "vendor": "Paul Murphy (joymonkey)",
+      "firmware": "joymonkey/CHIRP main (source-derived 2026-07)",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        },
+        "notes": "Colon-delimited ASCII over USB CDC serial / Serial2 UART, terminated by \\n or \\r. EXCLUDED: the SparkFun MP3-Trigger single-byte binary compatibility layer (O F R T t v p) — those are raw bytes, not ASCII tokens, and do not fit the template encoder. CHRP also accepts an optional trailing ,{volume} argument not modeled here. The `*` (all streams) form applies to STOP only per the documented protocol; STAT/VOL take a specific stream 0-9 (pending on-device confirmation). GNME is modeled 3-arg (bank,page,index) and PLAY as simple (1-arg) / full (4-arg) only; intermediate arities are not decoded."
+      },
+      "commands": [
+        {
+          "id": "chirp.play",
+          "name": "Play Sound",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "PLAY:{index}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "required": true
+            }
+          ],
+          "examples": [
+            "PLAY:5"
+          ],
+          "commentLabel": "CHiRP play",
+          "category": "Playback"
+        },
+        {
+          "id": "chirp.stop",
+          "name": "Stop All",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "STOP",
+          "params": [],
+          "examples": [
+            "STOP"
+          ],
+          "commentLabel": "CHiRP stop",
+          "category": "Playback"
+        },
+        {
+          "id": "chirp.stop.stream",
+          "name": "Stop Stream",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "STOP:{stream}",
+          "params": [
+            {
+              "name": "stream",
+              "enum": "chirp.stream.all",
+              "required": true
+            }
+          ],
+          "examples": [
+            "STOP:1",
+            "STOP:*"
+          ],
+          "commentLabel": "CHiRP stop stream",
+          "category": "Playback"
+        },
+        {
+          "id": "chirp.vol",
+          "name": "Set Volume",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "VOL:{volume}",
+          "params": [
+            {
+              "name": "volume",
+              "type": "int",
+              "min": 0,
+              "max": 99,
+              "required": true
+            }
+          ],
+          "examples": [
+            "VOL:75"
+          ],
+          "commentLabel": "CHiRP volume",
+          "category": "Volume"
+        },
+        {
+          "id": "chirp.vol.stream",
+          "name": "Set Stream Volume",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "VOL:{stream},{volume}",
+          "params": [
+            {
+              "name": "stream",
+              "enum": "chirp.stream",
+              "required": true
+            },
+            {
+              "name": "volume",
+              "type": "int",
+              "min": 0,
+              "max": 99,
+              "required": true
+            }
+          ],
+          "examples": [
+            "VOL:1,60"
+          ],
+          "commentLabel": "CHiRP stream volume",
+          "category": "Volume"
+        },
+        {
+          "id": "chirp.stat",
+          "name": "Stream Status",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "STAT:{stream}",
+          "params": [
+            {
+              "name": "stream",
+              "enum": "chirp.stream",
+              "required": true
+            }
+          ],
+          "examples": [
+            "STAT:0"
+          ],
+          "commentLabel": "CHiRP status",
+          "category": "Status"
+        },
+        {
+          "id": "chirp.list",
+          "name": "List Tracks",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "LIST",
+          "params": [],
+          "examples": [
+            "LIST"
+          ],
+          "commentLabel": "CHiRP list",
+          "category": "Status"
+        },
+        {
+          "id": "chirp.gman",
+          "name": "Get Manifest",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "GMAN",
+          "params": [],
+          "examples": [
+            "GMAN"
+          ],
+          "commentLabel": "CHiRP manifest",
+          "category": "Status"
+        },
+        {
+          "id": "chirp.gnme",
+          "name": "Get Filename",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "GNME:{bank},{page},{index}",
+          "params": [
+            {
+              "name": "bank",
+              "enum": "chirp.bank",
+              "required": true
+            },
+            {
+              "name": "page",
+              "enum": "chirp.page",
+              "required": true
+            },
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "required": true
+            }
+          ],
+          "examples": [
+            "GNME:1,A,3"
+          ],
+          "commentLabel": "CHiRP get name",
+          "category": "Status"
+        },
+        {
+          "id": "chirp.baud",
+          "name": "Set UART Baud",
+          "safety": "config",
+          "encoder": "template",
+          "template": "BAUD:{rate}",
+          "params": [
+            {
+              "name": "rate",
+              "enum": "chirp.baud",
+              "required": true
+            }
+          ],
+          "examples": [
+            "BAUD:115200"
+          ],
+          "commentLabel": "CHiRP baud",
+          "category": "Config"
+        },
+        {
+          "id": "chirp.bpage",
+          "name": "Set Bank-1 Page",
+          "safety": "config",
+          "encoder": "template",
+          "template": "BPAGE:{page}",
+          "params": [
+            {
+              "name": "page",
+              "enum": "chirp.page",
+              "required": true
+            }
+          ],
+          "examples": [
+            "BPAGE:A"
+          ],
+          "commentLabel": "CHiRP bank page",
+          "category": "Config"
+        },
+        {
+          "id": "chirp.ccrc",
+          "name": "Clear Flash CRC",
+          "safety": "config",
+          "encoder": "template",
+          "template": "CCRC",
+          "params": [],
+          "examples": [
+            "CCRC"
+          ],
+          "commentLabel": "CHiRP clear CRC",
+          "category": "Config"
+        },
+        {
+          "id": "chirp.musb",
+          "name": "Mass Storage Toggle",
+          "safety": "config",
+          "encoder": "template",
+          "template": "MUSB:{on}",
+          "params": [
+            {
+              "name": "on",
+              "enum": "chirp.msc",
+              "required": true
+            }
+          ],
+          "examples": [
+            "MUSB:1",
+            "MUSB:0"
+          ],
+          "commentLabel": "CHiRP MSC toggle",
+          "category": "Config"
+        },
+        {
+          "id": "chirp.pvoice",
+          "name": "Speak Debug Phrase",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "PVOICE:{filename}",
+          "params": [
+            {
+              "name": "filename",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "PVOICE:HELLO"
+          ],
+          "commentLabel": "CHiRP voice",
+          "category": "Debug"
+        },
+        {
+          "id": "chirp.play.full",
+          "name": "Play Sound (bank/page/volume)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "PLAY:{index},{bank},{page},{volume}",
+          "params": [
+            {
+              "name": "index",
+              "type": "int",
+              "min": 0,
+              "required": true
+            },
+            {
+              "name": "bank",
+              "enum": "chirp.bank",
+              "required": true
+            },
+            {
+              "name": "page",
+              "enum": "chirp.page",
+              "required": true
+            },
+            {
+              "name": "volume",
+              "type": "int",
+              "min": 0,
+              "max": 99,
+              "required": true
+            }
+          ],
+          "examples": [
+            "PLAY:5,2,A,80"
+          ],
+          "commentLabel": "CHiRP play full",
+          "category": "Playback"
+        },
+        {
+          "id": "chirp.chirp",
+          "name": "Generated Chirp Sweep",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "CHRP:{startHz},{endHz},{durationMs}",
+          "params": [
+            {
+              "name": "startHz",
+              "type": "int",
+              "min": 0,
+              "required": true
+            },
+            {
+              "name": "endHz",
+              "type": "int",
+              "min": 0,
+              "required": true
+            },
+            {
+              "name": "durationMs",
+              "type": "int",
+              "min": 0,
+              "required": true
+            }
+          ],
+          "examples": [
+            "CHRP:200,2000,500"
+          ],
+          "commentLabel": "CHiRP sweep",
+          "category": "Debug"
+        }
+      ],
+      "categories": [
+        "Playback",
+        "Volume",
+        "Status",
+        "Config",
+        "Debug"
+      ]
+    }
+  ]
+}

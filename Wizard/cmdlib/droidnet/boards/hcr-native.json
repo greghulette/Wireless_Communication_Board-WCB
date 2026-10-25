@@ -1,0 +1,627 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "hcr.emotion": {
+      "label": "Emotion",
+      "values": [
+        {
+          "code": "H",
+          "label": "Happy"
+        },
+        {
+          "code": "S",
+          "label": "Sad"
+        },
+        {
+          "code": "M",
+          "label": "Mad"
+        },
+        {
+          "code": "C",
+          "label": "Scared"
+        }
+      ]
+    },
+    "hcr.channel": {
+      "label": "Channel",
+      "values": [
+        {
+          "code": "A",
+          "label": "A"
+        },
+        {
+          "code": "B",
+          "label": "B"
+        }
+      ]
+    },
+    "hcr.intensity": {
+      "label": "Intensity",
+      "values": [
+        {
+          "code": "0",
+          "label": "Mild"
+        },
+        {
+          "code": "1",
+          "label": "Extreme"
+        }
+      ]
+    },
+    "hcr.museState": {
+      "label": "Muse",
+      "values": [
+        {
+          "code": "1",
+          "label": "Enable"
+        },
+        {
+          "code": "0",
+          "label": "Disable"
+        },
+        {
+          "code": "T",
+          "label": "Toggle"
+        }
+      ]
+    },
+    "hcr.stopTarget": {
+      "label": "Stop",
+      "values": [
+        {
+          "code": "V",
+          "label": "Vocalizer (now)"
+        },
+        {
+          "code": "G",
+          "label": "Vocalizer (graceful)"
+        },
+        {
+          "code": "A",
+          "label": "WAV A"
+        },
+        {
+          "code": "B",
+          "label": "WAV B"
+        }
+      ]
+    },
+    "hcr.volTarget": {
+      "label": "Channel",
+      "values": [
+        {
+          "code": "V",
+          "label": "Vocalizer"
+        },
+        {
+          "code": "A",
+          "label": "WAV A"
+        },
+        {
+          "code": "B",
+          "label": "WAV B"
+        }
+      ]
+    },
+    "hcr.canonMode": {
+      "label": "Mode",
+      "values": [
+        {
+          "code": "0",
+          "label": "Improvisational"
+        },
+        {
+          "code": "1",
+          "label": "Canonical"
+        }
+      ]
+    },
+    "hcr.onoff": {
+      "label": "State",
+      "values": [
+        {
+          "code": "1",
+          "label": "Enable"
+        },
+        {
+          "code": "0",
+          "label": "Disable"
+        }
+      ]
+    },
+    "hcr.memMode": {
+      "label": "Playback",
+      "values": [
+        {
+          "code": "0",
+          "label": "Strict"
+        },
+        {
+          "code": "1",
+          "label": "Organic"
+        }
+      ]
+    },
+    "hcr.query": {
+      "label": "Query",
+      "values": [
+        {
+          "code": "EH",
+          "label": "Happy emotion"
+        },
+        {
+          "code": "ES",
+          "label": "Sad emotion"
+        },
+        {
+          "code": "EM",
+          "label": "Angry emotion"
+        },
+        {
+          "code": "EC",
+          "label": "Scared emotion"
+        },
+        {
+          "code": "E",
+          "label": "All emotions"
+        },
+        {
+          "code": "O",
+          "label": "Override state"
+        },
+        {
+          "code": "M",
+          "label": "Muse state"
+        },
+        {
+          "code": "F",
+          "label": "WAV file count"
+        },
+        {
+          "code": "T",
+          "label": "Vocalization duration"
+        },
+        {
+          "code": "PV",
+          "label": "Vocalizing?"
+        },
+        {
+          "code": "PA",
+          "label": "WAV A file #"
+        },
+        {
+          "code": "PB",
+          "label": "WAV B file #"
+        },
+        {
+          "code": "VV",
+          "label": "Vocalizer volume"
+        },
+        {
+          "code": "VA",
+          "label": "WAV A volume"
+        },
+        {
+          "code": "VB",
+          "label": "WAV B volume"
+        },
+        {
+          "code": "D",
+          "label": "Key metrics"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "hcr-native",
+      "name": "HCR Vocalizer (native <…>)",
+      "kind": "device-native",
+      "confidence": "high",
+      "vendor": "Human-Cyborg Relations",
+      "firmware": "HCR official command API",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "angle",
+        "durationSuffix": {
+          "supported": false
+        },
+        "notes": "All commands wrapped in <...>; chain via comma <a,b> or back-to-back <a><b>. Transport Serial/UART/I2C. Distinct from the wcb-hcr ;H verb book."
+      },
+      "commands": [
+        {
+          "id": "hcr.native.stimulus",
+          "name": "Emotional Stimulus",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<S{emotion}{intensity}>",
+          "params": [
+            {
+              "name": "emotion",
+              "enum": "hcr.emotion",
+              "required": true
+            },
+            {
+              "name": "intensity",
+              "enum": "hcr.intensity",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<SH1>",
+            "<SM0>"
+          ],
+          "commentLabel": "HCR stimulus",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.overload",
+          "name": "Overload / Electrocution",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<SE>",
+          "params": [],
+          "examples": [
+            "<SE>"
+          ],
+          "commentLabel": "HCR overload",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.muse",
+          "name": "Muse Enable/Disable/Toggle",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<M{state}>",
+          "params": [
+            {
+              "name": "state",
+              "enum": "hcr.museState",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<M1>",
+            "<M0>",
+            "<MT>"
+          ],
+          "commentLabel": "HCR muse",
+          "category": "Muse"
+        },
+        {
+          "id": "hcr.native.museSingle",
+          "name": "Trigger Single Musing",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<MM>",
+          "params": [],
+          "examples": [
+            "<MM>"
+          ],
+          "commentLabel": "HCR muse once",
+          "category": "Muse"
+        },
+        {
+          "id": "hcr.native.museMinGap",
+          "name": "Muse Min Gap (s)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<MN{seconds}>",
+          "params": [
+            {
+              "name": "seconds",
+              "type": "int",
+              "min": 0,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<MN5>"
+          ],
+          "commentLabel": "HCR muse min gap",
+          "category": "Muse"
+        },
+        {
+          "id": "hcr.native.museMaxGap",
+          "name": "Muse Max Gap (s)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<MX{seconds}>",
+          "params": [
+            {
+              "name": "seconds",
+              "type": "int",
+              "min": 0,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<MX30>"
+          ],
+          "commentLabel": "HCR muse max gap",
+          "category": "Muse"
+        },
+        {
+          "id": "hcr.native.playWav",
+          "name": "Play WAV File",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<C{channel}{file}>",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "file",
+              "type": "int",
+              "min": 0,
+              "max": 9999,
+              "pad": 4,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<CA0025>",
+            "<CB0009>"
+          ],
+          "commentLabel": "HCR play WAV",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.playWavRandom",
+          "name": "Play Random WAV (range)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<C{channel}{fileFrom}C{fileTo}>",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "fileFrom",
+              "type": "int",
+              "min": 0,
+              "max": 9999,
+              "pad": 4,
+              "required": true
+            },
+            {
+              "name": "fileTo",
+              "type": "int",
+              "min": 0,
+              "max": 9999,
+              "pad": 4,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<CB0003C0185>"
+          ],
+          "commentLabel": "HCR play random WAV",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.stop",
+          "name": "Stop",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<PS{target}>",
+          "params": [
+            {
+              "name": "target",
+              "enum": "hcr.stopTarget",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<PSV>",
+            "<PSG>"
+          ],
+          "commentLabel": "HCR stop",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.volume",
+          "name": "Set Volume",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<PV{target}{level}>",
+          "params": [
+            {
+              "name": "target",
+              "enum": "hcr.volTarget",
+              "required": true
+            },
+            {
+              "name": "level",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<PVV100>",
+            "<PVA50>"
+          ],
+          "commentLabel": "HCR volume",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.native.canonMode",
+          "name": "Canonical / Improvisational Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<OA{mode}>",
+          "params": [
+            {
+              "name": "mode",
+              "enum": "hcr.canonMode",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<OA1>",
+            "<OA0>"
+          ],
+          "commentLabel": "HCR mode",
+          "category": "Config"
+        },
+        {
+          "id": "hcr.native.personalityOverride",
+          "name": "Personality Chip Override",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<O{state}>",
+          "params": [
+            {
+              "name": "state",
+              "enum": "hcr.onoff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<O1>",
+            "<O0>"
+          ],
+          "commentLabel": "HCR personality override",
+          "category": "Config"
+        },
+        {
+          "id": "hcr.native.resetEmotions",
+          "name": "Reset All Emotions",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<OR>",
+          "params": [],
+          "examples": [
+            "<OR>"
+          ],
+          "commentLabel": "HCR reset emotions",
+          "category": "Config"
+        },
+        {
+          "id": "hcr.native.setEmotion",
+          "name": "Set Emotion Level",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<O{emotion}{value}>",
+          "params": [
+            {
+              "name": "emotion",
+              "enum": "hcr.emotion",
+              "required": true
+            },
+            {
+              "name": "value",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<OH50>",
+            "<OM100>"
+          ],
+          "commentLabel": "HCR set emotion",
+          "category": "Config"
+        },
+        {
+          "id": "hcr.native.memoryPlay",
+          "name": "Play Memory Slot",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<RRP{slot}>",
+          "params": [
+            {
+              "name": "slot",
+              "type": "int",
+              "min": 0,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<RRP3>"
+          ],
+          "commentLabel": "HCR memory play",
+          "category": "Record"
+        },
+        {
+          "id": "hcr.native.memorySave",
+          "name": "Save Memory Slot",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<RRS{slot}>",
+          "params": [
+            {
+              "name": "slot",
+              "type": "int",
+              "min": 0,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            "<RRS3>"
+          ],
+          "commentLabel": "HCR memory save",
+          "category": "Record"
+        },
+        {
+          "id": "hcr.native.memoryMode",
+          "name": "Memory Playback Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "<R{mode}>",
+          "params": [
+            {
+              "name": "mode",
+              "enum": "hcr.memMode",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<R0>",
+            "<R1>"
+          ],
+          "commentLabel": "HCR memory mode",
+          "category": "Record"
+        },
+        {
+          "id": "hcr.native.query",
+          "name": "Query",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "<Q{query}>",
+          "params": [
+            {
+              "name": "query",
+              "enum": "hcr.query",
+              "required": true
+            }
+          ],
+          "examples": [
+            "<QEH>",
+            "<QE>",
+            "<QD>"
+          ],
+          "commentLabel": "HCR query",
+          "category": "Query"
+        }
+      ],
+      "categories": [
+        "Sound",
+        "Muse",
+        "Config",
+        "Record",
+        "Query"
+      ]
+    }
+  ]
+}

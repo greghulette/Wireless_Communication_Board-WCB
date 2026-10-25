@@ -1,0 +1,140 @@
+{
+  "$schema": "droidnet-command-library/catalog/v1",
+  "libraryVersion": "4.2.0",
+  "schemaVersion": "v1",
+  "generatedFrom": "C2B5 firmware + WIPDocs (2026-06); R2UppitySpinnerV3 ALT fw 3.5.3 (2026-07); Printed Droid Magic Panel 32 Wireless KB (2026-07); WCB 6.1.5_290119RJUN2026 (2026-07)",
+  "boards": [
+    {
+      "id": "flthy-hps",
+      "file": "boards/flthy-hps.json",
+      "name": "FlthyHPs Holoprojectors",
+      "confidence": "high"
+    },
+    {
+      "id": "ia-magic-panel",
+      "file": "boards/ia-magic-panel.json",
+      "name": "IA MagicPanel",
+      "confidence": "high"
+    },
+    {
+      "id": "pd-magic-panel",
+      "file": "boards/pd-magic-panel.json",
+      "name": "PD MagicPanel",
+      "confidence": "community"
+    },
+    {
+      "id": "rseries-logic",
+      "file": "boards/rseries-logic.json",
+      "name": "RSeriesLogic (Logic Displays)",
+      "confidence": "high"
+    },
+    {
+      "id": "wcb-hcr",
+      "file": "boards/wcb-hcr.json",
+      "name": "WCB · HCR Vocalizer",
+      "confidence": "high"
+    },
+    {
+      "id": "wcb-mp3",
+      "file": "boards/wcb-mp3.json",
+      "name": "WCB · MP3 Trigger",
+      "confidence": "high"
+    },
+    {
+      "id": "maestro",
+      "file": "boards/maestro.json",
+      "name": "Maestro (sequence trigger)",
+      "confidence": "high"
+    },
+    {
+      "id": "maestro-native",
+      "file": "boards/maestro-native.json",
+      "name": "Maestro (Pololu Protocol)",
+      "confidence": "high"
+    },
+    {
+      "id": "psi-pro",
+      "file": "boards/psi-pro.json",
+      "name": "PSIPro (Process State Indicators)",
+      "confidence": "high"
+    },
+    {
+      "id": "hcr-native",
+      "file": "boards/hcr-native.json",
+      "name": "HCR Vocalizer (native <…>)",
+      "confidence": "high"
+    },
+    {
+      "id": "chirp",
+      "file": "boards/chirp.json",
+      "name": "CHiRP Audio Trigger",
+      "confidence": "community"
+    },
+    {
+      "id": "r2uppityspinner-alt",
+      "file": "boards/r2uppityspinner-alt.json",
+      "name": "R2 Uppity Spinner ALT (Periscope)",
+      "confidence": "community"
+    },
+    {
+      "id": "roam-a-dome",
+      "file": "boards/roam-a-dome.json",
+      "name": "Roam-A-Dome",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-plus",
+      "file": "boards/astropixels-plus.json",
+      "name": "AstroPixelsPlus",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-sound",
+      "file": "boards/astropixels-sound.json",
+      "name": "AstroPixelsPlus (Sound)",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-psi",
+      "file": "boards/astropixels-psi.json",
+      "name": "AstroPixelsPlus (PSI)",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-logics",
+      "file": "boards/astropixels-logics.json",
+      "name": "AstroPixelsPlus (Logics)",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-holo",
+      "file": "boards/astropixels-holo.json",
+      "name": "AstroPixelsPlus (Holo)",
+      "confidence": "high"
+    },
+    {
+      "id": "astropixels-servo",
+      "file": "boards/astropixels-servo.json",
+      "name": "AstroPixelsPlus (Servo)",
+      "confidence": "high"
+    },
+    {
+      "id": "wcb-native",
+      "file": "boards/wcb-native.json",
+      "name": "WCB (native config)",
+      "confidence": "high"
+    },
+    {
+      "id": "wcb-sequences",
+      "file": "boards/wcb-sequences.json",
+      "name": "WCB · Stored Sequences",
+      "confidence": "high"
+    },
+    {
+      "id": "wcb-wled",
+      "file": "boards/wcb-wled.json",
+      "name": "WCB · WLED Lighting",
+      "confidence": "high"
+    }
+  ]
+}

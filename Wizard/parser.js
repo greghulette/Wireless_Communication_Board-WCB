@@ -25,6 +25,11 @@ function createDefaultBoardConfig() {
     wcbNumber:    1,
     wcbQuantity:  1,
     meshChannel:  1,       // ESP-NOW mesh channel (1–13); network-wide, all boards must match
+    // Channel sync (docs/CHANNEL_SYNC.md §6-7) - network-wide like meshChannel. The region decides whether channels
+    // 12-13 exist (CHSYNC_REGIONS below); ?REGION applies at the next boot, ?CHSYNC live. Firmware before channel
+    // sync has neither line in its backup, so it reads as these defaults - which is how it behaves.
+    region:       '01',    // ?REGION,<cc>: '01' = IDF world-safe mode, channels 1-11
+    chanSync:     true,    // ?CHSYNC,ON|OFF: take part in channel moves and searches
     livePeerCount: null,   // PEERSLIVE telemetry (read-only; null = not reported)
     alias:        '',      // Friendly per-WCB name; ≤24 chars; '' = unset
     specialPeer:  false,   // ?SPECIAL,ON enables tracking of the special peer (NaviCore)
@@ -73,6 +78,10 @@ function createDefaultBoardConfig() {
       joinSsid: '',
       joinPass: '',
     },
+    // ?WIFI,TOKEN,<token> | CLEAR - the board's WebSocket login token ('' = none). Its own line, not part of the mode
+    // line above, and outside `wifi` because it is not a reboot change: it takes effect for the next session. JOIN
+    // needs one (the firmware refuses to start a JOIN with none). wifiTokenProblem() is the firmware's rule.
+    wifiToken: '',
 
     // Kyber
     kyber: {
@@ -177,6 +186,8 @@ function createDefaultSystemConfig() {
     general: {
       wcbQuantity:    1,
       meshChannel:    1,
+      region:         '01',    // channel sync region and participation: fleet-wide (createDefaultBoardConfig)
+      chanSync:       true,
       espnowPassword: 'change_me_or_risk_takeover',
       macOctet2:      '00',
       macOctet3:      '00',
@@ -229,6 +240,34 @@ function hwValueToDisplay(value) {
 
 function hwValueToBinary(value) {
   return HW_VERSION_MAP[String(value)]?.binary ?? 'ESP32';
+}
+
+// ─────────────────────────────────────────────
+// Channel sync region, and the WebSocket token rule
+// ─────────────────────────────────────────────
+// ?REGION's codes as docs/CHANNEL_SYNC.md §6 lists them: '01' (IDF world-safe mode, the default) and the IDF country
+// codes. The top channel of each is the Wizard's ASSUMPTION, not read from the IDF: world-safe mode, the US, Canada and
+// Taiwan stop at 11, and every other code here is taken to allow 12-13. The board checks ?WCBCH and every MOVE against
+// its own region table and reports the result as MAXCH in its [CHSYNC:...] line, so a channel this list offers and the
+// board refuses stays refused. Legality is the operator's call (US WiFi devices are limited to 1-11).
+const CHSYNC_REGIONS = ['01', 'AT', 'AU', 'BE', 'BG', 'BR', 'CA', 'CH', 'CN', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI',
+  'FR', 'GB', 'GR', 'HK', 'HR', 'HU', 'IE', 'IN', 'IS', 'IT', 'JP', 'KR', 'LI', 'LT', 'LU', 'LV', 'MT', 'MX', 'NL',
+  'NO', 'NZ', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK', 'TW', 'US'];
+const _REGION_TOP_11 = new Set(['01', 'US', 'CA', 'TW']);
+function regionMaxChannel(cc) {
+  const c = String(cc ?? '01').toUpperCase();
+  return CHSYNC_REGIONS.includes(c) && !_REGION_TOP_11.has(c) ? 13 : 11;
+}
+
+// The firmware's rule for ?WIFI,TOKEN (the WebSocket login token): 8-32 printable ASCII characters, none of
+// space , ^ ; ? " \ - each breaks the config chain or the line grammar. null when it is acceptable, else why not.
+function wifiTokenProblem(token) {
+  const t = String(token ?? '');
+  if (t.length < 8 || t.length > 32) return `the access token must be 8-32 characters (this one is ${t.length})`;
+  if (!/^[\x21-\x7E]+$/.test(t)) return 'the access token may use printable ASCII characters only, and no spaces';
+  const bad = t.match(/[,^;?"\\]/);
+  if (bad) return `the access token cannot contain ${bad[0]} (none of , ^ ; ? " \\)`;
+  return null;
 }
 
 // ─────────────────────────────────────────────
@@ -522,10 +561,26 @@ function parseToken(body, config) {
       break;
 
     case 'WCBCH': {
-      // ESP-NOW mesh channel (1–11). Clamp out-of-range to the default so a
-      // malformed line can't push an invalid channel back to the fleet.
+      // ESP-NOW mesh channel (1–13: 12-13 need a ?REGION that allows them, which the board checks). Clamp
+      // out-of-range to the default so a malformed line can't push an invalid channel back to the fleet.
       const ch = parseInt(parts[1]);
-      config.meshChannel = (ch >= 1 && ch <= 11) ? ch : 1;
+      config.meshChannel = (ch >= 1 && ch <= 13) ? ch : 1;
+      break;
+    }
+
+    case 'REGION': {
+      // ?REGION,<cc> (docs/CHANNEL_SYNC.md §6). A bare ?REGION is the query, and a code the firmware does not take
+      // is ignored rather than stored, so it is never pushed back.
+      const cc = (upperParts[1] || '').trim();
+      if (CHSYNC_REGIONS.includes(cc)) config.region = cc;
+      break;
+    }
+
+    case 'CHSYNC': {
+      // ?CHSYNC,ON|OFF. SEARCH and MOVE are actions and a bare ?CHSYNC the status query: none is config.
+      const sub = (upperParts[1] || '').trim();
+      if (sub === 'ON' || sub === '1') config.chanSync = true;
+      else if (sub === 'OFF' || sub === '0') config.chanSync = false;
       break;
     }
 
@@ -652,6 +707,14 @@ function parseToken(body, config) {
       // Split manually rather than trusting parts[]: a WPA2 passphrase may contain
       // commas, so everything after the SSID field is password, not more fields.
       const mode = upperParts[1];
+      if (mode === 'TOKEN') {
+        // ?WIFI,TOKEN,<token> | CLEAR - not a mode: it leaves the mode line's settings alone. A token the firmware's
+        // rule refuses is not kept (it cannot be on a board, so pushing it back would only fail).
+        const tok = parts.slice(2).join(',').trim();
+        if ((upperParts[2] || '').trim() === 'CLEAR' || tok === '') config.wifiToken = '';
+        else if (!wifiTokenProblem(tok)) config.wifiToken = tok;
+        break;
+      }
       if (mode === 'OFF' || !mode) {
         config.wifi.mode = 'off';
         break;
@@ -1227,6 +1290,8 @@ function parseSystemFile(fileContent) {
     const generalConfig = parseBackupString(sections['GENERAL']);
     system.general.wcbQuantity    = generalConfig.wcbQuantity;
     system.general.meshChannel    = generalConfig.meshChannel ?? 1;
+    system.general.region         = generalConfig.region ?? '01';
+    system.general.chanSync       = generalConfig.chanSync !== false;
     system.general.espnowPassword = generalConfig.espnowPassword;
     system.general.macOctet2      = generalConfig.macOctet2;
     system.general.macOctet3      = generalConfig.macOctet3;
@@ -1272,6 +1337,8 @@ function parseSystemFile(fileContent) {
 function applyGeneralToBoard(general, board) {
   board.wcbQuantity    = general.wcbQuantity;
   board.meshChannel    = general.meshChannel ?? 1;
+  board.region         = general.region ?? '01';
+  board.chanSync       = general.chanSync !== false;
   board.espnowPassword = general.espnowPassword;
   board.macOctet2      = general.macOctet2;
   board.macOctet3      = general.macOctet3;
@@ -1351,10 +1418,20 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
       add(`WDP,AUTOJOIN,${curJoin ? 'ON' : 'OFF'}`);
   }
 
-  // ESP-NOW mesh channel (1–11). Network-wide; the firmware persists it and applies it
+  // Channel sync region (docs/CHANNEL_SYNC.md §6): network-wide, applied at the next boot like the channel. Ahead of
+  // WCBCH, because the board checks the channel against its region and 12-13 exist only in a region that allows them.
+  // Firmware before channel sync answers "Unknown command" to it (and to CHSYNC below): an answer, so the push goes on.
+  if (fullPush || !baseline || (baseline.region ?? '01') !== (config.region ?? '01'))
+    add(`REGION,${config.region ?? '01'}`);
+
+  // ESP-NOW mesh channel (1–13). Network-wide; the firmware persists it and applies it
   // on reboot, and every board must land on the same channel, so a push moves the whole fleet.
   if (fullPush || !baseline || (baseline.meshChannel ?? 1) !== (config.meshChannel ?? 1))
     add(`WCBCH,${config.meshChannel ?? 1}`);
+
+  // Channel sync on or off: network-wide, live (no reboot).
+  if (fullPush || !baseline || (baseline.chanSync !== false) !== (config.chanSync !== false))
+    add(`CHSYNC,${config.chanSync !== false ? 'ON' : 'OFF'}`);
 
   // Controller peer (default NaviCore, ID 20): emit on diff. Every WCB in the
   // network needs the same value so peer tables stay consistent. Canonical token
@@ -1482,6 +1559,16 @@ function buildCommandString(config, baseline = null, fullPush = false, opts = {}
     add(`BCAST,OUT,S0,${config.broadcastToS0 ? 'ON' : 'OFF'}`);
 
   // ── WiFi ──
+  // The WebSocket login token first: a ?WIFI,JOIN that arrives with no token set is saved but warned about, and a
+  // JOIN board with none refuses to start WiFi at boot. Like the alias, an empty token is only ever a CLEAR of one the
+  // board had - a full push with none sends nothing, so restoring a config that predates the token never strips a
+  // board's lock. Not a reboot change (commandStringNeedsReboot skips WIFI,TOKEN): it applies to the next session.
+  {
+    const tok  = config.wifiToken ?? '';
+    const bTok = baseline?.wifiToken ?? '';
+    if (tok && (fullPush || !baseline || tok !== bTok)) add(`WIFI,TOKEN,${tok}`);
+    else if (!tok && bTok && !fullPush && baseline) add('WIFI,TOKEN,CLEAR');
+  }
   // Emitted as ONE line carrying mode + credentials together, because that is the
   // shape the firmware command takes. Only when something actually changed: this
   // needs a reboot to take effect (commandStringNeedsReboot in app.js lists WIFI,),
@@ -1799,6 +1886,8 @@ function diffConfigs(configA, configB) {
   check('wdpAutoJoin',    configA.wdpAutoJoin !== false, configB.wdpAutoJoin !== false);
   check('wcbQuantity',    configA.wcbQuantity,     configB.wcbQuantity);
   check('meshChannel',    configA.meshChannel ?? 1, configB.meshChannel ?? 1);
+  check('region',         configA.region ?? '01',   configB.region ?? '01');
+  check('chanSync',       configA.chanSync !== false, configB.chanSync !== false);
   check('espnowPassword', configA.espnowPassword,  configB.espnowPassword);
   check('macOctet2',      configA.macOctet2,       configB.macOctet2);
   check('macOctet3',      configA.macOctet3,       configB.macOctet3);
@@ -1819,6 +1908,7 @@ function diffConfigs(configA, configB) {
   check('pwmOutputPorts', configA.pwmOutputPorts,  configB.pwmOutputPorts);
   check('broadcastToS0',  configA.broadcastToS0 ?? false, configB.broadcastToS0 ?? false);
   check('wifi',           configA.wifi ?? { mode: 'off' }, configB.wifi ?? { mode: 'off' });
+  check('wifiToken',      configA.wifiToken ?? '', configB.wifiToken ?? '');
 
   for (let i = 0; i < 5; i++) {
     const pa = configA.serialPorts[i];
@@ -2177,6 +2267,394 @@ function createPullCollector(wantWCB) {
 }
 
 // ─────────────────────────────────────────────
+// A relay push, planned (docs/MGMT_RELAY.md §10)
+// ─────────────────────────────────────────────
+// A push to a board behind a relay goes as ?MGMT,FRAG sessions: chunks of at most 179 BYTES (the relay copies a chunk
+// into a 180-byte field and refuses a longer one: WCB.ino handleMgmtForward), at most 16 a session
+// (a released target reassembles 16 and tracks them in a 16-bit mask). One session holds 2864 bytes; a push longer than
+// that goes as several, each a whole number of commands, which the target runs one session at a time.
+//
+// utf8Chunks(str, maxBytes): str cut into pieces of at most maxBytes UTF-8 bytes, never inside a character (a JS
+// string cannot hold half of one, and the relay counts bytes: a chunk of 179 characters with an 'é' in it was 180
+// bytes and REJECTED, so the session never completed and the push was lost while the Wizard reported it sent). And no
+// piece but the last ends in whitespace: a chunk is the END of its relay line (?MGMT,FRAG,...,<chunk>), and the relay
+// trims every line it reads (WCB.ino processIncomingSerial, the WebSocket reader too), so a cut just after a space
+// dropped that space from the command - a label or sequence value changed by one character. The whitespace goes to the
+// start of the next piece, which is in the middle of its line and kept.
+const _isLineTrimmed = (ch) => ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n' || ch === '\v' || ch === '\f';
+function utf8Chunks(str, maxBytes = 179) {
+  const cps = [...String(str ?? '')];               // by code point: a surrogate pair stays together
+  const size = (ch) => { const cp = ch.codePointAt(0); return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4; };
+  const out = [];
+  for (let i = 0; i < cps.length; ) {
+    let j = i, bytes = 0;
+    while (j < cps.length && (j === i || bytes + size(cps[j]) <= maxBytes)) bytes += size(cps[j++]);
+    if (j < cps.length) {                            // not the last piece: back off over trailing whitespace
+      let k = j;
+      while (k > i && _isLineTrimmed(cps[k - 1])) k--;
+      if (k > i) j = k;                              // a piece of nothing but whitespace stays as it is
+    }
+    out.push(cps.slice(i, j).join(''));
+    i = j;
+  }
+  return out;
+}
+
+// What a WCB's firmware takes, from the capability tags it advertises about itself (WDP TLV 0x0D, the CAPTAGS= field
+// of its ?WDP,DUMP row, docs/WDP_DESIGN.md §3; the firmware's wcbOwnCapTags). "mgmt.fwd<N>": as a relay it forwards a
+// push session of up to N chunks; "mgmt.rx<N>": as a target it reassembles one of up to N - and, since a board
+// forwards at least what it takes (MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS), forwards N as a relay too. So the
+// classic ESP32 says "mgmt.fwd24" and the ESP32-S3 "mgmt.rx24". Firmware from before 2026-10-23 sends no tags, and
+// takes 16 of each.
+// capTagChunks(tags, prefix) -> the N of the first "<prefix><N>" in a space-separated tag list, or 0.
+function capTagChunks(tags, prefix) {
+  const want = String(prefix).toLowerCase();
+  for (const t of String(tags ?? '').trim().toLowerCase().split(/\s+/)) {
+    if (t.startsWith(want) && /^\d{1,3}$/.test(t.slice(want.length))) return Number(t.slice(want.length));
+  }
+  return 0;
+}
+// relayLongChunks(targetTags, relayTags, { relayForwardsAny, maxChunks }) -> the most chunks ONE command too long for a
+// session may take through that relay to that target, or 0 (one session at most, as before): the target's rx and the
+// relay's fwd (its mgmt.fwd, or its mgmt.rx, which implies it), where both are past maxChunks (16). relayForwardsAny: a
+// WcbMgmt relay (NaviCore, MgmtRelay), which forwards a session of any length and advertises no tags of its own. Tags
+// not known yet (undefined) read as none.
+function relayLongChunks(targetTags, relayTags, { relayForwardsAny = false, maxChunks = 16 } = {}) {
+  const rx  = capTagChunks(targetTags, 'mgmt.rx');
+  const fwd = relayForwardsAny ? Infinity
+                               : Math.max(capTagChunks(relayTags, 'mgmt.fwd'), capTagChunks(relayTags, 'mgmt.rx'));
+  const most = Math.min(rx, fwd);
+  return most > maxChunks ? most : 0;
+}
+
+// planRelayPush(cmdString, opts) -> { sessions: [{ text, chunks, cmds, list, to, restart }], split, renumber, problem }
+//   (list: its commands; to: 'old' - address the session to the number the board has now - or 'new', its new number;
+//   restart: the board restarts after this session, and the next is sent only once it is heard under its new number)
+//   cmdString  the push chain, funcChar-led commands joined by delim (buildCommandString)
+//   opts       { funcChar, delim, reboot (append ?reboot), chunkBytes 179, maxChunks 16, maxCmds 150,
+//                longChunks: 0, or the most chunks the target and relay take for ONE command too long for one session
+//                (relayLongChunks: 24 to an ESP32-S3 through a relay that forwards them),
+//                wcbChange: the push changes the board's number (?WCB,<n> with a new n),
+//                restReboot: (chain) => whether the rest of a renumbering push needs a ?reboot of its own }
+// Everything that fits one session is ONE session, in the order given, exactly as before. A longer push is split at
+// command boundaries into sessions of at most maxChunks chunks and maxCmds commands (the target queues a session's
+// commands at once, from its WiFi task, which never waits for room in its 200-slot queue, so a session of more than
+// that lost the rest while the push reported it sent; maxCmds leaves the queue room). Then order matters across
+// sessions, so the commands after which the target cannot be reached, or restarts on its own, go in the LAST one:
+// MAC octets and the mesh password (the next session would be filtered out), every PWM mapping, ?PX and ?ERASE (each
+// queues a restart, which a gap between sessions longer than its 4 s quiet window would let run mid-push) and the
+// ?reboot.
+// A board-number CHANGE (wcbChange) in a push longer than one session goes in two steps, with a restart between (Greg,
+// 2026-10-23: refusing it kept a board from being renumbered on purpose). The board takes ?WCB,<new> at once
+// (saveWCBNumberToPreferences sets WCB_Number live) and from then on reassembles only a session addressed to the new
+// number, while its radio address - from which a relay's unicast and every relay's peers are derived - stays the old
+// number's until it restarts. So step 1 is one session to the number it has now: ?WCB,<new> and ?reboot (restart:
+// true). The sender waits until the relay hears the board under its new number, then sends step 2: the rest of the
+// push, planned as a push of its own (its own sessions, the late commands last, a ?reboot only if restReboot says the
+// rest needs one), addressed to the new number, every session two chunks at least: a relay sends a one-chunk session
+// as a unicast that needs the new number in its peer table (a WCB relay: an ETM unicast; a WcbMgmt relay: WCB_Client
+// send), which it is only once it has learned the board, while two chunks go as broadcasts (a WCB relay) or raw frames
+// that register the peer on demand (a WcbMgmt relay). Every command after the restart runs under a number and an address
+// that agree. (A ?WCB,<n> that repeats the number, as a full push sends it, is an ordinary command.) `problem` is a
+// refusal in words, only for what cannot be carried at all; nothing is sent then.
+const _RELAY_LATE = (verb, sub) => verb === 'MAC' || verb === 'EPASS' || (verb === 'MAP' && sub === 'PWM') ||
+  /^PX\d*$/.test(verb) || verb === 'ERASE' || verb === 'REBOOT';
+function planRelayPush(cmdString, opts = {}) {
+  const { funcChar = '?', delim = '^', reboot = false, chunkBytes = 179, maxChunks = 16, maxCmds = 150,
+          longChunks = 0, wcbChange = false, restReboot = null } = opts;
+  const chain = String(cmdString ?? '');
+  const cmds = chain ? chain.split(delim + funcChar).map((p, i) => (i === 0 ? p : funcChar + p)).filter(Boolean) : [];
+  const verbOf = (c) => c.slice(funcChar.length).toUpperCase().split(',');
+  const chunksOf = (t) => utf8Chunks(t, chunkBytes);
+  const sessionOf = (list, to = 'old') => {
+    const text = list.join(delim);
+    return { text, chunks: chunksOf(text), cmds: list.length, list, to, restart: false };
+  };
+  const tooLong = (c) => `one command is ${new TextEncoder().encode(c).length} bytes, more than one relay session carries`
+                         + ` (${maxChunks * chunkBytes} bytes${longChunks ? `; ${longChunks * chunkBytes} for this board` : ''})`;
+  const fits = (list) => list.length <= maxCmds && chunksOf(list.join(delim)).length <= maxChunks;
+  // The ordinary split: one session if it fits, else whole commands in order, the late ones in the last session.
+  const plan = (list, to) => {
+    if (!list.length) return { sessions: [], split: false, problem: '' };
+    const whole = sessionOf(list, to);
+    if (whole.chunks.length <= maxChunks && list.length <= maxCmds) return { sessions: [whole], split: false, problem: '' };
+    if (list.length === 1) {
+      if (longChunks && whole.chunks.length <= longChunks) return { sessions: [whole], split: false, problem: '' };
+      return { sessions: [], split: false, problem: tooLong(list[0]) };
+    }
+    const early = [], late = [];
+    for (const c of list) (_RELAY_LATE(...verbOf(c)) ? late : early).push(c);
+    const sessions = [];
+    let cur = [];
+    for (const c of early) {
+      if (cur.length && !fits([...cur, c])) { sessions.push(sessionOf(cur, to)); cur = []; }
+      if (!fits([c])) {
+        // One command too long for a session of its own (a long ?SEQ,SAVE): a long session, where the target takes one.
+        if (!(longChunks && chunksOf(c).length <= longChunks)) return { sessions: [], split: true, problem: tooLong(c) };
+        if (cur.length) { sessions.push(sessionOf(cur, to)); cur = []; }
+        sessions.push(sessionOf([c], to));
+        continue;
+      }
+      cur.push(c);
+    }
+    if (late.length) {
+      if (cur.length && fits([...cur, ...late])) cur.push(...late);
+      else {
+        if (cur.length) sessions.push(sessionOf(cur, to));
+        cur = [...late];
+        if (!fits(cur)) return { sessions: [], split: true, problem: 'its network and restart commands do not fit one relay session' };
+      }
+    }
+    if (cur.length) sessions.push(sessionOf(cur, to));
+    return { sessions, split: true, problem: '' };
+  };
+
+  if (!cmds.length && !reboot) return { sessions: [], split: false, renumber: false, problem: '' };
+  const all = reboot ? [...cmds, funcChar + 'reboot'] : cmds;
+  const one = plan(all, 'old');
+  const wcbAt = wcbChange ? cmds.findIndex((c) => verbOf(c)[0] === 'WCB') : -1;
+  if (wcbAt < 0 || !one.split) return { ...one, renumber: false };
+
+  // Two steps: ?WCB,<new> and ?reboot to the number the board has now; then the rest to the new number.
+  const first = sessionOf([cmds[wcbAt], funcChar + 'reboot'], 'old');
+  first.restart = true;
+  const rest = cmds.filter((_, i) => i !== wcbAt);
+  const restChain = rest.join(delim);
+  const needs = typeof restReboot === 'function' ? !!restReboot(restChain) : !!restReboot;
+  const two = plan(needs ? [...rest, funcChar + 'reboot'] : rest, 'new');
+  if (two.problem) return { sessions: [], split: true, renumber: true, problem: two.problem };
+  for (const x of two.sessions) {
+    if (x.chunks.length === 1) x.chunks = utf8Chunks(x.text, Math.ceil(new TextEncoder().encode(x.text).length / 2));
+  }
+  return { sessions: [first, ...two.sessions], split: true, renumber: true, problem: '' };
+}
+
+// ─────────────────────────────────────────────
+// Channel sync lines in a ?WDP,DUMP and a ?CHSYNC (docs/CHANNEL_SYNC.md §2, §7)
+// ─────────────────────────────────────────────
+// Both are KEY=value lists. They are read by key, not by position, so a field a later firmware adds or moves does not
+// cost the ones this Wizard knows.
+//   [WDPCH:N=<id>,CH=<channel>,RANK=<rank>,PIN=<0|1>,SYNC=<0|1>,CC=<cc>]   one per device that sent the CHAN TLV,
+//                                                                           the queried board first
+//   [CHSYNC:EN=,CH=,MAXCH=,CC=,RANK=,PIN=,LEAD=,LRANK=,LPIN=,STATE=idle|search|move]   ?CHSYNC's machine line
+function _kvLine(line, tag) {
+  const m = new RegExp(`\\[${tag}:([^\\]]*)\\]`).exec(typeof line === 'string' ? line : '');
+  if (!m) return null;
+  const kv = {};
+  for (const part of m[1].split(',')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) kv[part.slice(0, eq).trim().toUpperCase()] = part.slice(eq + 1).trim();
+  }
+  return kv;
+}
+const _int = (v) => (/^\d+$/.test(v ?? '') ? Number(v) : null);
+
+// -> { n, ch, rank, pinned, sync, cc } or null.
+function parseWdpChanLine(line) {
+  const kv = _kvLine(line, 'WDPCH');
+  if (!kv || _int(kv.N) === null) return null;
+  return { n: _int(kv.N), ch: _int(kv.CH), rank: _int(kv.RANK), pinned: kv.PIN === '1', sync: kv.SYNC === '1',
+           cc: kv.CC || '' };
+}
+
+// The [CHSYNC:...] line anywhere in a ?CHSYNC reply -> { enabled, ch, maxCh, cc, rank, pinned, leader, leaderRank,
+// leaderPinned, state } or null (no line: firmware before channel sync, which answered "Unknown command").
+function parseChanSyncStatus(text) {
+  for (const line of String(text ?? '').split('\n')) {
+    const kv = _kvLine(line, 'CHSYNC');
+    if (!kv) continue;
+    return { enabled: kv.EN === '1', ch: _int(kv.CH), maxCh: _int(kv.MAXCH), cc: kv.CC || '', rank: _int(kv.RANK),
+             pinned: kv.PIN === '1', leader: _int(kv.LEAD), leaderRank: _int(kv.LRANK), leaderPinned: kv.LPIN === '1',
+             state: (kv.STATE || '').toLowerCase() };
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────
+// Windowed relay OTA: Go-Back-N over the target's write cursor (docs/WCB_OTA_TECHNICAL.md §4)
+// ─────────────────────────────────────────────
+// The Wizard used to send one ?OTA,DATA line and wait for its ACK before the next: one 192-byte frame per round trip,
+// about 79 ms through a WiFi relay, so ten minutes a board. The target has always allowed more: otaWrite() takes only
+// the frame at its cursor, a duplicate or a gap is a no-op, and every DATA frame is ACKed with the cursor
+// (handleOtaDataPacket, WCB_OTA.cpp). So the sender keeps a window of frames in flight and the cursor pulls it along;
+// a gap rewinds the sender to the cursor. Sender-only: firmware already in the field takes it. The same shape as
+// NaviCore's config tool (otaUpdateOverWcb), with one change after an ACK timeout (otaRelayStream, below).
+
+const OTA_RELAY_CHUNK = 192;   // OTA_ESPNOW_PAYLOAD (WCB_OTA.h): firmware bytes in one ESP-NOW DATA frame
+
+// Frames in flight and the gap between two lines, per link to the RELAY - sized to what the relay can hold, not to a
+// wish. Below the relay everything is the same: the target queues 12 OTA frames (otaPktQueue, WCB_OTA.cpp
+// enqueueOtaPacket) and the relay's ESP-NOW sender holds a task at 12 frames in flight (ESPNOW_INFLIGHT_TASK,
+// WCB_EspNow.cpp), so a window under 12 overflows neither.
+//   usb  Web Serial (direct, or a shared-hub tab) or Intellex holding a COM port. Every relay that takes ?OTA - a WCB,
+//        a MgmtRelay, a NaviCore - raises its serial RX ring to 8 KB (Serial.setRxBufferSize(8192): WCB.ino setup(),
+//        MgmtRelay.ino setup(), NaviCore.ino setup()), about 28 DATA lines; a window of 8 lines is 8 x ~290 B = 2.3 KB.
+//        The pace is the wire: a DATA line is ~290 B, and 290 B at 115200 8N1 is 25.2 ms, so 25 ms sends no faster
+//        than the link carries. Faster only piles bytes into the ring, and a ring overflow drops a run from the MIDDLE
+//        of a line - which the CRC suffix turns into a loss instead of a corrupt image. NaviCore's tool: 8 / 25 ms.
+//   ws   Intellex bridging the page to the relay's own WebSocket. The relay's queue for WebSocket lines is the limit:
+//        a WCB holds 6 (WS_QUEUE_DEPTH, WCB_WS.cpp), a MgmtRelay 8 (mgmt_wsserver.h), a NaviCore 8
+//        (navicore_wsserver.h), each draining ONE line per loop() pass and waiting 50 ms for room before it drops one
+//        (WS_ENQUEUE_WAIT_MS). Sized for the smallest: 4 in flight leaves room for the line still queued after a rewind
+//        and for an ABORT. There is no wire to pace to; 10 ms keeps a window from arriving as one burst, and 4 x 10 ms
+//        stays under the ~80 ms round trip, so it costs no throughput.
+const OTA_RELAY_LINKS = {
+  usb: { window: 8, paceMs: 25 },
+  ws:  { window: 4, paceMs: 10 },
+};
+
+function _otaB64(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+
+// One relay DATA line: <prefix>DATA,<target>,<session>,<offset>:<crc32>,<b64>. The CRC-32 (crc32 above, the firmware's
+// calculateCRC32) covers "<offset>,<b64>" exactly as sent, and is checked by the relay before it forwards the frame
+// (processOtaRelayCommand, WCB_OTA.cpp: calculateCRC32(offField + "," + b64)). It rides on the OFFSET field because the
+// relay reads that with String::toInt(), which stops at the ':' - firmware that predates the check reads the offset as
+// before and ignores the suffix; a trailing field would have been swept into the base64 there. A mismatch drops the
+// line, which turns a serial RX overflow's silent corruption into an ordinary loss that the cursor recovers.
+function otaRelayDataLine(prefix, target, session, offset, u8) {
+  const b64 = _otaB64(u8);
+  const crc = crc32(`${offset},${b64}`).toString(16).toUpperCase().padStart(8, '0');
+  return `${prefix}DATA,${target},${session},${offset}:${crc},${b64}`;
+}
+
+// Wait for the next ACK of THIS transfer (target and session) under one deadline. A foreign or stale-session ACK - a
+// line from another transfer through the same relay - is skipped without extending the wait.
+async function _otaOwnAck(io, target, session, timeoutMs) {
+  const deadline = io.now() + timeoutMs;
+  for (;;) {
+    const left = deadline - io.now();
+    if (left <= 0) return null;
+    const a = await io.nextAck(left);
+    if (!a) return null;
+    if (a.src === target && a.session === session) return a;
+  }
+}
+
+// Stream `bytes` to the target as relay DATA lines. io: { send(line) -> Promise, nextAck(ms) -> Promise<{src, session,
+// offset, status} | null>, sleep(ms) -> Promise, now() -> ms, progress?(confirmed, total), log?(text) }. opts: { target,
+// session, prefix ('<fc>OTA,'), window, paceMs, chunk, ackTimeoutMs, confirmMs, maxIdle, maxRewinds }. Resolves
+// { frames, rewinds, timeouts } once the target's cursor reaches the end; throws with the reason otherwise. The
+// Wizard's fast-fails stay, checked in this order: a cursor that collapses to 0 after real progress (the target lost
+// the session, and that id can never take another byte), then a non-zero ACK status (a torn-down session: overrun,
+// write error, idle abort - handleOtaDataPacket, WCB_OTA.cpp).
+//
+// ACKs come back in the order the frames went out (one relay, one ESP-NOW link, FIFO queues on both boards), and each
+// answers with the cursor, so an ACK that does not move it means "a frame arrived that was not the one at the cursor":
+// a GAP behind a lost frame, or a DUPLICATE of one already written. They look the same.
+//  - A gap: after a lost frame every frame still in flight answers with the same cursor. Rewinding on the first of them
+//    resends the window while the rest are still arriving, and each one rewinds it again (NaviCore's tool simulated 440x
+//    the sends for ONE lost chunk). So count them and rewind once all have answered: the frames in flight minus
+//    the lost one - `window - 1` in a full window, fewer at the image's end (NaviCore's USB path, after
+//    nctool.ota_usb_lost_chunk found that counting to `window - 1` there waited out the timeout on every late loss).
+//    Nothing of the old window is in flight then, so the new one does not pile on top of it.
+//  - A duplicate comes only from resending a frame whose original was still on its way. A count rewind never does that
+//    (everything has answered). An ACK timeout can: the target was busy past it, not deaf. Resending the whole window
+//    then would put a window of duplicates behind the late originals; they would answer while the NEXT window is in
+//    flight, be counted as gaps, rewind it, and so on for the rest of the image - every window sent twice. So a timeout
+//    resends only the frame at the cursor, as a probe, and nothing else until the cursor moves. Late originals move it
+//    past the probe, and sending carries on from where it was. A cursor that moves by exactly the probe is either the
+//    probe's own answer (the window was lost) or the first late original: one short wait for a second move tells them
+//    apart, and without one the window is resent from the cursor.
+async function otaRelayStream(bytes, io, opts) {
+  const total     = bytes.length;
+  const CHUNK     = opts.chunk ?? OTA_RELAY_CHUNK;
+  const WINDOW    = Math.max(1, opts.window | 0);
+  const paceMs    = Math.max(0, opts.paceMs | 0);
+  const ackMs     = opts.ackTimeoutMs ?? 2000;
+  const confirmMs = Math.min(ackMs, opts.confirmMs ?? 500);   // many round trips: a late window answers back to back
+  const maxIdle   = opts.maxIdle ?? 10;          // timeouts in a row: ~20 s of silence, inside the target's 30 s reaper
+  const maxRew    = opts.maxRewinds ?? 40;       // rewinds and probes with no progress between them
+  const { target, session } = opts;
+  const prefix    = opts.prefix ?? '?OTA,';
+  let confirmed = 0;                             // the target's cursor, from its ACKs
+  let nextSend  = 0;                             // the next offset to transmit: everything below it has been sent
+  let noAdvance = 0;                             // ACKs that did not move the cursor since it last moved
+  let mode      = 'send';                        // 'send' | 'probe' (after a timeout) | 'confirm' (the probe's move?)
+  let probeEnd  = 0;
+  let idle = 0, retries = 0, frames = 0, rewinds = 0, timeouts = 0;
+
+  const sendFrame = async (off) => {
+    const end = Math.min(off + CHUNK, total);
+    await io.send(otaRelayDataLine(prefix, target, session, off, bytes.subarray(off, end)));
+    frames++;
+    if (paceMs) await io.sleep(paceMs);
+    return end;
+  };
+  // Back off before resending: a loss is almost always ESP-NOW congestion (a controller broadcasting on the mesh),
+  // and resending at once deepens it, so one transient drop cascades.
+  const retry = async (why) => {
+    if (++retries > maxRew) throw new Error(`OTA stalled at ${confirmed} (no progress after retries)`);
+    io.log?.(`[OTA] ${why} — resending from ${confirmed}`);
+    await io.sleep(Math.min(retries * 50, 600));
+  };
+  const rewind = async (why) => { rewinds++; await retry(why); nextSend = confirmed; noAdvance = 0; mode = 'send'; };
+
+  while (confirmed < total) {
+    if (nextSend < confirmed) nextSend = confirmed;   // late originals moved the cursor past the probe
+    if (mode === 'send') {
+      while (nextSend < total && nextSend - confirmed < WINDOW * CHUNK) nextSend = await sendFrame(nextSend);
+    }
+
+    const a = await _otaOwnAck(io, target, session, mode === 'confirm' ? confirmMs : ackMs);
+    if (!a) {
+      if (mode === 'confirm') { await rewind(`window after ${confirmed} lost`); continue; }   // only the probe answered
+      // Nothing back in time: the tail of the window was lost (nothing more would come, nor be sent), or the target
+      // is busy. Probe with the frame at the cursor; nextSend stays where it was.
+      timeouts++;
+      if (++idle > maxIdle) throw new Error(`OTA stalled at ${confirmed} (no progress after retries)`);
+      await retry(`no answer in ${ackMs} ms`);
+      mode = 'probe';
+      noAdvance = 0;
+      probeEnd = await sendFrame(confirmed);
+      if (nextSend < probeEnd) nextSend = probeEnd;
+      continue;
+    }
+    idle = 0;
+    if (a.offset === 0 && confirmed > CHUNK)
+      throw new Error(`target lost the OTA session at ${confirmed} bytes (it likely timed out or rebooted) — retry the OTA`);
+    if (a.status !== 0)
+      throw new Error(`target rejected OTA data near ${confirmed} bytes (write error or lost session) — retry the OTA`);
+
+    if (a.offset > confirmed) {
+      confirmed = a.offset;
+      noAdvance = 0;
+      retries = 0;
+      // After a probe: past it, late originals are arriving - carry on. Exactly to its end: wait once more (confirm).
+      if (mode === 'probe') mode = confirmed === probeEnd ? 'confirm' : 'send';
+      else mode = 'send';
+      io.progress?.(Math.min(confirmed, total), total);
+    } else if (mode === 'confirm' && a.offset === confirmed) {
+      await rewind(`window after ${confirmed} lost`);   // the probe's duplicate, and no late original moved the cursor
+    } else if (mode === 'send' && a.offset === confirmed && nextSend > confirmed) {
+      const behind = Math.ceil((nextSend - confirmed) / CHUNK) - 1;
+      if (++noAdvance >= Math.max(1, behind)) await rewind(`frame at ${confirmed} lost`);
+    }
+    // Otherwise an answer from before the cursor moved, or a leftover while probing: nothing to do.
+  }
+  return { frames, rewinds, timeouts };
+}
+
+// Send END and wait for the verdict. A DATA cursor ACK still in flight carries the same target, session and status 0,
+// so it would read as "verified": the target answers END with otaWrittenOffset() AFTER otaEnd() has ended the session
+// (handleOtaEndPacket, WCB_OTA.cpp), so a verdict is status != 0, or status 0 with offset 0 - and a cursor ACK never
+// has offset 0 once a byte is written. One END, as before: a resent END after a good one finds the target rebooting
+// with no session, and would answer ERR for an update that succeeded. Resolves the verdict ACK, or null on timeout.
+async function otaRelayFinish(io, opts) {
+  const { target, session, prefix = '?OTA,', timeoutMs = 12000 } = opts;
+  await io.send(`${prefix}END,${target},${session}`);
+  const deadline = io.now() + timeoutMs;
+  for (;;) {
+    const a = await _otaOwnAck(io, target, session, Math.max(0, deadline - io.now()));
+    if (!a) return null;
+    if (a.status !== 0 || a.offset === 0) return a;
+  }
+}
+
+// ─────────────────────────────────────────────
 // Exports — available to app.js and parser.test.js
 // ─────────────────────────────────────────────
 // ONE object for both worlds. They used to be two hand-kept lists, and a function added to the Node one only
@@ -2204,6 +2682,20 @@ const WCB_PARSER_API = {
   parseConfigError,
   verifyConfigReply,
   createPullCollector,
+  utf8Chunks,
+  capTagChunks,
+  relayLongChunks,
+  planRelayPush,
+  CHSYNC_REGIONS,
+  regionMaxChannel,
+  wifiTokenProblem,
+  parseWdpChanLine,
+  parseChanSyncStatus,
+  OTA_RELAY_CHUNK,
+  OTA_RELAY_LINKS,
+  otaRelayDataLine,
+  otaRelayStream,
+  otaRelayFinish,
 };
 if (typeof module !== 'undefined' && module && module.exports) {
   module.exports = WCB_PARSER_API;   // Node: node --test, the harness's wizard.parser

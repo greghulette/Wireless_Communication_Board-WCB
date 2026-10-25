@@ -1,0 +1,596 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "flthy.designator": {
+      "label": "Holoprojector",
+      "values": [
+        {
+          "code": "F",
+          "label": "Front"
+        },
+        {
+          "code": "R",
+          "label": "Rear"
+        },
+        {
+          "code": "T",
+          "label": "Top"
+        },
+        {
+          "code": "A",
+          "label": "All"
+        }
+      ]
+    },
+    "flthy.color": {
+      "label": "Color",
+      "values": [
+        {
+          "code": "1",
+          "label": "Red"
+        },
+        {
+          "code": "2",
+          "label": "Yellow"
+        },
+        {
+          "code": "3",
+          "label": "Green"
+        },
+        {
+          "code": "4",
+          "label": "Cyan"
+        },
+        {
+          "code": "5",
+          "label": "Blue"
+        },
+        {
+          "code": "6",
+          "label": "Magenta"
+        },
+        {
+          "code": "7",
+          "label": "Orange"
+        },
+        {
+          "code": "8",
+          "label": "Purple"
+        },
+        {
+          "code": "9",
+          "label": "White"
+        },
+        {
+          "code": "0",
+          "label": "Random"
+        }
+      ]
+    },
+    "flthy.ledClearMode": {
+      "label": "Clear / Auto Mode",
+      "values": [
+        {
+          "code": "96",
+          "label": "Clear · No Off-Color · Auto Off"
+        },
+        {
+          "code": "971",
+          "label": "Clear · No Off-Color · Auto Default"
+        },
+        {
+          "code": "972",
+          "label": "Clear · No Off-Color · Auto Random"
+        },
+        {
+          "code": "98",
+          "label": "Clear · Off-Color · Auto Off"
+        },
+        {
+          "code": "991",
+          "label": "Clear · Off-Color · Auto Default"
+        },
+        {
+          "code": "992",
+          "label": "Clear · Off-Color · Auto Random"
+        }
+      ]
+    },
+    "flthy.position": {
+      "label": "Position",
+      "values": [
+        {
+          "code": "0",
+          "label": "Down"
+        },
+        {
+          "code": "1",
+          "label": "Center"
+        },
+        {
+          "code": "2",
+          "label": "Up"
+        },
+        {
+          "code": "3",
+          "label": "Left"
+        },
+        {
+          "code": "4",
+          "label": "Upper Left"
+        },
+        {
+          "code": "5",
+          "label": "Lower Left"
+        },
+        {
+          "code": "6",
+          "label": "Right"
+        },
+        {
+          "code": "7",
+          "label": "Upper Right"
+        },
+        {
+          "code": "8",
+          "label": "Lower Right"
+        }
+      ]
+    },
+    "flthy.servoTwitch": {
+      "label": "Auto Twitch",
+      "values": [
+        {
+          "code": "98",
+          "label": "Disable"
+        },
+        {
+          "code": "99",
+          "label": "Enable"
+        }
+      ]
+    },
+    "flthy.special": {
+      "label": "Special Sequence",
+      "values": [
+        {
+          "code": "S1",
+          "label": "Leia Mode"
+        },
+        {
+          "code": "S4",
+          "label": "Clear + Disable (no Off-Color)"
+        },
+        {
+          "code": "S5",
+          "label": "Clear + Enable Default (no Off-Color)"
+        },
+        {
+          "code": "S6",
+          "label": "Clear + Enable Random (no Off-Color)"
+        },
+        {
+          "code": "S7",
+          "label": "Clear + Disable (Off-Color)"
+        },
+        {
+          "code": "S8",
+          "label": "Clear + Enable Default (Off-Color)"
+        },
+        {
+          "code": "S9",
+          "label": "Clear + Enable Random (Off-Color)"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "flthy-hps",
+      "name": "FlthyHPs Holoprojectors",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "v1.8",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": true,
+          "sep": "|",
+          "unit": "seconds",
+          "max": 32767
+        }
+      },
+      "commands": [
+        {
+          "id": "flthy.led.leia",
+          "name": "Leia",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}001",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "F001",
+            "A001|30"
+          ],
+          "commentLabel": "Flthy Leia",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.colorproj",
+          "name": "Color Projector",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}002{color}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "color",
+              "enum": "flthy.color",
+              "default": "5"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "F0025",
+            "A0023|20"
+          ],
+          "commentLabel": "Flthy color projector",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.dimpulse",
+          "name": "Dim Pulse",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}003{color}{speed}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "color",
+              "enum": "flthy.color",
+              "default": "5"
+            },
+            {
+              "name": "speed",
+              "type": "int",
+              "min": 0,
+              "max": 9,
+              "default": 5,
+              "required": true
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "A00365",
+            "F00362|30"
+          ],
+          "commentLabel": "Flthy dim pulse",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.cycle",
+          "name": "Cycle",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}004{color}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "color",
+              "enum": "flthy.color",
+              "default": "5"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "F0043",
+            "A0045|20"
+          ],
+          "commentLabel": "Flthy cycle",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.shortcircuit",
+          "name": "Short Circuit",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}005{color}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "color",
+              "enum": "flthy.color",
+              "default": "7"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "A0057",
+            "F0055|10"
+          ],
+          "commentLabel": "Flthy short circuit",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.clearauto",
+          "name": "Clear / Auto Mode",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}0{mode}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "mode",
+              "enum": "flthy.ledClearMode",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "A096",
+            "A0971",
+            "F0992"
+          ],
+          "commentLabel": "Flthy clear/auto",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.solid",
+          "name": "Solid Color",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}006{color}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "color",
+              "enum": "flthy.color",
+              "default": "5"
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "A0065",
+            "R0063",
+            "A0065|60"
+          ],
+          "commentLabel": "Flthy solid",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.led.rainbow",
+          "name": "Rainbow",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{designator}007",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": true,
+          "examples": [
+            "T007",
+            "A007|45"
+          ],
+          "commentLabel": "Flthy rainbow",
+          "category": "Lighting"
+        },
+        {
+          "id": "flthy.servo.preset",
+          "name": "Preset Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}101{position}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "position",
+              "enum": "flthy.position",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "F1011",
+            "A1010"
+          ],
+          "commentLabel": "Flthy preset position",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.rc-lr",
+          "name": "RC Control L/R",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}102",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "F102"
+          ],
+          "commentLabel": "Flthy RC L/R",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.rc-ud",
+          "name": "RC Control U/D",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}103",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "F103"
+          ],
+          "commentLabel": "Flthy RC U/D",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.random",
+          "name": "Random Position",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}104",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "A104",
+            "F104"
+          ],
+          "commentLabel": "Flthy random position",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.wag-lr",
+          "name": "Wag L/R",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}105",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "F105"
+          ],
+          "commentLabel": "Flthy wag L/R",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.wag-ud",
+          "name": "Wag U/D",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}106",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "F106"
+          ],
+          "commentLabel": "Flthy wag U/D",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.servo.autotwitch",
+          "name": "Auto Twitch On/Off",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{designator}1{mode}",
+          "params": [
+            {
+              "name": "designator",
+              "enum": "flthy.designator",
+              "required": true
+            },
+            {
+              "name": "mode",
+              "enum": "flthy.servoTwitch",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "T199",
+            "A198"
+          ],
+          "commentLabel": "Flthy servo auto twitch",
+          "category": "Servo"
+        },
+        {
+          "id": "flthy.special.sequence",
+          "name": "Special Sequence",
+          "safety": "movement",
+          "encoder": "template",
+          "template": "{special}",
+          "params": [
+            {
+              "name": "special",
+              "enum": "flthy.special",
+              "required": true
+            }
+          ],
+          "supportsDuration": false,
+          "examples": [
+            "S1",
+            "S5",
+            "S9"
+          ],
+          "commentLabel": "Flthy special",
+          "category": "Sequences"
+        }
+      ],
+      "categories": [
+        "Lighting",
+        "Servo",
+        "Sequences"
+      ]
+    }
+  ]
+}

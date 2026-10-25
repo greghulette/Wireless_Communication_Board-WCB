@@ -1,0 +1,387 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "hcr.emotion": {
+      "label": "Emotion",
+      "values": [
+        {
+          "code": "H",
+          "label": "Happy"
+        },
+        {
+          "code": "S",
+          "label": "Sad"
+        },
+        {
+          "code": "M",
+          "label": "Mad"
+        },
+        {
+          "code": "C",
+          "label": "Scared"
+        }
+      ]
+    },
+    "hcr.strength": {
+      "label": "Strength",
+      "values": [
+        {
+          "code": "MOD",
+          "label": "Moderate"
+        },
+        {
+          "code": "STRONG",
+          "label": "Strong"
+        }
+      ]
+    },
+    "hcr.channel": {
+      "label": "Channel",
+      "values": [
+        {
+          "code": "A",
+          "label": "A"
+        },
+        {
+          "code": "B",
+          "label": "B"
+        }
+      ]
+    },
+    "hcr.volTarget": {
+      "label": "Channel",
+      "values": [
+        {
+          "code": "V",
+          "label": "Vocalizer"
+        },
+        {
+          "code": "A",
+          "label": "WAV A"
+        },
+        {
+          "code": "B",
+          "label": "WAV B"
+        }
+      ]
+    },
+    "hcr.onoff": {
+      "label": "State",
+      "values": [
+        { "code": "1", "label": "Enable" },
+        { "code": "0", "label": "Disable" }
+      ]
+    },
+    "hcr.museMode": {
+      "label": "Muse",
+      "values": [
+        { "code": "ON", "label": "On" },
+        { "code": "OFF", "label": "Off" },
+        { "code": "TOGGLE", "label": "Toggle" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "wcb-hcr",
+      "name": "WCB · HCR Vocalizer",
+      "kind": "wcb-verb",
+      "confidence": "high",
+      "firmware": "WCB 6.1.0 HCR_Integration",
+      "routing": {
+        "class": "wcb-verb"
+      },
+      "commands": [
+        {
+          "id": "hcr.stim",
+          "name": "Emotional Stimulus",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,STIM,{emotion},{strength}",
+          "params": [
+            {
+              "name": "emotion",
+              "enum": "hcr.emotion",
+              "required": true
+            },
+            {
+              "name": "strength",
+              "enum": "hcr.strength",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,STIM,H,STRONG"
+          ],
+          "commentLabel": "HCR stimulus",
+          "category": "Emotion"
+        },
+        {
+          "id": "hcr.play",
+          "name": "Play WAV",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,PLAY,{channel},{file}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "file",
+              "type": "int",
+              "min": 0,
+              "max": 9999,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,PLAY,B,9"
+          ],
+          "commentLabel": "HCR play",
+          "category": "Sound"
+        },
+        {
+          "id": "hcr.vol",
+          "name": "Set Channel Volume",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,VOL,{channel},{level}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.volTarget",
+              "required": true
+            },
+            {
+              "name": "level",
+              "type": "int",
+              "min": 0,
+              "max": 100,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,VOL,A,80"
+          ],
+          "commentLabel": "HCR volume",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.volUp",
+          "name": "Volume Up (channel)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,VOLUP,{channel},{step}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.volTarget",
+              "required": true
+            },
+            {
+              "name": "step",
+              "type": "int",
+              "min": 1,
+              "max": 100,
+              "default": 5,
+              "required": false
+            }
+          ],
+          "examples": [
+            ";H,VOLUP,A,5"
+          ],
+          "commentLabel": "HCR vol up",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.volUpAll",
+          "name": "Volume Up (all channels)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,VOLUP",
+          "params": [],
+          "examples": [
+            ";H,VOLUP"
+          ],
+          "commentLabel": "HCR vol up all",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.volDown",
+          "name": "Volume Down (channel)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,VOLDN,{channel},{step}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.volTarget",
+              "required": true
+            },
+            {
+              "name": "step",
+              "type": "int",
+              "min": 1,
+              "max": 100,
+              "default": 5,
+              "required": false
+            }
+          ],
+          "examples": [
+            ";H,VOLDN,B,10"
+          ],
+          "commentLabel": "HCR vol down",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.volDownAll",
+          "name": "Volume Down (all channels)",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,VOLDN",
+          "params": [],
+          "examples": [
+            ";H,VOLDN"
+          ],
+          "commentLabel": "HCR vol down all",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.fadeIn",
+          "name": "Fade In",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,FADEIN,{channel},{sec}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 0,
+              "max": 600,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,FADEIN,A,3"
+          ],
+          "commentLabel": "HCR fade in",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.fadeOut",
+          "name": "Fade Out",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,FADEOUT,{channel},{sec}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 0,
+              "max": 600,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,FADEOUT,B,2"
+          ],
+          "commentLabel": "HCR fade out",
+          "category": "Volume"
+        },
+        {
+          "id": "hcr.playFade",
+          "name": "Play WAV with Fade-In",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": ";H,PLAY,{channel},{file},FADEIN,{sec}",
+          "params": [
+            {
+              "name": "channel",
+              "enum": "hcr.channel",
+              "required": true
+            },
+            {
+              "name": "file",
+              "type": "int",
+              "min": 0,
+              "max": 9999,
+              "required": true
+            },
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 0,
+              "max": 600,
+              "required": true
+            }
+          ],
+          "examples": [
+            ";H,PLAY,A,9,FADEIN,3"
+          ],
+          "commentLabel": "HCR play+fade",
+          "category": "Sound"
+        },
+        { "id": "hcr.overload", "name": "Overload", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,OVERLOAD", "params": [], "examples": [";H,OVERLOAD"], "commentLabel": "HCR overload", "category": "Emotion" },
+        { "id": "hcr.setEmotion", "name": "Set Emotion Level", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,SETEMOTION,{emotion},{value}",
+          "params": [ { "name": "emotion", "enum": "hcr.emotion", "required": true },
+                      { "name": "value", "type": "int", "min": 0, "max": 100, "required": true } ],
+          "examples": [";H,SETEMOTION,H,80"], "commentLabel": "HCR set emotion", "category": "Emotion" },
+        { "id": "hcr.override", "name": "Override Emotions", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,OVERRIDE,{state}",
+          "params": [ { "name": "state", "enum": "hcr.onoff", "required": true } ],
+          "examples": [";H,OVERRIDE,1"], "commentLabel": "HCR override", "category": "Emotion" },
+        { "id": "hcr.muse", "name": "Muse (once)", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,MUSE", "params": [], "examples": [";H,MUSE"], "commentLabel": "HCR muse", "category": "Emotion" },
+        { "id": "hcr.museSet", "name": "Muse On/Off/Toggle", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,MUSE,{mode}",
+          "params": [ { "name": "mode", "enum": "hcr.museMode", "required": true } ],
+          "examples": [";H,MUSE,TOGGLE"], "commentLabel": "HCR muse set", "category": "Emotion" },
+        { "id": "hcr.museGap", "name": "Muse Gap Range", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,MUSE,GAP,{min},{max}",
+          "params": [ { "name": "min", "type": "int", "min": 0, "max": 3600, "required": true },
+                      { "name": "max", "type": "int", "min": 0, "max": 3600, "required": true } ],
+          "examples": [";H,MUSE,GAP,10,30"], "commentLabel": "HCR muse gap", "category": "Emotion" },
+        { "id": "hcr.stopEmote", "name": "Stop Emote", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,STOPEMOTE", "params": [], "examples": [";H,STOPEMOTE"], "commentLabel": "HCR stop emote", "category": "Emotion" },
+        { "id": "hcr.resetEmotions", "name": "Reset Emotions", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,RESETEMOTIONS", "params": [], "examples": [";H,RESETEMOTIONS"], "commentLabel": "HCR reset emotions", "category": "Emotion" },
+        { "id": "hcr.stop", "name": "Stop All", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,STOP", "params": [], "examples": [";H,STOP"], "commentLabel": "HCR stop", "category": "Sound" },
+        { "id": "hcr.stopWav", "name": "Stop WAV Channel", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,STOPWAV,{channel}",
+          "params": [ { "name": "channel", "enum": "hcr.channel", "required": true } ],
+          "examples": [";H,STOPWAV,A"], "commentLabel": "HCR stop wav", "category": "Sound" },
+        { "id": "hcr.fn", "name": "Function (numeric)", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,FN,{fn},{chan},{track}",
+          "params": [ { "name": "fn", "type": "int", "min": 0, "max": 99, "required": true },
+                      { "name": "chan", "type": "int", "min": 0, "max": 9, "required": true },
+                      { "name": "track", "type": "int", "min": 0, "max": 9999, "required": true } ],
+          "examples": [";H,FN,14,1,5"], "commentLabel": "HCR fn", "category": "System" },
+        { "id": "hcr.raw", "name": "Raw Passthrough", "safety": "cosmetic", "encoder": "template",
+          "template": ";H,RAW,{payload}",
+          "params": [ { "name": "payload", "pattern": ".+", "required": true } ],
+          "examples": [";H,RAW,<CA0>"], "commentLabel": "HCR raw", "category": "System" }
+      ],
+      "categories": [
+        "Emotion",
+        "Sound",
+        "Volume",
+        "System"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo AstroPixelsPlus MarcduinoLogics.h — @<addr>T/M/P logic-display commands (FLD/RLD)",
+  "enums": {
+    "ap.logicAddr": {
+      "label": "Logic",
+      "values": [
+        {
+          "code": "0",
+          "label": "Both"
+        },
+        {
+          "code": "1",
+          "label": "Front (FLD)"
+        },
+        {
+          "code": "2",
+          "label": "Rear (RLD)"
+        }
+      ]
+    },
+    "ap.logicLineAddr": {
+      "label": "Line",
+      "values": [
+        {
+          "code": "1",
+          "label": "Front (top)"
+        },
+        {
+          "code": "2",
+          "label": "Front (bottom)"
+        },
+        {
+          "code": "3",
+          "label": "Rear"
+        }
+      ]
+    },
+    "ap.logicEffect": {
+      "label": "Effect",
+      "values": [
+        {
+          "code": "1",
+          "label": "Normal"
+        },
+        {
+          "code": "2",
+          "label": "Flashing Color"
+        },
+        {
+          "code": "3",
+          "label": "Alarm"
+        },
+        {
+          "code": "4",
+          "label": "Failure"
+        },
+        {
+          "code": "5",
+          "label": "Red Alert"
+        },
+        {
+          "code": "6",
+          "label": "Leia"
+        },
+        {
+          "code": "11",
+          "label": "March"
+        }
+      ]
+    },
+    "ap.logicFont": {
+      "label": "Font",
+      "values": [
+        {
+          "code": "60",
+          "label": "Latin"
+        },
+        {
+          "code": "61",
+          "label": "Aurabesh"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "astropixels-logics",
+      "name": "AstroPixelsPlus (Logics)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "AstroPixelsPlus",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "ap.logic.effect",
+          "name": "Logic Effect",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{addr}T{effect}",
+          "params": [
+            {
+              "name": "addr",
+              "enum": "ap.logicAddr",
+              "required": true,
+              "default": "0"
+            },
+            {
+              "name": "effect",
+              "enum": "ap.logicEffect",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "@1T1",
+            "@2T6",
+            "@0T11"
+          ],
+          "commentLabel": "AP logic effect",
+          "category": "Lighting"
+        },
+        {
+          "id": "ap.logic.text",
+          "name": "Scroll Text",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{addr}M{text}",
+          "params": [
+            {
+              "name": "addr",
+              "enum": "ap.logicLineAddr",
+              "required": true,
+              "default": "1"
+            },
+            {
+              "name": "text",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "@1MHELLO",
+            "@3MR2-D2"
+          ],
+          "commentLabel": "AP logic text (free text, scrolls left)",
+          "category": "Text"
+        },
+        {
+          "id": "ap.logic.font",
+          "name": "Text Font",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{addr}P{font}",
+          "params": [
+            {
+              "name": "addr",
+              "enum": "ap.logicLineAddr",
+              "required": true,
+              "default": "1"
+            },
+            {
+              "name": "font",
+              "enum": "ap.logicFont",
+              "required": true,
+              "default": "60"
+            }
+          ],
+          "examples": [
+            "@1P60",
+            "@3P61"
+          ],
+          "commentLabel": "AP logic font",
+          "category": "Text"
+        }
+      ],
+      "categories": [
+        "Lighting",
+        "Text"
+      ]
+    }
+  ]
+}

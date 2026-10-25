@@ -1,0 +1,462 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo AstroPixelsPlus.ino — #AP config + : panel macros + :SE sequences (consolidated)",
+  "enums": {
+    "ap.onOff": {
+      "label": "State",
+      "values": [
+        {
+          "code": "0",
+          "label": "Off / Disabled"
+        },
+        {
+          "code": "1",
+          "label": "On / Enabled"
+        }
+      ]
+    },
+    "ap.panelAction": {
+      "label": "Action",
+      "values": [
+        {
+          "code": "OP",
+          "label": "Open"
+        },
+        {
+          "code": "CL",
+          "label": "Close"
+        },
+        {
+          "code": "OF",
+          "label": "Flutter"
+        }
+      ]
+    },
+    "ap.panelGroup": {
+      "label": "Panel Group",
+      "values": [
+        {
+          "code": "00",
+          "label": "All"
+        },
+        {
+          "code": "01",
+          "label": "Group 1"
+        },
+        {
+          "code": "02",
+          "label": "Group 2"
+        },
+        {
+          "code": "03",
+          "label": "Group 3"
+        },
+        {
+          "code": "04",
+          "label": "Group 4"
+        },
+        {
+          "code": "05",
+          "label": "Group 5"
+        },
+        {
+          "code": "06",
+          "label": "Group 6"
+        },
+        {
+          "code": "07",
+          "label": "Group 7"
+        },
+        {
+          "code": "08",
+          "label": "Group 8"
+        },
+        {
+          "code": "09",
+          "label": "Group 9"
+        },
+        {
+          "code": "10",
+          "label": "Group 10"
+        },
+        {
+          "code": "11",
+          "label": "Top Pie"
+        },
+        {
+          "code": "12",
+          "label": "Bottom Dome"
+        }
+      ]
+    },
+    "ap.panelSeq": {
+      "label": "Sequence",
+      "values": [
+        {
+          "code": "OP",
+          "label": "Open"
+        },
+        {
+          "code": "CL",
+          "label": "Close"
+        },
+        {
+          "code": "OF",
+          "label": "Flutter"
+        },
+        {
+          "code": "OCR",
+          "label": "Open/Close Repeat"
+        },
+        {
+          "code": "OC",
+          "label": "Open/Close"
+        },
+        {
+          "code": "OCL",
+          "label": "Open/Close Long"
+        },
+        {
+          "code": "OW",
+          "label": "Wave"
+        },
+        {
+          "code": "OWF",
+          "label": "Wave Fast"
+        },
+        {
+          "code": "OWC",
+          "label": "Open/Close Wave"
+        },
+        {
+          "code": "OMA",
+          "label": "Marching Ants"
+        },
+        {
+          "code": "OAP",
+          "label": "Alternate"
+        },
+        {
+          "code": "OD",
+          "label": "Dance"
+        },
+        {
+          "code": "OS",
+          "label": "Shake"
+        }
+      ]
+    },
+    "ap.sequence": {
+      "label": "Sequence",
+      "values": [
+        {
+          "code": "00",
+          "label": "Stop / Cancel"
+        },
+        {
+          "code": "01",
+          "label": "Scream"
+        },
+        {
+          "code": "02",
+          "label": "Wave"
+        },
+        {
+          "code": "03",
+          "label": "Smirk (fast wave)"
+        },
+        {
+          "code": "04",
+          "label": "Open/Close Wave"
+        },
+        {
+          "code": "05",
+          "label": "Beep Cantina"
+        },
+        {
+          "code": "06",
+          "label": "Short Circuit"
+        },
+        {
+          "code": "07",
+          "label": "Cantina Music"
+        },
+        {
+          "code": "08",
+          "label": "Leia Message"
+        },
+        {
+          "code": "09",
+          "label": "Disco"
+        },
+        {
+          "code": "50",
+          "label": "Scream (no panels)"
+        },
+        {
+          "code": "51",
+          "label": "Panel Open/Close"
+        },
+        {
+          "code": "52",
+          "label": "Panel Wave"
+        },
+        {
+          "code": "53",
+          "label": "Panel Fast Wave"
+        },
+        {
+          "code": "54",
+          "label": "Sound + Open/Close Wave"
+        },
+        {
+          "code": "55",
+          "label": "Marching Ants"
+        },
+        {
+          "code": "56",
+          "label": "Faint"
+        },
+        {
+          "code": "57",
+          "label": "Rhythmic"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "astropixels-plus",
+      "name": "AstroPixelsPlus",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "AstroPixelsPlus",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "categories": [
+        "Panels",
+        "Sequences",
+        "Setup",
+        "System"
+      ],
+      "commands": [
+        {
+          "id": "ap.cfg.wifi",
+          "name": "WiFi Enable",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APWIFI{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "ap.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#APWIFI0",
+            "#APWIFI1"
+          ],
+          "commentLabel": "AP wifi",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.remote",
+          "name": "Droid Remote Enable",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APREMOTE{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "ap.onOff",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "#APREMOTE0",
+            "#APREMOTE1"
+          ],
+          "commentLabel": "AP remote",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.rname",
+          "name": "Droid Remote Name",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#APRNAME{name}",
+          "params": [
+            {
+              "name": "name",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "#APRNAMER2D2"
+          ],
+          "commentLabel": "AP remote name (free text)",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.rsecret",
+          "name": "Droid Remote Secret",
+          "safety": "config",
+          "encoder": "template",
+          "template": "#APRSECRET{secret}",
+          "params": [
+            {
+              "name": "secret",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "#APRSECRETfoo"
+          ],
+          "commentLabel": "AP remote secret (free text)",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.pair",
+          "name": "Start Pairing",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APPAIR",
+          "params": [],
+          "examples": [
+            "#APPAIR"
+          ],
+          "commentLabel": "AP pair",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.unpair",
+          "name": "Clear Pairing",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APUNPAIR",
+          "params": [],
+          "examples": [
+            "#APUNPAIR"
+          ],
+          "commentLabel": "AP unpair",
+          "category": "Setup"
+        },
+        {
+          "id": "ap.cfg.zero",
+          "name": "Clear All Preferences",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APZERO",
+          "params": [],
+          "examples": [
+            "#APZERO"
+          ],
+          "commentLabel": "AP zero (clears WiFi/remote/sound prefs)",
+          "category": "System"
+        },
+        {
+          "id": "ap.cfg.restart",
+          "name": "Reboot",
+          "safety": "power",
+          "encoder": "template",
+          "template": "#APRESTART",
+          "params": [],
+          "examples": [
+            "#APRESTART"
+          ],
+          "commentLabel": "AP restart",
+          "category": "System"
+        },
+        {
+          "id": "ap.panel.macro",
+          "name": "Panel Macro",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":{action}{group}",
+          "params": [
+            {
+              "name": "action",
+              "enum": "ap.panelAction",
+              "required": true,
+              "default": "OP"
+            },
+            {
+              "name": "group",
+              "enum": "ap.panelGroup",
+              "required": true,
+              "default": "00"
+            }
+          ],
+          "examples": [
+            ":OP00",
+            ":CL05",
+            ":OF00",
+            ":OP11",
+            ":CL12"
+          ],
+          "commentLabel": "AP panel macro (open/close/flutter group)",
+          "category": "Panels"
+        },
+        {
+          "id": "ap.panel.dynamic",
+          "name": "Panel Sequence (hex group)",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":{code}${rest}",
+          "params": [
+            {
+              "name": "code",
+              "enum": "ap.panelSeq",
+              "required": true,
+              "default": "OP"
+            },
+            {
+              "name": "rest",
+              "pattern": "[0-9A-Fa-f]+(?:,[0-9]+)*",
+              "required": true
+            }
+          ],
+          "examples": [
+            ":OP$4000",
+            ":OS$3F",
+            ":OP$4000,10,50,0,0"
+          ],
+          "commentLabel": "AP panel dynamic: <hexGroup>[,onMs,offMs,onEase,offEase] (free text)",
+          "category": "Sequences"
+        },
+        {
+          "id": "ap.seq.play",
+          "name": "Play Sequence",
+          "safety": "movement",
+          "encoder": "template",
+          "template": ":SE{seq}",
+          "params": [
+            {
+              "name": "seq",
+              "enum": "ap.sequence",
+              "required": true,
+              "default": "01"
+            }
+          ],
+          "examples": [
+            ":SE01",
+            ":SE00",
+            ":SE57"
+          ],
+          "commentLabel": "AP sequence (drives panels/sound/logic/holo)",
+          "category": "Sequences"
+        }
+      ]
+    }
+  ]
+}
