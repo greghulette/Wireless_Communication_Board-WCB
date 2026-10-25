@@ -283,6 +283,13 @@ static int fileGet(const char *key, String &value) {
   return result;
 }
 
+// A value as bytes, without a copy of it: a ?SEQ,SAVE's value is read in place from its command line
+// (seqStorePut(key, p, n)), and a String's is its c_str() and length().
+struct SeqVal {
+  const char *p;
+  size_t      n;
+};
+
 // Where key is, how long its value is, and whether that value equals *compare.
 struct SeqFound {
   bool found = false;
@@ -290,12 +297,12 @@ struct SeqFound {
   size_t oldLen = 0;
 };
 
-static int fileFind(const char *key, const String *compare, SeqFound &f) {
+static int fileFind(const char *key, const SeqVal *compare, SeqFound &f) {
   return walkFile([&](const char *k, SeqReader &r) -> int {
     if (strcmp(k, key) != 0) return r.skipValue() ? 0 : SEQ_E_IO;
     f.found = true;
-    const char *cv = compare ? compare->c_str() : "";
-    const size_t cl = compare ? compare->length() : 0;
+    const char *cv = compare ? compare->p : "";
+    const size_t cl = compare ? compare->n : 0;
     size_t pos = 0;
     bool eq = compare != nullptr;
     if (!r.value([&](const char *p, size_t n) {
@@ -309,14 +316,14 @@ static int fileFind(const char *key, const String *compare, SeqFound &f) {
   });
 }
 
-static int fileAppend(const String &key, const String &value, bool newlineFirst) {
+static int fileAppend(const String &key, SeqVal value, bool newlineFirst) {
   const int fd = ::open(SEQ_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666);
   if (fd < 0) return errnoCode();
   SeqWriter w(fd);
   if (newlineFirst) w.ch('\n');       // a file that does not end in one (never written so, but never glue two lines)
   w.put(key);
   w.ch(',');
-  w.put(value);
+  w.put(value.p, value.n);
   w.ch('\n');
   const int c = ::close(fd);
   if (w.code != SEQ_OK) return w.code;
@@ -325,7 +332,7 @@ static int fileAppend(const String &key, const String &value, bool newlineFirst)
 
 // Writes /seqs to /seqs.tmp - key's record replaced by newValue, or left out when newValue is null, and any damaged
 // line or second record for key dropped - then renames it over /seqs.
-static int fileRewrite(const char *key, const String *newValue) {
+static int fileRewrite(const char *key, const SeqVal *newValue) {
   const int in = ::open(SEQ_PATH, O_RDONLY);
   if (in < 0) return errno == ENOENT ? SEQ_NOTFOUND : errnoCode();
   const int out = ::open(SEQ_TMP_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -354,7 +361,7 @@ static int fileRewrite(const char *key, const String *newValue) {
       if (newValue && !hit) {
         w.put(k);
         w.ch(',');
-        w.put(*newValue);
+        w.put(newValue->p, newValue->n);
         w.ch('\n');
       }
       hit = true;
@@ -379,13 +386,13 @@ static int fileRewrite(const char *key, const String *newValue) {
   return rc;
 }
 
-static int filePut(const String &key, const String &value) {
+static int filePut(const String &key, SeqVal value) {
   SeqFound f;
   const int rc = fileFind(key.c_str(), &value, f);
   if (rc != SEQ_OK) return rc;
   if (f.found && f.same) return SEQ_OK;   // a re-pushed config: nothing to write
   const size_t size = fileSize();
-  const size_t grown = f.found ? size - f.oldLen + value.length() : size + key.length() + value.length() + 2;
+  const size_t grown = f.found ? size - f.oldLen + value.n : size + key.length() + value.n + 2;
   if (grown > SEQ_FILE_MAX) return SEQ_E_FULL;
   if (f.found) return fileRewrite(key.c_str(), &value);
   return fileAppend(key, value, !walkEndedClean);   // the find walked to the end: walkEndedClean is this file's
@@ -590,9 +597,10 @@ static int nvsHash(uint32_t &h) {
 }
 
 // ── Moving NVS sequences into the file (every boot that mounts) ───────────────
-static bool valueFitsFile(const String &v) {
-  return v.length() > 0 && v.length() <= SEQ_VALUE_MAX && v.indexOf('\n') < 0 && v.indexOf('\r') < 0;
+static bool valueFitsFile(SeqVal v) {
+  return v.n > 0 && v.n <= SEQ_VALUE_MAX && !memchr(v.p, '\n', v.n) && !memchr(v.p, '\r', v.n);
 }
+static bool valueFitsFile(const String &v) { return valueFitsFile(SeqVal{v.c_str(), v.length()}); }
 
 // One rewrite of /seqs with every sequence NVS lists: a key the file has takes NVS's value in its place, the rest go
 // last in NVS order. Each moved key is read back from the file before NVS lets go of it, so a reset anywhere in here
@@ -899,17 +907,24 @@ int seqStoreGet(const String &key, String &value) {
   return fileGet(key.c_str(), value);
 }
 
-int seqStorePut(const String &key, const String &value) {
+int seqStorePut(const String &key, const String &value) { return seqStorePut(key, value.c_str(), value.length()); }
+
+int seqStorePut(const String &key, const char *value, size_t len) {
   if (key.length() == 0 || key.length() > SEQ_KEY_MAX_LEN || seqKeyReserved(key) || key.indexOf(',') >= 0 ||
       key.indexOf('\n') >= 0 || key.indexOf('\r') >= 0)
     return SEQ_E_BADVAL;
-  if (value.length() > SEQ_VALUE_MAX) return SEQ_E_TOOBIG;
-  if (!valueFitsFile(value)) return SEQ_E_BADVAL;
+  if (len > SEQ_VALUE_MAX) return SEQ_E_TOOBIG;
+  const SeqVal v = {value, len};
+  if (!valueFitsFile(v)) return SEQ_E_BADVAL;
   SeqLock lock;
-  if (!onFile) return nvsPut(key, value);
+  if (!onFile) {                          // the NVS fallback: Preferences takes a string, so this boot copies it once
+    const String copy(value, (unsigned)len);
+    if (copy.length() != len) return SEQ_E_NOMEM;
+    return nvsPut(key, copy);
+  }
   const int rc = mountLocked();
   if (rc != SEQ_OK) return rc;
-  return filePut(key, value);
+  return filePut(key, v);
 }
 
 int seqStoreRemove(const String &key) {

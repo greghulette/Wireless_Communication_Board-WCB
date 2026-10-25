@@ -188,6 +188,9 @@ unsigned commandQueueSpaces();
 void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
 bool saveStoredCommandsToPreferences(const String &message);   // true when stored
+// The same from "<key>,<value>" characters, the value read in place: ?SEQ,SAVE's path (handleSingleCommand), so a
+// 3,999-character value saves on a classic board hosting its access point.
+bool saveSequenceChars(const char *msg, size_t len);
 void listStoredCommands();
 
 // ── Stored-sequence INVENTORY (names only, no values) ──────────────────────

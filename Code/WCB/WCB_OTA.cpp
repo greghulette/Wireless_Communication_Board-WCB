@@ -618,6 +618,7 @@ static portMUX_TYPE  s_otaQMux   = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t       s_otaQUsers = 0;        // callbacks between taking the queue and their send
 static volatile uint32_t s_otaQLastMs = 0;   // the last packet queued or handled
 static const uint32_t OTA_QUEUE_IDLE_MS = 30000;
+static const UBaseType_t OTA_PKT_QUEUE_DEPTH = 12;   // above every relay window (tests/wizard/unit/ota_relay_window)
 
 void enqueueOtaPacket(const uint8_t *raw, uint16_t len) {
   if (len == 0 || len > sizeof(((OtaPktSlot *)0)->buf)) return;
@@ -626,7 +627,7 @@ void enqueueOtaPacket(const uint8_t *raw, uint16_t len) {
   if (q) s_otaQUsers++;
   portEXIT_CRITICAL(&s_otaQMux);
   if (!q) {
-    QueueHandle_t made = xQueueCreate(12, sizeof(OtaPktSlot));   // the heap, so outside the critical section
+    QueueHandle_t made = xQueueCreate(OTA_PKT_QUEUE_DEPTH, sizeof(OtaPktSlot));   // the heap: outside the critical section
     if (!made) return;
     portENTER_CRITICAL(&s_otaQMux);
     if (!otaPktQueue) { otaPktQueue = made; made = nullptr; }

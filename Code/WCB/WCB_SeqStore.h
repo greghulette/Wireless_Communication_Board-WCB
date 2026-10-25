@@ -75,6 +75,7 @@ int    seqStoreKeyList(String &list);                        // "k1,k2,...," in 
 int    seqStoreForEachKey(const std::function<bool(const char *key, size_t len)> &fn);
 int    seqStoreGet(const String &key, String &value);        // SEQ_OK / SEQ_NOTFOUND / SEQ_E_*
 int    seqStorePut(const String &key, const String &value);  // a new key goes last; an existing one keeps its place
+int    seqStorePut(const String &key, const char *value, size_t len);   // the same, the value read in place: no copy
 int    seqStoreRemove(const String &key);                    // SEQ_OK / SEQ_NOTFOUND / SEQ_E_*
 int    seqStoreClear();          // every sequence, in the file and in NVS
 // fn(key, value) for every sequence in save order; return false to stop. value is empty when it could not be held in

@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_241316ROCT2026                                  *****////
+///*****                                          Version 7.0.1_250039ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -203,7 +203,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_241316ROCT2026";
+String SoftwareVersion = "7.0.1_250039ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -1229,24 +1229,23 @@ typedef struct __attribute__((packed)) {
 // A ?MGMT,FRAG push session (relay → target, 179 characters a chunk). A relay forwards a session of up to
 // MGMT_FWD_MAX_CHUNKS chunks; a target reassembles one of up to MGMT_RX_MAX_CHUNKS (docs/MGMT_RELAY.md §10). The
 // longest command a board can be pushed is a ?SEQ,SAVE of a 15-character key and a 3,999-character value: 10 + 15 + 1 +
-// 3999 = 4025 characters, 23 chunks. Only an ESP32-S3 can run one: a ?SEQ,SAVE costs about 7 times its length in heap
-// while it runs (docs/SEQUENCE_INVENTORY.md §3b), and a classic ESP32 stops at about 2,400 characters, so 16 chunks
-// (2864) cover every command it can take, and its 2.9 KB of .bss is not grown for commands it could not run (rule 14).
-// A relay or target from before this forwards or takes 16 at most: the Wizard sends more only to firmware that takes them.
+// 3999 = 4025 characters, 23 chunks, and both chips take it. A classic ESP32 took 16 (2864) until 2026-10-24: a
+// ?SEQ,SAVE cost about 7 times its length in heap through the dispatcher and it stopped at about 2,400 characters, so
+// longer was never runnable there. A save now goes to the store from its queued line (handleSingleCommand,
+// saveSequenceChars), which a classic board hosting its access point holds for the whole 3,999, for 8 more chunks of
+// .bss (1,448 bytes; rule 14). A relay or target from before this forwards or takes 16 at most: the Wizard sends more
+// only to firmware that says it takes them (wcbOwnCapTags).
 #define MGMT_FWD_MAX_CHUNKS     24
-#if CONFIG_IDF_TARGET_ESP32S3
 #define MGMT_RX_MAX_CHUNKS      24
-#else
-#define MGMT_RX_MAX_CHUNKS      MGMT_MAX_CHUNKS
-#endif
 static_assert(MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS && MGMT_FWD_MAX_CHUNKS <= 32, "the receive mask is 32-bit");
 
 // What this board says about those two limits in its own WDP advert: capability tags (TLV 0x0D CAPTAGS, which WCBs
 // only read until 2026-10-23), also its ?WDP,DUMP self row. "mgmt.fwd<N>": as a relay it forwards a push session of up
 // to N chunks; "mgmt.rx<N>": as a target it reassembles one of up to N, and - since a board forwards at least what it
 // takes (the static_assert above) - forwards N as a relay too. A tag is sent only past the 16 every released relay and
-// target take, so the classic ESP32 sends "mgmt.fwd24" and the ESP32-S3 "mgmt.rx24" (12 / 11 bytes of the 200-byte
-// advert, ahead of the port labels); both tags only if a build ever forwarded more than it takes. The Wizard sends one
+// target take, so both chips send "mgmt.rx24" (11 bytes of the 200-byte advert, ahead of the port labels); a classic
+// ESP32 sent "mgmt.fwd24" until 2026-10-24, when it took 16 as a target. Both tags only if a build ever forwarded more
+// than it takes. The Wizard sends one
 // command longer than a session as one long session only when the target's rx and the relay's fwd (or rx) both cover
 // it (WCBParser.relayLongChunks); a board whose tags it has not seen gets one session at most. A literal, so it costs
 // flash, not RAM (docs/WDP_DESIGN.md §3).
@@ -1408,6 +1407,7 @@ void writeSerialString(Stream &serialPort, const String &stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 // Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
+void enqueueCommand(const char *cmd, size_t len, int sourceID, int originEspnow, int originSeqBody);
 void checkConfigPullTimeout();
 static void statusQueueOut(const char *fmt, ...);   // a short line for loop() to print, from the WiFi task (rule 11)
 // frozenPeersLive >= 0: emit PEERSLIVE with that value instead of the live count (a config pull job's
@@ -2884,6 +2884,12 @@ void MeshSerialOutTask(void *parameter) {
 static TaskHandle_t serialCommandTaskHandle = nullptr;
 
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody) {
+  enqueueCommand(cmd.c_str(), cmd.length(), sourceID, originEspnow, originSeqBody);
+}
+
+// The same from characters, so a caller holding the command inside a longer line (a ?SEQ,SAVE token in a chain) does
+// not copy it first: the queue item is the one copy.
+void enqueueCommand(const char *cmd, size_t cmdLen, int sourceID, int originEspnow, int originSeqBody) {
   if (!commandQueue) return;
 
   CommandQueueItem item;
@@ -2904,7 +2910,7 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
 
   // One allocation: the lineage hashes, then the command (including null terminator). A top-level command
   // (depth 0) costs exactly what it did before.
-  const size_t length = cmd.length() + 1;
+  const size_t length = cmdLen + 1;
   char *block = (char *)malloc(pathBytes + length);
   if (!block) {
     Serial.println("Out of memory while enqueuing command!");
@@ -2914,8 +2920,8 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
   item.seqDepth = depth;
   item.cmd = block + pathBytes;
 
-  strncpy(item.cmd, cmd.c_str(), length);
-  item.cmd[length - 1] = '\0';
+  memcpy(item.cmd, cmd, cmdLen);
+  item.cmd[cmdLen] = '\0';
 
   // Attempt to enqueue. Only the serial reader may wait for room: it is its own task, and a pasted ?backup of more
   // than 200 tokens lost everything past the queue's capacity, one "queue is full" line per token (WCB coverage
@@ -3182,11 +3188,18 @@ void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow,
         int endPos = (int)data.length();
         if (nextFuncPos != -1 && nextFuncPos < endPos) endPos = nextFuncPos;
 
-        String seqSaveCmd = data.substring(startIdx, endPos);
-        seqSaveCmd.trim();
-        if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
-          if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
-            enqueueCommand(seqSaveCmd, sourceID, originEspnow, originSeqBody);
+        // The token as a slice of data, trimmed in place and queued from there: a copy of a long value here was one
+        // more of the copies a classic board could not hold (handleSingleCommand's ?SEQ,SAVE path). A token under a
+        // false IF is dropped as ifGateConsumeToken drops it, which takes its copy only then.
+        int tokS = startIdx, tokE = endPos;
+        while (tokS < tokE && isspace((unsigned char)data[tokS])) tokS++;
+        while (tokE > tokS && isspace((unsigned char)data[tokE - 1])) tokE--;
+        if (tokE > tokS && strncmp(data.c_str() + tokS, commentDelimiter.c_str(), commentDelimiter.length()) != 0) {
+          if (ifSkipping) {
+            const String tok = data.substring(tokS, tokE);
+            ifGateConsumeToken(tok, ifSkipping);
+          } else {
+            enqueueCommand(data.c_str() + tokS, (size_t)(tokE - tokS), sourceID, originEspnow, originSeqBody);
           }
         }
         startIdx = endPos;
@@ -7460,6 +7473,18 @@ void handleSingleCommand(const String &cmd, int sourceID) {
     // sources, queue-drain boundaries, and timer groups). If an IF token
     // still reaches the executor (a direct enqueue path), drop it so the raw
     // "IF,..." text is never broadcast out the serial ports as data.
+    //
+    // ?SEQ,SAVE first, straight to the store, its value read in place from this command's own text. Through the
+    // dispatcher a long value was copied at nearly every layer (the IF check's trimmed copy just below,
+    // cmd.substring(1), args, argsUpper, seqArgs, the save's own), about 7 times its length in heap, and a classic board
+    // hosting its access point (~19 KB) refused anything past ~2,400 characters, under the store's 3,999 (run
+    // 20261024-053854: "largest free block 692 bytes" for 2,784). The checks and replies are processLocalCommand's
+    // ?SEQ,SAVE's (saveSequenceChars); a bare "?SEQ,SAVE," still goes there and says "Invalid format". It is not an IF
+    // token, so the IF check has nothing to drop.
+    if (cmd.length() > 10 && cmd[0] == LocalFunctionIdentifier && strncasecmp(cmd.c_str() + 1, "SEQ,SAVE,", 9) == 0) {
+        saveSequenceChars(cmd.c_str() + 10, cmd.length() - 10);
+        return;
+    }
     {
         String u = cmd; u.trim();
         if (isIfChainToken(u)) {

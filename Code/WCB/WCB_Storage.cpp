@@ -826,26 +826,28 @@ void recallCommandSlot(const String &key, int sourceID) {
 
 // Save a stored sequence ("<key>,<value>", from ?SEQ,SAVE / ?C). True when it was stored.
 bool saveStoredCommandsToPreferences(const String &message) {
-  int commaIndex = message.indexOf(',');
-  if (commaIndex == -1 || commaIndex == 0) {
+  return saveSequenceChars(message.c_str(), message.length());
+}
+
+// "<key>,<value>" as characters, the value read in place: only the key (at most 15 characters, plus any spaces around
+// it) is copied. Through Strings a long value was copied again here, after the dispatcher's own copies, and a classic
+// board hosting its access point (~19 KB free) refused anything past ~2,400 characters, under the store's 3,999
+// (handleSingleCommand's ?SEQ,SAVE path; run 20261024-053854: "largest free block 692 bytes" for 2,784).
+// Whitespace around the key and the value is dropped, as String::trim did.
+bool saveSequenceChars(const char *msg, size_t len) {
+  const char *comma = msg ? (const char *)memchr(msg, ',', len) : nullptr;
+  if (!comma || comma == msg) {
     Serial.println("Invalid format. Use ?Ckey,value");
     return false;
   }
+  const char *k0 = msg, *k1 = comma, *v0 = comma + 1, *v1 = msg + len;
+  while (k0 < k1 && isspace((unsigned char)*k0)) k0++;
+  while (k1 > k0 && isspace((unsigned char)k1[-1])) k1--;
+  while (v0 < v1 && isspace((unsigned char)*v0)) v0++;
+  while (v1 > v0 && isspace((unsigned char)v1[-1])) v1--;
+  const size_t klen = (size_t)(k1 - k0), vlen = (size_t)(v1 - v0);
 
-  String key = message.substring(0, commaIndex);
-  String value = message.substring(commaIndex + 1);
-  // An Arduino String whose allocation fails comes back EMPTY, not as an error - so a long value
-  // on a busy heap fell through to 'Key or value cannot be empty', naming the wrong problem.
-  if (value.length() == 0 && message.length() > (unsigned)commaIndex + 1) {
-    Serial.printf("Out of memory: could not copy a %u-character value (largest free block %u bytes). Not stored.\n",
-                  (unsigned)(message.length() - commaIndex - 1),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));   // not ESP.getMaxAllocHeap(): see ?STATS
-    return false;
-  }
-  key.trim();
-  value.trim();
-
-  if (key.length() == 0 || value.length() == 0) {
+  if (klen == 0 || vlen == 0) {
     Serial.println("Key or value cannot be empty.");
     return false;
   }
@@ -854,28 +856,36 @@ bool saveStoredCommandsToPreferences(const String &message) {
   // either store (WCB_SeqStore.h). A longer one once made the NVS write fail while the name was still listed - so the
   // sequence was reported as "Stored:" and advertised to peers, but recalling it found nothing. Both shipping clients
   // already enforce 15 (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
-  if (key.length() > SEQ_KEY_MAX_LEN) {
-    Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
-                  key.c_str(), (unsigned)key.length());
+  if (klen > SEQ_KEY_MAX_LEN) {
+    Serial.printf("Sequence key '%.*s' is %u characters — the limit is 15. Not stored.\n", (int)klen, k0,
+                  (unsigned)klen);
     return false;
   }
+  const String key(k0, (unsigned)klen);
   if (seqKeyReserved(key)) {
     Serial.printf("'%s' is a reserved name (the sequence store keeps its own records under it). Not stored.\n",
                   key.c_str());
     return false;
   }
 
-  const int rc = seqStorePut(key, value);
+  const int rc = seqStorePut(key, v0, vlen);
   if (rc != SEQ_OK) {
     if (rc == SEQ_E_TOOBIG)
       Serial.printf("Failed to store sequence '%s' (it is %u characters - the limit is %u). Not stored.\n",
-                    key.c_str(), (unsigned)value.length(), (unsigned)SEQ_VALUE_MAX);
+                    key.c_str(), (unsigned)vlen, (unsigned)SEQ_VALUE_MAX);
     else
       Serial.printf("Failed to store sequence '%s' (%s). Not stored.\n", key.c_str(), seqStoreError(rc));
     return false;
   }
   invalidateSequenceInventoryHash();   // WDP re-advertises the new fingerprint within ~500 ms
-  Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+  // A long value goes out in three writes rather than through printf, which would allocate a buffer its size.
+  if (vlen < 200) {
+    Serial.printf("Stored: Key='%s', Value='%.*s'\n", key.c_str(), (int)vlen, v0);
+  } else {
+    Serial.printf("Stored: Key='%s', Value='", key.c_str());
+    Serial.write((const uint8_t *)v0, vlen);
+    Serial.println("'");
+  }
   return true;
 }
 
