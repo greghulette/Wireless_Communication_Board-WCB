@@ -9166,11 +9166,23 @@ function fragmentString(str, chunkSize) {
 
 // The most chunks ONE command may take through relayN to board n, where it is longer than one session: a long
 // ?SEQ,SAVE (up to 4025 characters, 23 chunks). Read from the capability tags each WCB advertises about itself
-// (WCBParser.relayLongChunks; _meshSeen, from the ?WDP,DUMP rows): an ESP32-S3 target says "mgmt.rx24", every WCB
-// relay on the firmware that forwards them "mgmt.fwd24"; a WcbMgmt relay (NaviCore, MgmtRelay) forwards any count. A
-// classic ESP32 target never needs it: a ?SEQ,SAVE costs about 7x its length in heap while it runs, so it stops near
-// 2,400 characters, under one session. 0 = one session at most, as before - and so for a board or relay whose tags no
-// dump has shown yet, as for firmware that sends none.
+// (WCBParser.relayLongChunks; _meshSeen, from the ?WDP,DUMP rows): a WCB that takes one as a target says "mgmt.rx24" -
+// every ESP32-S3 on the firmware that sends tags, and a classic ESP32 since it saves from the queued line (2026-10-24;
+// it said "mgmt.fwd24", forwarding 24 but taking 16, the day before); a WcbMgmt relay (NaviCore, MgmtRelay) forwards
+// any count. 0 = one session at most, as before - and so for a board or relay whose tags no dump has shown yet, as for
+// firmware that sends none.
+// Whether board n saves a ?SEQ,SAVE of the whole 3,999 characters the store takes. An ESP32-S3 (HW 3.1, 3.2) always
+// did; a classic ESP32 (HW 1.0, 2.x) does from the firmware that saves from the queued line (2026-10-24), which says
+// so with "mgmt.rx24" in its WDP row - before it, about 7x a value's length in heap stopped it near 2,400 characters.
+// The Sequence Builder warns only where this is false (seq-builder.js sbAnalyze).
+function boardTakesLongSave(n) {
+  const cfg = boardConfigs[n] || {};
+  if (+cfg.hwVersion === 31 || +cfg.hwVersion === 32) return true;
+  const tags = _meshSeen.get(+(cfg.wcbNumber || n))?.capTags || '';
+  const m = /(^|\s)mgmt\.rx(\d+)(\s|$)/.exec(tags);
+  return !!m && +m[2] >= 23;
+}
+
 function _relayLongChunks(relayN, n) {
   const relay = boardConfigs[relayN];
   const targetNum = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
