@@ -24,7 +24,8 @@ from hil.navicore import NaviCore
 from hil.runner import Skip, test
 from hil.wcb import WCB
 from suites.common import (FORBIDDEN_MESH_IDS, Console, Watch, absent_wcbs, config_guard, link, marker, mesh_params,
-                           nonce, padded, probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb)
+                           nonce, padded, probe_in_mesh, remote_wcbs, require_tokens, snapshot, token, usb_wcb,
+                           ws_token)
 
 ETM_KEYS = ("TIMEOUT", "HB", "MISS", "BOOT", "COUNT", "DELAY")
 
@@ -1255,8 +1256,18 @@ def _expected_cap(tokens, n):
     return cap
 
 
-@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration", needs=["wcb1"], links=[])
+def _own_tags(hw):
+    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): both builds take a
+    24-chunk push session as a target, and so forward one too (mgmt.rx24 alone: rx implies fwd). The classic build said
+    mgmt.fwd24 (it took 16) until 2026-10-24, when a save stopped costing ~7x its length in heap."""
+    return "mgmt.rx24"
+
+
+@test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration; a WCB's CAPTAGS are its build's own tags (mgmt.fwd24, or mgmt.rx24 on an ESP32-S3), on its self row and on W1's row for W2", needs=["wcb1"], links=[])
 def dump_fields(bench):
+    """The self row carries what the board advertises (WCB_WDP.cpp printWdpDump); W2's row what W1 decoded from W2's
+    advert, CAPTAGS included (TLV 0x0D, which a WCB sends about itself since 2026-10-23). The Wizard reads those tags to
+    size a relay push (WCBParser.relayLongChunks), so a row that drops or garbles them costs the long ?SEQ,SAVE."""
     w = usb_wcb(bench)
     me = bench.usb_wcb_number()
     t1, t2 = snapshot(bench, me), snapshot(bench, 2)
@@ -1270,6 +1281,9 @@ def dump_fields(bench):
                        ("CTRL", "20" if "?CONTROLLER,ON,20" in t1 else _field(self_row, "CTRL"))):
         if _field(self_row, name) != want:
             bad.append(f"self {name}={_field(self_row, name)}, expected {want}")
+    hw1 = int(_field(self_row, "HW") or 0)
+    if _field(self_row, "CAPTAGS") != _own_tags(hw1):
+        bad.append(f"self CAPTAGS={_field(self_row, 'CAPTAGS')!r}, expected {_own_tags(hw1)!r} (HW {hw1})")
     for t in t1:
         m = re.match(r"^\?LABEL,S(\d),(.+)$", t)
         if m and f"[WDPIF:N={me},S={m.group(1)},DEV={m.group(2)[:24]}]" not in dump:
@@ -1286,7 +1300,11 @@ def dump_fields(bench):
         if int(_field(row2, "AGE") or 999) > 75:
             bad.append(f"W2 AGE {_field(row2, 'AGE')}")
         if _field(row2, "FW") != fw:
-            bench.note(f"W2 runs {_field(row2, 'FW')}, W1 runs {fw}")
+            bench.note(f"W2 runs {_field(row2, 'FW')}, W1 runs {fw}: its CAPTAGS are not checked")
+        else:
+            hw2 = int(_field(row2, "HW") or 0)
+            if _field(row2, "CAPTAGS") != _own_tags(hw2):
+                bad.append(f"W2 CAPTAGS={_field(row2, 'CAPTAGS')!r}, expected {_own_tags(hw2)!r} (HW {hw2})")
     if row20 is not None:
         for name, want in (("CLIENT", "1"), ("CAP", "0000"), ("CTRL", "0"), ("PEER", "0")):
             if _field(row20, name) != want:
@@ -1884,12 +1902,13 @@ def mgmt_input_line_gating(bench):
     assert not bad, "; ".join(bad)
 
 
-@test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, free heap", needs=["wcb1"], links=[])
+@test("wifi.status", "?WIFI prints the status block for the board's mode (OFF, AP or JOIN): mode and interface lines, WS endpoint, radio channel = mesh channel, the WebSocket token as set or none, free heap", needs=["wcb1"], links=[])
 def wifi_status(bench):
     """wcbWifiPrintStatus (WCB_WiFi.cpp). Read-only, so it runs in whatever mode the board is in (W1 hosts an AP on the
     bench); the mode changes are wifi.off_and_back and wifi.join_w2_ap (opt-in wifi_modes) and the WebSocket endpoint
     wifi.pc_joins_ap_ws (opt-in wifi_pc, attended), all in s28_wifi.py. The ?WIFI line is emitted with the credentials and is not in the chain the harness
-    compares, so the mode is read from the block itself. The SSID is printed, the password only as 'set'."""
+    compares, so the mode is read from the block itself. The SSID is printed, the password only as 'set', and the
+    WebSocket token only as 'set' or 'none' - set exactly when the chain carries ?WIFI,TOKEN (docs/WIFI_DESIGN.md §7)."""
     w = usb_wcb(bench)
     ch = (token(bench.config_tokens(1), "?WCBCH,") or "?WCBCH,?").split(",")[1]
     out = [x.rstrip() for x in w.run("?WIFI")]
@@ -1925,6 +1944,13 @@ def wifi_status(bench):
         bad.append("no WS endpoint line")
     if not any(re.match(r"^Free heap     : \d+ bytes \(min since boot \d+\)$", x) for x in out):
         bad.append("no Free heap line")
+    tok = next((x for x in out if x.startswith("Token         : ")), None)
+    want = "set" if ws_token(bench.config_tokens(1)) else "none"
+    if tok is None:
+        bad.append("no Token line")
+    elif tok.split(" : ", 1)[1].split(" ")[0] != want:
+        bad.append(f"the Token line says {tok.split(' : ', 1)[1]!r}, but the chain {'carries' if want == 'set' else 'has no'} "
+                   f"?WIFI,TOKEN")
     bench.note("W1 WiFi: " + "; ".join(x.strip() for x in out if x.startswith(("Mode", "Interface", "WS endpoint", "Radio channel"))))
     assert not bad, "; ".join(bad)
 
@@ -3519,7 +3545,7 @@ def _hold_line(seconds):
     return ";S3" + padded("HOLD", int(seconds * HOLD_BAUD / 10))
 
 
-@test("etm.status_lines_dropped_reported", "With W1's loop() held over 10 s by a slow ;S3 line while W2 and W3 reboot together, their six boot announces overflow the five-line status ring: loop() prints the lines it kept and '[ETM] N status line(s) dropped - more peers came online at once than the queue holds', and printed plus dropped add up to the announces W1 received (W2 and W3 reboot; up to 2 tries)", needs=["wcb1", "wcb2"], links=[])
+@test("etm.status_lines_dropped_reported", "With W1's loop() held over 10 s by a slow ;S3 line while W2 and W3 reboot together, their six boot announces overflow the five-line status ring: loop() prints the lines it kept and '[ETM] N status line(s) dropped - more peers came online at once than the queue holds', and printed plus dropped add up to the announces W1 received (W2 and W3 reboot; up to 4 tries)", needs=["wcb1", "wcb2"], links=[])
 def status_lines_dropped_reported(bench):
     """Coverage re-scan 2026-10-12, etm.status_lines_queued_to_loop. espNowReceiveCallback queues '[ETM] WCBn came ONLINE
     (boot)' for every boot announce from an active peer (statusQueueOut, WCB.ino) into a six-slot ring - five lines -
@@ -3529,7 +3555,7 @@ def status_lines_dropped_reported(bench):
     each, which is the count the printed and dropped lines must add up to. The hold is a ;S3 line at 600 baud, which
     WcbSoftSerial::write sends on loop()'s task and waits out, started as the two boards restart: their announces come
     4-8 s later (run 20261013-002216: a 6 s hold caught four of six). An announce lost on the air leaves five, which
-    fit: that try is inconclusive and runs once more."""
+    fit: that try is inconclusive and runs again, up to four tries (run 20261015-145452 lost one in each of two)."""
     own2, own3 = bench.usb_wcbs().get(2), bench.usb_wcbs().get(3)
     if not own2 or not own3:
         raise Skip("W2 and W3 need their own USB consoles here (to reboot them at the same moment)")
@@ -3546,7 +3572,7 @@ def status_lines_dropped_reported(bench):
             w.run("?DEBUG,ETM,ON")
             if not _has(w.run(f"?BAUD,S3,{HOLD_BAUD}"), f"Baud rate for Serial3 updated to {HOLD_BAUD}"):
                 raise AssertionError(f"setup: ?BAUD,S3,{HOLD_BAUD} did not confirm")
-            for attempt in (1, 2):
+            for attempt in (1, 2, 3, 4):
                 m2, m3 = w2.dev.mark(), w3.dev.mark()
                 w2.send("?reboot")
                 w3.send("?reboot")

@@ -199,9 +199,10 @@ test.describe('the bench config', () => {
     expect(Object.keys(sent.data)).toEqual(['wcbNetwork']);
     expect(sent.data.wcbNetwork.quantity).toBe(3);
     await expect.poll(() => emu.config.toJSON().wcbNetwork.quantity).toBe(3);
-    // Loading a profile writes its identity into the fields (Save over USB applies it).
+    // Loading a profile writes its identity into the fields (Save over USB applies it). A profile carries no region
+    // (rc_config.h RcWcbProfile; loadWcbProfile sets the six identity fields), so the network keeps its own.
     await page.locator('#wcb-profile-list input[type=radio]').nth(1).click();
-    expect(await page.evaluate(() => ({ ...config.wcbNetwork, password: undefined }))).toEqual({ ...BENCH.wcbProfiles[1], name: undefined, password: undefined });
+    expect(await page.evaluate(() => ({ ...config.wcbNetwork, password: undefined }))).toEqual({ ...BENCH.wcbProfiles[1], name: undefined, password: undefined, region: BENCH.wcbNetwork.region });
     await expect(page.locator('#wcb-channel')).toHaveValue(String(BENCH.wcbProfiles[1].channel));
     // Four more profiles fill the six slots; a seventh is refused and nothing is replaced.
     const add = page.locator('button', { hasText: 'Save current credentials as profile' });

@@ -154,12 +154,15 @@ test('nctool.unit: every command-library command encodes and decodes back to its
     return v;
   };
   let checked = 0;
-  const templateless = [], collided = [];
+  const templateless = [], collided = [], freeOnly = [];
   for (const b of L.lib.boards) {
     for (const c of b.commands || []) {
       const lk = c.local || b.local;
       if (lk && lk !== 'maestro') continue;              // record/play/stop: never decoded (ncDecodeCommand)
       if (!c.template) { templateless.push(`${b.id}/${c.id}`); continue; }
+      // A template with no fixed text and a free-text field (cmdlib/wcb's serial text, "{text}") is never decoded: it
+      // would match every wire string (_ncCommandPattern). It must not claim the commands after it either - checked below.
+      if (/^\{[A-Za-z][A-Za-z0-9]*\}$/.test(c.template) && !L._ncCommandPattern(c).regex) { freeOnly.push(`${b.id}/${c.id}`); continue; }
       const wire = L.ncEncodeCommand(c, valuesFor(c));
       const d = L.ncDecodeCommand(wire);
       assert.ok(d, `${b.id}/${c.id}: "${wire}" does not decode`);
@@ -183,6 +186,28 @@ test('nctool.unit: every command-library command encodes and decodes back to its
     assert.equal(L.ncEncodeCommand(cmd, valuesFor(cmd)), '', `${id}`);
   }
   assert.ok(collided.length <= 5, `${collided.length} commands share a template with another board: ${collided.join(', ')}`);
+  assert.deepEqual(freeOnly, ['wcb-actions/wcb.serialText'], 'the only free-field-only template is serial text');
+  assert.equal(L.ncDecodeCommand('some device text'), null, 'serial text claims nothing when decoding');
+});
+
+// cmdlib/wcb is the WCB's own boards, shared with the WCB Wizard's sequence builder (cmdlib/wcb/NOTICE.md): its
+// wcb-maestro replaces both the snapshot's narrow maestro and the inline nc-maestro-wcb, and DroidNet's @A<name>
+// Maestro trigger decodes in either case of its prefix and names Serial 0 as its port.
+test('nctool.unit: cmdlib/wcb loads - wcb-maestro replaces nc-maestro-wcb, DroidNet trigger decodes in either case', { skip }, () => {
+  const { buildLibrary } = require('./cmdlib');
+  const L = buildLibrary();
+  const ids = L.lib.boards.map((b) => b.id);
+  assert.ok(ids.includes('wcb-maestro') && ids.includes('wcb-actions'), ids.join(','));
+  assert.ok(!ids.includes('nc-maestro-wcb') && !ids.includes('maestro'), 'superseded by wcb-maestro');
+  assert.deepEqual(ids.slice(0, 6), ['wcb-sequences', 'wcb-hcr', 'wcb-mp3', 'wcb-dfplayer', 'wcb-maestro', 'wcb-wled']);
+  for (const wire of ['@AMonsterMash', '@aMonsterMash']) {
+    const d = L.ncDecodeCommand(wire);
+    assert.equal(d && d.cmd.id, 'wcbmaestro.droidnet', wire);
+    assert.equal(d.values.name, 'MonsterMash');
+    assert.equal(d.cmd.defaultPort, 0);
+  }
+  assert.equal(L.ncDecodeCommand(';M11').board.id, 'wcb-maestro');
+  assert.equal(L.ncDecodeCommand(';V,armed,TOGGLE').cmd.id, 'wcb.varToggle');   // the fixed-word forms come first
 });
 
 test("nctool.unit: _seqValueToLines is the Wizard's seqValueToLines, line for line", { skip }, () => {

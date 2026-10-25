@@ -77,7 +77,8 @@ store that cannot be read at that moment (§3d: it will not mount on a low heap)
 fingerprint and is tried again every 5 s; a value it could not read is never hashed as empty.
 
 **The names are pulled on demand** with a dedicated request/response pair, only when the
-hash a consumer sees differs from the hash it cached.
+hash a consumer sees differs from the hash it cached. A list longer than one reply (from about
+180 names) comes a page per request, joined by the requester and delivered whole (§3).
 
 A steady mesh therefore costs **zero** request traffic, and a sequence saved on any board
 shows up within a couple of seconds — WDP re-advertises on content change within ~500 ms
@@ -100,9 +101,15 @@ for the same reason PWMTARGET is: it is functional, labels are cosmetic.
 
 ## 3. Wire format
 
+A list that fits one reply travels as it always has: one request (13), one reply (14). A list
+that does not - from about 180 names, and the store holds a few hundred (§3d) - travels a page
+per request (28 / 29), to a requester that asks for pages. The split, the page header and the
+join are pure code in `Code/WCB/WCB_SeqNamesWire.h`, a byte-identical copy of which ships in
+`WCB_Client` (`src/WCB_SeqNamesWire.h`), host-tested by `tests/seqnames_page_test.cpp`.
+
 ### Request — `PACKET_TYPE_SEQ_REQ` (13)
 
-Reuses `espnow_struct_config_req`, 43 bytes (`WCB.ino:783`). Broadcast, not unicast, so it
+Reuses `espnow_struct_config_req`, 43 bytes (`WCB.ino:1105-1110`). Broadcast, not unicast, so it
 works before the target is a registered peer.
 
 ```
@@ -112,9 +119,11 @@ uint8_t targetWCB        // board being asked
 uint8_t requesterWCB     // only this requester is answered
 ```
 
+It has no spare byte, so it cannot name a page: it asks for the whole list in one reply.
+
 Sent **three times** — a first broadcast frame to a given board is routinely dropped on a
-busy mesh. The target dedups repeats from the same requester inside 1.5 s
-(`handleSeqReqPacket`), so three sends still produce exactly one response.
+busy mesh. The target dedups repeats inside 1.5 s (`answerSeqNames`, below), so three sends
+still produce exactly one response.
 
 The request reads the sequence store, so it is **deferred out of the WiFi callback** onto the
 loop task via `enqueueMgmtReq` / `drainMgmtReqs`, exactly like CONFIG/STATS/ETM. Running it
@@ -122,24 +131,62 @@ inline stalls ESP-NOW and drops other inbound packets. A store it cannot read ri
 gets **no answer**, not an empty inventory: a `WCB_Client` reads any reply as the inventory. The
 handler clears its dedup so the requester's retry is answered.
 
-### Response — `PACKET_TYPE_SEQ_FRAG` (14)
+### Request — `PACKET_TYPE_SEQ_PAGE_REQ` (28): one page
 
-Reuses `espnow_struct_config_frag`, 230 bytes (`WCB.ino:792`), through the shared
-`sendResultFrags()` helper (`WCB.ino:3050`). **182 usable payload bytes per chunk** — the
-183rd is reserved as a NUL terminator. (`WCB.ino:2950` records why: an earlier version used
-all 183 and dropped one character per chunk, which ate the comma in `SEQ,SAVE,key,value`.)
+`espnow_struct_seqpage_req`, **59 bytes** (`WCB.ino:1138-1149`) — the size of the
+single-sequence request (§3a) on purpose: the page goes where that struct carries its key, and a
+target already takes 59-byte requests onto the queue its names handler reads.
+
+```
+char    structPassword[40]
+uint8_t packetType       = 28
+uint8_t targetWCB
+uint8_t requesterWCB
+uint8_t page             // 0-based
+uint8_t reserved[15]     // zero
+```
+
+A released target drops a 59-byte frame of any type but 15 at its receive filter (and firmware
+before §3a drops every 59-byte frame), so **a requester asks for page 0 with three 28s and then
+three 13s** behind them (`seqPullSend`, `WCB_Client::_seqSendNames`): an older target answers a
+13; a target with paged names answers the first 28 and takes the 13s for copies of it. Later
+pages are asked with 28s alone - only a target that pages sends a page.
+
+### Responses — `PACKET_TYPE_SEQ_FRAG` (14) and `PACKET_TYPE_SEQ_PAGE` (29)
+
+Both reuse `espnow_struct_config_frag`, 230 bytes (`WCB.ino:1152-1161`), through the shared
+`sendResultFrags()` helper (`WCB.ino:4851`): at most 16 chunks of **182 usable payload bytes**
+(the 183rd is reserved as a NUL terminator; an earlier version used all 183 and dropped one
+character per chunk, which ate the comma in `SEQ,SAVE,key,value`), two passes 100 ms apart. So
+**one reply carries at most 2,912 characters**, and `sendResultFrags()` refuses anything longer
+with an `[ERROR] Result too large to relay (...)` text in its place.
 
 > **Dispatch is by SIZE first, then packetType.** `CONFIG_REQ` and `MGMT_FRAG_UNICAST` are
-> both type 5 and are told apart only by 43 vs 226 bytes (`WCB.ino:3316`). Any
+> both type 5 and are told apart only by 43 vs 226 bytes (`espNowReceiveCallback`). Any
 > reimplementation of these structs must match the byte count exactly or the packet routes
 > into the wrong handler — or nowhere, with no diagnostic at either end. `WCB_Client` pins
-> both with `static_assert`.
+> them with `static_assert`, and both sides assert the page request is 59 bytes with the page
+> at byte 43.
 
-### Payload
+### Payloads
+
+The whole list, type 14:
 
 ```
 <hash8hex>,<count>[,<key1>,<key2>,...]
 ```
+
+One page, type 29:
+
+```
+<hash8hex>,<count>,<page>,<pages>,<keyBytes>[,<key>...]
+```
+
+`hash` and `count` are the whole list's in both (a page carries the same pair the one-reply form
+would), `page` is 0-based, `pages` is how many there are, and `keyBytes` is the length of every
+page's key text together, each key with its comma - so a requester sizes its buffer once, at page
+0, and checks the join at the end. Joined, the pages' key text after `<hash>,<count>` is exactly
+the type-14 payload.
 
 Comma separation is safe: `saveStoredCommandsToPreferences()` takes a stored key as
 everything **before the first comma**, so a key can never contain one.
@@ -147,8 +194,84 @@ everything **before the first comma**, so a key can never contain one.
 The empty case is `811C9DC5,0` — the FNV basis and a zero count — so a parser needs no
 special case for "board has no sequences".
 
-Sizing: 80 keys (`MAX_STORED_COMMANDS`) × 16 bytes ≈ 1280 bytes → 8 of the 16 available
-chunks. Comfortable, unlike the config pull.
+**Sizing.** A key is 1-15 characters, 2-16 bytes in the list with its comma. The one-reply form
+fits while `9 + digits(count) + keyBytes` ≤ 2,912: about 180 names of 15 characters, more when
+they are shorter. The store holds 32,768 bytes of `<key>,<value>` lines (§3d): a few hundred
+real sequences, and at the extreme - 15-character keys with 1-character values, 18 bytes a line
+- 1,820 names, 29,120 bytes of key text, 11 pages.
+
+**The split.** Greedy, in save order: a key goes on the current page while that page's key text
+stays within 2,880 bytes (`PAGE_KEYS_MAX`; with the widest header, 28 characters, a page fits
+one reply). The target walks the store's keys once per request (`seqStoreForEachKey`, no value
+read and no copy of the list held) and keeps only the page asked for, so every page of one list
+splits the same way, and the reply costs at most one reply's text twice in heap, whatever the
+store holds (CLAUDE.md rule 14; the list built whole cost three copies of it).
+
+### What the target answers (`answerSeqNames`, `buildSequenceNamesReply`)
+
+| Request | The whole list fits one reply | It does not |
+|---|---|---|
+| 13 (one reply) | type 14, the whole list - as it always was | type 14, `[ERROR] Result too large to relay (<l> chars, max 2912). Reduce stored variables/sequences or query this board directly.` - as it always was - and the target prints `[MGMT] Result too large to relay: ...` naming the requester |
+| 28, page 0 | type 14, the whole list - byte for byte the reply to a 13 | type 29, page 0 |
+| 28, page *p* > 0 | type 29, page *p* (the list shrank since page 0: *p* past the last page has no keys, and the new hash or `pages` starts the requester over) | type 29, page *p* |
+
+The 13 that does not fit gets the `[ERROR]` text it always got (Greg, 2026-10-23: keep the error):
+a WCB relay prints it for the operator. Every `WCB_Client` up to 1.18.1 reads any type-14 reply as
+the inventory, so there it reads as hash 0, count 0 - an **empty** list - and 1.19.0 drops it. The
+real answer is paging: every requester on the paged firmware or WCB_Client 1.19.0 gets the whole
+list however long, and no relay result should ever need the error. A list that fits one reply
+but not one page (2,881-2,898 bytes of key text) goes whole to both requests.
+
+**Dedup.** On (requester, page), an old request counting as page 0, within 1.5 s **of the end
+of the answer** (a full page takes about 0.75 s in two passes, and the copies queued meanwhile are
+still copies). So a page-0 burst of 3 + 3 requests is one answer, a requester walking the pages
+back to back is never taken for a retry of the page before, and a retry 3 s on is answered.
+
+### The requester (`?MGMT,SEQ` in `WCB.ino`, `WCB_Client::requestSequenceNames`)
+
+1. Page 0: 28 x3, then 13 x3. A type-14 answer is the whole list: done (the WCB relay prints it
+   as it always did; `WCB_Client` checks it whole - 8 hex digits, a comma, the count, exactly
+   that many keys of 1-15 characters - and drops anything else, so the `[ERROR] Result too
+   large` text of a WCB before paged names is not taken for a list). No answer in 4 s: the pull
+   ends silently, as the one-reply request always did - a board that is not there costs no more.
+2. A type-29 page 0: size one buffer for the whole list from its header, take its keys, ask for
+   page 1 with 28 x3, and so on. A page that brings no frag for 3 s is asked again, at most 3
+   times (the target may start answering ~0.5 s after the request, while it sends the last
+   page's second pass, and ignores a repeat for 1.5 s after it finished: a retry at 3 s is past
+   that). A page whose hash, count, `pages` or `keyBytes` differ from page 0's was built from
+   another list (a sequence saved, edited or erased mid-pull): start over at page 0, at most
+   twice. A stale copy (not the page asked for) is ignored. 60 s caps the pull.
+3. The last page: the joined key text must come to `count` keys and `keyBytes` bytes, else start
+   over. Then the list is delivered **once**, in the one-reply shape: the WCB relay prints one
+   `[MGMT:SEQ,<n>]<hash>,<count>,<keys>` line with one write; `WCB_Client` fires
+   `onSequenceNames()` once with the whole list.
+
+About 0.8 s a page on a quiet mesh, so 300 names (2 pages) take under 2 s and the largest store
+(11 pages) about 9 s. A WCB relay holds the list in one heap buffer of its exact size while it
+reads it; a list that does not fit the heap is not printed, and it says so.
+
+A pull that cannot finish says why, untagged, and prints no `[MGMT:SEQ,` line: from the WCB relay
+`[MGMT] Sequence names from WCB<n>: page <k> never came (asked 3 times) - not printed. Ask
+again.`, `... changed 3 times while they were read ...`, `... need <b> bytes, more than the heap
+has free in one piece ...` or `... did not finish in 60 s ...`; from `WCB_Client` the same as
+`[WCB_Client] sequence names from WCB<n>: ... - abandoned`, with no callback. A `[MGMT:SEQ,<n>]`
+line from a relay is therefore always a whole list (or the text a target sent in its place).
+
+One pull at a time on a WCB relay: a second `?MGMT,SEQ` replaces the first (a one-reply answer to
+the first is still printed as it comes). A running pull holds a channel-sync search
+(`chanSyncHostBusy`, `a sequence-names pull`), and `serviceSeqNamesPull()` runs only while the
+radio is home (CLAUDE.md rule 18).
+
+### Who talks to whom
+
+| Requester | Target | List fits one reply | List does not fit |
+|---|---|---|---|
+| paged (this firmware, `WCB_Client` 1.19.0) | paged | the 28 is answered with type 14 | pages, joined: one line / one callback |
+| paged | before paged names (7.0.1 and older) | the target drops the 28 and answers a 13 with type 14 | the target answers the 13 with `[ERROR] Result too large ...` as type 14: the WCB relay prints it as before; `WCB_Client` drops it, no callback |
+| before paged names (WCB 7.0.1, `WCB_Client` ≤ 1.18.1, NaviCore main) | paged | a 13, type 14 - unchanged | **no answer**; the target prints why. Never a wrong list |
+| before paged names | before paged names | unchanged | unchanged: the `[ERROR]` text, which `WCB_Client` ≤ 1.18.1 reads as an empty list |
+
+Firmware older than the inventory itself answers neither request.
 
 ---
 
@@ -188,30 +311,44 @@ Same 230-byte frag struct, through the same `sendResultFrags()`. Payload:
 ```
 
 `status` is `OK`, `NOTFOUND`, or `TOOBIG`. The value may itself contain commas, so a
-parser takes everything after the **second** comma verbatim. A store the target cannot read
+parser takes everything after the **second** comma verbatim.
+
+**A value longer than one reply comes in parts** (`?MGMT,SEQGET` on this firmware, `WCB_Client`
+1.20.0; [MGMT_RELAY.md](MGMT_RELAY.md) §10). The requester asks part 0 with a 59-byte
+`SEQVAL_PART_REQ` (31: the part and the 15-byte key) three times and the old 15 three times
+behind it; a target with parts answers the first 31 and takes the rest for copies, an older one
+answers a 15. A reply that fits goes out as type 16, as it always has; a longer one (with a
+15-character key, a value over 2,893 characters) goes as type-34 parts,
+`<id>,<part>,<parts>,<len>,<crc>:<data>`, the target reading the value from its store again for
+every part, the CRC in each header saying when it changed. The requester joins them in one
+buffer of the exact length and prints ONE `[MGMT:SEQVAL,<n>]<key>,OK,<value>` line /
+fires `onSequenceValue()` once. A requester that cannot take parts still gets `TOOBIG`. A store the target cannot read
 right then (§3d) gets no answer at all, and the requester retries: `WCB_Client` reads any
 status it does not know as `NOTFOUND`, which would be wrong.
 
-**The reply is sent once and nothing acknowledges it.** Every chunk is one ESP-NOW
-broadcast, 20 ms apart, with no second pass (unlike the config pull, which sends two).
-Lose one chunk and the requester gets nothing: no partial value, no error. Its
-half-built session is cleared silently after 10 s. So a requester must retry on
-timeout, at least 1.5 s after its last request for the same key, or the dedup above
-eats the retry. On the HIL bench, about 1 in 4 replies of 5-7 chunks was lost on the
-first try.
+**Nothing acknowledges the reply.** Every chunk is one ESP-NOW broadcast, 20 ms apart, sent
+in two passes 100 ms apart (since 2026-10-06, HIL_FIX_TRACKER #109; once before). Lose one chunk
+from both passes and the requester gets nothing: no partial value, no error. Its half-built
+session is cleared silently after 10 s. So a requester must retry on timeout, at least 1.5 s
+after its last request for the same key, or the dedup above eats the retry; a part of a value
+in parts is asked again by the requester itself. On the HIL bench, before the second pass,
+about 1 in 4 replies of 5-7 chunks was lost on the first try.
 
-**`TOOBIG` is reported explicitly.** `sendResultFrags()` silently refuses anything
-over 16 chunks, so the handler checks the budget first and answers with a status
-instead of nothing. Silence is what makes a config pull through older firmware unusable here (§1) and
-reintroducing it in the replacement would recreate the very bug this routes around.
-The budget allows a 2,903-character value, and the store takes up to 3,999 (§3d), so a
-long enough sequence answers `TOOBIG`. What usually stops a long value first is the heap a
-save costs (§3b): on a classic ESP32 about 2,400 characters. HIL `inv.seqget_largest` finds the
-largest value a board actually stores and round-trips it.
+**`TOOBIG` is reported explicitly**, to a requester that cannot take parts. `sendResultFrags()`
+refuses anything over 16 chunks, so the handler checks the budget first and answers with a
+status instead of nothing. Silence is what makes a config pull through older firmware unusable
+here (§1) and reintroducing it in the replacement would recreate the very bug this routes around.
+One reply allows a 2,903-character value (with a 5-character key), and the store takes up to
+3,999 (§3d): past one reply a requester with parts gets the value in parts, an older one
+`TOOBIG`. Every board saves the whole 3,999 since 2026-10-24 (§3b: a classic ESP32 stopped near 2,400 characters
+before), so a value past one reply is on any board. HIL
+`inv.seqget_largest` finds the largest value a board actually stores and round-trips it;
+`inv.seqget_parts` pulls a 3,999-character one from W3 (an ESP32-S3) whole, and the old requester's
+`TOOBIG` with `?DEBUG,ONEREPLY`.
 
 ### Why one at a time
 
-A single value is bounded — ~1800 chars is about 10 of the 16 chunks. The whole set
+A single value is bounded — at most 3,999 characters, a reply or two. The whole set
 is not. A consumer pulls the name list, then walks it:
 
 ```
@@ -247,12 +384,18 @@ is receive-only (it parses inbound `bb`/`bc`/`bd` and NACKs; there is no `sendBu
 A second, bespoke write path would drift from the one the Wizard and the console
 already use. Don't add one.
 
-**A long save costs about 7× its length in heap while it runs.** The line is copied at
-almost every layer of the dispatcher before `saveStoredCommandsToPreferences()` takes its
-own copy: the port's line buffer, the queue item, `args`, its upper-cased twin and the SEQ
-arguments. A classic-ESP32 board has about 24 KB of byte-addressable heap after boot, so
-a value of about 2,400 characters or more either fails with "Out of memory: could not copy"
-or reaches the store with little heap left.
+**A save holds about 2× its length in heap while it runs**: the port's line buffer and its
+queue item while it is queued, the dispatched command and the store's small write buffer while
+it runs. `handleSingleCommand` sends a `?SEQ,SAVE` straight to `saveSequenceChars`, which reads the
+key and value in place from the command's own text and writes the value to the file from there
+(`seqStorePut(key, p, n)`), and the chain splitter queues a `?SEQ,SAVE` token as a slice of its line
+(`enqueueCommand(p, n, ...)`). So the whole 3,999 saves on a classic ESP32 hosting its access point
+(~19 KB free), over USB or pushed through a relay (it takes a 24-chunk session too: `MGMT_RX_MAX_CHUNKS`,
+[MGMT_RELAY.md](MGMT_RELAY.md) §10). Until 2026-10-24 the line was copied at almost every layer of the
+dispatcher (the IF check's trimmed copy, `cmd.substring(1)`, `args`, its upper-cased twin, the SEQ
+arguments, the save's own), about 7× its length, and a classic board stopped near 2,400 characters with
+"Out of memory: could not copy" (HIL `inv.push_long_sequence`, `mgmt.seqval_session_reaped`: "largest
+free block 692 bytes" for 2,784).
 `?STATS`'s "min free since boot" is the sum of each heap region's own low point, not one
 moment's free heap. After such a save it can read near 0 until the next reboot, without the
 board ever having been out of memory (tracker #75).
@@ -365,6 +508,11 @@ pull) and the hash are each a walk of the file, with no copy of it in RAM: a val
 while it is used, and the hash reads none. A value the heap cannot hold is a lost token to the
 config walk (F19): `?backup` warns, a pull answers `NOMEM`. A line no key can address (no
 comma, or a key over 15 characters) is skipped, and the next replace or remove drops it.
+`?SEQ,NAMES` and the names reply (§3) walk the keys alone (`seqStoreForEachKey`): no value is
+read and no copy of the key list is held. `?SEQ,NAMES` counts first, then prints the line from
+one buffer of its exact size with one write (streamed in pieces if the heap has no such buffer).
+On the NVS fallback the same walk skips an empty `key_list` entry and one longer than 15
+characters, which no call can address.
 
 **The settings store still decides when sequences are erased.** `?ERASE,NVS` and
 `?SEQ,CLEAR,ALL` clear the file too. A factory reset that blanks only NVS - the Wizard's writes
@@ -491,6 +639,11 @@ and remote:
 [MGMT:SEQVAL,3]wave,OK,;M1,1^;S5,<CA1021>^***wave and chirp
 ```
 
+A list that came in pages is printed the same way, one line, once the last page is in (§3,
+about 0.8 s a page). A `?MGMT,SEQ` that cannot finish prints an untagged `[MGMT] Sequence names
+from WCB<n>: ...` line saying why, and no `[MGMT:SEQ,` line. With `?DEBUG,MGMT` the target logs
+`[MGMT] Sequence-names request from WCB<n>` for page 0 and `... (page <k>)` for each later one.
+
 `?WDP,DETAIL,<n>` shows a neighbor's hash, and `?WDP,DUMP` emits it as its own record —
 `[WDPSEQ:N=3,HASH=A1B2C3D4]` — deliberately **not** as a new field on the `[WDP:...]` line,
 whose field order is load-bearing for older Wizard regexes.
@@ -506,7 +659,8 @@ wcb.onSequenceNames([](uint8_t n, uint32_t hash, uint16_t count, const char* nam
 // 2. What's in one of them
 wcb.onSequenceValue([](uint8_t n, const char* key, WCBSeqStatus st, const char* value) {
     if (st == WCB_SEQ_OK) { /* value = ";M1,1^;S5,…" */ }
-    // else WCB_SEQ_NOTFOUND / WCB_SEQ_TOOBIG — always check before trusting value
+    // else WCB_SEQ_NOTFOUND / WCB_SEQ_TOOBIG (only from a WCB older than values in parts) —
+    // always check before trusting value
 });
 wcb.requestSequence(3, "wave");
 
@@ -532,8 +686,25 @@ Constraints worth knowing:
 - The ~3 KB reassembly buffer is **heap-allocated only while a request is in flight** and
   freed on delivery or timeout — a library this widely included shouldn't cost every sketch
   3 KB of BSS for a feature most don't use.
-- A request with no complete answer within ~4 s is **abandoned silently**. No callback
+- A request with no answer within ~4 s is **abandoned silently**. No callback
   fires: a half-list delivered as a result would look like a real answer.
+- **A list in pages still fires the callback once, with the whole list** (1.19.0). The library
+  asks for each page itself, retries a page, starts over on a change (§3), and only then calls
+  `onSequenceNames()`. Once, because every consumer treats a call as the inventory: NaviCore
+  replaces its cached list on each one, so a page at a time would cache part of a list as all
+  of it, and the callback's signature (`count`, `names`) already carries a whole list. The cost
+  is the joined list in heap for the length of the pull, its exact size (about 5 KB for 300
+  names; NaviCore has PSRAM). Use `sequenceNamesPending()`, not a fixed timeout, to tell a long
+  pull from a lost one: NaviCore's `GET_WCB_SEQ` waits on it past its 6 s.
+- A pull that cannot finish (a page asked 3 times that never comes, a list that changed 3
+  times, no heap for the list, 60 s) is abandoned with a `[WCB_Client] sequence names ...` line
+  on `Serial` and no callback; so is a one-reply answer that is not a list (an older WCB's
+  `[ERROR] Result too large` text, which 1.18.1 and earlier delivered as an empty list).
+- **A value longer than one reply comes in parts and the callback fires once** (1.20.0, §3a):
+  `onSequenceValue()` gets `WCB_SEQ_OK` and the whole value, CRC-checked; the joined reply is
+  held in heap for the pull, its exact size (about 4 KB at most). `sequenceNamesPending()` stays
+  true while it pages. A pull that cannot finish is abandoned with a `[WCB_Client] sequence
+  '<key>' ...` line and no callback.
 - Interception of `SEQ_FRAG` is armed only once `onSequenceNames()` is registered. Until
   then those packets fall through to `onRawPacket()` exactly as before, so existing sketches
   (NaviCore's OTA raw hook) are unaffected.
@@ -546,16 +717,26 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 ## 5. Pointers into the code
 
-- Inventory string + hash (single source of truth for both the console command and the mesh
-  reply): `Code/WCB/WCB_Storage.cpp` — `buildSequenceNamesString()`,
-  `sequenceInventoryHash()`, `invalidateSequenceInventoryHash()`.
+- Inventory + hash (one key walk and one cached hash for both the console command and the mesh
+  reply): `Code/WCB/WCB_Storage.cpp` — `buildSequenceNamesReply()` (the reply to a request: whole,
+  one page, or none), `printSequenceNames()` (`?SEQ,NAMES`), `sequenceInventoryHash()`,
+  `invalidateSequenceInventoryHash()`; `seqStoreForEachKey()` (`WCB_SeqStore.cpp`).
+- The pages (§3): `Code/WCB/WCB_SeqNamesWire.h` — `seqn::Pager` (the split), `formatPageHeader` /
+  `parsePageHeader`, `parseWhole` (the strict one-reply parse), `seqn::Assembly` (the join), the
+  packet types, sizes and requester timing; byte-identical in `WCBClient/src/WCB_SeqNamesWire.h`.
+  Host test: `tests/seqnames_page_test.cpp`. Target: `answerSeqNames()` (dedup, the decision),
+  `handleSeqReqPacket()` / `handleSeqPageReqPacket()`; requester: `handleMgmtSeqRequest()`,
+  `seqPullSend()`, `handleSeqFragPacket()` (types 14 and 29, WiFi task), `seqPullTakePage()` and
+  `serviceSeqNamesPull()` (loop) in `Code/WCB/WCB.ino`; `WCB_Client::_seqSendNames`,
+  `_maybeHandleSeqFrag`, `_seqNamesPage`, `_seqTick`. HIL: `inv.mgmt_seq_paged` (s17),
+  `ncmesh.seq_pull_paged` (s43).
 - Where sequences are stored (§3d): `Code/WCB/WCB_SeqStore.{h,cpp}` — `seqStoreBegin()` (mount,
-  factory-reset check, `moveNvsSequences()`), `seqStoreGet/Put/Remove/Clear/ForEach/KeyList/Hash`,
+  factory-reset check, `moveNvsSequences()`), `seqStoreGet/Put/Remove/Clear/ForEach/ForEachKey/KeyList/Hash`,
   `SeqLock` (the per-call unmount), `seqStoreReport()` (`?NVS`), the NVS fallback (`nvs*`).
   Callers: `recallCommandSlot()`, `saveStoredCommandsToPreferences()`,
   `eraseStoredCommandByName()`, `listStoredCommands()`, `clearAllStoredCommands()`
   (`WCB_Storage.cpp`); `collectConfigCommands()`, `printConfigInfo()`, the `?SEQ` handler,
-  `handleSeqReqPacket()`, `handleSeqValReqPacket()` (`WCB.ino`).
+  `answerSeqNames()`, `handleSeqValReqPacket()` (`WCB.ino`).
 - Packets, handlers, `?MGMT,SEQ`, `?SEQ,NAMES`: `Code/WCB/WCB.ino`.
 - TLV advertise/decode + `?WDP` display: `Code/WCB/WCB_WDP.cpp`, `WdpNeighbor::seqHash` in
   `WCB_WDP.h`.
@@ -575,6 +756,10 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | §3a: a value longer than one reply comes in parts (`SEQVAL_PART_REQ` 31, `SEQVAL_PART` 34, `WCB_ResultWire.h`, shared with `WCB_Client` 1.20.0; [MGMT_RELAY.md](MGMT_RELAY.md) §10), joined by the requester and delivered once; `TOOBIG` only to a requester that cannot take parts. The SEQVAL dedup is on (requester, key, part), an old request counting as part 0. HIL `inv.seqget_parts`, `inv.push_long_sequence`; `inv.seqget_largest` expects the value whole past one reply. | — |
+| 2026-10-23 | §3: an old one-reply request for a list too long for one reply gets the `[ERROR] Result too large to relay` text again instead of no answer (Greg: keep the error). | — |
+| 2026-10-24 | §3a, §3b: a `?SEQ,SAVE` reads its key and value in place and writes the value from there (`saveSequenceChars`, `seqStorePut(key, p, n)`, the splitter's slice enqueue), about 2× its length in heap instead of 7×: the whole 3,999 saves on a classic ESP32 hosting its access point, over USB and through a relay (24-chunk sessions on both chips). Greg: "it should work as long as it has enough room to store it in the board". HIL `inv.push_long_sequence` now stores it on W2. | — |
+| 2026-10-22 | §3: the names list in pages. One reply carries 2,912 characters, about 180 names, and the store holds a few hundred, so a longer list could not be listed over the mesh at all (`?MGMT,SEQ` printed `[ERROR] Result too large to relay`, which `WCB_Client` read as an empty list). A requester now asks for page 0 with a 59-byte `SEQ_PAGE_REQ` (28) ahead of the old 13; a list that fits still goes as type 14, one that does not goes a page per request as type 29 (`<hash>,<count>,<page>,<pages>,<keyBytes>,<keys>`, greedy pages of up to 2,880 bytes of key text, `WCB_SeqNamesWire.h`, shared with `WCB_Client` 1.19.0), and the requester joins them and prints one line / fires the callback once. An old one-reply request for a list that does not fit is not answered. The dedup is on (requester, page), timed from the end of the answer. The target and `?SEQ,NAMES` walk the keys alone (`seqStoreForEachKey`) instead of building the list three times in heap. §3's sizing (80 keys, `MAX_STORED_COMMANDS`) predated the file store and is replaced. Host test `tests/seqnames_page_test.cpp`; HIL `inv.mgmt_seq_paged`, `ncmesh.seq_pull_paged`. | — |
 | 2026-09-29 | §3d: the store is mounted for each call and unmounted as it returns. Held for 3 s after a call, a `?backup` left its 1.7 KB in use under a 250-token one-line restore, which lost four tokens to out-of-memory (HIL `backup.one_line_restore`, run `20260929-194057`). Bench-verified: a full store (32,727 bytes, 36 sequences) still pulls whole, in 12 of 16 parts. | `8e5d24f` |
 | 2026-09-29 | §3d: sequences move out of NVS into a file of their own, `/seqs` on the 128 KB `spiffs` partition (`WCB_SeqStore`), capped at 32 KB so a full store's config still pulls; NVS keeps the `seq_mig_done` marker, whose absence clears the file (a factory reset that blanks only NVS). Every boot that mounts moves what NVS lists into the file; a boot that cannot mount runs on the NVS layout (`?DEBUG,SEQNVS` forces one). `?SEQ,GET` answers `NOTFOUND` for `key_list` and `seq_mig_done`; a mesh request the store cannot answer right then gets no reply; a value that cannot be read is never hashed. §3a `TOOBIG` is reachable now that the store takes 3,999 characters. | `fecd481` |
 | 2026-09-27 | §3c: a top-level recall that cannot fit the command queue is refused whole, and the serial reader waits for queue room instead of dropping tokens (WCB coverage re-scan #24). | `cc2a8a9` |

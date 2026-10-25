@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="seq-builder.css">
 </head>
 <body>
 
@@ -93,12 +94,26 @@
               style="text-transform:uppercase" spellcheck="false">
           </div>
           <div class="field advanced-only reserve-space hidden">
-            <label>Mesh Channel <span class="wiz-hint tip-left" data-tip="ESP-NOW radio channel (1–11) for the whole mesh. The ESP32 has one radio, so every WCB and WCB_Client device must be on this channel or it can't hear the mesh. Leave at 1 unless channel 1 is congested or you must match a hosted access point — then move the ENTIRE fleet together: a push stages the change, and each board applies it on its next reboot. (12–13 are omitted — they need a WiFi-country override the firmware doesn't set.)">i</span></label>
+            <label>Mesh Channel <span class="wiz-hint tip-left" data-tip="ESP-NOW radio channel for the whole mesh. The ESP32 has one radio, so every WCB and WCB_Client device must be on this channel or it can't hear the mesh. Leave at 1 unless channel 1 is congested or you must match a hosted access point — then move the ENTIRE fleet together: a push stages the change, and each board applies it on its next reboot. 12 and 13 need a Region that allows them.">i</span></label>
             <select id="g-meshch" onchange="onMeshChannelChange()">
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
               <option value="7">7</option><option value="8">8</option><option value="9">9</option>
               <option value="10">10</option><option value="11">11</option>
+              <option value="12" disabled>12</option><option value="13" disabled>13</option>
+            </select>
+          </div>
+          <div class="field advanced-only reserve-space hidden">
+            <label>Region <span class="wiz-hint tip-left" data-tip="WiFi country for the whole mesh. 01 (the default) is world-safe mode: channels 1–11. A country code that allows them opens channels 12–13 — legal in Europe and most of the world, not in the US. Set the same on every board and every WCB_Client device; each board applies it on its next reboot. Older firmware ignores it.">i</span></label>
+            <select id="g-region" onchange="onRegionChange()">
+              <option value="01">01 — world-safe (1–11)</option>
+            </select>
+          </div>
+          <div class="field advanced-only reserve-space hidden">
+            <label>Channel Sync <span class="wiz-hint tip-left" data-tip="On (the default): the mesh moves together. A board that joins a network on another channel takes the mesh with it, and a board that went missing is searched for on the other channels and brought back. Off: a board never moves, never searches and never answers a search — as before. Takes effect at once; set it the same on every board.">i</span></label>
+            <select id="g-chsync" onchange="onChanSyncChange()">
+              <option value="on">On — the mesh follows one channel</option>
+              <option value="off">Off — stays where it is</option>
             </select>
           </div>
         </div>
@@ -346,6 +361,22 @@
     <div class="modal-footer" style="gap:8px">
       <button class="btn btn-ghost btn-sm" id="network-group-change-cancel">Cancel</button>
       <button class="btn btn-danger btn-sm" id="network-group-change-confirm">I understand — push anyway</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Board Number Taken Confirmation Modal ─────────────────────── -->
+<!-- Shown when a push gives a board a number another board already has (USB or relay, confirmWcbNumberTaken). -->
+<!-- Cancel has the focus: Enter, Escape and a click outside all cancel. -->
+<div class="modal-overlay" id="wcb-number-taken-modal">
+  <div class="modal-dialog" style="width:480px;max-width:94vw">
+    <div class="modal-header">
+      <span class="modal-title">⚠ Board Number Already in Use</span>
+    </div>
+    <div class="modal-body" id="wcb-number-taken-body"></div>
+    <div class="modal-footer" style="gap:8px">
+      <button class="btn btn-ghost btn-sm" id="wcb-number-taken-cancel">Cancel</button>
+      <button class="btn btn-danger btn-sm" id="wcb-number-taken-confirm">Push anyway — two boards on one number</button>
     </div>
   </div>
 </div>
@@ -646,6 +677,16 @@
         </div>
       </div>
       <div id="b{N}-wifi-note" class="hint" style="display:none"></div>
+      <div class="field-group">
+        <div class="field">
+          <label>Access Token <span class="wiz-hint" data-tip="The login for this board's WebSocket: a client must send it before the board runs any of its commands. Join mode needs one, since everyone on that network can reach the board. 8–32 characters, no spaces and none of , ^ ; ? &quot; \ — leave blank for none. Intellex asks for it when it connects. Takes effect for the next connection.">i</span></label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="password" id="b{N}-wifi-token" maxlength="32" placeholder="none — 8–32 characters" autocomplete="off" spellcheck="false" oninput="onWifiTokenChange({N})">
+            <button type="button" class="btn btn-ghost btn-sm" id="b{N}-wifi-token-reveal" onclick="toggleWifiTokenReveal({N})" title="Show the token">Show</button>
+          </div>
+          <div id="b{N}-wifi-token-err" class="hint" style="display:none;color:var(--red)"></div>
+        </div>
+      </div>
       </div>
 
       <!-- Kyber section (shown only when Controller = Kyber) -->
@@ -778,6 +819,8 @@
       <div class="flex items-center gap-8 mb-12" style="flex-wrap:wrap">
         <div class="subsection-title" style="margin-bottom:0;border:none;padding:0">Stored Sequences</div>
         <button class="btn btn-ghost btn-sm" onclick="addSequenceRow({N})">+ Add</button>
+        <button class="btn btn-ghost btn-sm" onclick="window.SeqBuilder?.openNew({N})"
+                title="Build a new sequence on a timeline, from the command library">+ Timeline</button>
         <input type="search" class="seq-filter" id="b{N}-seq-filter" placeholder="Filter by name or contents"
                spellcheck="false" oninput="seqPagerFilter({N}, this.value)"
                title="Show only the sequences whose name or commands contain this text (not case-sensitive)">
@@ -1101,6 +1144,7 @@
 <script src="device-labels.js"></script>
 <script src="serial-hub.js"></script>
 <script src="app.js"></script>
+<script src="seq-builder.js"></script>
 
 </body>
 </html>

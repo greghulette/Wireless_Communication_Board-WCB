@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.0.1_160101ROCT2026                                  *****////
+///*****                                          Version 7.1.0_250555ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -95,6 +95,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_WDP.h"
 #include "WCB_WiFi.h"
 #include "WCB_WS.h"
+#include "WCB_ChanSync.h"   // channel sync: the mesh on one channel, MOVE / PROBE / REPLY (docs/CHANNEL_SYNC.md)
 #include "WCB_LoopWatch.h"
 #include "WCB_Variables.h"
 #include "wcb_pin_map.h"
@@ -112,6 +113,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 #include "WCB_OTA.h"   // ESP-NOW relay OTA (P1: local ?OTALOCAL,* USB driver + write core)
 #include "WCB_EspNow.h"   // wcbEspNowSend: every ESP-NOW send is paced to the radio (CLAUDE.md rule 16)
 #include "WCB_ConfigParts.h"  // mesh config pull: parts split/framing arithmetic (pure; tests/config_parts_test.cpp)
+#include "WCB_ResultWire.h"   // STATS / ETM / SEQGET results in parts (pure; tests/result_parts_test.cpp; shared with WCB_Client)
 #include "WCB_Fault.h"         // ?DEBUG,FAULT,<NAME> test knobs (debugFaultCommand)
 #include "driver/gpio.h"  // clearStaleGpioInterrupts (boot): gpio_intr_disable / gpio_set_intr_type
 #include "hal/gpio_ll.h"  // ...and the GPIO register block it inspects
@@ -153,7 +155,7 @@ void enableControllerPeer(uint8_t id);   // enable + persist + live-register the
 // MAC Octets
 uint8_t umac_oct2 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
 uint8_t umac_oct3 = 0x00;                                           // Default setting.  Change to match your setup here or via command line
-uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change
+uint8_t meshChannel = WCB_MESH_CHANNEL_DEFAULT;                     // ESP-NOW mesh channel (1–11; 12-13 under a ?REGION that allows them); loaded from NVS. All WCBs + clients must match.  ?WCBCH / Wizard to change; channel sync moves it with the mesh
 
 // User-defined ESP-NOW password
 char espnowPassword[40] = "change_me_or_risk_takeover";      // Default setting. Change to match your setup here or via command line.  Lower case characters only!
@@ -201,7 +203,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.0.1_160101ROCT2026";
+String SoftwareVersion = "7.1.0_250555ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -302,6 +304,31 @@ typedef struct __attribute__((packed)) {
 #define PACKET_TYPE_CONFIG_REQ_PARTS 19  // relay → target: CONFIG_REQ (same 43-byte struct) from a
                                          // requester that accepts parts. Older targets drop it at
                                          // the receive filter and answer the type-5 copies behind it.
+// 20-24 = OTA, 25-27 = channel sync (ETM struct).
+#define PACKET_TYPE_SEQ_PAGE_REQ     28  // relay → target: ONE PAGE of the sequence names (59-byte struct,
+                                         // espnow_struct_seqpage_req). Sent ahead of type-13 copies: an older
+                                         // target drops it at the 59-byte filter and answers those.
+#define PACKET_TYPE_SEQ_PAGE         29  // target → relay: that page (230-byte frags). Only a list that does not
+                                         // fit one type-14 reply is paged, and only to a requester that asked
+                                         // with type 28 (WCB_SeqNamesWire.h, docs/SEQUENCE_INVENTORY.md §3).
+static_assert(PACKET_TYPE_SEQ_REQ == seqn::PT_SEQ_REQ && PACKET_TYPE_SEQ_FRAG == seqn::PT_SEQ_FRAG &&
+              PACKET_TYPE_SEQ_PAGE_REQ == seqn::PT_PAGE_REQ && PACKET_TYPE_SEQ_PAGE == seqn::PT_PAGE,
+              "WCB_SeqNamesWire.h packet types != WCB.ino's");
+// A ?MGMT,STATS / ETM,CHAR / SEQGET result too long for one reply, in parts (WCB_ResultWire.h, docs/MGMT_RELAY.md §10).
+// Sent ahead of the old request (7 / 8 / 15): an older target drops the 59-byte frame at its receive filter and answers
+// the old one; a newer one answers the first new one and takes the old one for a copy. Parts go only to a requester that
+// asked with one of these, and only for a result that does not fit one reply.
+#define PACKET_TYPE_RESULT_REQ       30  // relay → target (59 B): start a STATS / ETM result in parts, or ask one part
+#define PACKET_TYPE_SEQVAL_PART_REQ  31  // relay → target (59 B): one part of a stored sequence, by key
+#define PACKET_TYPE_STATS_PART       32  // target → relay (230-byte frags): one part of a ?STATS
+#define PACKET_TYPE_ETM_PART         33  // target → relay: one part of an ETM characterization result
+#define PACKET_TYPE_SEQVAL_PART      34  // target → relay: one part of "<key>,OK,<value>"
+static_assert(PACKET_TYPE_RESULT_REQ == rparts::PT_RESULT_REQ && PACKET_TYPE_SEQVAL_PART_REQ == rparts::PT_SEQVAL_PART_REQ &&
+              PACKET_TYPE_STATS_PART == rparts::PT_STATS_PART && PACKET_TYPE_ETM_PART == rparts::PT_ETM_PART &&
+              PACKET_TYPE_SEQVAL_PART == rparts::PT_SEQVAL_PART && PACKET_TYPE_STATS_REQ == rparts::PT_STATS_REQ &&
+              PACKET_TYPE_ETM_REQ == rparts::PT_ETM_REQ && PACKET_TYPE_STATS_FRAG == rparts::PT_STATS_FRAG &&
+              PACKET_TYPE_ETM_FRAG == rparts::PT_ETM_FRAG && PACKET_TYPE_SEQVAL_REQ == rparts::PT_SEQVAL_REQ &&
+              PACKET_TYPE_SEQVAL_FRAG == rparts::PT_SEQVAL_FRAG, "WCB_ResultWire.h packet types != WCB.ino's");
 
 #define CONFIG_PAYLOAD_SIZE       183  // sizeof(espnow_struct_config_frag) = 230 — distinct from 226, 249, 252
 #define CONFIG_SESSION_TIMEOUT_MS 10000
@@ -771,8 +798,7 @@ struct ETMCharBoardResult {
     unsigned long latencyAccum;
 };
 
-// [phase 0-2][board index 0-(MAX_WCB_COUNT-1)]
-ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
+// etmCharBoardResults[phase 0-2][board index 0-(MAX_WCB_COUNT-1)] lives in EtmCharTables, below.
 
 // Hard cap on messages PER PHASE. This is the row length of etmCharPhaseSentTimes below, and
 // processETMChar() clamps totalMessages to it — do not raise one without the other.
@@ -787,7 +813,21 @@ ETMCharBoardResult etmCharBoardResults[3][MAX_WCB_COUNT];
 // unclamped run could never satisfy `totalAcked >= totalMessages` and EVERY phase ran to its full
 // timeout (count 200 / 2 peers ≈ 11.6 minutes of dead wall-clock).
 #define ETM_CHAR_MAX_MSGS 200
-unsigned long etmCharPhaseSentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
+
+// A run's per-board results and send times (3.6 KB): allocated when a run starts (startETMChar) and freed once its
+// results text is built (printETMCharResults) or it is abandoned - static until 2026-10-22, when that much of W1's
+// AP-mode heap was the difference between ?backup building every line and not (HIL run 20261022-132202, tracker
+// #110). Every access is on the loop task - etmProcessAck runs there, fed by the ACK ring - and each one is behind
+// etmCharRunning (processETMChar, processETMCharAck, the ACK hook) or inside printETMCharResults before the free,
+// so nothing reads them after they are gone.
+struct EtmCharTables {
+    ETMCharBoardResult results[3][MAX_WCB_COUNT];        // [phase][board index]
+    unsigned long      sentTimes[3][ETM_CHAR_MAX_MSGS];  // [phase][msgIndex]
+};
+static EtmCharTables *etmCharTables = nullptr;
+#define etmCharBoardResults   (etmCharTables->results)
+#define etmCharPhaseSentTimes (etmCharTables->sentTimes)
+static void etmCharFreeTables() { free(etmCharTables); etmCharTables = nullptr; }
 int etmCharPhaseMessageIndex = 0;
 bool etmCharClampWarned = false;   // one-shot notice per run when the sample had to be reduced
 unsigned long etmCharPhaseStartTime = 0;
@@ -1063,6 +1103,7 @@ static bool delimCharOk(char nc) {
 volatile bool rebootPending = false;
 void reboot(){
   Serial.println("Reboot queued - restarting once the command queue is quiet");
+  wcbEspNowForgetWedgeReboots();   // a restart asked for: not one of the transmit wedge's automatic ones in a row
   rebootPending = true;
 }
 
@@ -1118,6 +1159,57 @@ typedef struct __attribute__((packed)) {
   char    key[16];         // sequence key, NUL-terminated (15 chars = the NVS key limit)
 } espnow_struct_seqval_req;
 
+// One page of the sequence names: relay → target (59 bytes, the size of the request above, on purpose).
+//
+// The 43-byte request has no spare byte (password[40] + three), and a page request must reach the
+// same deferred handler queue a released target already takes 59 bytes on. A released target drops
+// a 59-byte frame of any type but SEQVAL_REQ at its receive filter, so a requester sends this ahead
+// of the old type-13 request and an older target answers that instead (WCB_SeqNamesWire.h).
+typedef struct __attribute__((packed)) {
+  char    structPassword[40];
+  uint8_t packetType;      // PACKET_TYPE_SEQ_PAGE_REQ
+  uint8_t targetWCB;       // which WCB to list
+  uint8_t requesterWCB;    // which WCB is asking
+  uint8_t page;            // 0-based
+  uint8_t reserved[15];    // zero
+} espnow_struct_seqpage_req;
+static_assert(sizeof(espnow_struct_seqpage_req) == sizeof(espnow_struct_seqval_req) &&
+              sizeof(espnow_struct_seqpage_req) == seqn::PAGE_REQ_LEN &&
+              offsetof(espnow_struct_seqpage_req, page) == seqn::PAGE_REQ_PAGE_AT,
+              "the page request must be the 59-byte request (WCB_SeqNamesWire.h)");
+
+// A STATS or ETM result in parts: relay → target (59 bytes, WCB_ResultWire.h). id 0 starts one (the requester takes
+// parts); any other id asks part `part` of the result the target holds under it (from that result's part 0).
+typedef struct __attribute__((packed)) {
+  char     structPassword[40];
+  uint8_t  packetType;      // PACKET_TYPE_RESULT_REQ
+  uint8_t  targetWCB;
+  uint8_t  requesterWCB;
+  uint8_t  kind;            // rparts::KIND_STATS / KIND_ETM
+  uint8_t  part;            // 0-based
+  uint16_t id;              // 0 = start
+  uint8_t  reserved[12];    // zero
+} espnow_struct_result_req;
+// One part of a stored sequence: relay → target (59 bytes). The target reads the value again for every part; part 0
+// is the first request. key is NUL-padded and has no NUL when it is 15 characters long.
+typedef struct __attribute__((packed)) {
+  char    structPassword[40];
+  uint8_t packetType;       // PACKET_TYPE_SEQVAL_PART_REQ
+  uint8_t targetWCB;
+  uint8_t requesterWCB;
+  uint8_t part;             // 0-based
+  char    key[15];
+} espnow_struct_seqvalpart_req;
+static_assert(sizeof(espnow_struct_result_req) == rparts::REQ_LEN &&
+              offsetof(espnow_struct_result_req, kind) == rparts::REQ_KIND_AT &&
+              offsetof(espnow_struct_result_req, part) == rparts::REQ_PART_AT &&
+              offsetof(espnow_struct_result_req, id) == rparts::REQ_ID_AT &&
+              sizeof(espnow_struct_seqvalpart_req) == rparts::REQ_LEN &&
+              offsetof(espnow_struct_seqvalpart_req, part) == rparts::SEQ_PART_AT &&
+              offsetof(espnow_struct_seqvalpart_req, key) == rparts::SEQ_KEY_AT &&
+              sizeof(espnow_struct_seqvalpart_req) == sizeof(espnow_struct_seqval_req),
+              "the result requests must be the 59-byte request (WCB_ResultWire.h)");
+
 // Config pull response fragment: target → relay (230 bytes)
 typedef struct __attribute__((packed)) {
   char     structPassword[40];
@@ -1134,6 +1226,42 @@ typedef struct __attribute__((packed)) {
 #define MGMT_MAX_CHUNKS         16
 #define MGMT_PAYLOAD_SIZE       180
 #define MGMT_SESSION_TIMEOUT_MS 15000
+// A ?MGMT,FRAG push session (relay → target, 179 characters a chunk). A relay forwards a session of up to
+// MGMT_FWD_MAX_CHUNKS chunks; a target reassembles one of up to MGMT_RX_MAX_CHUNKS (docs/MGMT_RELAY.md §10). The
+// longest command a board can be pushed is a ?SEQ,SAVE of a 15-character key and a 3,999-character value: 10 + 15 + 1 +
+// 3999 = 4025 characters, 23 chunks, and both chips take it. A classic ESP32 took 16 (2864) until 2026-10-24: a
+// ?SEQ,SAVE cost about 7 times its length in heap through the dispatcher and it stopped at about 2,400 characters, so
+// longer was never runnable there. A save now goes to the store from its queued line (handleSingleCommand,
+// saveSequenceChars), which a classic board hosting its access point holds for the whole 3,999, for 8 more chunks of
+// .bss (1,448 bytes; rule 14). A relay or target from before this forwards or takes 16 at most: the Wizard sends more
+// only to firmware that says it takes them (wcbOwnCapTags).
+#define MGMT_FWD_MAX_CHUNKS     24
+#define MGMT_RX_MAX_CHUNKS      24
+static_assert(MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS && MGMT_FWD_MAX_CHUNKS <= 32, "the receive mask is 32-bit");
+
+// What this board says about those two limits in its own WDP advert: capability tags (TLV 0x0D CAPTAGS, which WCBs
+// only read until 2026-10-23), also its ?WDP,DUMP self row. "mgmt.fwd<N>": as a relay it forwards a push session of up
+// to N chunks; "mgmt.rx<N>": as a target it reassembles one of up to N, and - since a board forwards at least what it
+// takes (the static_assert above) - forwards N as a relay too. A tag is sent only past the 16 every released relay and
+// target take, so both chips send "mgmt.rx24" (11 bytes of the 200-byte advert, ahead of the port labels); a classic
+// ESP32 sent "mgmt.fwd24" until 2026-10-24, when it took 16 as a target. Both tags only if a build ever forwarded more
+// than it takes. The Wizard sends one
+// command longer than a session as one long session only when the target's rx and the relay's fwd (or rx) both cover
+// it (WCBParser.relayLongChunks); a board whose tags it has not seen gets one session at most. A literal, so it costs
+// flash, not RAM (docs/WDP_DESIGN.md §3).
+#define WCB_CAPTAG_STR_(x) #x
+#define WCB_CAPTAG_STR(x)  WCB_CAPTAG_STR_(x)
+const char *wcbOwnCapTags() {
+#if MGMT_RX_MAX_CHUNKS > MGMT_MAX_CHUNKS && MGMT_FWD_MAX_CHUNKS > MGMT_RX_MAX_CHUNKS
+  return "mgmt.fwd" WCB_CAPTAG_STR(MGMT_FWD_MAX_CHUNKS) " mgmt.rx" WCB_CAPTAG_STR(MGMT_RX_MAX_CHUNKS);
+#elif MGMT_RX_MAX_CHUNKS > MGMT_MAX_CHUNKS
+  return "mgmt.rx" WCB_CAPTAG_STR(MGMT_RX_MAX_CHUNKS);
+#elif MGMT_FWD_MAX_CHUNKS > MGMT_MAX_CHUNKS
+  return "mgmt.fwd" WCB_CAPTAG_STR(MGMT_FWD_MAX_CHUNKS);
+#else
+  return "";
+#endif
+}
 
 struct MgmtSession {
   bool     active;
@@ -1141,8 +1269,8 @@ struct MgmtSession {
                             // reassembled command target-local (no re-broadcast)
   uint16_t sessionId;
   uint8_t  totalChunks;
-  uint16_t receivedMask;    // bitmask — bit N set when chunk N received
-  char     chunks[MGMT_MAX_CHUNKS][MGMT_PAYLOAD_SIZE + 1];
+  uint32_t receivedMask;    // bitmask — bit N set when chunk N received
+  char     chunks[MGMT_RX_MAX_CHUNKS][MGMT_PAYLOAD_SIZE + 1];
   unsigned long lastActivityMs;
 };
 MgmtSession mgmtSession = {};
@@ -1171,9 +1299,20 @@ struct ConfigPullSession {
 ConfigPullSession pullSession      = {};  // relay-side reassembly for remote config pull
 ConfigPullSession statsRelaySession = {};  // relay-side reassembly for remote ?STATS
 ConfigPullSession etmRelaySession   = {};  // relay-side reassembly for remote ?ETM,CHAR
-ConfigPullSession seqRelaySession    = {};  // relay-side reassembly for remote ?SEQ,NAMES
+ConfigPullSession seqRelaySession    = {};  // relay-side reassembly for remote ?SEQ,NAMES (types 14 and 29)
+// ?MGMT,SEQ,<n> is a pull: the names of a list too long for one reply come a page per request (WCB_SeqNamesWire.h).
+// The WiFi task reads seqPullActive / seqPullTarget to take only pages this board asked for, hands a whole page to
+// loop() in seqRelaySession under seqPageReady, and notes a one-reply answer in seqWholeFrom. The rest is loop()'s
+// (serviceSeqNamesPull).
+static volatile bool     seqPullActive  = false;
+static volatile uint8_t  seqPullTarget  = 0;
+static volatile uint32_t seqPullHeardMs = 0;    // last page frag heard from the target (WiFi task)
+static volatile bool     seqPageReady   = false;
+static volatile uint8_t  seqWholeFrom   = 0;
+static portMUX_TYPE      seqPageMux     = portMUX_INITIALIZER_UNLOCKED;
 ConfigPullSession seqValRelaySession = {};  // relay-side reassembly for remote ?SEQ,GET,<key>
 uint8_t etmCharRelayRequesterWCB    = 0;   // non-zero when ETM char was relay-triggered
+bool    etmCharRelayParts           = false;   // ...and that requester takes its result in parts (WCB_ResultWire.h)
 // A relayed run's result waits until the load the run started on its peers is off the air (HIL_FIX_TRACKER #109): sent
 // at once, its broadcast frags met the peers' generators, and one lost frag lost the whole reply (ncmesh.mgmt_etm_char,
 // runs 20260929-025701 and 20261006-122850). A peer starts its generator when ETMLOAD reaches it, retries included,
@@ -1182,6 +1321,7 @@ static const unsigned long ETM_LOAD_SETTLE_MS = 1500;
 unsigned long etmCharLoadTriggeredMs = 0;   // when this run's phase 3 sent ETMLOAD; 0 = no load yet this run
 String        etmCharHeldResult;            // the result held for the requester below
 uint8_t       etmCharHeldFor        = 0;    // 0 = nothing held
+bool          etmCharHeldParts      = false;   // that requester takes parts (etmCharRelayParts at the run's end)
 unsigned long etmCharHeldUntilMs    = 0;
 
 // ESP-NOW messages
@@ -1267,7 +1407,9 @@ void writeSerialString(Stream &serialPort, const String &stringData);
 void sendESPNowMessage(uint8_t target, const char *message, bool useETM = true);
 // Defaults live in WCB_Storage.h (included above) — C++ allows them in only one declaration.
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody);
+void enqueueCommand(const char *cmd, size_t len, int sourceID, int originEspnow, int originSeqBody);
 void checkConfigPullTimeout();
+static void statusQueueOut(const char *fmt, ...);   // a short line for loop() to print, from the WiFi task (rule 11)
 // frozenPeersLive >= 0: emit PEERSLIVE with that value instead of the live count (a config pull job's
 // snapshot, so its walks agree). ?backup passes nothing and keeps the live value.
 void collectConfigCommands(const std::function<void(const String &cmd, bool includeInLive)> &emit,
@@ -1342,6 +1484,57 @@ static void wdpBroadcastAs(const uint8_t *payload, int len, uint8_t packetType) 
 }
 void wdpBroadcast(const uint8_t *payload, int len)   { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP); }
 void wdpDaBroadcast(const uint8_t *payload, int len) { wdpBroadcastAs(payload, len, PACKET_TYPE_WDP_DA); }
+
+// ─── Channel sync transport (WCB_ChanSync.{h,cpp}) ──────────────────────────
+// MOVE / PROBE / PROBE_REPLY (chansync::PT_*, ETM packet types 25-27) ride the same envelope as WDP. Not commands, so
+// nothing here reads lastReceivedViaESPNOW (only sendESPNowMessage does, CLAUDE.md rule 3): a frame channel sync sends
+// from loop() goes out whatever command ran last.
+void chanSyncBroadcastFrame(uint8_t packetType, const uint8_t *payload, int len) {
+  wdpBroadcastAs(payload, len, packetType);
+}
+bool chanSyncRestartPending() { return rebootPending || pwmRebootPending; }
+
+// Asked before channel sync takes the radio off the mesh channel. Every case is something a channel switch would cut
+// in half: an OTA session or a config pull with a peer on this channel, and a restart that is already pending (a push
+// is usually still arriving). forSearch adds what a 1.5 s absence would cost: commands still queued or arriving, ETM
+// commands awaiting an ACK (their retries would go out on the wrong channel), an ETM characterization - and RC
+// passthrough in use: PWM (;P) and raw Kyber / raw-serial frames are unacknowledged and PWM is sent only on a change,
+// so one lost to a hop leaves a servo where the frame before it put it until the stick moves again.
+static const unsigned long CHSYNC_QUIET_MS    = 1000;   // no command processed for this long counts as quiet
+static const unsigned long CHSYNC_RC_QUIET_MS = 5000;   // no RC passthrough sent or heard for this long: not in use
+// The receive callback stamps an RC passthrough frame it hears (WiFi task: one store, nothing more); the counters
+// count the ones this board sends (PWMTask, the Kyber and raw-serial tasks). loop() compares them here.
+static volatile uint32_t chanSyncRcRxMs = 0;
+static bool chanSyncRcInUse() {
+  static unsigned long lastCount = 0, changedMs = 0;
+  const unsigned long now   = millis();
+  const unsigned long count = espnowPWMAttempts + espnowRawAttempts;
+  if (count != lastCount) { lastCount = count; changedMs = now | 1; }
+  const uint32_t rx = chanSyncRcRxMs;
+  return (changedMs && now - changedMs < CHSYNC_RC_QUIET_MS) || (rx && now - rx < CHSYNC_RC_QUIET_MS);
+}
+bool configPullJobActive();                          // defined with the config pull job, below
+bool resultPullBusy();                               // results in parts: a relay pull that pages (defined below)
+bool chanSyncHostBusy(bool forSearch, const char **why) {
+  const char *w = nullptr;
+  if (otaActiveSession())                       w = "an OTA session";
+  else if (configPullJobActive())               w = "a config pull";
+  else if (rebootPending || pwmRebootPending)   w = "a pending restart";
+  else if (forSearch) {
+    if (etmCharRunning || etmLoadRunning)       w = "an ETM characterization";
+    else if (seqPullActive)                     w = "a sequence-names pull";
+    else if (resultPullBusy())                  w = "a mesh result pull (?MGMT,STATS / ETM,CHAR / SEQGET)";
+    else if (commandQueue && uxQueueMessagesWaiting(commandQueue)) w = "queued commands";
+    else if (millis() - lastCommandProcessedMs < CHSYNC_QUIET_MS)  w = "commands still arriving";
+    else if (chanSyncRcInUse())                 w = "RC passthrough (PWM / Kyber / raw serial) in use";
+    else {
+      for (int i = 0; i < ETM_PENDING_MAX; i++)
+        if (etmPendingTable[i].active) { w = "ETM commands awaiting an ACK"; break; }
+    }
+  }
+  if (why) *why = w;
+  return w != nullptr;
+}
 
 // Callback-side (WiFi task, Core 0): copy the raw advert into a queue. The TLV
 // decode + neighbor-table write happen in loop() (drainWdpPackets), never inline
@@ -1794,8 +1987,9 @@ void etmSendAck(int senderWCB, uint16_t seqNum) {
   // being in our own peer table — a high-numbered relay above our WCBQ floor, or a peer evicted
   // from the ~20-slot ESP-NOW table. esp_now_send then fails ESP_ERR_ESPNOW_NOT_FOUND and the ACK
   // is silently dropped, so the sender burns all 3 retries and reports "[ETM] WCBn FAILED" for a
-  // command we actually executed. Mirrors the on-demand registration the retry path already does.
-  if (!esp_now_is_peer_exist(mac)) {
+  // command we actually executed. Mirrors the on-demand registration the retry path already does. Not while a wedge
+  // remedy restarts ESP-NOW from loop() (this runs on the WiFi task): the send below is refused then anyway.
+  if (!wcbEspNowRestarting() && !esp_now_is_peer_exist(mac)) {
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, mac, 6);
     p.channel = 0; p.encrypt = false;
@@ -1849,6 +2043,13 @@ const char *startETMChar() {
     }  
 
     sendHeldETMCharResult(true);   // a result still held for the previous run's requester goes first
+    if (!etmCharTables) etmCharTables = (EtmCharTables *)malloc(sizeof(EtmCharTables));
+    if (!etmCharTables) {
+        Serial.printf("[ETM CHAR] Not enough memory to run: it needs %u bytes in one block, the largest free is %u.\n",
+                      (unsigned)sizeof(EtmCharTables), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        if (etmCharDebugWasSaved) { debugETM = true; etmCharDebugWasSaved = false; }
+        return "not enough memory";
+    }
     etmCharLoadTriggeredMs = 0;
     etmCharRunning = true;
     etmCharPhase = 1;
@@ -1882,6 +2083,7 @@ void processETMChar() {
     if (peerCount == 0) {
         Serial.println("[ETM] Characterization aborted: no online peers.");
         etmCharRunning = false;
+        etmCharFreeTables();
         // printETMCharResults() is the only place that unwinds the rest of the run's state, and
         // this early return skips it. Unwind here too, or: debugETM stays suppressed for the rest
         // of the session, and etmCharRelayRequesterWCB stays latched so the NEXT — possibly
@@ -1893,6 +2095,7 @@ void processETMChar() {
             sendResultFrags("ETM characterization aborted: no online peers.",
                             etmCharRelayRequesterWCB, PACKET_TYPE_ETM_FRAG);
             etmCharRelayRequesterWCB = 0;
+            etmCharRelayParts        = false;
         }
         return;
     }
@@ -2195,6 +2398,14 @@ String buildStatsString() {
              (unsigned long)wcbEspNowDropped());
     out += buf;
   }
+  if (wcbEspNowLostFrames() > 0 || wcbEspNowWedges() > 0) {
+    // Since boot, not since a stats reset: frames the radio accepted and never completed - each one a TX buffer the WiFi
+    // driver lost (tracker #112, WCB_EspNow.h) - and the transmit wedges they led to.
+    snprintf(buf, sizeof(buf), "ESP-NOW since boot: %lu frame(s) accepted and never completed; transmit wedged %lu "
+             "time(s), %lu cleared without a reboot\n", (unsigned long)wcbEspNowLostFrames(),
+             (unsigned long)wcbEspNowWedges(), (unsigned long)wcbEspNowWedgesCleared());
+    out += buf;
+  }
   if (etmQueueFullRefused > 0) {
     // ETM commands refused unacknowledged because the command queue could not take them (tracker #108): their
     // senders retried, and report a failure if every retry met a full queue too.
@@ -2370,6 +2581,7 @@ String buildETMCharResultsString(int* peers, int peerCount) {
 
 void printETMCharResults(int* peers, int peerCount) {
     String results = buildETMCharResultsString(peers, peerCount);
+    etmCharFreeTables();           // the text holds the run now
     Serial.print(results);
 
     // Restore ETM debug state
@@ -2384,6 +2596,8 @@ void printETMCharResults(int* peers, int peerCount) {
     if (etmCharRelayRequesterWCB != 0) {
         etmCharHeldResult  = results;
         etmCharHeldFor     = etmCharRelayRequesterWCB;
+        etmCharHeldParts   = etmCharRelayParts;
+        etmCharRelayParts  = false;
         etmCharHeldUntilMs = etmCharLoadTriggeredMs ? etmCharLoadTriggeredMs + ETM_LOAD_RUN_MS + ETM_LOAD_SETTLE_MS
                                                     : millis();
         etmCharRelayRequesterWCB = 0;
@@ -2394,6 +2608,18 @@ void printETMCharResults(int* peers, int peerCount) {
     }
 }
 
+static void sendResultWholeOrHold(uint8_t kind, String &result, uint8_t requester, bool parts);   // results in parts
+
+// Gives a String's heap buffer back. `s = String()` does not: arduino-esp32 3.x moves an empty String into one that has
+// a buffer by keeping the buffer (String::move: its capacity is >= 0), so a dropped held ?STATS result stayed ~4 KB of
+// W2's heap, and a sent ETM characterization result ~1 KB, until the next one (ncmesh.mgmt_stats_parts and
+// mgmt_etm_char, run 20261023-213338: with the OTA queue, 8 KB of a classic board's ~19 KB). A null C string frees it
+// (copy -> invalidate), and "" then fits the String's own small buffer, so nothing is taken back.
+static inline void stringRelease(String &s) {
+  s = (const char *)nullptr;
+  s = "";
+}
+
 // Sends a relayed run's held result once etmCharHeldUntilMs has passed, or at once with `force` (a new run is starting).
 // Called from loop() beside processETMChar().
 void sendHeldETMCharResult(bool force) {
@@ -2401,8 +2627,11 @@ void sendHeldETMCharResult(bool force) {
     if (!force && (long)(millis() - etmCharHeldUntilMs) < 0) return;
     const uint8_t to = etmCharHeldFor;
     etmCharHeldFor = 0;
-    sendResultFrags(etmCharHeldResult, to, PACKET_TYPE_ETM_FRAG);
-    etmCharHeldResult = String();
+    // Whole when it fits one reply (or the requester predates parts: the [ERROR] text past one reply, as before); else
+    // held for the requester to page through (sendResultWholeOrHold takes the String), part 0 now.
+    sendResultWholeOrHold(rparts::KIND_ETM, etmCharHeldResult, to, etmCharHeldParts);
+    stringRelease(etmCharHeldResult);
+    etmCharHeldParts  = false;
     if (debugMGMT) Serial.printf("[MGMT] ETM char results sent to WCB%d via relay\n", to);
 }
 
@@ -2655,6 +2884,12 @@ void MeshSerialOutTask(void *parameter) {
 static TaskHandle_t serialCommandTaskHandle = nullptr;
 
 void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int originSeqBody) {
+  enqueueCommand(cmd.c_str(), cmd.length(), sourceID, originEspnow, originSeqBody);
+}
+
+// The same from characters, so a caller holding the command inside a longer line (a ?SEQ,SAVE token in a chain) does
+// not copy it first: the queue item is the one copy.
+void enqueueCommand(const char *cmd, size_t cmdLen, int sourceID, int originEspnow, int originSeqBody) {
   if (!commandQueue) return;
 
   CommandQueueItem item;
@@ -2675,7 +2910,7 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
 
   // One allocation: the lineage hashes, then the command (including null terminator). A top-level command
   // (depth 0) costs exactly what it did before.
-  const size_t length = cmd.length() + 1;
+  const size_t length = cmdLen + 1;
   char *block = (char *)malloc(pathBytes + length);
   if (!block) {
     Serial.println("Out of memory while enqueuing command!");
@@ -2685,8 +2920,8 @@ void enqueueCommand(const String &cmd, int sourceID, int originEspnow, int origi
   item.seqDepth = depth;
   item.cmd = block + pathBytes;
 
-  strncpy(item.cmd, cmd.c_str(), length);
-  item.cmd[length - 1] = '\0';
+  memcpy(item.cmd, cmd, cmdLen);
+  item.cmd[cmdLen] = '\0';
 
   // Attempt to enqueue. Only the serial reader may wait for room: it is its own task, and a pasted ?backup of more
   // than 200 tokens lost everything past the queue's capacity, one "queue is full" line per token (WCB coverage
@@ -2953,11 +3188,18 @@ void parseCommandsNoChecksum(const String &data, int sourceID, int originEspnow,
         int endPos = (int)data.length();
         if (nextFuncPos != -1 && nextFuncPos < endPos) endPos = nextFuncPos;
 
-        String seqSaveCmd = data.substring(startIdx, endPos);
-        seqSaveCmd.trim();
-        if (!seqSaveCmd.isEmpty() && !seqSaveCmd.startsWith(commentDelimiter)) {
-          if (!ifGateConsumeToken(seqSaveCmd, ifSkipping)) {
-            enqueueCommand(seqSaveCmd, sourceID, originEspnow, originSeqBody);
+        // The token as a slice of data, trimmed in place and queued from there: a copy of a long value here was one
+        // more of the copies a classic board could not hold (handleSingleCommand's ?SEQ,SAVE path). A token under a
+        // false IF is dropped as ifGateConsumeToken drops it, which takes its copy only then.
+        int tokS = startIdx, tokE = endPos;
+        while (tokS < tokE && isspace((unsigned char)data[tokS])) tokS++;
+        while (tokE > tokS && isspace((unsigned char)data[tokE - 1])) tokE--;
+        if (tokE > tokS && strncmp(data.c_str() + tokS, commentDelimiter.c_str(), commentDelimiter.length()) != 0) {
+          if (ifSkipping) {
+            const String tok = data.substring(tokS, tokE);
+            ifGateConsumeToken(tok, ifSkipping);
+          } else {
+            enqueueCommand(data.c_str() + tokS, (size_t)(tokE - tokS), sourceID, originEspnow, originSeqBody);
           }
         }
         startIdx = endPos;
@@ -3533,7 +3775,9 @@ void handleMgmtForward(const String &args) {
   uint8_t  totalChunks = (uint8_t)args.substring(c4 + 1, c5).toInt();
   String   payload     = args.substring(c5 + 1);
 
-  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT || totalChunks == 0 || totalChunks > MGMT_MAX_CHUNKS) {
+  // Up to MGMT_FWD_MAX_CHUNKS: the relay holds nothing of a session, so it forwards one longer than it could take itself
+  // (the longest ?SEQ,SAVE an ESP32-S3 target runs, MGMT_RX_MAX_CHUNKS); a target reassembles what it can.
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT || totalChunks == 0 || totalChunks > MGMT_FWD_MAX_CHUNKS) {
     if (debugMGMT) Serial.println("[MGMT] Invalid parameters");
     return;
   }
@@ -3617,8 +3861,8 @@ void handleMgmtPacket(const uint8_t *data) {
 
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
-  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;
-  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_RX_MAX_CHUNKS) return;   // longer than this board can take
+  if (pkt.chunkIdx >= MGMT_RX_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
 
   // Initialise the recent-session ring buffer on first use (avoids false matches
   // against the zero-initialised array for the rare sessionId of 0x0000).
@@ -3664,21 +3908,34 @@ void handleMgmtPacket(const uint8_t *data) {
   }
 
   // Store chunk if not already received
-  if (!(mgmtSession.receivedMask & (1 << pkt.chunkIdx))) {
+  if (!(mgmtSession.receivedMask & (1UL << pkt.chunkIdx))) {
     strncpy(mgmtSession.chunks[pkt.chunkIdx], pkt.payload, MGMT_PAYLOAD_SIZE);
     mgmtSession.chunks[pkt.chunkIdx][MGMT_PAYLOAD_SIZE] = '\0';
-    mgmtSession.receivedMask |= (1 << pkt.chunkIdx);
+    mgmtSession.receivedMask |= (1UL << pkt.chunkIdx);
     if (debugMGMT) Serial.printf("[MGMT] Chunk %d/%d received (session %04X)\n",
                                  pkt.chunkIdx + 1, pkt.totalChunks, pkt.sessionId);
   }
   mgmtSession.lastActivityMs = millis();
 
   // Check if all chunks are in
-  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
+  const uint32_t expectedMask = (pkt.totalChunks >= 32) ? 0xFFFFFFFFUL : ((1UL << pkt.totalChunks) - 1);
   if (mgmtSession.receivedMask == expectedMask) {
-    // Reassemble
-    String fullCmd = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullCmd += String(mgmtSession.chunks[i]);
+    // Reassemble - whole or not at all. A String append that fails leaves the String unchanged (rule 14), so the
+    // old `fullCmd += chunk` ran a command with a chunk missing from its middle: a ?SEQ,SAVE stored a wrong value
+    // under a right key. Reserved once at its exact length and every append checked; a command the heap cannot hold
+    // is dropped whole, and loop() says so (statusQueueOut: this is the WiFi task, which must not print, rule 11).
+    size_t total = 0;
+    for (int i = 0; i < pkt.totalChunks; i++) total += strnlen(mgmtSession.chunks[i], MGMT_PAYLOAD_SIZE);
+    String fullCmd;
+    bool whole = fullCmd.reserve(total);
+    for (int i = 0; whole && i < pkt.totalChunks; i++) whole = fullCmd.concat(mgmtSession.chunks[i]);
+    if (!whole || fullCmd.length() != total) {
+      statusQueueOut("[MGMT] No memory for a %u-char pushed command - not run", (unsigned)total);
+      mgmtRecentIds[mgmtRecentHead] = pkt.sessionId;   // its second copies are not a new command either
+      mgmtRecentHead = (mgmtRecentHead + 1) % MGMT_RECENT_COUNT;
+      memset(&mgmtSession, 0, sizeof(mgmtSession));
+      return;
+    }
     if (debugMGMT) Serial.printf("[MGMT] Session %04X complete — executing %d chars\n",
                                  pkt.sessionId, fullCmd.length());
 
@@ -3784,13 +4041,20 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   emit("WCB,"  + String(WCB_Number), true);
   if (wcb_alias.length() > 0) emit("ALIAS," + wcb_alias, true);
   emit("WCBQ," + String(Default_WCB_Quantity), true);
+  // The region BEFORE the channel: ?WCBCH checks the channel against the region, and against 13 when ?REGION has just
+  // saved another one (chanSyncWcbchLimit), so a chain restoring a board onto channel 12 or 13 works in this order only.
+  emit("REGION," + String(chanSyncSavedRegion()), true);
   if (configLineFaultActive()) emit(String(), true);           // the test knob's lost line (above)
-  else emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1–11)
+  else emit("WCBCH," + String(meshChannel), true);   // ESP-NOW mesh channel (1-11, 12-13 under a region allowing them)
   // WiFi (?WIFI). Emitted so a backup captures it and a restore replays it. The
   // password rides along because a restore that brought the AP back WITHOUT its
   // passphrase would silently fail closed at boot — the board would come up with
   // no AP and nothing saying why. OFF is emitted too, so restoring a backup taken
   // with WiFi off actively turns it off rather than leaving whatever was there.
+  // The WebSocket token goes first, when one is set: a restore then has it before ?WIFI,JOIN, which warns without one,
+  // and before the reboot that starts JOIN, which refuses to without one (docs/WIFI_DESIGN.md §7). A chain from a board
+  // with none leaves the target's token as it is.
+  if (wcbWifiToken[0]) emit("WIFI,TOKEN," + String(wcbWifiToken), true);
   if (wcbWifiMode == WCB_WIFI_AP)
     emit("WIFI,AP," + wcbWifiApSsid + "," + wcbWifiApPass, true);
   else if (wcbWifiMode == WCB_WIFI_JOIN)
@@ -3923,6 +4187,8 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
   // of a portable config, so it is intentionally not emitted here.
   if (!wdpEnabled)  emit("WDP,OFF", true);
   if (!wdpAutoJoin) emit("WDP,AUTOJOIN,OFF", true);
+  // Channel sync, both ways: a restore must turn a deliberate OFF back on as surely as it keeps it off.
+  emit(chanSyncEnabled() ? "CHSYNC,ON" : "CHSYNC,OFF", true);
 
   // Stored sequences (WCB_SeqStore.h). A value that could not be held, or a SEQ,SAVE line that could not be built,
   // is a lost token; a store that could not be read, or a walk that broke off, is one more - never a shorter list
@@ -4043,7 +4309,7 @@ static struct {
   uint16_t id;             // parts id, new for every measure walk
   uint8_t  K;              // 0 = one legacy reply, else the number of parts
   uint8_t  part;           // the next part to build (1-based; the legacy reply is part 1 of 1)
-  uint16_t split[CFGP_MAX_PARTS + 1];
+  uint8_t  back[CFGP_MAX_PARTS];   // the split points' back-offs (cfgpSplit / cfgpSplitAt)
   uint8_t  err;            // CFGP_E_* to send
   uint32_t errA, errB, errC;
   bool     emptyAfterErr;  // NOMEM on a legacy-size reply: send the empty type-6 reply after it
@@ -4261,7 +4527,7 @@ static void cpjMeasure() {
       cpjBuild();
       break;
     case CFGP_PLAN_PARTS:
-      s_cpj.K     = (uint8_t)cfgpSplit(w.len, s_cpj.D, w.grid, s_cpj.split);
+      s_cpj.K     = (uint8_t)cfgpSplit(w.len, s_cpj.D, w.grid, s_cpj.back);
       s_cpj.state = CPJ_BUILD;
       if (debugMGMT) Serial.printf("[MGMT] Config pull to WCB%d: %lu chars in %u parts (id %04X)\n",
                                    s_cpj.requester, (unsigned long)s_cpj.L, (unsigned)s_cpj.K, s_cpj.id);
@@ -4282,8 +4548,8 @@ static void cpjBuild() {
   if (s_cpj.oomWaiting && (int32_t)(now - s_cpj.oomNextMs) < 0) return;
 
   const bool   legacy = (s_cpj.K == 0);
-  const size_t lo     = legacy ? 0 : s_cpj.split[s_cpj.part - 1];
-  const size_t hi     = legacy ? s_cpj.L : s_cpj.split[s_cpj.part];
+  const size_t lo     = legacy ? 0 : cfgpSplitAt(s_cpj.part - 1, s_cpj.K, s_cpj.L, s_cpj.D, s_cpj.back);
+  const size_t hi     = legacy ? s_cpj.L : cfgpSplitAt(s_cpj.part, s_cpj.K, s_cpj.L, s_cpj.D, s_cpj.back);
   char         hdr[CFGP_PART_HDR_MAX + 1] = "";
   const size_t hdrLen = legacy ? 0 : cfgpPartHeader(hdr, sizeof(hdr), s_cpj.id, s_cpj.part, s_cpj.K);
   const size_t msgLen = hdrLen + (hi - lo) + (legacy ? 0 : 1);   // + the closing '~'
@@ -4747,28 +5013,17 @@ void handleConfigFragPacket(const uint8_t *data) {
   }
 }
 
-// ── Shared helper: fragment a String result and send back via ESP-NOW ────────
+// ── Shared helper: fragment a result and send it back via ESP-NOW ─────────────
 static const uint32_t RESULT_PASS_GAP_MS = 100;   // between sendResultFrags' two passes
 
-void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacketType) {
-  const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
-  int totalLen    = data.length();
-  int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
-  if (totalChunks > MGMT_MAX_CHUNKS) {
-    // UNGATED. This used to be behind debugMGMT (off by default), so an oversized result — a
-    // ?MGMT,STATS or ?MGMT,ETM on a large fleet, or a config with many stored variables — simply
-    // produced nothing at all, and the requesting end waited out its timeout with no clue why.
-    // Send a short in-band error instead of silence so the operator sees the cause.
-    Serial.printf("[MGMT] Result too large to relay: %d chars needs %d chunks, max %d (%d chars).\n",
-                  totalLen, totalChunks, MGMT_MAX_CHUNKS, MGMT_MAX_CHUNKS * chunkStride);
-    String err = "[ERROR] Result too large to relay (" + String(totalLen) + " chars, max " +
-                 String(MGMT_MAX_CHUNKS * chunkStride) + "). Reduce stored variables/sequences "
-                 "or query this board directly.";
-    // Recurse ONCE with a message that provably fits, so the requester gets a real answer.
-    if (err.length() <= (unsigned)(MGMT_MAX_CHUNKS * chunkStride))
-      sendResultFrags(err, requesterWCB, fragPacketType);
-    return;
-  }
+// `len` bytes of one reply, produced a chunk at a time by fill(at, n, out) - so a reply built of pieces (a part header
+// and a window of a held result, or a sequence's key and its value) is never copied into one buffer first. At most
+// MGMT_MAX_CHUNKS chunks: the callers check (sendResultFrags, sendResultPart).
+static void sendResultFragsFill(size_t len, const std::function<void(size_t at, size_t n, char *out)> &fill,
+                                uint8_t requesterWCB, uint8_t fragPacketType) {
+  const size_t chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
+  const int    totalChunks = len ? (int)((len + chunkStride - 1) / chunkStride) : 1;
+  if (totalChunks > MGMT_MAX_CHUNKS) return;
   uint16_t sessionId = (uint16_t)random(1, 0xFFFF);   // [1..0xFFFE] — avoid both frag-dedup sentinels (0 = "no session", 0xFFFF = ring-buffer init)
   // Two passes, as a config pull's reply has (HIL_FIX_TRACKER #109): the frags are unacknowledged broadcasts, and one
   // lost frag lost the whole STATS, ETM,CHAR or sequence reply (inv.dedup, ncmesh.mgmt_etm_char). A relay fills a gap
@@ -4786,10 +5041,9 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
       frag.sessionId    = sessionId;
       frag.chunkIdx     = (uint8_t)i;
       frag.totalChunks  = (uint8_t)totalChunks;
-      int start = i * chunkStride;
-      int end   = min(start + chunkStride, totalLen);
-      String chunk = data.substring(start, end);
-      memcpy(frag.payload, chunk.c_str(), chunk.length());
+      const size_t at = (size_t)i * chunkStride;
+      const size_t n  = len - at < chunkStride ? len - at : chunkStride;
+      if (n) fill(at, n, frag.payload);    // memset left the rest of the payload NUL
       wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&frag, sizeof(frag));
       delay(20);
     }
@@ -4798,94 +5052,313 @@ void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacke
                                 totalChunks, fragPacketType, requesterWCB);
 }
 
-// ── Target side: handle STATS_REQ → collect ?STATS and send back as frags ────
+void sendResultFrags(const String &data, uint8_t requesterWCB, uint8_t fragPacketType) {
+  const int chunkStride = CONFIG_PAYLOAD_SIZE - 1;  // 182 usable bytes per chunk
+  int totalLen    = data.length();
+  int totalChunks = max(1, (totalLen + chunkStride - 1) / chunkStride);
+  if (totalChunks > MGMT_MAX_CHUNKS) {
+    // UNGATED. This used to be behind debugMGMT (off by default), so an oversized result — a
+    // ?MGMT,STATS or ?MGMT,ETM on a large fleet, or a config with many stored variables — simply
+    // produced nothing at all, and the requesting end waited out its timeout with no clue why.
+    // Send a short in-band error instead of silence so the operator sees the cause. Only a requester that
+    // predates results in parts gets here now (WCB_ResultWire.h): it gets what it always got (Greg, 2026-10-23).
+    Serial.printf("[MGMT] Result too large to relay: %d chars needs %d chunks, max %d (%d chars).\n",
+                  totalLen, totalChunks, MGMT_MAX_CHUNKS, MGMT_MAX_CHUNKS * chunkStride);
+    String err = "[ERROR] Result too large to relay (" + String(totalLen) + " chars, max " +
+                 String(MGMT_MAX_CHUNKS * chunkStride) + "). Reduce stored variables/sequences "
+                 "or query this board directly.";
+    // Recurse ONCE with a message that provably fits, so the requester gets a real answer.
+    if (err.length() <= (unsigned)(MGMT_MAX_CHUNKS * chunkStride))
+      sendResultFrags(err, requesterWCB, fragPacketType);
+    return;
+  }
+  const char *p = data.c_str();
+  sendResultFragsFill((size_t)totalLen, [p](size_t at, size_t n, char *out) { memcpy(out, p + at, n); },
+                      requesterWCB, fragPacketType);
+}
+
+// ── Results in parts: the target (WCB_ResultWire.h, docs/MGMT_RELAY.md §10) ─────
+// A ?MGMT,STATS or ?MGMT,ETM,CHAR result that does not fit one reply goes, to a requester that asked for parts, a part
+// per request. A STATS or ETM result is a moment's numbers: built again for every part, the parts would not agree, so
+// it is HELD, as built (the String the old reply was sent from), for the requester to page through, and dropped once
+// nobody asked for a part of it for JOB_IDLE_MS (serviceResultJobs). One per kind, so a STATS pull never costs an ETM
+// pull its result. A stored sequence is not held: it is read from the store again for every part, and the CRC in every
+// header says when it changed. The bound: a held ?STATS is at most 6,587 bytes (19 peers, a special peer and 20
+// reported rows, every counter at 2^32-1), an ETM result at most 5,212 (19 peers in 3 phases, 5-digit latencies) - the
+// String the old reply was built in too, now held for the few seconds the requester pages through it.
+static uint16_t s_resultPartD = 0;      // ?DEBUG,RESULTPART (RAM only): part data size; 0 = rparts::PART_DATA
+void resultSetPartSize(uint16_t d) { s_resultPartD = d; }
+static size_t resultPartData() { return s_resultPartD ? s_resultPartD : rparts::PART_DATA; }
+
+struct ResultJob {
+  String   text;          // the result, as built
+  uint8_t  requester;
+  uint16_t id;            // 0 = nothing held
+  uint8_t  parts;
+  uint32_t crc;
+  uint32_t lastMs;        // the last part sent
+  int      lastPart;      // ...and which, for the dedup
+};
+static ResultJob s_rjob[2];   // [0] ?STATS, [1] ETM characterization
+// An index, not a ResultJob&: the .ino prototype generator would emit a prototype naming the struct above it.
+static int resultJobOf(uint8_t kind) { return kind == rparts::KIND_ETM ? 1 : 0; }
+static const char *resultKindName(uint8_t kind) {
+  return kind == rparts::KIND_STATS ? "Stats" : kind == rparts::KIND_ETM ? "ETM characterization" : "Sequence";
+}
+
+static void resultJobDrop(int i) {
+  ResultJob &j = s_rjob[i];
+  stringRelease(j.text);  // gives the buffer back (j.text = String() did not)
+  j.id = 0;
+  j.parts = 0;
+}
+
+// loop(): drop a held result nobody asked a part of for JOB_IDLE_MS.
+void serviceResultJobs() {
+  for (int i = 0; i < 2; i++) {
+    const ResultJob &j = s_rjob[i];
+    if (j.id && millis() - j.lastMs > rparts::JOB_IDLE_MS) {
+      if (debugMGMT) Serial.printf("[MGMT] Held result %04X for WCB%d dropped: no part asked for %lu s\n", j.id,
+                                   j.requester, (unsigned long)(rparts::JOB_IDLE_MS / 1000));
+      resultJobDrop(i);
+    }
+  }
+}
+
+// Part `part` of t, under its header, as one reply of `type`.
+static bool sendResultPart(const rparts::Text &t, bool lines, uint16_t id, unsigned parts, uint32_t crc, unsigned part,
+                           uint8_t requester, uint8_t type) {
+  size_t lo = 0, hi = 0;
+  if (!rparts::partRange(t, resultPartData(), lines, part, lo, hi)) return false;
+  const rparts::Header h = { id, part, parts, (unsigned)t.len(), crc };
+  char hdr[rparts::HEADER_MAX + 1];
+  const int hn = rparts::formatHeader(hdr, sizeof(hdr), h);
+  if (hn < 0) return false;
+  const size_t hl = (size_t)hn;
+  sendResultFragsFill(hl + (hi - lo), [&](size_t at, size_t n, char *out) {
+    if (at < hl) {                                  // the header's tail, then the data
+      const size_t k = hl - at < n ? hl - at : n;
+      memcpy(out, hdr + at, k);
+      out += k;
+      n -= k;
+      at = hl;
+    }
+    if (n) t.copy(lo + (at - hl), n, out);
+  }, requester, type);
+  if (debugMGMT) Serial.printf("[MGMT] %s part %u of %u (%u bytes) sent to WCB%d\n",
+                               type == PACKET_TYPE_SEQVAL_PART ? "Sequence"
+                               : type == PACKET_TYPE_ETM_PART ? "ETM characterization" : "Stats",
+                               part + 1, parts, (unsigned)(hi - lo), requester);
+  return true;
+}
+
+// A STATS or ETM result for `requester`: whole when it fits one reply or the requester cannot take parts (the old
+// reply: sendResultFrags, the [ERROR] text past one reply); else held, and part 0 sent.
+static void sendResultWholeOrHold(uint8_t kind, String &result, uint8_t requester, bool parts) {
+  const uint8_t whole = rparts::wholeType(kind);
+  const size_t  D     = resultPartData();
+  if (!parts || rparts::fitsOneReply(result.length(), D)) {
+    sendResultFrags(result, requester, whole);
+    return;
+  }
+  ResultJob &j = s_rjob[resultJobOf(kind)];
+  resultJobDrop(resultJobOf(kind));                 // a newer result replaces a held one
+  const unsigned n = rparts::partCount(rparts::Text(result.c_str(), result.length()), D, true);
+  if (n == 0 || result.length() > rparts::LEN_MAX) {   // past what a requester takes: no result is near it
+    sendResultFrags(result, requester, whole);
+    return;
+  }
+  j.text      = std::move(result);
+  j.requester = requester;
+  do { j.id = (uint16_t)esp_random(); } while (j.id == 0);
+  j.parts     = (uint8_t)n;
+  j.crc       = rparts::Text(j.text.c_str(), j.text.length()).crc();
+  if (debugMGMT) Serial.printf("[MGMT] %s result for WCB%d: %u chars in %u parts (id %04X)\n", resultKindName(kind),
+                               requester, (unsigned)j.text.length(), n, j.id);
+  sendResultPart(rparts::Text(j.text.c_str(), j.text.length()), true, j.id, j.parts, j.crc, 0, requester,
+                 rparts::partType(kind));
+  j.lastPart = 0;
+  j.lastMs   = millis();
+}
+
+// ── Target side: STATS_REQ (7, one reply) and RESULT_REQ (30, parts) → ?STATS ──
+// A requester sends the parts request three times and the old one once behind it (handleMgmtStatsRequest, WcbMgmt): a
+// repeat from the same requester within DEDUP_MS of the END of the answer is a copy, whichever kind it is. An old
+// relay sends one 7, which this answers as it always did.
+static void answerStats(uint8_t requester, bool parts) {
+  static uint32_t lastMs   = 0;
+  static uint8_t  lastFrom = 0;
+  if (requester == lastFrom && millis() - lastMs < rparts::DEDUP_MS) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate stats request from WCB%d ignored\n", requester);
+    return;
+  }
+  lastFrom = requester;
+  lastMs   = millis();
+  if (debugMGMT) Serial.printf("[MGMT] Stats request from WCB%d\n", requester);
+  String result = buildStatsString();
+  sendResultWholeOrHold(rparts::KIND_STATS, result, requester, parts);
+  lastMs = millis();   // the window runs from the end of the answer
+}
+
 void handleStatsReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
-  if (debugMGMT) Serial.printf("[MGMT] Stats request from WCB%d\n", pkt.requesterWCB);
-  String result = buildStatsString();
-  sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_STATS_FRAG);
+  answerStats(pkt.requesterWCB, false);
 }
 
-// ── Target side: handle SEQ_REQ → send this board's sequence NAMES back ──────
-// Reads the sequence store's key list (names only) and fragments the inventory back
-// to the requester. Deferred out of the WiFi callback via enqueueMgmtReq like its peers.
+void handleETMReqFrom(uint8_t requester, bool parts);   // with handleETMReqPacket, below
+
+// Part `part` of the result held under `id`. A request for a result no longer held (dropped idle, or replaced by a newer
+// one) gets no answer: the requester asks again, and then says the part never came.
+static void answerResultPart(uint8_t requester, uint8_t kind, uint16_t id, unsigned part) {
+  ResultJob &j = s_rjob[resultJobOf(kind)];
+  if (!j.id || j.id != id || j.requester != requester || part >= j.parts) {
+    if (debugMGMT) Serial.printf("[MGMT] %s part %u of %04X for WCB%d: not held here - not answered\n",
+                                 resultKindName(kind), part + 1, id, requester);
+    return;
+  }
+  if ((int)part == j.lastPart && millis() - j.lastMs < rparts::DEDUP_MS) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate %s part request from WCB%d ignored\n", resultKindName(kind),
+                                 requester);
+    return;
+  }
+  if (debugMGMT) Serial.printf("[MGMT] %s request from WCB%d (part %u)\n", resultKindName(kind), requester, part + 1);
+  sendResultPart(rparts::Text(j.text.c_str(), j.text.length()), true, j.id, j.parts, j.crc, part, requester,
+                 rparts::partType(kind));
+  j.lastPart = (int)part;
+  j.lastMs   = millis();
+}
+
+void handleResultReqPacket(const uint8_t *data) {
+  espnow_struct_result_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  if (pkt.kind != rparts::KIND_STATS && pkt.kind != rparts::KIND_ETM) return;
+  if (pkt.id == 0) {
+    if (pkt.part != 0) return;
+    if (pkt.kind == rparts::KIND_STATS) answerStats(pkt.requesterWCB, true);
+    else                                handleETMReqFrom(pkt.requesterWCB, true);
+    return;
+  }
+  answerResultPart(pkt.requesterWCB, pkt.kind, pkt.id, pkt.part);
+}
+
+// ── Target side: SEQ_REQ / SEQ_PAGE_REQ → send this board's sequence NAMES back ──────
+// Walks the sequence store's keys (names only) and fragments the reply back to the requester
+// (buildSequenceNamesReply): the whole list as type 14 when it fits one reply, else the page asked
+// for as type 29 to a page request, and nothing to an old request (13). Deferred out of the WiFi
+// callback via enqueueMgmtReq like its peers. `page` < 0: an old request.
+static void answerSeqNames(uint8_t requester, int page) {
+  // The requester sends each request 3x (handleMgmtSeqRequest; a page-0 request also sends three
+  // type-13 copies behind its three type-28 ones, for an older target) because a first broadcast frame
+  // is routinely dropped on a busy mesh. Without a dedup window that would fire several full
+  // fragmented responses. Keyed on (requester, page), an old request counting as page 0, so a
+  // requester walking the pages back to back is never mistaken for a retry of the page before; and
+  // timed from the END of the answer, so the copies queued while it was sent (a full page takes
+  // ~0.75 s, two passes) are still copies. Shorter than any sane retry interval, so a genuine retry is
+  // still answered.
+  static uint32_t lastSeqReqMs   = 0;
+  static uint8_t  lastSeqReqFrom = 0;
+  static int      lastSeqReqPage = 0;
+  const int key = page < 0 ? 0 : page;
+  uint32_t nowMs = millis();
+  if (requester == lastSeqReqFrom && key == lastSeqReqPage && (nowMs - lastSeqReqMs) < 1500) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq request from WCB%d ignored\n", requester);
+    return;
+  }
+  lastSeqReqFrom = requester;
+  lastSeqReqPage = key;
+  lastSeqReqMs   = nowMs;
+
+  if (debugMGMT) {
+    if (page > 0) Serial.printf("[MGMT] Sequence-names request from WCB%d (page %d)\n", requester, page);
+    else          Serial.printf("[MGMT] Sequence-names request from WCB%d\n", requester);
+  }
+  String       reply;
+  uint8_t      type = 0;
+  SeqNamesInfo info;
+  const int rc = buildSequenceNamesReply(page, reply, type, info);
+  if (rc == SEQN_UNREAD) {
+    // The store could not be read right now (it will not mount on a low heap). No answer rather than a wrong one
+    // (a WCB_Client reads any reply as an inventory): clearing the dedup lets the requester's retry be answered.
+    Serial.printf("[MGMT] Could not read the sequence store for WCB%d's request - not answered\n", requester);
+    lastSeqReqFrom = 0;
+    return;
+  }
+  if (rc == SEQN_NOFIT) {
+    // An old requester (WCB firmware before paged names, WCB_Client up to 1.18.1) cannot page, so it gets what it always
+    // got for a list this long: sendResultFrags' "[ERROR] Result too large to relay" text, which a WCB relay prints for
+    // the operator (Greg, 2026-10-23: keep the error). A WCB_Client that old reads it as an empty list; 1.19.0 drops it.
+    const unsigned whole = seqn::wholeLen(info.count, info.keyBytes);
+    const unsigned cap   = MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1);
+    Serial.printf("[MGMT] Result too large to relay: %u chars needs %u chunks, max %d (%u chars). WCB%d asked for the "
+                  "sequence names in one reply; a requester that predates paged names cannot read %u names.\n", whole,
+                  (whole + CONFIG_PAYLOAD_SIZE - 2) / (CONFIG_PAYLOAD_SIZE - 1), MGMT_MAX_CHUNKS, cap, requester,
+                  info.count);
+    sendResultFrags("[ERROR] Result too large to relay (" + String(whole) + " chars, max " + String(cap) +
+                    "). Reduce stored variables/sequences or query this board directly.", requester, PACKET_TYPE_SEQ_FRAG);
+    lastSeqReqMs = millis();
+    return;
+  }
+  sendResultFrags(reply, requester, type);
+  lastSeqReqMs = millis();   // the window runs from the end of the answer (above)
+}
+
 void handleSeqReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
-
-  // The requester sends SEQ_REQ 3x (see handleMgmtSeqRequest) because a first
-  // broadcast frame is routinely dropped on a busy mesh. Without a dedup window
-  // that would fire THREE full fragmented responses. Same guard, same reasoning
-  // as handleConfigReqPacket — shorter than any sane retry interval, so a genuine
-  // retry is still answered.
-  static uint32_t lastSeqReqMs   = 0;
-  static uint8_t  lastSeqReqFrom = 0;
-  uint32_t nowMs = millis();
-  if (pkt.requesterWCB == lastSeqReqFrom && (nowMs - lastSeqReqMs) < 1500) {
-    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq request from WCB%d ignored\n", pkt.requesterWCB);
-    return;
-  }
-  lastSeqReqFrom = pkt.requesterWCB;
-  lastSeqReqMs   = nowMs;
-
-  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request from WCB%d\n", pkt.requesterWCB);
-  String result = buildSequenceNamesString();
-  if (result.length() == 0) {
-    // The store could not be read right now (it will not mount on a low heap). No answer rather than a wrong one
-    // (a WCB_Client reads any reply as an inventory): clearing the dedup lets the requester's retry be answered.
-    Serial.printf("[MGMT] Could not read the sequence store for WCB%d's request - not answered\n", pkt.requesterWCB);
-    lastSeqReqFrom = 0;
-    return;
-  }
-  sendResultFrags(result, pkt.requesterWCB, PACKET_TYPE_SEQ_FRAG);
+  answerSeqNames(pkt.requesterWCB, -1);
 }
 
-// ── Target side: handle SEQVAL_REQ → send ONE sequence's value back ──────────
-// Reply payload is always "<key>,<status>,<value>" so the requester can match the
-// answer to its request and tell the three outcomes apart:
-//   OK       — value follows
-//   NOTFOUND — no such key (value empty)
-//   TOOBIG   — the value exceeds what sendResultFrags can carry (value empty)
-//
-// TOOBIG is reported EXPLICITLY rather than dropped. Silent overflow is precisely
-// what makes the config-pull path unusable for sequences (it sends nothing and logs
-// only under debugMGMT), and reintroducing it here would recreate the bug this whole
-// feature exists to route around.
-void handleSeqValReqPacket(const uint8_t *data) {
-  espnow_struct_seqval_req pkt;
+void handleSeqPageReqPacket(const uint8_t *data) {
+  espnow_struct_seqpage_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  pkt.key[sizeof(pkt.key) - 1] = '\0';
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
+  answerSeqNames(pkt.requesterWCB, pkt.page);
+}
 
-  String key = String(pkt.key);
-  key.trim();
-  if (key.length() == 0) return;
-
-  // Dedup a repeat of the SAME key from the SAME requester, matching the burst the
-  // requester sends. Keyed on the key too, so a consumer walking a name list back to
-  // back (get "wave", then "park") is never mistaken for a retry of the previous one.
+// ── Target side: SEQVAL_REQ (15) and SEQVAL_PART_REQ (31) → ONE sequence's value back ──
+// The reply is always "<key>,<status>,<value>", so the requester can match the answer to its request and tell the
+// outcomes apart:
+//   OK       — value follows
+//   NOTFOUND — no such key (value empty)
+//   TOOBIG   — the value does not fit one reply, and the requester cannot take parts (value empty)
+//
+// TOOBIG is reported EXPLICITLY rather than dropped. Silent overflow is precisely what made the config-pull path
+// unusable for sequences, and reintroducing it here would recreate the bug this whole feature exists to route around.
+// A requester that asks with SEQVAL_PART_REQ (WCB_ResultWire.h) never gets it: a value that does not fit one reply goes
+// to it a part per request, type 34, each read from the store again (nothing held between parts; the CRC in every
+// header says when the value changed under the pull). `part` < 0: an old request.
+static void answerSeqVal(uint8_t requester, const String &key, int part) {
+  // Dedup a repeat of the SAME (key, part) from the SAME requester, matching the burst the requester sends (an old
+  // request counts as part 0, so the 15s sent behind the 31s are copies). Keyed on the key too, so a consumer walking a
+  // name list back to back (get "wave", then "park") is never mistaken for a retry of the previous one. Timed from the
+  // request, as it always was: the longest answer (16 frags, two passes) takes about 0.75 s, so the copies queued
+  // behind it are still inside the window when they are read.
   static uint32_t lastSeqValMs   = 0;
   static uint8_t  lastSeqValFrom = 0;
+  static int      lastSeqValPart = 0;
   static String   lastSeqValKey  = "";
-  uint32_t nowMs = millis();
-  if (pkt.requesterWCB == lastSeqValFrom && key == lastSeqValKey &&
-      (nowMs - lastSeqValMs) < 1500) {
-    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq-value request '%s' from WCB%d ignored\n",
-                                 key.c_str(), pkt.requesterWCB);
+  const int slot = part < 0 ? 0 : part;
+  if (requester == lastSeqValFrom && slot == lastSeqValPart && key == lastSeqValKey &&
+      (millis() - lastSeqValMs) < rparts::DEDUP_MS) {
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate seq-value request '%s' from WCB%d ignored\n", key.c_str(), requester);
     return;
   }
-  lastSeqValFrom = pkt.requesterWCB;
+  lastSeqValFrom = requester;
   lastSeqValKey  = key;
-  lastSeqValMs   = nowMs;
+  lastSeqValPart = slot;
+  lastSeqValMs   = millis();
 
   // seqStoreGet answers NOTFOUND for a key longer than SEQ_KEY_MAX_LEN (never stored; NVS would match its first
   // 15 characters) and for the NVS layout's own records. A store it could not read makes no answer: a WCB_Client
@@ -4893,8 +5366,8 @@ void handleSeqValReqPacket(const uint8_t *data) {
   String value;
   const int got = seqStoreGet(key, value);
   if (got < 0) {
-    Serial.printf("[MGMT] Could not read sequence '%s' for WCB%d (%s) - not answered\n", key.c_str(),
-                  pkt.requesterWCB, seqStoreError(got));
+    Serial.printf("[MGMT] Could not read sequence '%s' for WCB%d (%s) - not answered\n", key.c_str(), requester,
+                  seqStoreError(got));
     lastSeqValFrom = 0;
     return;
   }
@@ -4903,43 +5376,106 @@ void handleSeqValReqPacket(const uint8_t *data) {
   if (got == SEQ_NOTFOUND) {
     reply = key + ",NOTFOUND,";
   } else {
-    // Budget check BEFORE sending: sendResultFrags silently refuses anything over
-    // MGMT_MAX_CHUNKS. Account for the "<key>,OK," header we prepend.
+    const String head = key + ",OK,";
+    const rparts::Text t(head.c_str(), head.length(), value.c_str(), value.length());
+    const size_t D = resultPartData();
+    if (part >= 0 && !rparts::fitsOneReply(t.len(), D)) {
+      // Parts. A part past the last (the value shrank since part 0) is answered with part 0 of what is stored now: its
+      // CRC differs, so the requester starts over.
+      const unsigned n = rparts::partCount(t, D, false);
+      if (n == 0) return;                           // past 99 parts: no value is near it (3,999 characters at most)
+      if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' from WCB%d (part %d of %u)\n", key.c_str(),
+                                   requester, part + 1, n);
+      sendResultPart(t, false, 0, n, t.crc(), (unsigned)part < n ? (unsigned)part : 0, requester,
+                     PACKET_TYPE_SEQVAL_PART);
+      return;
+    }
+    // One reply: budget check BEFORE sending, since sendResultFrags refuses anything over MGMT_MAX_CHUNKS. Only an old
+    // request (or the test part size) can be over it here.
     const int maxPayload = MGMT_MAX_CHUNKS * (CONFIG_PAYLOAD_SIZE - 1);
-    if ((int)(key.length() + 4 + value.length()) > maxPayload) {
+    if ((int)t.len() > maxPayload) {
       Serial.printf("[MGMT] Sequence '%s' is %d chars — too large to relay (max %d)\n",
                     key.c_str(), value.length(), maxPayload - (int)key.length() - 4);
       reply = key + ",TOOBIG,";
     } else {
-      reply = key + ",OK," + value;
+      reply = head + value;
     }
   }
 
   if (debugMGMT) Serial.printf("[MGMT] Sequence-value request '%s' from WCB%d (%d chars)\n",
-                               key.c_str(), pkt.requesterWCB, reply.length());
-  sendResultFrags(reply, pkt.requesterWCB, PACKET_TYPE_SEQVAL_FRAG);
+                               key.c_str(), requester, reply.length());
+  sendResultFrags(reply, requester, PACKET_TYPE_SEQVAL_FRAG);
 }
 
-// ── Target side: handle ETM_REQ → start ETM char, results sent in printETMCharResults ──
+void handleSeqValReqPacket(const uint8_t *data) {
+  espnow_struct_seqval_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  pkt.key[sizeof(pkt.key) - 1] = '\0';
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  String key = String(pkt.key);
+  key.trim();
+  if (key.length() == 0) return;
+  answerSeqVal(pkt.requesterWCB, key, -1);
+}
+
+void handleSeqValPartReqPacket(const uint8_t *data) {
+  espnow_struct_seqvalpart_req pkt;
+  memcpy(&pkt, data, sizeof(pkt));
+  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
+  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
+  if (pkt.targetWCB != WCB_Number) return;
+  char k[sizeof(pkt.key) + 1];
+  memcpy(k, pkt.key, sizeof(pkt.key));
+  k[sizeof(pkt.key)] = '\0';                        // a 15-character key fills the field with no NUL
+  String key = String(k);
+  key.trim();
+  if (key.length() == 0) return;
+  answerSeqVal(pkt.requesterWCB, key, pkt.part);
+}
+
+// ── Target side: ETM_REQ (8) / RESULT_REQ kind ETM (30) → start ETM char, results sent in printETMCharResults ──
+// The requester sends the parts request three times and the old one once behind it; the copies reach a run that is
+// already going for the same requester and are dropped quietly. A parts request among them marks the run's result for
+// parts (the first copy may have been an old one): sendHeldETMCharResult sends it whole or held for parts.
+void handleETMReqFrom(uint8_t requester, bool parts) {
+  // A copy: the run this requester started is going, or was refused a moment ago (answering every copy of a refused
+  // one sent the requester the refusal four times).
+  static uint32_t refusedMs   = 0;
+  static uint8_t  refusedFrom = 0;
+  if ((etmCharRunning && requester == etmCharRelayRequesterWCB) ||
+      (requester == refusedFrom && millis() - refusedMs < rparts::DEDUP_MS)) {
+    if (etmCharRunning && parts) etmCharRelayParts = true;
+    if (debugMGMT) Serial.printf("[MGMT] Duplicate ETM char request from WCB%d ignored\n", requester);
+    return;
+  }
+  if (debugMGMT) Serial.printf("[MGMT] ETM char request from WCB%d\n", requester);
+  if (etmCharRunning) {
+    if (debugMGMT) Serial.println("[MGMT] ETM char already running — ignoring relay request");
+    return;
+  }
+  etmCharRelayRequesterWCB = requester;
+  etmCharRelayParts        = parts;
+  if (const char *why = startETMChar()) {
+    // No run means no results to send: tell the requester now and release the latch. Left latched, the requester
+    // waited for nothing, and this board's next LOCAL run sent its results to it (WCB coverage re-scan #18).
+    sendResultFrags(String("ETM characterization could not run on WCB") + String(WCB_Number) + ": " + why,
+                    requester, PACKET_TYPE_ETM_FRAG);
+    etmCharRelayRequesterWCB = 0;
+    etmCharRelayParts        = false;
+    refusedFrom = requester;
+    refusedMs   = millis();
+  }
+}
+
 void handleETMReqPacket(const uint8_t *data) {
   espnow_struct_config_req pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
   if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
   if (pkt.targetWCB != WCB_Number) return;
-  if (debugMGMT) Serial.printf("[MGMT] ETM char request from WCB%d\n", pkt.requesterWCB);
-  if (etmCharRunning) {
-    if (debugMGMT) Serial.println("[MGMT] ETM char already running — ignoring relay request");
-    return;
-  }
-  etmCharRelayRequesterWCB = pkt.requesterWCB;
-  if (const char *why = startETMChar()) {
-    // No run means no results to send: tell the requester now and release the latch. Left latched, the requester
-    // waited for nothing, and this board's next LOCAL run sent its results to it (WCB coverage re-scan #18).
-    sendResultFrags(String("ETM characterization could not run on WCB") + String(WCB_Number) + ": " + why,
-                    pkt.requesterWCB, PACKET_TYPE_ETM_FRAG);
-    etmCharRelayRequesterWCB = 0;
-  }
+  handleETMReqFrom(pkt.requesterWCB, false);
 }
 
 // ── Defer mgmt request responses out of the WiFi receive callback ───────────
@@ -4989,13 +5525,78 @@ void drainMgmtReqs() {
       case PACKET_TYPE_SEQVAL_REQ:
         if (slot.len >= (int)sizeof(espnow_struct_seqval_req)) handleSeqValReqPacket(p);
         break;
+      case PACKET_TYPE_SEQ_PAGE_REQ:
+        if (slot.len >= (int)sizeof(espnow_struct_seqpage_req)) handleSeqPageReqPacket(p);
+        break;
+      case PACKET_TYPE_RESULT_REQ:
+        if (slot.len >= (int)sizeof(espnow_struct_result_req)) handleResultReqPacket(p);
+        break;
+      case PACKET_TYPE_SEQVAL_PART_REQ:
+        if (slot.len >= (int)sizeof(espnow_struct_seqvalpart_req)) handleSeqValPartReqPacket(p);
+        break;
       default: break;
     }
   }
 }
 
-// ── Relay side: reassemble ?STATS frags and output [MGMT:STATS,N]<data> ──────
-void handleStatsFragPacket(const uint8_t *data) {
+// ── Results in parts: the relay (?MGMT,STATS / ETM,CHAR / SEQGET; WCB_ResultWire.h, docs/MGMT_RELAY.md §10) ──
+// A kind's whole reply (9 / 10 / 16) and its part (32 / 33 / 34) share that kind's reassembly session. A whole reply
+// is printed as it always was, whoever asked - [MGMT:STATS|ETM|SEQVAL,<n>]<text>, queued for loop() straight from the
+// chunks, no String on the WiFi task. A part is taken only while this board's own pull of that kind runs, from that
+// target: it is handed to loop() in the session (rpReady), which this task then leaves alone until loop() has taken it.
+//
+// The pull (serviceResultPulls, loop): part 0 is asked with the new request x3 and the old one behind it; part k is
+// taken and k+1 asked. A STATS or ETM part is printed as it comes - part 0 behind the tag, the next ones as they are,
+// the last with the line end, one write each - so what comes out is byte for byte the one-reply form, and nothing is
+// held. A sequence's parts are joined in one buffer of its exact length (4,038 bytes at most) and printed with one write.
+// A part with no progress is asked again; a pull that cannot finish says why, untagged, and a [MGMT:SEQVAL,<n>] line
+// from this board is always whole. One pull of each kind at a time: a second one replaces the first.
+enum : uint8_t { RK_STATS = 0, RK_ETM = 1, RK_SEQVAL = 2, RK_COUNT = 3 };
+static ConfigPullSession *const rpSession[RK_COUNT] = { &statsRelaySession, &etmRelaySession, &seqValRelaySession };
+static const char *rpTagOf(int k) { return k == RK_STATS ? "STATS" : k == RK_ETM ? "ETM" : "SEQVAL"; }
+static int rpIndex(uint8_t kind) {
+  return kind == rparts::KIND_STATS ? RK_STATS : kind == rparts::KIND_ETM ? RK_ETM : RK_SEQVAL;
+}
+static uint8_t rpKind(int k) {
+  return k == RK_STATS ? rparts::KIND_STATS : k == RK_ETM ? rparts::KIND_ETM : rparts::KIND_SEQVAL;
+}
+
+struct ResultPull {
+  rparts::Clock    clock;
+  rparts::Assembly as;
+  uint16_t askId;         // STATS / ETM: the held result's id (0 = start one)
+  bool     printed;       // STATS / ETM: part 0 is out on the console
+};
+static ResultPull s_rp[RK_COUNT];
+static struct {           // SEQGET only
+  char   key[16];
+  char  *buf;             // "[MGMT:SEQVAL,<n>]" + the reply + CRLF, sized at part 0
+  size_t cap, tagLen;
+} s_rq = {};
+// The WiFi task reads rpActive / rpTarget and writes rpHeardMs, rpReady (to true) and rpWholeFrom; loop() the rest.
+static volatile bool     rpActive[RK_COUNT]    = {};
+static volatile uint8_t  rpTarget[RK_COUNT]    = {};
+static volatile uint32_t rpHeardMs[RK_COUNT]   = {};
+static volatile bool     rpReady[RK_COUNT]     = {};
+static volatile uint8_t  rpWholeFrom[RK_COUNT] = {};
+static volatile uint16_t rpSeenId[RK_COUNT]    = {};   // a part 0 frag 0 was heard: the target pages, under this id
+static volatile bool     rpSeen[RK_COUNT]      = {};
+static portMUX_TYPE      rpMux = portMUX_INITIALIZER_UNLOCKED;
+
+// ?DEBUG,ONEREPLY (test knob, RAM only): ?MGMT,STATS / ETM,CHAR / SEQGET ask for one reply only, as every relay before
+// results in parts did - what the bench uses to see the old requester's answers (the [ERROR] text, TOOBIG).
+static bool s_oneReply = false;
+void resultSetOneReply(bool on) { s_oneReply = on; }
+
+// A pull that must stay on the mesh channel to be heard (chanSyncHostBusy): an ETM characterization is waited for
+// minutes before its first part, as the old one-reply request was, unheld; once it pages it is held like the rest.
+bool resultPullBusy() {
+  for (int k = 0; k < RK_COUNT; k++)
+    if (rpActive[k] && (k != RK_ETM || s_rp[k].clock.paging)) return true;
+  return false;
+}
+
+void handleResultFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
   pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
@@ -5003,38 +5604,404 @@ void handleStatsFragPacket(const uint8_t *data) {
   if (pkt.requesterWCB != WCB_Number) return;
   if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
   if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
+  bool part = false;
+  const uint8_t kind = rparts::kindOfType(pkt.packetType, part);
+  if (!kind) return;
+  const int k = rpIndex(kind);
+  ConfigPullSession &s = *rpSession[k];
   // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
   // instead of starting a session that would print the reply twice.
-  static uint16_t lastDelivered = 0;
-  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
-  if (!statsRelaySession.active || statsRelaySession.sessionId != pkt.sessionId) {
-    memset(&statsRelaySession, 0, sizeof(statsRelaySession));
-    statsRelaySession.sourceWCB      = pkt.sourceWCB;
-    statsRelaySession.sessionId      = pkt.sessionId;
-    statsRelaySession.totalChunks    = pkt.totalChunks;
-    statsRelaySession.lastActivityMs = millis();
-    statsRelaySession.active         = true;
+  static uint16_t lastDelivered[RK_COUNT] = {};
+  if (lastDelivered[k] != 0 && pkt.sessionId == lastDelivered[k]) return;
+  if (part && !(rpActive[k] && pkt.sourceWCB == rpTarget[k])) return;   // a part this board did not ask for
+  portENTER_CRITICAL(&rpMux);
+  const bool held = rpReady[k];
+  portEXIT_CRITICAL(&rpMux);
+  if (held) return;   // loop() has a part in the session: one more pass of it, or lost and asked for again
+  if (!s.active || s.sessionId != pkt.sessionId || s.packetType != pkt.packetType || s.sourceWCB != pkt.sourceWCB) {
+    memset(&s, 0, sizeof(s));
+    s.sourceWCB      = pkt.sourceWCB;
+    s.sessionId      = pkt.sessionId;
+    s.totalChunks    = pkt.totalChunks;
+    s.packetType     = pkt.packetType;
+    s.lastActivityMs = millis();
+    s.active         = true;
   }
-  if (!(statsRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
-    strncpy(statsRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
-    statsRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
-    statsRelaySession.receivedMask |= (1 << pkt.chunkIdx);
+  if (!(s.receivedMask & (1u << pkt.chunkIdx))) {
+    strncpy(s.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
+    s.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
+    s.receivedMask |= (1u << pkt.chunkIdx);
   }
-  statsRelaySession.lastActivityMs = millis();
-  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
-  if (statsRelaySession.receivedMask == expectedMask) {
-    String fullResult = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(statsRelaySession.chunks[i]);
-    uint8_t srcWCB = statsRelaySession.sourceWCB;
-    lastDelivered = pkt.sessionId;
-    memset(&statsRelaySession, 0, sizeof(statsRelaySession));
-    mgmtQueueOut("STATS", srcWCB, fullResult.c_str());    // printed by drainMgmtOut() in loop()
-    if (debugMGMT) Serial.printf("[MGMT] Stats relay complete for WCB%d (%d chars)\n",
-                                 srcWCB, fullResult.length());
+  s.lastActivityMs = millis();
+  if (part) {
+    rpHeardMs[k] = millis();
+    // The target pages. Its part 0 can still be lost in both passes - then it is asked again, by the id its first frag
+    // carries (a STATS or ETM result is held under it; asked with id 0 the target would build or run a new one).
+    rparts::Header h;
+    size_t at = 0;
+    if (pkt.chunkIdx == 0 && !rpSeen[k] &&
+        rparts::parseHeader(pkt.payload, strnlen(pkt.payload, CONFIG_PAYLOAD_SIZE), h, at) && h.part == 0) {
+      rpSeenId[k] = h.id;
+      rpSeen[k]   = true;
+    }
+  }
+  const uint16_t expectedMask = (uint16_t)((1u << pkt.totalChunks) - 1);
+  if (s.receivedMask != expectedMask) return;
+  lastDelivered[k] = pkt.sessionId;
+  if (part) {
+    portENTER_CRITICAL(&rpMux);
+    rpReady[k] = true;                  // the session is loop()'s now (serviceResultPulls)
+    portEXIT_CRITICAL(&rpMux);
+    return;
+  }
+  const uint8_t srcWCB = s.sourceWCB;
+  const int len = mgmtQueueOutChunks(rpTagOf(k), srcWCB, (const char *)s.chunks, sizeof(s.chunks[0]), pkt.totalChunks, 0);
+  memset(&s, 0, sizeof(s));
+  rpWholeFrom[k] = srcWCB;              // a pull of that board is answered in one reply
+  if (debugMGMT) Serial.printf("[MGMT] %s relay complete for WCB%d (%d chars)\n",
+                               k == RK_STATS ? "Stats" : k == RK_ETM ? "ETM" : "Sequence-value", srcWCB, len);
+}
+
+static void rpRelease(int k) {
+  memset(rpSession[k], 0, sizeof(ConfigPullSession));
+  portENTER_CRITICAL(&rpMux);
+  rpReady[k] = false;
+  portEXIT_CRITICAL(&rpMux);
+}
+
+static void rpEnd(int k) {
+  ResultPull &r = s_rp[k];
+  rpActive[k] = false;
+  rpTarget[k] = 0;
+  r.clock.stop();
+  r.as.reset();
+  if (k == RK_SEQVAL) {
+    free(s_rq.buf);
+    s_rq.buf = nullptr;
+    s_rq.cap = s_rq.tagLen = 0;
+  }
+  r.askId = 0;
+  r.printed = false;
+  rpSeen[k] = false;
+  rpSeenId[k] = 0;
+  if (rpReady[k]) rpRelease(k);
+}
+
+// The request for `part`: part 0 with id 0 starts a STATS / ETM result, a later part names the result by part 0's id;
+// a sequence's part names its key. `first`: the old one-reply request goes behind, for a target before parts. Each 3x,
+// for the reason the config pull's is (a board often drops the first broadcast frame it is sent); the target takes the
+// rest for copies.
+static void rpSend(int k, uint8_t target, unsigned part, bool first) {
+  ResultPull &r = s_rp[k];
+  if (k == RK_SEQVAL) {
+    espnow_struct_seqvalpart_req pr;
+    memset(&pr, 0, sizeof(pr));
+    strncpy(pr.structPassword, espnowPassword, sizeof(pr.structPassword) - 1);
+    pr.packetType   = PACKET_TYPE_SEQVAL_PART_REQ;
+    pr.targetWCB    = target;
+    pr.requesterWCB = WCB_Number;
+    pr.part         = (uint8_t)part;
+    memcpy(pr.key, s_rq.key, strnlen(s_rq.key, sizeof(pr.key)));
+    for (int i = 0; i < 3; i++) {
+      wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pr, sizeof(pr));
+      delay(15);
+    }
+    if (first) {
+      espnow_struct_seqval_req pkt;
+      memset(&pkt, 0, sizeof(pkt));
+      strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+      pkt.packetType   = PACKET_TYPE_SEQVAL_REQ;
+      pkt.targetWCB    = target;
+      pkt.requesterWCB = WCB_Number;
+      strncpy(pkt.key, s_rq.key, sizeof(pkt.key) - 1);
+      for (int i = 0; i < 3; i++) {
+        wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+        delay(15);
+      }
+    }
+    if (debugMGMT) {
+      if (first) Serial.printf("[MGMT] Sequence-value request '%s' sent to WCB%d (x3)\n", s_rq.key, target);
+      else       Serial.printf("[MGMT] Sequence-value request '%s' sent to WCB%d (part %u, x3)\n", s_rq.key, target,
+                               part + 1);
+    }
+    return;
+  }
+  espnow_struct_result_req pr;
+  memset(&pr, 0, sizeof(pr));
+  strncpy(pr.structPassword, espnowPassword, sizeof(pr.structPassword) - 1);
+  pr.packetType   = PACKET_TYPE_RESULT_REQ;
+  pr.targetWCB    = target;
+  pr.requesterWCB = WCB_Number;
+  pr.kind         = rpKind(k);
+  pr.part         = (uint8_t)part;
+  pr.id           = r.askId;
+  for (int i = 0; i < 3; i++) {
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pr, sizeof(pr));
+    delay(15);
+  }
+  if (first) {
+    espnow_struct_config_req pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+    pkt.packetType   = k == RK_STATS ? PACKET_TYPE_STATS_REQ : PACKET_TYPE_ETM_REQ;
+    pkt.targetWCB    = target;
+    pkt.requesterWCB = WCB_Number;
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+  }
+  if (debugMGMT) {
+    if (first) Serial.printf("[MGMT] %s request sent to WCB%d\n", k == RK_STATS ? "Stats" : "ETM char", target);
+    else       Serial.printf("[MGMT] %s request sent to WCB%d (part %u of %u)\n", k == RK_STATS ? "Stats" : "ETM char",
+                             target, part + 1, r.as.first.parts);
   }
 }
 
-// ── Relay side: reassemble sequence-name frags → [MGMT:SEQ,N]<hash>,<count>,... ──
+// What a failure line calls the result: "Stats from WCB2", "Sequence 'wave' from WCB3".
+static void rpSay(int k, const char *fmt, ...) {
+  char why[160];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(why, sizeof(why), fmt, ap);
+  va_end(ap);
+  if (k == RK_SEQVAL) Serial.printf("[MGMT] Sequence '%s' from WCB%d: %s\n", s_rq.key, rpTarget[k], why);
+  else                Serial.printf("[MGMT] %s from WCB%d: %s\n", k == RK_STATS ? "Stats" : "ETM characterization results",
+                                    rpTarget[k], why);
+}
+
+// The result changed under the pull. A sequence starts over, a few times. A STATS or ETM result is held as built, so
+// another one is a result replaced on the target - and part of it is out on the console already: say so.
+static void rpRestart(int k) {
+  ResultPull &r = s_rp[k];
+  if (k != RK_SEQVAL) {
+    rpSay(k, "the result changed after part %u of %u was printed - the rest is not printed. Ask again.",
+          r.as.next, r.as.first.parts);
+    rpEnd(k);
+    return;
+  }
+  if (r.clock.restarts >= rparts::RESTARTS_MAX) {
+    rpSay(k, "it changed %u times while it was read - not printed. Ask again.", (unsigned)r.clock.restarts + 1);
+    rpEnd(k);
+    return;
+  }
+  r.clock.restarts++;
+  free(s_rq.buf);
+  s_rq.buf = nullptr;
+  s_rq.cap = s_rq.tagLen = 0;
+  r.as.reset();
+  rpSeen[k] = false;
+  if (debugMGMT) Serial.printf("[MGMT] Sequence '%s' from WCB%d changed mid-pull - starting over\n", s_rq.key, rpTarget[k]);
+  r.clock.asked(millis());
+  rpSend(k, rpTarget[k], 0, false);   // it pages, so it is new enough for a 31
+}
+
+// The part in the kind's session (rpReady): check it, print or join it, ask for the next.
+static void rpTakePart(int k) {
+  ResultPull &r = s_rp[k];
+  ConfigPullSession &s = *rpSession[k];
+  const uint8_t target = rpTarget[k];
+  const size_t c0 = strnlen(s.chunks[0], CONFIG_PAYLOAD_SIZE);
+  rparts::Header h;
+  size_t at = 0;
+  if (s.sourceWCB != target || !rparts::parseHeader(s.chunks[0], c0, h, at)) {
+    if (debugMGMT) Serial.printf("[MGMT] A %s part from WCB%d did not parse - ignored\n", rpTagOf(k), s.sourceWCB);
+    rpRelease(k);
+    return;
+  }
+  const rparts::Step chk = r.as.check(h);
+  if (chk == rparts::STEP_STALE || chk == rparts::STEP_BAD) {
+    if (debugMGMT) Serial.printf("[MGMT] %s part %u from WCB%d %s - ignored\n", rpTagOf(k), h.part + 1, target,
+                                 chk == rparts::STEP_STALE ? "was not the one asked for" : "is out of bounds");
+    rpRelease(k);
+    return;
+  }
+  if (chk == rparts::STEP_RESTART) {
+    rpRelease(k);
+    rpRestart(k);
+    return;
+  }
+  const uint32_t now = millis();
+  if (h.part == 0) {
+    if (k == RK_SEQVAL) {
+      // The reply of THIS key: a late part 0 of an earlier pull of another key is not.
+      const size_t kl = strnlen(s_rq.key, sizeof(s_rq.key));
+      if (c0 < at + kl + 1 || memcmp(s.chunks[0] + at, s_rq.key, kl) != 0 || s.chunks[0][at + kl] != ',') {
+        rpRelease(k);
+        return;
+      }
+      char tag[24];
+      const int tn = snprintf(tag, sizeof(tag), "[MGMT:SEQVAL,%d]", (int)target);
+      const size_t cap = (size_t)tn + h.len + 3;   // and CRLF + NUL
+      char *b = (char *)malloc(cap);
+      if (!b) {
+        rpRelease(k);
+        rpSay(k, "%u characters need %u bytes, more than the heap has free in one piece (%u) - not printed.", h.len,
+              (unsigned)cap, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        rpEnd(k);
+        return;
+      }
+      memcpy(b, tag, (size_t)tn);
+      s_rq.buf = b;
+      s_rq.cap = cap;
+      s_rq.tagLen = (size_t)tn;
+    }
+    r.as.start(h);
+    r.askId = h.id;
+    r.clock.startPaging(now);
+  }
+
+  if (k == RK_SEQVAL) {
+    // The part's data, straight from the chunks into its place in the reply.
+    char *dst = s_rq.buf + s_rq.tagLen + r.as.got;
+    const size_t room = s_rq.cap - 3 - s_rq.tagLen - r.as.got;
+    size_t n = 0;
+    bool fits = true;
+    for (uint8_t i = 0; i < s.totalChunks && fits; i++) {
+      const char *c  = s.chunks[i];
+      size_t      cl = strnlen(c, CONFIG_PAYLOAD_SIZE);
+      if (i == 0) { c += at; cl -= at; }
+      if (n + cl > room) { fits = false; break; }
+      memcpy(dst + n, c, cl);
+      n += cl;
+    }
+    rpRelease(k);
+    const rparts::Step st = fits ? r.as.take(dst, n) : rparts::STEP_RESTART;
+    if (st == rparts::STEP_BAD) return;   // asked again on the retry timer
+    if (st == rparts::STEP_RESTART) { rpRestart(k); return; }
+    if (st == rparts::STEP_NEXT) {
+      r.clock.asked(now);
+      rpSend(k, target, r.as.next, false);
+      return;
+    }
+    // STEP_DONE: one line, one write, as drainMgmtOut prints (a print from another task lands between lines, not in one).
+    size_t end = s_rq.tagLen + r.as.got;
+    s_rq.buf[end++] = '\r';
+    s_rq.buf[end++] = '\n';
+    Serial.write((const uint8_t *)s_rq.buf, end);
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%u chars in %u parts)\n", target,
+                                 h.len, h.parts);
+    rpEnd(k);
+    return;
+  }
+
+  // STATS / ETM: print it now, in one write, from the session itself. The rows are compacted in place (each holds at
+  // most 183 characters in 184 bytes, so the text moved down never reaches a row not yet read), the tag goes into the
+  // tail of the header in front of the data (a header is at least 20 characters, a tag at most 15), and the line end
+  // after the data (a reply is at most 2912 bytes in the 2944 of the rows).
+  char  *base = (char *)s.chunks;
+  size_t len  = 0;
+  for (uint8_t i = 0; i < s.totalChunks; i++) {
+    const size_t cl = strnlen(s.chunks[i], CONFIG_PAYLOAD_SIZE);
+    memmove(base + len, s.chunks[i], cl);
+    len += cl;
+  }
+  const char  *dataP = base + at;
+  const size_t dataN = len - at;
+  const rparts::Step st = r.as.take(dataP, dataN);
+  if (st == rparts::STEP_BAD) { rpRelease(k); return; }       // asked again on the retry timer
+  if (st == rparts::STEP_RESTART) {
+    rpRelease(k);
+    rpSay(k, "part %u of %u does not match the result's checksum - the rest is not printed. Ask again.",
+          h.part + 1, h.parts);
+    rpEnd(k);
+    return;
+  }
+  size_t from = at, to = len;
+  if (h.part == 0) {
+    char tag[24];
+    const int tn = snprintf(tag, sizeof(tag), "[MGMT:%s,%d]", rpTagOf(k), (int)target);
+    if (tn > 0 && (size_t)tn <= at) {
+      from = at - (size_t)tn;
+      memcpy(base + from, tag, (size_t)tn);
+    }
+  }
+  if (st == rparts::STEP_DONE) {
+    base[to++] = '\r';
+    base[to++] = '\n';
+  }
+  Serial.write((const uint8_t *)(base + from), to - from);
+  rpRelease(k);
+  r.printed = true;
+  if (st == rparts::STEP_NEXT) {
+    r.clock.asked(now);
+    rpSend(k, target, r.as.next, false);
+    return;
+  }
+  if (debugMGMT) Serial.printf("[MGMT] %s relay complete for WCB%d (%u chars in %u parts)\n",
+                               k == RK_STATS ? "Stats" : "ETM", target, h.len, h.parts);
+  rpEnd(k);
+}
+
+static void serviceResultPull(int k) {
+  ResultPull &r = s_rp[k];
+  if (!rpActive[k]) {
+    if (rpReady[k]) rpRelease(k);        // a part that came in as the pull ended
+    rpWholeFrom[k] = 0;
+    return;
+  }
+  const uint8_t whole = rpWholeFrom[k];
+  rpWholeFrom[k] = 0;
+  if (whole == rpTarget[k]) {            // answered in one reply (printed by drainMgmtOut)
+    rpEnd(k);
+    return;
+  }
+  if (rpReady[k]) rpTakePart(k);
+  if (!rpActive[k]) return;
+  const uint32_t now = millis();
+  if (!r.clock.paging && rpSeen[k]) {    // part 0 is on its way: from here a lost one is asked again
+    if (k != RK_SEQVAL) r.askId = rpSeenId[k];
+    r.clock.startPaging(now);
+  }
+  r.clock.heard(rpHeardMs[k]);
+  switch (r.clock.tick(now)) {
+    case rparts::Clock::T_SILENT:        // no answer: a board that is not there, as the one-reply request always was
+      if (debugMGMT) Serial.printf("[MGMT] No %s reply from WCB%d\n", rpTagOf(k), rpTarget[k]);
+      rpEnd(k);
+      break;
+    case rparts::Clock::T_NEVER:
+      rpSay(k, "part %u of %u never came (asked %u times) - %s. Ask again.", r.as.next + 1, r.as.first.parts,
+            (unsigned)r.clock.tries, k == RK_SEQVAL ? "not printed" : "the rest is not printed");
+      rpEnd(k);
+      break;
+    case rparts::Clock::T_TIMEOUT:
+      rpSay(k, "did not finish in %u s - %s. Ask again.", (unsigned)(rparts::PULL_MAX_MS / 1000),
+            k == RK_SEQVAL ? "not printed" : "the rest is not printed");
+      rpEnd(k);
+      break;
+    case rparts::Clock::T_ASK:
+      r.clock.again(now);
+      rpSend(k, rpTarget[k], r.as.next, false);
+      break;
+    default:
+      break;
+  }
+}
+
+// loop(): carry each result pull forward. Held while the radio is away (rule 18), like every sender in loop().
+void serviceResultPulls() {
+  for (int k = 0; k < RK_COUNT; k++) serviceResultPull(k);
+}
+
+// Start a pull of `kind` from `target` (a second one of a kind replaces the first).
+static void rpStart(int k, uint8_t target, const char *key) {
+  ResultPull &r = s_rp[k];
+  if (rpActive[k] && r.printed)
+    rpSay(k, "stopped after part %u of %u for a new request.", r.as.next, r.as.first.parts);
+  rpEnd(k);
+  if (k == RK_SEQVAL) {
+    memset(s_rq.key, 0, sizeof(s_rq.key));
+    if (key) strncpy(s_rq.key, key, sizeof(s_rq.key) - 1);
+  }
+  r.clock.begin(rpKind(k), target, millis());
+  rpHeardMs[k] = 0;
+  rpTarget[k]  = target;
+  rpActive[k]  = true;                   // before the send: a quick answer must find it
+  rpSend(k, target, 0, true);
+}
+
+// ── Relay side: reassemble sequence-name frags ──────────────────────────────────
+// Type 14, the whole list in one reply → [MGMT:SEQ,N]<hash>,<count>,... queued for loop() to print, straight from the
+// chunks (no String on the WiFi task), whoever asked: it is printed as it comes, as it always was. Type 29, one page,
+// only while this board's own pull of that board runs: handed whole to serviceSeqNamesPull() in seqRelaySession,
+// which this task then leaves alone until loop() has taken it (seqPageReady).
 void handleSeqFragPacket(const uint8_t *data) {
   espnow_struct_config_frag pkt;
   memcpy(&pkt, data, sizeof(pkt));
@@ -5047,11 +6014,19 @@ void handleSeqFragPacket(const uint8_t *data) {
   // instead of starting a session that would print the reply twice.
   static uint16_t lastDelivered = 0;
   if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
-  if (!seqRelaySession.active || seqRelaySession.sessionId != pkt.sessionId) {
+  const bool page = pkt.packetType == PACKET_TYPE_SEQ_PAGE;
+  if (page && !(seqPullActive && pkt.sourceWCB == seqPullTarget)) return;   // a page this board did not ask for
+  portENTER_CRITICAL(&seqPageMux);
+  const bool held = seqPageReady;
+  portEXIT_CRITICAL(&seqPageMux);
+  if (held) return;   // loop() has a page in the session: one more pass of it, or lost and asked for again
+  if (!seqRelaySession.active || seqRelaySession.sessionId != pkt.sessionId ||
+      seqRelaySession.packetType != pkt.packetType || seqRelaySession.sourceWCB != pkt.sourceWCB) {
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
     seqRelaySession.sourceWCB      = pkt.sourceWCB;
     seqRelaySession.sessionId      = pkt.sessionId;
     seqRelaySession.totalChunks    = pkt.totalChunks;
+    seqRelaySession.packetType     = pkt.packetType;
     seqRelaySession.lastActivityMs = millis();
     seqRelaySession.active         = true;
   }
@@ -5061,138 +6036,296 @@ void handleSeqFragPacket(const uint8_t *data) {
     seqRelaySession.receivedMask |= (1 << pkt.chunkIdx);
   }
   seqRelaySession.lastActivityMs = millis();
+  if (page) seqPullHeardMs = millis();
   uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
   if (seqRelaySession.receivedMask == expectedMask) {
-    String fullResult = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqRelaySession.chunks[i]);
-    uint8_t srcWCB = seqRelaySession.sourceWCB;
+    const uint8_t srcWCB = seqRelaySession.sourceWCB;
     lastDelivered = pkt.sessionId;
+    if (page) {
+      portENTER_CRITICAL(&seqPageMux);
+      seqPageReady = true;            // the session is loop()'s now (serviceSeqNamesPull)
+      portEXIT_CRITICAL(&seqPageMux);
+      return;
+    }
+    const int len = mgmtQueueOutChunks("SEQ", srcWCB, (const char *)seqRelaySession.chunks,
+                                       sizeof(seqRelaySession.chunks[0]), pkt.totalChunks, 0);
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
-    mgmtQueueOut("SEQ", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
-    if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n",
-                                 srcWCB, fullResult.length());
-  }
-}
-
-// ── Relay side: reassemble one sequence → [MGMT:SEQVAL,N]<key>,<status>,<value> ──
-void handleSeqValFragPacket(const uint8_t *data) {
-  espnow_struct_config_frag pkt;
-  memcpy(&pkt, data, sizeof(pkt));
-  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
-  if (pkt.requesterWCB != WCB_Number) return;
-  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
-  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
-  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
-  // instead of starting a session that would print the reply twice.
-  static uint16_t lastDelivered = 0;
-  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
-  if (!seqValRelaySession.active || seqValRelaySession.sessionId != pkt.sessionId) {
-    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
-    seqValRelaySession.sourceWCB      = pkt.sourceWCB;
-    seqValRelaySession.sessionId      = pkt.sessionId;
-    seqValRelaySession.totalChunks    = pkt.totalChunks;
-    seqValRelaySession.lastActivityMs = millis();
-    seqValRelaySession.active         = true;
-  }
-  if (!(seqValRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
-    strncpy(seqValRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
-    seqValRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
-    seqValRelaySession.receivedMask |= (1 << pkt.chunkIdx);
-  }
-  seqValRelaySession.lastActivityMs = millis();
-  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
-  if (seqValRelaySession.receivedMask == expectedMask) {
-    String fullResult = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(seqValRelaySession.chunks[i]);
-    uint8_t srcWCB = seqValRelaySession.sourceWCB;
-    lastDelivered = pkt.sessionId;
-    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
-    mgmtQueueOut("SEQVAL", srcWCB, fullResult.c_str());   // printed by drainMgmtOut() in loop()
-    if (debugMGMT) Serial.printf("[MGMT] Sequence-value relay complete for WCB%d (%d chars)\n",
-                                 srcWCB, fullResult.length());
-  }
-}
-
-// ── Relay side: reassemble ?ETM,CHAR frags and output [MGMT:ETM,N]<data> ─────
-void handleETMFragPacket(const uint8_t *data) {
-  espnow_struct_config_frag pkt;
-  memcpy(&pkt, data, sizeof(pkt));
-  pkt.structPassword[sizeof(pkt.structPassword) - 1] = '\0';
-  if (strncmp(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword)) != 0) return;
-  if (pkt.requesterWCB != WCB_Number) return;
-  if (pkt.totalChunks == 0 || pkt.totalChunks > MGMT_MAX_CHUNKS) return;  // forged/corrupt: keep expectedMask sane
-  if (pkt.chunkIdx >= MGMT_MAX_CHUNKS || pkt.chunkIdx >= pkt.totalChunks) return;
-  // The target sends two passes (sendResultFrags): once a session is delivered, the rest of it is dropped here
-  // instead of starting a session that would print the reply twice.
-  static uint16_t lastDelivered = 0;
-  if (lastDelivered != 0 && pkt.sessionId == lastDelivered) return;
-  if (!etmRelaySession.active || etmRelaySession.sessionId != pkt.sessionId) {
-    memset(&etmRelaySession, 0, sizeof(etmRelaySession));
-    etmRelaySession.sourceWCB      = pkt.sourceWCB;
-    etmRelaySession.sessionId      = pkt.sessionId;
-    etmRelaySession.totalChunks    = pkt.totalChunks;
-    etmRelaySession.lastActivityMs = millis();
-    etmRelaySession.active         = true;
-  }
-  if (!(etmRelaySession.receivedMask & (1 << pkt.chunkIdx))) {
-    strncpy(etmRelaySession.chunks[pkt.chunkIdx], pkt.payload, CONFIG_PAYLOAD_SIZE);
-    etmRelaySession.chunks[pkt.chunkIdx][CONFIG_PAYLOAD_SIZE] = '\0';
-    etmRelaySession.receivedMask |= (1 << pkt.chunkIdx);
-  }
-  etmRelaySession.lastActivityMs = millis();
-  uint16_t expectedMask = (uint16_t)((1 << pkt.totalChunks) - 1);
-  if (etmRelaySession.receivedMask == expectedMask) {
-    String fullResult = "";
-    for (int i = 0; i < pkt.totalChunks; i++) fullResult += String(etmRelaySession.chunks[i]);
-    uint8_t srcWCB = etmRelaySession.sourceWCB;
-    lastDelivered = pkt.sessionId;
-    memset(&etmRelaySession, 0, sizeof(etmRelaySession));
-    mgmtQueueOut("ETM", srcWCB, fullResult.c_str());      // printed by drainMgmtOut() in loop()
-    if (debugMGMT) Serial.printf("[MGMT] ETM relay complete for WCB%d (%d chars)\n",
-                                 srcWCB, fullResult.length());
+    seqWholeFrom = srcWCB;            // a pull of that board is answered (serviceSeqNamesPull)
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%d chars)\n", srcWCB, len);
   }
 }
 
 // ── Relay side: handle ?MGMT,STATS,<n> and ?MGMT,ETM,<n> ────────────────────
-void handleMgmtStatsRequest(const String &targetStr) {
-  uint8_t targetWCB = (uint8_t)targetStr.toInt();
-  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
+// A pull (serviceResultPulls): a result too long for one reply comes in parts and is printed as the one reply it
+// always was. With ?DEBUG,ONEREPLY on, the one request a relay before parts sent, and nothing else.
+static void oneReplyRequest(uint8_t targetWCB, uint8_t type) {
   espnow_struct_config_req pkt;
   memset(&pkt, 0, sizeof(pkt));
   strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
-  pkt.packetType   = PACKET_TYPE_STATS_REQ;
+  pkt.packetType   = type;
   pkt.targetWCB    = targetWCB;
   pkt.requesterWCB = WCB_Number;
   wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
-  if (debugMGMT) Serial.printf("[MGMT] Stats request sent to WCB%d\n", targetWCB);
+  if (debugMGMT) Serial.printf("[MGMT] %s request sent to WCB%d\n", type == PACKET_TYPE_STATS_REQ ? "Stats" : "ETM char",
+                               targetWCB);
+}
+
+void handleMgmtStatsRequest(const String &targetStr) {
+  uint8_t targetWCB = (uint8_t)targetStr.toInt();
+  if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
+  if (s_oneReply) oneReplyRequest(targetWCB, PACKET_TYPE_STATS_REQ);
+  else            rpStart(RK_STATS, targetWCB, nullptr);
 }
 
 // ── Relay side: handle ?MGMT,SEQ,<n> — ask a board for its sequence NAMES ────
+// A pull (WCB_SeqNamesWire.h). Page 0 is asked as SEQ_PAGE_REQ x3, then the old SEQ_REQ x3: an older target drops the
+// 59-byte request at its receive filter and answers a 13; a newer one answers the first 28 and takes the 13s for
+// copies (answerSeqNames). A list that fits one reply comes back as type 14 and is printed as it always was
+// (handleSeqFragPacket). A longer one comes back a page at a time: each is joined into one buffer here, the next asked
+// for, and the whole list printed as ONE [MGMT:SEQ,<n>] line, the same shape, with one write. Only page 0 goes
+// unanswered silently (a board that is not there, as before); a later page is asked again, and a pull that cannot
+// finish says why, untagged, so a [MGMT:SEQ,<n>] line from this board is always a whole list (or the target's text).
+struct SeqNamesPull {
+  uint8_t        target;
+  seqn::Assembly as;
+  char          *buf;          // "[MGMT:SEQ,<n>]" + the joined list + CRLF, once page 0 is in
+  size_t         cap, tagLen;
+  uint8_t        tries;        // requests of the page asked for
+  uint8_t        restarts;
+  uint32_t       startMs, askedMs;
+};
+static SeqNamesPull seqPull;
+
+static void seqPullSend(uint8_t target, unsigned page, bool withOld) {
+  espnow_struct_seqpage_req pr;
+  memset(&pr, 0, sizeof(pr));
+  strncpy(pr.structPassword, espnowPassword, sizeof(pr.structPassword) - 1);
+  pr.packetType   = PACKET_TYPE_SEQ_PAGE_REQ;
+  pr.targetWCB    = target;
+  pr.requesterWCB = WCB_Number;
+  pr.page         = (uint8_t)page;
+  // Each 3x, for the same reason the config pull is (the first broadcast frame to a board is frequently dropped on a
+  // busy mesh). answerSeqNames dedups (requester, page) within 1.5 s, so this still produces one response.
+  for (int i = 0; i < 3; i++) {
+    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pr, sizeof(pr));
+    delay(15);
+  }
+  if (withOld) {
+    espnow_struct_config_req pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
+    pkt.packetType   = PACKET_TYPE_SEQ_REQ;
+    pkt.targetWCB    = target;
+    pkt.requesterWCB = WCB_Number;
+    for (int i = 0; i < 3; i++) {
+      wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
+      delay(15);
+    }
+  }
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (page %u, x3%s)\n", target, page,
+                               withOld ? ", then the one-reply request x3" : "");
+}
+
+// Give back a page loop() was handed and no longer wants.
+static void seqPageRelease() {
+  memset(&seqRelaySession, 0, sizeof(seqRelaySession));
+  portENTER_CRITICAL(&seqPageMux);
+  seqPageReady = false;
+  portEXIT_CRITICAL(&seqPageMux);
+}
+
+static void seqPullEnd() {
+  seqPullActive = false;
+  seqPullTarget = 0;
+  free(seqPull.buf);
+  seqPull.buf = nullptr;
+  seqPull.cap = seqPull.tagLen = 0;
+  seqPull.as.reset();
+  if (seqPageReady) seqPageRelease();
+}
+
+static void seqPullAsk(unsigned page, bool withOld) {
+  seqPull.tries   = 1;
+  seqPull.askedMs = millis();
+  seqPullSend(seqPull.target, page, withOld);
+}
+
+// The list changed under the pull (a page built from another one): start over, a few times.
+static void seqPullRestart() {
+  if (seqPull.restarts >= seqn::RESTARTS_MAX) {
+    Serial.printf("[MGMT] Sequence names from WCB%d changed %u times while they were read - not printed. Ask again.\n",
+                  seqPull.target, (unsigned)seqPull.restarts + 1);
+    seqPullEnd();
+    return;
+  }
+  seqPull.restarts++;
+  free(seqPull.buf);
+  seqPull.buf = nullptr;
+  seqPull.cap = seqPull.tagLen = 0;
+  seqPull.as.reset();
+  if (debugMGMT) Serial.printf("[MGMT] Sequence names from WCB%d changed mid-pull - starting over\n", seqPull.target);
+  seqPullAsk(0, false);   // it pages, so it is new enough for a 28
+}
+
+// The page in seqRelaySession (seqPageReady): check it, join it, ask for the next or print the list.
+static void seqPullTakePage() {
+  const ConfigPullSession &s = seqRelaySession;
+  const uint8_t total = s.totalChunks;
+  char head[seqn::HEADER_MAX + 2];
+  const size_t c0 = strnlen(s.chunks[0], CONFIG_PAYLOAD_SIZE);
+  const size_t hn = c0 < sizeof(head) - 1 ? c0 : sizeof(head) - 1;
+  memcpy(head, s.chunks[0], hn);
+  head[hn] = '\0';
+  seqn::PageHeader h;
+  size_t keysAt = 0;
+  if (s.sourceWCB != seqPull.target || !seqn::parsePageHeader(head, hn, h, keysAt) || keysAt > c0) {
+    if (debugMGMT) Serial.printf("[MGMT] A sequence-names page from WCB%d did not parse - ignored\n", s.sourceWCB);
+    seqPageRelease();
+    return;
+  }
+  const seqn::Step chk = seqPull.as.check(h);
+  if (chk == seqn::STEP_STALE || chk == seqn::STEP_BAD) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names page %u from WCB%d %s - ignored\n", h.page, s.sourceWCB,
+                                 chk == seqn::STEP_STALE ? "was not the one asked for" : "is out of bounds");
+    seqPageRelease();
+    return;
+  }
+  if (chk == seqn::STEP_RESTART) {
+    seqPageRelease();
+    seqPullRestart();
+    return;
+  }
+  if (h.page == 0) {
+    char tag[24];
+    const int tn = snprintf(tag, sizeof(tag), "[MGMT:SEQ,%d]", (int)seqPull.target);
+    const size_t cap = (size_t)tn + seqn::wholeLen(h.count, h.keyBytes) + 3;   // and CRLF + NUL
+    char *b = (char *)malloc(cap);
+    if (!b) {
+      Serial.printf("[MGMT] Sequence names from WCB%d: %u names (%u characters) need %u bytes, more than the heap has "
+                    "free in one piece (%u) - not printed.\n", seqPull.target, h.count,
+                    seqn::wholeLen(h.count, h.keyBytes), (unsigned)cap,
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      seqPullEnd();
+      return;
+    }
+    memcpy(b, tag, (size_t)tn);
+    seqPull.buf = b;
+    seqPull.cap = cap;
+    seqPull.tagLen = (size_t)tn;
+    if (!seqPull.as.start(h, b + tn, cap - (size_t)tn - 2)) {   // keep room for the CRLF
+      seqPageRelease();
+      seqPullEnd();
+      return;
+    }
+  }
+  // The page's key text, straight from the chunks into its place in the list.
+  char *list = seqPull.buf + seqPull.tagLen;
+  const size_t listCap = seqPull.cap - seqPull.tagLen - 2;
+  size_t at = seqPull.as.len, n = 0;
+  bool fits = true;
+  for (uint8_t i = 0; i < total && fits; i++) {
+    const char  *c = s.chunks[i];
+    size_t       cl = strnlen(c, CONFIG_PAYLOAD_SIZE);
+    if (i == 0) { c += keysAt; cl -= keysAt; }
+    if (at + n + cl + 1 > listCap) { fits = false; break; }
+    memcpy(list + at + n, c, cl);
+    n += cl;
+  }
+  seqPageRelease();
+  const seqn::Step st = fits ? seqPull.as.commit(list, n, listCap) : seqn::STEP_RESTART;
+  if (st == seqn::STEP_BAD) {
+    if (debugMGMT) Serial.printf("[MGMT] Sequence-names page %u from WCB%d is malformed - ignored\n", h.page,
+                                 seqPull.target);
+    return;   // asked again on the retry timer
+  }
+  if (st == seqn::STEP_RESTART) {
+    seqPullRestart();
+    return;
+  }
+  if (st == seqn::STEP_NEXT) {
+    seqPullAsk(seqPull.as.next, false);
+    return;
+  }
+  // STEP_DONE: one line, one write, as drainMgmtOut prints (a print from another task lands between lines, not in one).
+  size_t end = seqPull.tagLen + seqPull.as.len;
+  seqPull.buf[end++] = '\r';
+  seqPull.buf[end++] = '\n';
+  Serial.write((const uint8_t *)seqPull.buf, end);
+  if (debugMGMT) Serial.printf("[MGMT] Sequence-names relay complete for WCB%d (%u names in %u pages)\n",
+                               seqPull.target, h.count, h.pages);
+  seqPullEnd();
+}
+
+// loop(): carry a names pull forward. Held while the radio is away (rule 18), like every sender in loop().
+void serviceSeqNamesPull() {
+  if (!seqPullActive) {
+    if (seqPageReady) seqPageRelease();   // a page that came in as the pull ended
+    seqWholeFrom = 0;
+    return;
+  }
+  const uint8_t whole = seqWholeFrom;
+  seqWholeFrom = 0;
+  if (whole == seqPull.target) {           // answered in one reply (printed by drainMgmtOut)
+    seqPullEnd();
+    return;
+  }
+  if (seqPageReady) seqPullTakePage();
+  if (!seqPullActive) return;
+  const uint32_t now = millis();
+  if (now - seqPull.startMs > seqn::PULL_MAX_MS) {
+    Serial.printf("[MGMT] Sequence names from WCB%d did not finish in %u s - not printed. Ask again.\n",
+                  seqPull.target, (unsigned)(seqn::PULL_MAX_MS / 1000));
+    seqPullEnd();
+    return;
+  }
+  const uint32_t heard = seqPullHeardMs;
+  const uint32_t last  = (int32_t)(heard - seqPull.askedMs) > 0 ? heard : seqPull.askedMs;
+  // Page 0 of a first pull is asked once, as the names always were: silence is a board that is not there. Once the
+  // board has paged (a later page, or page 0 again after the list changed), a page is asked again.
+  if (seqPull.as.next == 0 && seqPull.restarts == 0) {
+    if (now - last >= seqn::WAIT_FIRST_MS) {
+      if (debugMGMT) Serial.printf("[MGMT] No sequence names from WCB%d\n", seqPull.target);
+      seqPullEnd();
+    }
+    return;
+  }
+  if (now - last >= seqn::RETRY_MS) {
+    if (seqPull.tries >= seqn::PAGE_TRIES) {
+      Serial.printf("[MGMT] Sequence names from WCB%d: page %u never came (asked %u times) - not printed. Ask "
+                    "again.\n", seqPull.target, seqPull.as.next + 1, (unsigned)seqPull.tries);
+      seqPullEnd();
+      return;
+    }
+    seqPull.tries++;
+    seqPull.askedMs = now;
+    seqPullSend(seqPull.target, seqPull.as.next, false);
+  }
+}
+
 void handleMgmtSeqRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
   if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) {
     if (debugMGMT) Serial.println("[MGMT] SEQ: invalid targetWCB");
     return;
   }
-  espnow_struct_config_req pkt;
-  memset(&pkt, 0, sizeof(pkt));
-  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
-  pkt.packetType   = PACKET_TYPE_SEQ_REQ;
-  pkt.targetWCB    = targetWCB;
-  pkt.requesterWCB = WCB_Number;
-
-  // Sent 3x for the same reason the config pull is (first broadcast frame to a
-  // board is frequently dropped on a busy mesh). handleSeqReqPacket dedups within
-  // 1.5 s, so this still produces exactly one response.
-  for (int i = 0; i < 3; i++) {
-    wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
-    delay(15);
-  }
-  if (debugMGMT) Serial.printf("[MGMT] Sequence-names request sent to WCB%d (x3)\n", targetWCB);
+  // One pull at a time: the newest wins. A pull of the same board asks again (its target takes a copy inside 1.5 s for
+  // a copy), and a one-reply answer to the old one is still printed as it comes.
+  if (seqPullActive && seqPull.as.next > 0 && seqPull.target != targetWCB)
+    Serial.printf("[MGMT] The paged pull of WCB%d's sequence names stops here, for WCB%d's\n", seqPull.target,
+                  targetWCB);
+  seqPullEnd();
+  seqPull.target   = targetWCB;
+  seqPull.restarts = 0;
+  seqPull.startMs  = millis();
+  seqPullHeardMs   = 0;
+  seqPullTarget    = targetWCB;
+  seqPullActive    = true;                 // before the send: a quick answer must find it
+  seqPullAsk(0, true);
 }
 
 // ── Relay side: handle ?MGMT,SEQGET,<n>,<key> — pull ONE sequence from a board ──
+// A pull (serviceResultPulls): SEQVAL_PART_REQ x3 for part 0, then the old SEQVAL_REQ x3 behind it. A value that fits
+// one reply comes back as it always did; a longer one a part per request, joined and printed as the one line.
 void handleMgmtSeqValRequest(const String &args) {
   int c = args.indexOf(',');
   if (c < 0) {
@@ -5208,6 +6341,10 @@ void handleMgmtSeqValRequest(const String &args) {
   }
   if (key.length() == 0 || key.length() > 15) {   // 15 = the NVS key limit
     Serial.println("[MGMT] SEQGET: key must be 1-15 chars");
+    return;
+  }
+  if (!s_oneReply) {
+    rpStart(RK_SEQVAL, targetWCB, key.c_str());
     return;
   }
 
@@ -5232,14 +6369,8 @@ void handleMgmtSeqValRequest(const String &args) {
 void handleMgmtETMRequest(const String &targetStr) {
   uint8_t targetWCB = (uint8_t)targetStr.toInt();
   if (targetWCB < 1 || targetWCB > MAX_WCB_COUNT) return;
-  espnow_struct_config_req pkt;
-  memset(&pkt, 0, sizeof(pkt));
-  strncpy(pkt.structPassword, espnowPassword, sizeof(pkt.structPassword) - 1);
-  pkt.packetType   = PACKET_TYPE_ETM_REQ;
-  pkt.targetWCB    = targetWCB;
-  pkt.requesterWCB = WCB_Number;
-  wcbEspNowSend(broadcastMACAddress[0], (uint8_t *)&pkt, sizeof(pkt));
-  if (debugMGMT) Serial.printf("[MGMT] ETM char request sent to WCB%d\n", targetWCB);
+  if (s_oneReply) oneReplyRequest(targetWCB, PACKET_TYPE_ETM_REQ);
+  else            rpStart(RK_ETM, targetWCB, nullptr);
 }
 
 // Relay side: handle ?MGMT,PULL,<targetWCB>[,P] — send a config pull request
@@ -5300,15 +6431,19 @@ void checkConfigPullTimeout() {
   // Same reaping for the sequence-name session. Without it a half-received
   // inventory (target rebooted mid-send) stays "active" until a new sessionId
   // happens along, and its stale chunks would prefix the next reassembly.
-  if (seqRelaySession.active &&
+  if (seqRelaySession.active && !seqPageReady &&   // a page handed to serviceSeqNamesPull is loop()'s to release
       (millis() - seqRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
     if (debugMGMT) Serial.printf("[MGMT] Sequence-names session %04X timed out\n", seqRelaySession.sessionId);
     memset(&seqRelaySession, 0, sizeof(seqRelaySession));
   }
-  if (seqValRelaySession.active &&
-      (millis() - seqValRelaySession.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
-    if (debugMGMT) Serial.printf("[MGMT] Sequence-value session %04X timed out\n", seqValRelaySession.sessionId);
-    memset(&seqValRelaySession, 0, sizeof(seqValRelaySession));
+  // And the STATS / ETM / sequence-value sessions, but never one holding a part handed to loop() (rpReady).
+  for (int k = 0; k < RK_COUNT; k++) {
+    ConfigPullSession &s = *rpSession[k];
+    if (s.active && !rpReady[k] && (millis() - s.lastActivityMs > CONFIG_SESSION_TIMEOUT_MS)) {
+      if (debugMGMT) Serial.printf("[MGMT] %s session %04X timed out\n",
+                                   k == RK_STATS ? "Stats" : k == RK_ETM ? "ETM" : "Sequence-value", s.sessionId);
+      memset(&s, 0, sizeof(s));
+    }
   }
 }
 
@@ -5323,6 +6458,10 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
   // MAC octets and the password together gate ALL communication, not just the
   // data plane.
   if (info->src_addr[1] != umac_oct2 || info->src_addr[2] != umac_oct3) return;
+
+  // Channel sync: while the radio visits another channel (a search hop, a pull, a JOIN full-band scan) nothing heard
+  // there is this mesh's business but channel-sync frames, which ride the ETM struct (handled below). WCB_ChanSync.h.
+  if (chanSyncRadioAway() && len != sizeof(espnow_struct_message_etm)) return;
 
   // OTA struct sizes must stay distinct from every other ESP-NOW packet — the
   // router below dispatches by size. WCB_OTA.cpp pins them to 55/243; assert no
@@ -5372,9 +6511,13 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
   if (len == sizeof(espnow_struct_seqval_req)) {
-    // Reads NVS and fragments a reply — deferred to loop() like its siblings.
+    // Reads the sequence store and fragments a reply — deferred to loop() like its siblings. The names page
+    // request and the results-in-parts requests share the size (espnow_struct_seqpage_req, _result_req,
+    // _seqvalpart_req).
     uint8_t ptype = ((const espnow_struct_seqval_req*)incomingData)->packetType;
-    if (ptype == PACKET_TYPE_SEQVAL_REQ) enqueueMgmtReq(incomingData, len);
+    if (ptype == PACKET_TYPE_SEQVAL_REQ || ptype == PACKET_TYPE_SEQ_PAGE_REQ || ptype == PACKET_TYPE_RESULT_REQ ||
+        ptype == PACKET_TYPE_SEQVAL_PART_REQ)
+      enqueueMgmtReq(incomingData, len);
     return;
   }
   if (len == sizeof(espnow_struct_config_frag)) {
@@ -5383,10 +6526,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     uint8_t ptype = ((const espnow_struct_config_frag*)incomingData)->packetType;
     if      (ptype == PACKET_TYPE_CONFIG_FRAG ||
              ptype == PACKET_TYPE_CONFIG_PART)  handleConfigFragPacket(incomingData);
-    else if (ptype == PACKET_TYPE_STATS_FRAG)  handleStatsFragPacket(incomingData);
-    else if (ptype == PACKET_TYPE_SEQ_FRAG)    handleSeqFragPacket(incomingData);
-    else if (ptype == PACKET_TYPE_SEQVAL_FRAG) handleSeqValFragPacket(incomingData);
-    else if (ptype == PACKET_TYPE_ETM_FRAG)    handleETMFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_SEQ_FRAG ||
+             ptype == PACKET_TYPE_SEQ_PAGE)    handleSeqFragPacket(incomingData);
+    else if (ptype == PACKET_TYPE_STATS_FRAG  || ptype == PACKET_TYPE_STATS_PART ||
+             ptype == PACKET_TYPE_ETM_FRAG    || ptype == PACKET_TYPE_ETM_PART ||
+             ptype == PACKET_TYPE_SEQVAL_FRAG || ptype == PACKET_TYPE_SEQVAL_PART)
+      handleResultFragPacket(incomingData);   // a whole STATS / ETM / SEQVAL reply, or one part of one
     return;
   }
   // OTA over ESP-NOW (P2). ACK is relay-side + lightweight → handle inline here.
@@ -5497,6 +6642,20 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
                                   senderWCB, info->src_addr[5]);
       return;
     }
+
+    // Channel-sync frames (MOVE / PROBE / PROBE_REPLY, ETM types 25-27): copied for loop() (chanSyncTick) and nothing
+    // more - no decision, print or send here (rule 11), and no presence refresh: a PROBE or a pull comes from a board
+    // visiting from another channel and gone 150 ms later, and marking it online would clear the very "board missing"
+    // that its group's leader searches on. Firmware without channel sync drops these types at the fall-through return
+    // at the end of this branch, after only the presence refresh below.
+    if (etmReceived.structPacketType == chansync::PT_MOVE ||
+        etmReceived.structPacketType == chansync::PT_PROBE ||
+        etmReceived.structPacketType == chansync::PT_PROBE_REPLY) {
+      chanSyncOnFrame(etmReceived.structPacketType, senderWCB, (const uint8_t *)etmReceived.structCommand);
+      return;
+    }
+    // Visiting another channel: its heartbeats, adverts, ACKs and commands are not this mesh's (see the top gate).
+    if (chanSyncRadioAway()) return;
 
     // Refresh the sender's online presence on EVERY valid received ETM
     // packet (not just heartbeats). Otherwise if heartbeats are dropped
@@ -5821,6 +6980,12 @@ void espNowReceiveCallback(const esp_now_recv_info_t *info, const uint8_t *incom
     return;
   }
 
+  // RC passthrough heard: this board is in use, and channel sync does not take its radio off the channel meanwhile
+  // (chanSyncRcInUse). One store; everything else about the frame is decided below, as before.
+  if (isPWMCommand || received.structTargetID[0] == 'K' || targetWCB == WCB_TARGET_KYBER ||
+      targetWCB == WCB_TARGET_RAW_SERIAL)
+    chanSyncRcRxMs = millis() | 1;
+
   // Kyber targeted forwarding
   if (received.structTargetID[0] == 'K') {
     uint8_t destWCB  = received.structCommand[0];
@@ -6049,6 +7214,88 @@ void espNowSendCallback(const wifi_tx_info_t *tx_info, esp_now_send_status_t sta
     }
 }
 
+// ── The ESP-NOW transmit wedge's remedies (tracker #112; the why and the ladder: WCB_EspNow.h) ─────────────────────
+// WCB_EspNow.cpp decides when; this file holds what a restart has to put back - the callbacks, the peers and, for a
+// WiFi driver restart, everything setup() gave the radio before esp_now_init(). Run from loop() only (rule 11), never
+// while the radio is away on another channel or a restart is pending (rule 18: the remedy puts the radio on the home
+// channel, and a pending restart clears the wedge anyway).
+
+// Why the WiFi driver may not be restarted on this board now, or nullptr. An access point or a joined network is never
+// torn down under its clients and sockets (docs/WIFI_DESIGN.md §4); an OTA session is left to finish.
+static const char *espNowWifiRestartRefusal() {
+  if (!wcbWifiBootedOff()) return "this board runs WiFi - its access point or network join would go down with it";
+  if (otaActiveSession())  return "an OTA session is running";
+  return nullptr;
+}
+
+// Every peer setup() and the membership code registered, from RAM: the WCBQ floor, the learned and temporary members
+// (wcbPeerActive), the controller peer, the broadcast address. On-demand peers (an OTA or remote-terminal partner, an
+// ETM ACK target) are added again by their own send paths. Returns how many the driver took.
+static int espNowRegisterPeersAgain() {
+  int n = 0;
+  auto add = [&n](const uint8_t *mac) {
+    if (esp_now_is_peer_exist(mac)) return;
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, mac, 6);
+    p.channel = 0;
+    p.encrypt = false;
+    if (esp_now_add_peer(&p) == ESP_OK) n++;
+  };
+  for (int i = 0; i < MAX_WCB_COUNT; i++) {
+    if (i + 1 == WCB_Number) continue;
+    const bool special = specialPeerEnabled && (i + 1) == WCB_SPECIAL_PEER_ID;
+    if (wcbPeerActive[i] || special) add(WCBMacAddresses[i]);
+  }
+  add(broadcastMACAddress[0]);
+  return n;
+}
+
+// Remedy 1: ESP-NOW from scratch. Remedy 2 (wifiToo): the WiFi driver too - esp_wifi_stop/deinit/init/start through
+// WiFi.mode(), the only cure the upstream reports found (esp-idf #18682, #19269) - then the radio as setup() leaves it:
+// power save off, the region, the home channel (channel sync's, which a live MOVE may have changed), the mesh MAC.
+static void espNowRestartForWedge(bool wifiToo) {
+  wcbEspNowRestartBegin(wifiToo);      // from here every send returns NOT_INIT, and the peer-add paths stand aside
+  espNowInitialized = false;
+  // A sender that read the gate just before it closed - the WiFi task's ACK in a receive callback, another task's
+  // send - is through the driver call in microseconds; let it finish before the driver's state goes.
+  delay(20);
+  esp_now_deinit();
+  esp_err_t e = ESP_OK;
+  if (wifiToo) {
+    WiFi.mode(WIFI_OFF);
+    WiFi.setSleep(false);              // before the mode, as in setup(): the core's STA_START handler applies it
+    if (!WiFi.mode(WIFI_STA)) e = ESP_ERR_WIFI_NOT_INIT;
+    if (e == ESP_OK) {
+      esp_wifi_set_ps(WIFI_PS_NONE);
+      chanSyncReapplyRegion();
+      const esp_err_t ce = esp_wifi_set_channel(chanSyncHomeChannel(), WIFI_SECOND_CHAN_NONE);
+      const esp_err_t me = esp_wifi_set_mac(WIFI_IF_STA, WCBMacAddresses[WCB_Number - 1]);
+      // Either one failed leaves the board off the mesh with ESP-NOW running: said, ungated, so the next line's
+      // "restarted" is not read as a recovery.
+      if (ce != ESP_OK || me != ESP_OK)
+        Serial.printf("[MESH] ESP-NOW transmit wedged: after the WiFi driver restart the channel (%s) or the mesh MAC "
+                      "(%s) did not go back - ?reboot\n", esp_err_to_name(ce), esp_err_to_name(me));
+    }
+  }
+  if (e == ESP_OK) e = esp_now_init();
+  int peers = 0;
+  if (e == ESP_OK) {
+    espNowInitialized = true;
+    esp_now_register_send_cb(espNowSendCallback);   // first, as in setup(): a frame sent before it holds its slot
+    esp_now_register_recv_cb(espNowReceiveCallback);
+    peers = espNowRegisterPeersAgain();
+  }
+  wcbEspNowRestartEnd(wifiToo ? 2 : 1, e, peers);
+}
+
+// loop(): ESP-NOW's drop and stall reports, and the wedge watch with its remedies.
+static void espNowTxService() {
+  const bool hold = chanSyncRadioAway() || rebootPending || pwmRebootPending;
+  const uint8_t remedy = wcbEspNowService(hold, espNowWifiRestartRefusal());
+  if (remedy == 3) rebootPending = true;          // out of remedies: the deferred restart (its line is printed)
+  else if (remedy) espNowRestartForWedge(remedy == 2);
+}
+
 //*******************************
 /// Kyber Serial Forwarding Commands
 //*******************************
@@ -6226,6 +7473,18 @@ void handleSingleCommand(const String &cmd, int sourceID) {
     // sources, queue-drain boundaries, and timer groups). If an IF token
     // still reaches the executor (a direct enqueue path), drop it so the raw
     // "IF,..." text is never broadcast out the serial ports as data.
+    //
+    // ?SEQ,SAVE first, straight to the store, its value read in place from this command's own text. Through the
+    // dispatcher a long value was copied at nearly every layer (the IF check's trimmed copy just below,
+    // cmd.substring(1), args, argsUpper, seqArgs, the save's own), about 7 times its length in heap, and a classic board
+    // hosting its access point (~19 KB) refused anything past ~2,400 characters, under the store's 3,999 (run
+    // 20261024-053854: "largest free block 692 bytes" for 2,784). The checks and replies are processLocalCommand's
+    // ?SEQ,SAVE's (saveSequenceChars); a bare "?SEQ,SAVE," still goes there and says "Invalid format". It is not an IF
+    // token, so the IF check has nothing to drop.
+    if (cmd.length() > 10 && cmd[0] == LocalFunctionIdentifier && strncasecmp(cmd.c_str() + 1, "SEQ,SAVE,", 9) == 0) {
+        saveSequenceChars(cmd.c_str() + 10, cmd.length() - 10);
+        return;
+    }
     {
         String u = cmd; u.trim();
         if (isIfChainToken(u)) {
@@ -6291,6 +7550,7 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     for (const Knob &k : knobs) k.k->arm(false);
     configPullFaultArm(false);
     configLineFaultArm(false);
+    wcbEspNowSimulateWedge(0);
     Serial.println("[FAULT] All fault knobs disarmed");
     return;
   }
@@ -6300,6 +7560,21 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     if (k.k == &faultJoinNoIp) wcbWifiFaultRejoin();
     Serial.printf("[FAULT] %s armed: %s (once; lapses in %lu s)\n", k.name, k.what,
                   (unsigned long)(WCB_FAULT_ARM_MS / 1000));
+    return;
+  }
+  if (f == "TXWEDGE" || f.startsWith("TXWEDGE,")) {   // the ESP-NOW transmit wedge, simulated (tracker #112, WCB_EspNow.h)
+    // Not a one-shot WcbFault: a wedge holds until the remedy it names clears it, as the driver's does.
+    const String arg = f.length() > 8 ? f.substring(8) : String("1");
+    const int level = arg.toInt();
+    if (level < 1 || level > 3 || arg != String(level)) {
+      Serial.println("[FAULT] TXWEDGE takes 1, 2 or 3: ?DEBUG,FAULT,TXWEDGE[,<1-3>]");
+      return;
+    }
+    wcbEspNowSimulateWedge((uint8_t)level);
+    Serial.printf("[FAULT] TXWEDGE armed: from now every ESP-NOW frame is lost as a wedged driver loses it (the first "
+                  "8 accepted and never completed, then each refused) until %s\n",
+                  level == 1 ? "the next ESP-NOW restart" : level == 2 ? "the next WiFi driver restart"
+                                                          : "?DEBUG,FAULT,OFF or a reboot");
     return;
   }
   if (f.startsWith("BAUD0,")) {                    // ?DEBUG,FAULT,BAUD0,S<n>: a saved baud of 0, as 483b4d8..f5d758f left
@@ -6364,7 +7639,7 @@ static void debugFaultCommand(const String &f) {   // f: what follows "FAULT," i
     return;
   }
   Serial.println("Invalid FAULT knob. Use: ?DEBUG,FAULT,<TIMERMEM|SEQREAD|SEQLIST|VARNVS|ESPNOWDOWN|JOINCHAN|"
-                 "JOINNOIP|CHANDRIFT|LOOPSTALL[,s]|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
+                 "JOINNOIP|CHANDRIFT|LOOPSTALL[,s]|TXWEDGE[,1-3]|BAUD0,S<n>|HWOTHER|SEQDAMAGE[,kind]|OFF> - see ?DEBUG?");
 }
 
 void processLocalCommand(const String &message) {
@@ -6436,6 +7711,10 @@ void processLocalCommand(const String &message) {
         stopTimerSequence();
         return;
     }
+
+    // --- ?AUTH --- a WebSocket session's sign-in, answered by the session layer (WCB_WS.cpp wsAdmit) and never queued.
+    // Here it came from USB or the mesh, where there is nothing to sign in to: a no-op, never "Unknown command".
+    if (rootUpper == "AUTH") return;
 
     // --- ?DEBUG,... ---
     if (rootUpper == "DEBUG") {
@@ -6519,6 +7798,29 @@ void processLocalCommand(const String &message) {
                 Serial.printf("Invalid PULLPART size. Use %u-%u, or 0/OFF for the default (%u)\n",
                               (unsigned)CFGP_PART_DATA_MIN, (unsigned)CFGP_PART_DATA, (unsigned)CFGP_PART_DATA);
             }
+        } else if (argsUpper.startsWith("RESULTPART,")) {
+            // Test knob (RAM only): this board, as the target, sends a ?MGMT,STATS / ETM,CHAR / SEQGET result longer
+            // than <n> bytes in parts of <n> to a requester that takes parts, so a bench result splits (WCB_ResultWire.h).
+            String v = argsUpper.substring(11);
+            v.trim();
+            const long req = (v == "OFF") ? 0 : v.toInt();
+            const bool ok  = (v == "OFF" || v == String(req)) &&
+                             (req == 0 || (req >= (long)rparts::PART_DATA_MIN && req <= (long)rparts::PART_DATA));
+            if (ok) {
+                resultSetPartSize((uint16_t)req);
+                Serial.printf("Result part size: %u bytes%s\n", req ? (unsigned)req : rparts::PART_DATA,
+                              req == 0 ? " (default)" : " (test value, until reboot)");
+            } else {
+                Serial.printf("Invalid RESULTPART size. Use %u-%u, or 0/OFF for the default (%u)\n",
+                              rparts::PART_DATA_MIN, rparts::PART_DATA, rparts::PART_DATA);
+            }
+        } else if (argsUpper == "ONEREPLY,ON" || argsUpper == "ONEREPLY,OFF") {
+            // Test knob (RAM only): this board, as the relay, asks for ?MGMT,STATS / ETM,CHAR / SEQGET results the way a
+            // relay before results in parts did - one reply - so the bench can see an old requester's answers.
+            const bool on = argsUpper == "ONEREPLY,ON";
+            resultSetOneReply(on);
+            Serial.println(on ? "One-reply requests on: ?MGMT,STATS / ETM,CHAR / SEQGET ask for one reply only (until reboot)"
+                              : "One-reply requests off: results too long for one reply come in parts");
         } else {
             Serial.println("Invalid DEBUG command. Use: ?DEBUG ?");
         }
@@ -6926,19 +8228,40 @@ void processLocalCommand(const String &message) {
         return;
     }
 
-    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11) ---
+    // --- ?WCBCH,x — ESP-NOW mesh channel (1–11, or up to 13 under a ?REGION that allows it) ---
     // Persisted and applied on the NEXT REBOOT, not live (see saveMeshChannelToPreferences):
     // a live radio switch would drop this board off the mesh mid-config — fatal for a
     // relayed ?WCBCH, since the sender stays on the old channel. Range-check the plain
     // int BEFORE the uint8_t cast so wrap values (e.g. 268→12) can't slip past. Push to
-    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once.
+    // the WHOLE fleet, then reboot everyone together so they land on the new channel at once
+    // (or move the running mesh with ?CHSYNC,MOVE). The top is the applied region's; when ?REGION
+    // saved another one, 13, since the next boot applies that region and checks the channel against
+    // it (chanSyncApplyRegionAtBoot) - which is why a config chain carries ?REGION before ?WCBCH.
     if (rootUpper == "WCBCH") {
         int ch = args.toInt();
-        if (ch < 1 || ch > 11) {
-            Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", ch);
+        bool regionPending = false;
+        const int top = chanSyncWcbchLimit(&regionPending);
+        if (ch < 1 || ch > top) {
+            Serial.printf("Invalid mesh channel %d. Valid range: 1-%d.\n", ch, top);
+            if (ch >= 12 && ch <= 13)
+                Serial.printf("Channels 12-13 need a region that allows them: ?REGION,<cc>, then reboot "
+                              "(region now %s).\n", chanSyncSavedRegion());
             return;
         }
         saveMeshChannelToPreferences((uint8_t)ch);   // persists; applies on reboot
+        if (regionPending && ch > chanSyncMaxChannel())
+            Serial.printf("Note: channel %d is outside the region running now; the next boot applies region %s "
+                          "and checks it there.\n", ch, chanSyncSavedRegion());
+        return;
+    }
+
+    // --- ?CHSYNC / ?REGION — channel sync: the mesh on one channel (WCB_ChanSync.h, docs/CHANNEL_SYNC.md) ---
+    if (rootUpper == "CHSYNC") {
+        processChanSyncCommand(args);
+        return;
+    }
+    if (rootUpper == "REGION") {
+        processRegionCommand(args);
         return;
     }
 
@@ -7138,12 +8461,10 @@ void processLocalCommand(const String &message) {
                     Serial.printf("[MGMT:SEQVAL,%d]%s,OK,%s\n", WCB_Number, gk.c_str(), v.c_str());
             }
         } else if (seqCmdUpper == "NAMES") {
-            // Machine-readable inventory — names only, one line, same string the
-            // SEQ_REQ mesh path returns. Prefixed like the relay output so a host
-            // parsing this board's console uses ONE parser for local and remote.
-            const String names = buildSequenceNamesString();
-            if (names.length()) Serial.printf("[MGMT:SEQ,%d]%s\n", WCB_Number, names.c_str());
-            else                Serial.println("Could not read the sequence store right now - try again.");
+            // Machine-readable inventory — names only, one line, the same list the
+            // names mesh reply carries, whole or in pages. Prefixed like the relay output
+            // so a host parsing this board's console uses ONE parser for local and remote.
+            if (!printSequenceNames()) Serial.println("Could not read the sequence store right now - try again.");
         } else if (seqCmdUpper == "CLEAR") {
             String seqArgsUpper = seqArgs;
             seqArgsUpper.toUpperCase();
@@ -8004,6 +9325,7 @@ void updateHWVersion(const String &message) {
         void flush() {
             if (used) Serial.write((const uint8_t *)buf, used);
             used = 0;
+            loopWatchProgress();   // a long backup is moving, not stuck (WCB_LoopWatch.h)
         }
         void raw(const char *s, size_t n) {           // printed, not checksummed
             while (n) {
@@ -9815,6 +11137,7 @@ void setup() {
   loadWCBAlias();
   loadWCBQuantitiesFromPreferences();
   loadMeshChannelFromPreferences();   // must precede WiFi init below (esp_wifi_set_channel)
+  chanSyncLoadSettings();             // ...and the region it is checked against there (chanSyncApplyRegionAtBoot)
   loadWifiSettings();                 // ditto — wcbWifiStart() hosts/joins on meshChannel
   loadSpecialPeerPreferences();
   loadSpecialPeerIDFromPreferences();
@@ -9980,6 +11303,13 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // never read; persistent by default, every WiFi.begin/softAP stored it again in nvs.net80211 (the JOIN retry every
   // 5 s: W1 grew 36 -> 95 entries in one test run, tracker #104).
   WiFi.persistent(false);
+  // Power save OFF through the core as well, BEFORE the mode: the core's STA_START handler (arduino-esp32 3.3.4
+  // STA.cpp, _onStaArduinoEvent) applies WiFi.getSleep() - modem sleep unless told otherwise - on the event task, so
+  // it could land after the esp_wifi_set_ps(WIFI_PS_NONE) below and undo it on a board with no AP up (this core builds
+  // with CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE, so an unassociated, ESP-NOW-only station can power-save too).
+  // Before WiFi.mode() it only records NONE, which that handler then applies. The wedge line (WCB_EspNow.cpp) reports
+  // the power save in force.
+  WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
   // ESP-NOW needs the radio awake to hear the MAC-layer ACK that arrives a few
   // microseconds after every unicast TX. The Arduino/IDF default in STA mode with
@@ -9997,11 +11327,15 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   // WCB_Client must share meshChannel or they silently can't hear each other. Check
   // the result: a rejected channel (e.g. 12–13 without a country override) would
   // otherwise leave the radio on the wrong channel with no signal.
+  // The region (?REGION) FIRST: it decides which channels the driver accepts, and a saved channel it does not allow
+  // falls back to the default here, loudly (WCB_ChanSync.h). "01" makes no call at all - the driver default, as before.
+  // Before wcbWifiStart() too, so an access point comes up under it.
+  chanSyncApplyRegionAtBoot();
   {
     esp_err_t chErr = esp_wifi_set_channel(meshChannel, WIFI_SECOND_CHAN_NONE);
     if (chErr != ESP_OK)
-      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-11.\n",
-                    meshChannel, chErr);
+      Serial.printf("[WiFi] esp_wifi_set_channel(%d) FAILED (err %d) — radio may be off-mesh; use channels 1-%u.\n",
+                    meshChannel, chErr, chanSyncMaxChannel());
   }
   // NOTE: TX power deliberately left at the radio default (~19.5 dBm). A
   // previous build trimmed it to 8.5 dBm as a cold-boot brownout mitigation,
@@ -10149,6 +11483,7 @@ Serial.printf("Normal struct size: %d\n", sizeof(espnow_struct_message));
   Serial.printf("ETM: %s\n", etmEnabled ? "ENABLED" : "Disabled");
   if (etmEnabled) Serial.println("[ETM] Heartbeat scheduled (boot window)");
   printKyberSettings();
+  chanSyncBegin();                   // the frame queue the receive callback fills, and the home channel - before it runs
   esp_now_register_recv_cb(espNowReceiveCallback);
   // (The send callback was registered right after esp_now_init().)
   // Create FreeRTOS Tasks-
@@ -10203,37 +11538,47 @@ void loop() {
   g_loopTick++;
   LOOP_STEP(rtermRelayDrain());        // flush queued remote-terminal packets to USB serial (safe from loop)
   LOOP_STEP(WCBDebugSerial.expireIfIdle());   // end a remote-terminal session nobody re-armed for 30 s
-  LOOP_STEP(wcbEspNowReportDrops());   // say when ESP-NOW frames were given up to a full radio queue (tracker #102, #107)
+  LOOP_STEP(espNowTxService());       // ESP-NOW frames given up (#102, #107), stalls, and the transmit wedge's remedies (#112)
   LOOP_STEP(reportEtmQueueRefusals()); // ...and ETM commands refused, unacknowledged, for a full command queue (tracker #108)
   LOOP_STEP(drainRcJsonRelay());       // flush RC-Controller JSON broadcasts received in the ESP-NOW callback (cross-core safe Serial output)
   LOOP_STEP(drainPendingTimerChains());// parse any ESP-NOW timer chains queued by the WiFi callback (must precede processCommandGroups so a new chain takes effect this tick)
-  LOOP_STEP(processCommandGroups());
-  LOOP_STEP(processETMHeartbeats());
-  LOOP_STEP(wdpTick());               // WDP: broadcast our advert on schedule + age the neighbor table
+  // Held while the radio visits another channel (a channel-sync search, a JOIN full-band scan; WCB_ChanSync.h): a
+  // heartbeat, an advert or an ETM retry sent there reaches nobody it is for, and so does whatever a command sends.
+  // Commands - timed groups, the command queue at the end of loop(), WebSocket lines, config-pull replies - wait for
+  // the radio to come home and run then, ~1.5 s late rather than lost: a relayed ?OTA,BEGIN typed during a search went
+  // out on the visited channel and was never answered (HIL ota.relay_navicore_brick_guard, run 20261021-212944).
+  const bool radioAway = chanSyncRadioAway();
+  if (!radioAway) LOOP_STEP(processCommandGroups());
+  if (!radioAway) LOOP_STEP(processETMHeartbeats());
+  if (!radioAway) LOOP_STEP(wdpTick());   // WDP: broadcast our advert on schedule + age the neighbor table
   LOOP_STEP(wdpDaTick());             // WDP-DA: age out serial-attached devices that stopped announcing
   LOOP_STEP(drainLearnedPeerMaintenance());  // flush learned-peer NVS writes + post-boot prune
   LOOP_STEP(etmDrainAckQueue());       // apply ACKs the WiFi callback queued — keeps the pending table loop-task-only (must precede the retry scan)
-  LOOP_STEP(processETMAcksAndRetries());
+  if (!radioAway) LOOP_STEP(processETMAcksAndRetries());
   LOOP_STEP(processETMChar());
   LOOP_STEP(sendHeldETMCharResult(false));
   LOOP_STEP(processETMLoad());
   LOOP_STEP(checkMgmtTimeout());
   LOOP_STEP(checkConfigPullTimeout());
-  LOOP_STEP(drainMgmtReqs());         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
-  LOOP_STEP(serviceConfigPullJob());  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
+  if (!radioAway) LOOP_STEP(drainMgmtReqs());         // run queued CONFIG/STATS/ETM_REQ responses in loop() (off the WiFi callback)
+  if (!radioAway) LOOP_STEP(serviceConfigPullJob());  // one step of a running config pull: a walk (two for the first message) or one frag, never a wait
+  if (!radioAway) LOOP_STEP(serviceSeqNamesPull());   // ?MGMT,SEQ: take a page of a long names list, ask for the next, print the list
+  if (!radioAway) LOOP_STEP(serviceResultPulls());    // ?MGMT,STATS / ETM,CHAR / SEQGET: take a part, print it, ask for the next
+  LOOP_STEP(serviceResultJobs());     // drop a STATS / ETM result held for a requester that stopped asking for its parts
   LOOP_STEP(drainMgmtOut());          // print reassembled MGMT results here, NOT on the WiFi callback
   LOOP_STEP(drainStatusOut());        // and the callback's status lines ("[ETM] WCBn came ONLINE")
   LOOP_STEP(drainOtaPackets());       // run queued OTA flash writes in safe loop() context (P2)
   LOOP_STEP(drainWdpPackets());       // decode queued WDP adverts into the neighbor table (off the WiFi callback)
   LOOP_STEP(wcbWifiService());        // carry a pending ?WIFI,JOIN forward; watch for channel drift (no-op when OFF)
-  LOOP_STEP(wcbWsService());          // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
+  LOOP_STEP(chanSyncTick());          // channel sync: frames from the callback, the MOVE countdown, the search
+  if (!chanSyncRadioAway()) LOOP_STEP(wcbWsService());   // start the /ws endpoint once WiFi is up, then run ONE queued command + flush
   LOOP_STEP(checkOtaTimeout());       // abort a stalled OTA session (current app untouched)
   LOOP_STEP(processMP3Responses());   // Read MP3 Trigger serial responses (non-blocking)
   LOOP_STEP(processDFPResponses());   // Read DFPlayer Mini response frames (non-blocking)
   LOOP_STEP(processHCRTick());        // HCR: auto-poll + parse status (non-blocking)
   // Handle queued commands. (IF gating happens before enqueue, in the chain
   // splitters — by the time commands reach this queue they are unconditional.)
-  if (!commandQueue) return;
+  if (!commandQueue || chanSyncRadioAway()) return;   // away: the queue runs on the first pass home (see radioAway)
   CommandQueueItem inItem;
   while (xQueueReceive(commandQueue, &inItem, 0) == pdTRUE) {
     const size_t cmdLen = inItem.cmd ? strlen(inItem.cmd) : 0;

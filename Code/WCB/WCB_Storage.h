@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "command_timer_queue.h"
+#include "WCB_SeqNamesWire.h"   // the sequence-names reply's split and header (buildSequenceNamesReply)
 
 // =============== WCB System Constants ===============
 // Guard allows WCB.ino to also define these without conflict
@@ -15,11 +16,13 @@
 #define WCB_TARGET_KYBER      98
 #endif
 
-// ESP-NOW mesh channel (1–11). The whole mesh AND every WCB_Client device must
-// share this channel — the ESP32 has one radio, so a board on a different channel
-// is silently unreachable. 1–11 only: 12–13 need a WiFi-country override the firmware
-// doesn't set (and aren't US-legal), so esp_wifi_set_channel would silently reject them.
-// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config).
+// ESP-NOW mesh channel. The whole mesh AND every WCB_Client device must share this
+// channel — the ESP32 has one radio, so a board on a different channel is silently
+// unreachable. 1–11 under the default region ("01", world safe); 12–13 only under a
+// ?REGION that allows them (and they aren't US-legal), else esp_wifi_set_channel
+// rejects them - chanSyncApplyRegionAtBoot checks a saved one (WCB_ChanSync.h).
+// Default 1; runtime-settable via ?WCBCH / the Wizard and persisted in NVS (wcb_config);
+// channel sync moves the running mesh and saves it too.
 // Own guard so both WCB.ino and WCB_Storage.cpp see it.
 #ifndef WCB_MESH_CHANNEL_DEFAULT
 #define WCB_MESH_CHANNEL_DEFAULT 1
@@ -32,7 +35,7 @@ extern Preferences preferences;
 extern uint8_t umac_oct2;
 extern uint8_t umac_oct3;
 extern int WCB_Number;
-extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–11); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
+extern uint8_t meshChannel;       // ESP-NOW mesh channel (1–13, region permitting); loaded from NVS, default WCB_MESH_CHANNEL_DEFAULT
 extern String wcb_alias;          // Per-WCB friendly name (e.g. "Body"); ≤24 chars; "" = unset
 extern int Default_WCB_Quantity;
 extern bool specialPeerEnabled;
@@ -185,6 +188,9 @@ unsigned commandQueueSpaces();
 void recallCommandSlot(const String &key, int sourceID);
 // void loadStoredCommandsFromPreferences();
 bool saveStoredCommandsToPreferences(const String &message);   // true when stored
+// The same from "<key>,<value>" characters, the value read in place: ?SEQ,SAVE's path (handleSingleCommand), so a
+// 3,999-character value saves on a classic board hosting its access point.
+bool saveSequenceChars(const char *msg, size_t len);
 void listStoredCommands();
 
 // ── Stored-sequence INVENTORY (names only, no values) ──────────────────────
@@ -193,18 +199,30 @@ void listStoredCommands();
 // sequence set. A consumer that only needs to know WHAT exists (NaviCore's command
 // picker, a web UI) wants names alone — ~16 bytes per entry instead of hundreds.
 //
-// buildSequenceNamesString() is the single source of truth for that inventory and
-// is used by BOTH ?SEQ,NAMES (console) and the SEQ_REQ/SEQ_FRAG mesh request, so
-// the two can never disagree. Format:
+// Both readers walk the keys with seqStoreForEachKey and the same cached hash, so
+// ?SEQ,NAMES (console) and the mesh reply can never disagree. Format:
 //
 //     <hash8hex>,<count>[,<key1>,<key2>,...]
 //
 // Comma separation is safe: saveStoredCommandsToPreferences() takes the key as
 // everything BEFORE the first comma, so a stored key can never contain one.
-// Empty when the store could not be read right now (a valid inventory never is).
 // The empty case is "811C9DC5,0" — the FNV offset basis and a zero count, so a
 // parser needs no special case for "board has no sequences".
-String   buildSequenceNamesString();
+//
+// Over the mesh a list longer than one reply (2912 characters, about 180 names) goes
+// in pages, one per request, to a requester that asks for them (WCB_SeqNamesWire.h,
+// docs/SEQUENCE_INVENTORY.md §3).
+enum SeqNamesResult : int {
+    SEQN_REPLY  = 0,   // `reply` is filled: send it as packet type `type` (14 the whole list, 29 one page)
+    SEQN_UNREAD = 1,   // the store could not be read right now (or the heap could not hold the reply): no answer
+    SEQN_NOFIT  = 2,   // an old one-reply request (page < 0) for a list that does not fit one reply: the [ERROR] text
+};
+struct SeqNamesInfo { unsigned count, keyBytes, pages; };   // the list's, for messages
+// The reply to a names request: page >= 0 for a page request (28), page < 0 for an old one (13).
+int      buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo &info);
+// ?SEQ,NAMES: "[MGMT:SEQ,<n>]<hash>,<count>[,<key>...]" and a newline. False when the store could not be read right now
+// (nothing printed).
+bool     printSequenceNames();
 
 // FNV-1a over the key list ("k1,k2,...," in save order - NVS's key_list format, which
 // the sequence store keeps) AND every stored value. Cheap content fingerprint of
@@ -218,8 +236,11 @@ String   buildSequenceNamesString();
 // Advertised as WDP_TLV_SEQHASH, so a peer re-pulls only when something actually
 // changed. CACHED: the WDP dirty-check rebuilds the advert twice a second, and
 // hashing values uncached would mean a walk of the whole store at 2 Hz forever. Every
-// write path must call invalidateSequenceInventoryHash().
-uint32_t sequenceInventoryHash();
+// write path must call invalidateSequenceInventoryHash(). A store that could not be read is tried again every 5 s
+// (for the 2 Hz check); now = true tries at once - an explicit request (?SEQ,NAMES, a peer's names request), which
+// answered "try again" for up to 5 s after the background check met a store it could not mount (ncmesh.seq_pull_paged,
+// run 20261023-213338: right after a burst of saves).
+uint32_t sequenceInventoryHash(bool now = false);
 void     invalidateSequenceInventoryHash();
 void eraseStoredCommandByName(const String &name);
 

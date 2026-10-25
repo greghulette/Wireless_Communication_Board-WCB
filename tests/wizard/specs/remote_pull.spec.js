@@ -15,8 +15,8 @@ test.beforeEach(() => {
 // Manage WCB<target> through the relay slot, then pull it the way Intellex's shim does: remoteBoardPull(slot, n, 1, 3,
 // cb), positional, with an onComplete that must fire exactly once. Resolves 3 s after the first onComplete, so a second
 // call would be seen. The relay's terminal pane is opened first, so a raw part line would have somewhere to show.
-async function pullThroughRelay(page, relay, target) {
-  return page.evaluate(async ({ relay, target }) => {
+async function pullThroughRelay(page, relay, target, { keys = null, guardMs = 55_000 } = {}) {
+  return page.evaluate(async ({ relay, target, keys, guardMs }) => {
     const conn = boardConnections[relay];
     const seen = [];
     const sent = [];
@@ -55,7 +55,8 @@ async function pullThroughRelay(page, relay, target) {
       const calls = [];
       const t0 = Date.now();
       await new Promise((resolve) => {
-        const guard = setTimeout(resolve, 55_000);   // the Wizard settles every pull within 40 s (PULL_DEADLINE_MS)
+        // The Wizard settles a short pull within 40 s (PULL_DEADLINE_MS), one in parts within PULL_PART_MS a part more.
+        const guard = setTimeout(resolve, guardMs);
         const r = remoteBoardPull(relay, target, 1, 3, (ok) => {
           calls.push({ ok, ms: Date.now() - t0 });
           if (calls.length === 1) { clearTimeout(guard); setTimeout(resolve, 3000); }
@@ -64,7 +65,10 @@ async function pullThroughRelay(page, relay, target) {
       });
       const cfg = boardConfigs[target] || {};
       const seqs = {};
-      for (const s of cfg.sequences || []) if (/^HILP\d\d$/.test(s.key)) seqs[s.key] = String(s.value).length;
+      const want = keys ? new Set(keys) : null;
+      for (const s of cfg.sequences || []) {
+        if (want ? want.has(s.key) : /^HILP\d\d$/.test(s.key)) seqs[s.key] = String(s.value).length;
+      }
       const panes = [...document.querySelectorAll('[id^="term-pane-output-"]')].map((el) => el.textContent).join('\n');
       return {
         calls, sent, seen, seqs,
@@ -72,13 +76,13 @@ async function pullThroughRelay(page, relay, target) {
         fwVersion: cfg.fwVersion ?? null,
         baseline: !!boardBaselines[target],
         stillPulling: _pullingBoards.has(target),
-        rawInTerminal: /\?SEQ,SAVE,HILP\d\d,/.test(panes),
+        rawInTerminal: /\?SEQ,SAVE,(HILP\d\d|HILSF\d\d|HM\d{4}),/.test(panes),
       };
     } finally {
       conn._dataCallbacks = conn._dataCallbacks.filter((cb) => cb !== spy);
       if (ownSend) conn.send = origSend; else delete conn.send;
     }
-  }, { relay, target });
+  }, { relay, target, keys, guardMs });
 }
 
 // What every remote pull must leave behind, one line or parts. With noParts, CFGERR NOPARTS lines are let through: on a
@@ -144,4 +148,27 @@ test('wizard.remote_pull_parts pulls W2 through W1 in parts and joins them', asy
   await hil.note(`remote pull: ${e.K} parts of ${[...e.lens.values()].join('+')} characters under ${byId.size} id(s), ` +
                  `settled in ${res.calls[0].ms} ms` +
                  (noParts ? `, after ${noParts} NOPARTS asked again` : ''));
+});
+
+// A full sequence store pulled through W1 (s30 _remote_pull_full_store): the harness fills W2's store on its own USB.
+// The parts check is wizard.remote_pull_parts'; the guard allows PULL_PART_MS per part on top of the 40 s.
+async function expectFullStorePulledThroughRelay(page, hilCtx) {
+  const a = hilCtx.args;
+  await openWizard(page);
+  await connectBoard(page, hilCtx);
+  const parts = Math.ceil(a.length / 2880);
+  const res = await pullThroughRelay(page, a.relay, a.target,
+                                     { keys: Object.keys(a.seqs), guardMs: 3 * (40_000 + parts * 1000) });
+  const mine = expectPulled(res, a, page, { noParts: true });
+  const ids = new Set(mine.filter((s) => s.tag === 'CFGPART').map((s) => s.id));
+  await hil.note(`remote pull of a full store: ${a.length} characters, ~${parts} parts, ${ids.size} job(s), settled in ` +
+                 `${(res.calls[0].ms / 1000).toFixed(1)} s`);
+}
+
+test('wizard.remote_pull_full_store pulls W2 through W1 with its sequence store full of long sequences', async ({ page, hilCtx }) => {
+  await expectFullStorePulledThroughRelay(page, hilCtx);
+});
+
+test('wizard.remote_pull_many_sequences pulls W2 through W1 with its sequence store full of the shortest sequences', async ({ page, hilCtx }) => {
+  await expectFullStorePulledThroughRelay(page, hilCtx);
 });

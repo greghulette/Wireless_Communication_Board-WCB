@@ -12,6 +12,11 @@
 // limit and drops a trailing partial UTF-8 character.
 //
 // No real credential is ever written here. The compile-time mesh password (wcb_config.h) is replaced by FACTORY_PW.
+//
+// Channel sync (NaviCore ab762c1, WCB_Client 1.19.0) added three fields, modelled from the chansync tree: wifiToken, the
+// WebSocket login token (rcWsTokenValid, rc_config.h:69-79; printed in the USB copy only, never the mesh one,
+// rcConfigToJSON(forMesh) :1371-1372), chanSync (:1373, :1688) and wcbNetwork.region (RC_REGIONS :50-54, rcRegionValid
+// :57-62; :1505, :1962-1970), and wcbNetwork.channel takes 1-13 (:1960-1961, profiles :1988).
 
 const THRESHOLDS = 36, TAP_TIERS = 4, ACTIONS = 5, SWITCHES = 10, KNOBS = 11, KNOB_OUTS = 10;
 const MAESTROS = 8, MAE_CH = 32, WLED = 4, PROFILES = 6, SMOOTH = 6, MAX_BOARDS = 20;
@@ -24,6 +29,13 @@ const SLBL_KEYS = ['S3', 'S4', 'S5', 'maestro'];
 const SW_SE = 4;
 const LOCAL_MAESTRO_BAUD = 115200;          // wcb_config.h:43
 const FACTORY_PW = 'HILfactoryPass';         // stands in for the compile-time WCB_PASSWORD (never the real one)
+const REGIONS = ['01', 'AT', 'AU', 'BE', 'BG', 'BR', 'CA', 'CH', 'CN', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR',
+                 'GB', 'GR', 'HK', 'HR', 'HU', 'IE', 'IN', 'IS', 'IT', 'JP', 'KR', 'LI', 'LT', 'LU', 'LV', 'MT', 'MX',
+                 'NL', 'NO', 'NZ', 'PL', 'PT', 'RO', 'SE', 'SI', 'SK', 'TW', 'US'];   // RC_REGIONS (rc_config.h:50-54)
+// rcWsTokenValid (rc_config.h:69-79): '' (none), or 8-32 printable ASCII characters with none of space , ^ ; ? " \.
+const tokenValid = (t) => t === '' || (t.length >= 8 && t.length <= 32 && /^[\x21-\x7E]+$/.test(t) && !/[,^;?"\\]/.test(t));
+// wcbNetwork.channel and a profile's (rc_config.h:1960-1961, :1988): 1-13, anything else reads 1.
+const meshCh = (ch) => (ch < 1 || ch > 13 ? 1 : ch);
 const DEFAULT_BANDS = [
   ['B1', 1799, 1823], ['B2', 1758, 1782], ['B3', 1718, 1742], ['B4', 1676, 1700], ['B5', 1634, 1658],
   ['B6', 1594, 1618], ['T4 Left', 1553, 1577], ['T4 Right', 1512, 1536], ['T5 Left', 1471, 1495],
@@ -154,6 +166,7 @@ class NcConfig {
     const s = {};
     Object.assign(s, {
       txModel: 0, threeAxisGimbals: false, sbusOutEnabled: false, wifiEnabled: false, wifiSsid: '', wifiPassword: '',
+      wifiToken: '', chanSync: true,   // rc_config.h:899-900
       maeGateMs: 250, boardType: 0, tapWindowMs: 500, holdMs: 750, switchSettleMs: 80, chRateHz: 5, matrixChannel: 7,
       matrixDebounceFrames: 1, modeSwitch: SW_SE, peerActions: [], peerAlert: true,
     });
@@ -184,7 +197,8 @@ class NcConfig {
       name: p === 0 ? 'Default' : '',
       e: Array.from({ length: MAESTROS }, () => Array.from({ length: 32 }, () => ({ speed: 0, accel: 0 }))),
     }));
-    s.wcbNetwork = { macOct2: 0, macOct3: 0, password: this.factoryPassword, quantity: 4, deviceId: 20, channel: 1 };
+    s.wcbNetwork = { macOct2: 0, macOct3: 0, password: this.factoryPassword, quantity: 4, deviceId: 20, channel: 1,
+                     region: '01' };   // rc_config.h:1054
     s.wcbProfiles = [];
     this.s = s;
   }
@@ -199,6 +213,10 @@ class NcConfig {
     if (has(doc, 'wifiEnabled')) s.wifiEnabled = jBool(doc.wifiEnabled, false);
     if (has(doc, 'wifiSsid')) s.wifiSsid = strl(jStr(doc.wifiSsid, s.wifiSsid), 33);
     if (has(doc, 'wifiPassword')) s.wifiPassword = strl(jStr(doc.wifiPassword, s.wifiPassword), 64);
+    // A string the rule refuses is ignored (the firmware says so with a line that never echoes it); a non-string, the
+    // tool's null for a branch it no longer holds among them, is left alone silently (rc_config.h:1677-1687).
+    if (typeof doc.wifiToken === 'string' && tokenValid(doc.wifiToken)) s.wifiToken = doc.wifiToken;
+    if (typeof doc.chanSync === 'boolean') s.chanSync = doc.chanSync;                     // :1688, is<bool>()
     if (has(doc, 'maeGateMs')) s.maeGateMs = u16(jInt(doc.maeGateMs, 250));
     if (has(doc, 'boardType')) s.boardType = u8(jInt(doc.boardType, 0));
     if (has(doc, 'tapWindowMs')) s.tapWindowMs = u16(asInt(doc.tapWindowMs));
@@ -338,16 +356,19 @@ class NcConfig {
       n.password = strl(jStr(w.password, n.password), 40);
       n.quantity = u8(jInt(w.quantity, n.quantity));
       n.deviceId = u8(jInt(w.deviceId, n.deviceId));
-      const ch = jInt(w.channel, n.channel);
-      n.channel = ch < 1 || ch > 11 ? 1 : ch;
+      n.channel = meshCh(jInt(w.channel, n.channel));
+      // The region: one rcRegionValid refuses is ignored and the stored one stays; absent or null, left alone (:1962-1970).
+      if (has(w, 'region') && w.region !== null) {
+        const cc = typeof w.region === 'string' ? w.region : '';
+        if (REGIONS.includes(cc)) n.region = cc;
+      }
     }
     if (has(doc, 'wcbProfiles')) {
       s.wcbProfiles = arr(doc.wcbProfiles).slice(0, PROFILES).map((o0) => {
         const o = isObj(o0) ? o0 : {};
-        const ch = jInt(o.channel, 1);
         return { name: strl(jStr(o.name, ''), 24), macOct2: u8(asInt(o.macOct2)), macOct3: u8(asInt(o.macOct3)),
                  password: strl(jStr(o.password, ''), 40), quantity: u8(jInt(o.quantity, 4)),
-                 deviceId: u8(jInt(o.deviceId, 20)), channel: ch < 1 || ch > 11 ? 1 : ch };
+                 deviceId: u8(jInt(o.deviceId, 20)), channel: meshCh(jInt(o.channel, 1)) };
       });
     }
     for (const [key, def] of [['mp3Dest', 'wcb'], ['dfpDest', 'serial']]) {
@@ -406,12 +427,14 @@ class NcConfig {
     return true;
   }
 
-  // rcConfigToJSON (:1211-1480): the object GET_CONFIG prints as "data", keys in the firmware's order.
-  toJSON() {
+  // rcConfigToJSON (:1211-1480; chansync :1355-1634): the object GET_CONFIG prints as "data", keys in the firmware's
+  // order. forMesh: the copy a GET_CONFIG over the mesh gets, which leaves the WebSocket token out (:1371-1372).
+  toJSON(forMesh = false) {
     const s = this.s;
     const out = {
       txModel: s.txModel, threeAxisGimbals: s.threeAxisGimbals, sbusOutEnabled: s.sbusOutEnabled,
-      wifiEnabled: s.wifiEnabled, wifiSsid: s.wifiSsid, wifiPassword: s.wifiPassword, maeGateMs: s.maeGateMs,
+      wifiEnabled: s.wifiEnabled, wifiSsid: s.wifiSsid, wifiPassword: s.wifiPassword,
+      ...(forMesh ? {} : { wifiToken: s.wifiToken }), chanSync: s.chanSync, maeGateMs: s.maeGateMs,
       boardType: s.boardType, tapWindowMs: s.tapWindowMs, holdMs: s.holdMs, switchSettleMs: s.switchSettleMs,
       chRateHz: s.chRateHz, matrixChannel: s.matrixChannel, matrixDebounceFrames: s.matrixDebounceFrames,
       funcBindings: { mode: s.modeSwitch },
@@ -497,11 +520,11 @@ class NcConfig {
     return out;
   }
 
-  // GET_CONFIG's line body, exactly as serialized (ArduinoJson writes no spaces).
-  text() { return JSON.stringify(this.toJSON()); }
+  // GET_CONFIG's line body, exactly as serialized (ArduinoJson writes no spaces); forMesh as toJSON's.
+  text(forMesh = false) { return JSON.stringify(this.toJSON(forMesh)); }
 }
 
 module.exports = {
-  NcConfig, actionFrom, strl, FACTORY_PW, THRESHOLDS, SWITCH_LABELS, KNOB_LABELS, SLBL_KEYS, MAX_BOARDS,
+  NcConfig, actionFrom, strl, FACTORY_PW, THRESHOLDS, SWITCH_LABELS, KNOB_LABELS, SLBL_KEYS, MAX_BOARDS, REGIONS, tokenValid,
   constants: { THRESHOLDS, TAP_TIERS, ACTIONS, SWITCHES, KNOBS, KNOB_OUTS, MAESTROS, MAE_CH, WLED, PROFILES, SMOOTH },
 };

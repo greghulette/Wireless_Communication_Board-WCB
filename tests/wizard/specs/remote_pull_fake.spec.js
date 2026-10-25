@@ -382,6 +382,58 @@ test('wizard.remote_pull_fake_errors CFGERR NOMEM retries (its trailing empty re
   expect(page.wizErrors).toEqual([]);
 });
 
+// A full sequence store is up to ~35 parts of 2880 bytes. Parts come ~0.65 s apart for long sequences (seq.store_full:
+// 12 parts in 7.8 s) and ~1.26 s for thousands of short ones (wizard.remote_pull_many_sequences: 22 parts in 27.7 s).
+// With one part lost the retry ran past the 40 s cap, and the pull gave up on a board that was answering. Every new
+// part now moves the cap out to cover the parts still to come (PULL_PART_MS each).
+test('wizard.remote_pull_fake_many_parts a reply of 43 parts (600 sequences), a part every 650 ms, whose first job loses its last part, completes on the retry 63 s after the call; 35 parts 1.3 s apart complete 46 s after it: the cap follows the parts still to come', async ({ page }) => {
+  const idle = await setup(page);
+  const text = reply(chainFor(2, 600));
+  const all = partLines(text, 2, { id: 'B001' });
+  const K = all.length;
+  expect(K, 'parts in the reply').toBe(43);
+  const jobs = [all.slice(0, K - 1), partLines(text, 2, { id: 'B002' })];   // the first never sends part K
+  await page.evaluate(({ jobs }) => {
+    let job = 0, timers = [];
+    window.__onSend = (s) => {
+      if (!s.includes('MGMT,PULL,2,')) return;
+      timers.forEach(clearTimeout);
+      const lines = jobs[Math.min(job++, jobs.length - 1)];
+      timers = lines.map((l, i) => setTimeout(() => __feed([l]), 650 * (i + 1)));
+    };
+  }, { jobs });
+  await page.evaluate(() => __pull(2));
+  const t0 = (await pulls(page, 2))[0].at;
+  await page.clock.runFor(70_000);
+  const d = await done(page, 2);
+  expect(d.map((x) => x.ok), 'onComplete once, with true').toEqual([true]);
+  expect(d[0].at - t0, 'past the old 40 s cap').toBeGreaterThan(40_000);
+  expect((await pulls(page, 2)).length, 'two attempts').toBe(2);
+  expect(await page.evaluate(() => (boardConfigs[2]?.sequences || []).length), 'every sequence').toBe(600);
+  await page.evaluate(() => { window.__onSend = null; });
+  await expectSettled(page, 2, idle, true);
+
+  // One job, nothing lost, at the pace a store of thousands of short sequences sends: 35 parts 1.3 s apart.
+  const slow = partLines(reply(chainFor(3, 485)), 3, { id: 'C001' });
+  expect(slow.length, 'parts in the slow reply').toBe(35);
+  await page.evaluate(({ slow }) => {
+    let timers = [];
+    window.__onSend = (s) => {
+      if (!s.includes('MGMT,PULL,3,')) return;
+      timers.forEach(clearTimeout);
+      timers = slow.map((l, i) => setTimeout(() => __feed([l]), 1300 * (i + 1)));
+    };
+  }, { slow });
+  await page.evaluate(() => __pull(3));
+  const t3 = (await pulls(page, 3))[0].at;
+  await page.clock.runFor(60_000);
+  const d3 = await done(page, 3);
+  expect(d3.map((x) => x.ok), 'slow: onComplete once, with true').toEqual([true]);
+  expect(d3[0].at - t3, 'slow: past the old 40 s cap').toBeGreaterThan(40_000);
+  expect((await pulls(page, 3)).length, 'slow: one attempt').toBe(1);
+  await page.evaluate(() => { window.__onSend = null; });
+});
+
 test('wizard.remote_pull_fake_deadline a pull ends at PULL_DEADLINE_MS from the call, once: parts that trickle in forever, and a pull queued behind three dead targets inside Intellex\'s 45 s watchdog', async ({ page }) => {
   const idle = await setup(page);
   // K = 7, and part 7 never comes: each new part restarts the attempt timer, so without the cap a pull like this

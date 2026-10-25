@@ -291,6 +291,98 @@ test('wizard.pull_fake_usb_guards the USB pull: a backup cut short changes nothi
   expect(page.wizErrors).toEqual([]);
 });
 
+// A full sequence store's backup takes ~9 s over a classic ESP32's 115200-baud USB (seq.store_full, run 20261015-145452:
+// 32,721 bytes in 41 sequences), and one of the most sequences a board holds (2,970 of the shortest) ~18 s, its two
+// one-line chains ~62 KB each: over 5 s for one line (wizard.pull_many_sequences, run 20261023-195917). The pull read
+// the bootstrap's answer for a fixed 3 s and the fallback ?backup's for a fixed 8 s, so it was cut off part way, and the
+// bootstrap's own end marker could end the fallback's read with no beginning; reading until 3 s with no LINE then cut
+// the long chains (USB_PULL_READ, BoardConnection.sendAndCollect). The real connection class and its real reader here,
+// fed the board's bytes at 115200 baud, with its send faked.
+function realBackup(tokens, opts) {
+  const chainLine = tokens.map((t) => `?${t}`).join('^') + '^?CHK00000000';
+  return backup(tokens, opts).split('(chain not read by the Wizard)').join(chainLine);
+}
+test('wizard.pull_fake_usb_long_backup a USB pull of a backup that takes 9 s or 18 s to arrive at 115200 baud (a full sequence store of long sequences, or of the 2,970 shortest, whose one-line chains take over 5 s a line) loads every sequence: the read lasts while bytes keep coming, the tail of an earlier backup still arriving is not taken for it, and no fallback ?backup is sent into the middle of it; a board that stops part way still changes nothing', async ({ page }) => {
+  await page.clock.install();
+  await openWizard(page);
+  const longKeys = Array.from({ length: 41 }, (_, i) => `HILSF${String(i + 1).padStart(2, '0')}`);
+  const manyKeys = Array.from({ length: 2970 }, (_, i) => `HM${String(i + 1).padStart(4, '0')}`);
+  const longTokens = board(longKeys.map((k) => `SEQ,SAVE,${k},;S0${'x'.repeat(780)}`));
+  const manyTokens = board(manyKeys.map((k) => `SEQ,SAVE,${k},;S0`));
+  await page.evaluate(() => {
+    window._wdpMeshConn = () => null;
+    window.__usb = (text, { stale = false } = {}) => {
+      const c = new BoardConnection(1);
+      let feed;
+      c.port = { readable: new ReadableStream({ start(k) { feed = k; } }) };
+      c._connected = true;
+      window.__sent = [];
+      c.send = async (s) => {
+        __sent.push(String(s).trim());
+        if (!String(s).startsWith('WCB_WEBTOOL_CONFIG_PULL')) return;
+        // The end of an earlier backup first (a boot probe's), then this one: 1150 bytes every 100 ms, 115200 baud.
+        const bytes = new TextEncoder().encode(
+          (stale ? '?SEQ,SAVE,STALE,;S0zz\r\n--------- End of Backup ---------\r\n' : '') + text);
+        for (let i = 0, k = 0; i < bytes.length; i += 1150, k++) {
+          setTimeout(() => feed.enqueue(bytes.slice(i, i + 1150)), 50 + 100 * k);
+        }
+      };
+      boardConnections[1] = c;
+      c._startReading();
+      window.__pulled = boardPull(1);
+    };
+  });
+  const secs = (text) => Buffer.byteLength(text) / 11500;
+  const got = () => page.evaluate(async () => {
+    await __pulled;
+    return { sent: [...__sent], keys: (boardBaselines[1]?.sequences || []).map((s) => s.key),
+             lens: [...new Set((boardBaselines[1]?.sequences || []).map((s) => s.value.length))] };
+  });
+  for (const [what, tokens, keys, len] of [['long sequences', longTokens, longKeys, 783], ['2,970 sequences', manyTokens, manyKeys, 3]]) {
+    const text = realBackup(tokens);
+    expect(secs(text), `${what}: the answer takes longer than both old reads together`).toBeGreaterThan(8.5);
+    for (const stale of [false, true]) {
+      const why = `${what}, ${stale ? 'behind the tail of an earlier backup' : 'alone'}`;
+      await page.evaluate(() => { delete boardBaselines[1]; delete boardConfigs[1]; });
+      await page.evaluate(({ text, stale }) => __usb(text, { stale }), { text, stale });
+      await page.clock.runFor(secs(text) * 1000 + 5000);
+      const r = await got();
+      expect(r.sent.filter((s) => /backup/.test(s)), `${why}: no fallback ?backup into the middle of the answer`).toEqual([]);
+      expect(r.keys.filter((k) => keys.includes(k) || k === 'STALE'), `${why}: every sequence${stale ? ', and not the earlier backup\'s' : ''}`).toEqual(keys);
+      expect(r.lens, `${why}: each whole`).toEqual([len]);
+    }
+  }
+  expect(Math.max(...realBackup(manyTokens).split('\r\n').map((l) => l.length)) / 11500, 'a chain line takes over 3 s').toBeGreaterThan(3);
+
+  // A board that stops part way: 3 s of quiet ends the read, the fallback finds nothing, and nothing changes.
+  const before = await page.evaluate(() => JSON.stringify([boardConfigs[1], boardBaselines[1]]));
+  const cut = realBackup(longTokens, { end: false });
+  await page.evaluate((text) => __usb(text), cut);
+  await page.clock.runFor(secs(cut) * 1000 + 3000 + 8000 + 2000);
+  await page.evaluate(() => __pulled);
+  expect(await page.evaluate(() => JSON.stringify([boardConfigs[1], boardBaselines[1]])), 'a cut backup changes nothing').toBe(before);
+  expect(await page.evaluate(() => __sent), 'the fallback once the board went quiet').toEqual(['WCB_WEBTOOL_CONFIG_PULL', '?backup']);
+  expect(page.wizErrors).toEqual([]);
+});
+
+// The most sequences a board holds: 2,970 of the shortest, a full 32 KB store (wizard.pull_many_sequences on the bench).
+// Each appended row re-read every row before it to set its buttons (updateSequencePlayButtons), so the load took ~15 s
+// on a fast PC and the bench's connect gave up at 45 s; it is one pass now. A push with no edit then sends nothing.
+test('wizard.pull_fake_many_sequences a board with 2,970 sequences (a full store of the shortest) loads in seconds: every row in the page, the pager counting them all, and a push with no edit sends nothing', async ({ page }) => {
+  await openWizard(page);
+  const keys = Array.from({ length: 2970 }, (_, i) => `HM${String(i + 1).padStart(4, '0')}`);
+  const t0 = Date.now();
+  await pullFake(page, 1, board(keys.map((k) => `SEQ,SAVE,${k},;S0`)));
+  const ms = Date.now() - t0;
+  expect(ms, `the load took ${ms} ms`).toBeLessThan(5000);
+  expect(await page.evaluate(() => getSequencesFromUI(1).map((s) => s.key))).toEqual(keys);
+  await expect(page.locator('#b1-seq-pager .seq-pager-info')).toContainText('of 2970 sequences');
+  expect(await page.evaluate(() => document.querySelectorAll('#b1-seq-tbody [title="Test"]:disabled').length),
+         'the play buttons follow the connection').toBe(0);
+  expect((await push(page, 1, { skipReboot: true })).outcome).toMatchObject(NO_CHANGES);
+  expect(page.wizErrors).toEqual([]);
+});
+
 // Two pulled boards whose mesh passwords differ (both dummies). The first seeds General; the second opens the modal.
 const OTHER = 'dummy_other_mesh_password';
 const conflictRows = (page) => page.$$eval('#general-conflict-body tbody tr td:first-child', (tds) => tds.map((t) => t.textContent));

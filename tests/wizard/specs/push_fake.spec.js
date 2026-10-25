@@ -11,6 +11,7 @@
 // the user never made, written to real hardware.
 const { test, expect } = require('../lib/fixtures');
 const { openWizard } = require('../lib/wizard');
+const { wdpDump, feedWdpDump } = require('../lib/fake');
 
 const EPASS = 'dummy_not_a_real_mesh_password';
 
@@ -360,10 +361,25 @@ async function relayBoard(page, chain) {
 const RELAY_CHAIN = `?HW,32^?WCB,2^?WCBQ,2^?WCBCH,1^?MAC,2,05^?MAC,3,4B^?EPASS,${EPASS}^?CMDCHAR,;`;
 const frags = (sent) => sent.filter((s) => s.includes('MGMT,FRAG,'));
 
-test('wizard.push_fake_relay_cap a relay push over 16 chunks is refused before the network-group confirm, the bootstrap or any send (W-9, F14)', async ({ page }) => {
+// The FRAG lines of a push, as sessions: { id, total, chunks: [payload] } in the order sent.
+function sessionsOf(sent) {
+  const out = [];
+  for (const s of frags(sent)) {
+    const m = /^.MGMT,FRAG,(\d+),([0-9A-F]{4}),(\d+),(\d+),([\s\S]*)$/.exec(s);
+    if (!m) continue;
+    let cur = out[out.length - 1];
+    if (!cur || cur.id !== m[2]) { cur = { target: Number(m[1]), id: m[2], total: Number(m[4]), idx: [], chunks: [] }; out.push(cur); }
+    cur.idx.push(Number(m[3]));
+    cur.chunks.push(m[5]);
+  }
+  return out;
+}
+
+test('wizard.push_fake_relay_sessions a relay push over one 16-chunk session goes as several, whole commands each, the mesh password in the last; the network-group confirm and the bootstrap still come first (F14, docs/MGMT_RELAY.md §10)', async ({ page }) => {
   // Twenty long sequences (~3.9 KB of changes, over 16 x 179), a new mesh password and a new function identifier.
   await relayBoard(page, RELAY_CHAIN);
   await page.evaluate(() => {
+    window.sleep = () => Promise.resolve();          // the chunk and session gaps: real time on the bench, none here
     const cfg = boardConfigs[2];
     cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
     populateUIFromConfig(2, cfg);
@@ -371,18 +387,260 @@ test('wizard.push_fake_relay_cap a relay push over 16 chunks is refused before t
     document.getElementById('g-funcchar').value = '!';
     window.__go = boardGo(2);
   });
-  await page.waitForTimeout(1500);
-  const r = await page.evaluate(() => ({
-    modal: document.getElementById('network-group-change-modal').classList.contains('open'),
-    sent: [...__sent], outcome: boardPushOutcome[2],
-    btn: [document.getElementById('b2-btn-go').disabled, document.getElementById('b2-btn-go').textContent],
-  }));
-  expect(r.modal, 'the confirm must not open for a push that cannot be sent').toBe(false);
-  expect(r.sent, 'nothing reaches the relay: no bootstrap, no chunk').toEqual([]);
+  await expect(page.locator('#network-group-change-modal.open')).toBeVisible();
+  expect(await page.evaluate(() => [...__sent]), 'nothing before the confirm').toEqual([]);
+  await page.locator('#network-group-change-confirm').click();
+  await page.evaluate(() => window.__go);
+  const r = await page.evaluate(() => ({ sent: [...__sent], outcome: boardPushOutcome[2] }));
+  expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+  const boot = r.sent.filter((s) => s.endsWith(',0,1,?FUNCCHAR,!'));
+  expect(boot.length).toBe(3);
+  expect(r.sent.indexOf(boot[0])).toBe(0);
+  const sessions = sessionsOf(r.sent.filter((s) => !s.endsWith('?FUNCCHAR,!')));
+  expect(sessions.length, 'more than one session').toBeGreaterThan(1);
+  const texts = [];
+  for (const x of sessions) {
+    expect(x.target).toBe(2);
+    expect(x.total).toBeLessThanOrEqual(16);
+    expect(x.idx).toEqual(x.chunks.map((_, i) => i));
+    expect(x.chunks.length).toBe(x.total);
+    for (const c of x.chunks) expect(Buffer.byteLength(c, 'utf8')).toBeLessThanOrEqual(179);
+    const t = x.chunks.join('');
+    expect(t.startsWith('!'), 'every session starts on a command').toBe(true);
+    texts.push(t);
+  }
+  expect(new Set(sessions.map((x) => x.id)).size, 'a session id each').toBe(sessions.length);
+  const all = texts.join('^');
+  for (let i = 0; i < 20; i++) expect(all).toContain(`!SEQ,SAVE,s${i},;S1${'x'.repeat(180)}`);
+  expect(texts[texts.length - 1]).toContain('!EPASS,a_new_mesh_password');
+  expect(texts.slice(0, -1).join('^')).not.toContain('EPASS');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.push_fake_relay_wcb_change a push that changes the board number and does not fit one session goes in two steps, through a WCB or a WcbMgmt relay: ?WCB,<new> and ?reboot to the number the board has now, then - once the relay\'s ?WDP,DUMP shows it under the new number - the rest to the new number, two chunks a session; a board never heard back stops the push after step 1 and says so; the board then shows once, under its new number, and the mesh poll adds no section for either number; one that fits goes as one session to the number the board has now', async ({ page }) => {
+  // The relay's ?WDP,DUMP answers with window.__dump; its own row is WCB 1.
+  const dumpWith = (rows) => wdpDump([{ n: 1, alias: 'Relay', tags: 'mgmt.fwd24', peer: 3 }, ...rows]);
+  const renumberPush = async ({ dump, mgmt = false, wait = 45000 } = {}) => {
+    await relayBoard(page, RELAY_CHAIN);
+    return page.evaluate(async ({ dump, mgmt, wait }) => {
+      window.sleep = () => Promise.resolve();
+      _renumberReturnMs = wait;
+      window.__dump = dump;
+      const relay = boardConnections[1];
+      relay.sendAndCollect = async (s) => { __sent.push(String(s)); return /WDP,DUMP/.test(s) ? window.__dump : ''; };
+      if (mgmt) boardConfigs[1] = { ...(boardConfigs[1] || {}), isRelay: true };
+      const cfg = boardConfigs[2];
+      cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
+      populateUIFromConfig(2, cfg);
+      cfg.wcbNumber = 5;
+      document.getElementById('g-funcchar').value = '!';
+      await boardGo(2);
+      return { sent: [...__sent].filter((s) => !s.includes('RTERM')), outcome: boardPushOutcome[2],
+               moved: { cfg5: boardConfigs[5]?.wcbNumber ?? null, base5: boardBaselines[5]?.wcbNumber ?? null,
+                        base2: boardBaselines[2]?.wcbNumber ?? null, relay5: remoteRelayForBoard[5] ?? null,
+                        relay2: remoteRelayForBoard[2] ?? null, s5: !!document.getElementById('section-board-5'),
+                        s2: !!document.getElementById('section-board-2'), floor: _boardFloor } };
+    }, { dump, mgmt, wait });
+  };
+  const back5 = dumpWith([{ n: 5, alias: 'Dome', hw: 32, tags: 'mgmt.rx24', age: 0 }]);
+
+  for (const mgmt of [false, true]) {
+    const why = mgmt ? 'a WcbMgmt relay' : 'a WCB relay';
+    const r = await renumberPush({ dump: back5, mgmt });
+    expect(r.outcome.ok, `${why}: ${JSON.stringify(r.outcome)}`).toBe(true);
+    const boot = r.sent.filter((s) => s.endsWith(',0,1,?FUNCCHAR,!'));
+    expect(boot.length, why).toBe(3);
+    expect(boot.every((s) => s.startsWith('?MGMT,FRAG,2,')), `${why}: the bootstrap to the number the board has now`).toBe(true);
+    const rest = r.sent.filter((s) => !s.endsWith('?FUNCCHAR,!'));
+    const sessions = sessionsOf(rest);
+    expect(sessions[0].target, why).toBe(2);
+    expect(sessions[0].chunks.join(''), `${why}: step 1`).toBe('!WCB,5^!reboot');
+    // The relay's dump is read after step 1 and before step 2.
+    const firstDump = rest.findIndex((s) => /WDP,DUMP/.test(s));
+    const step2 = rest.findIndex((s) => s.startsWith('?MGMT,FRAG,5,'));
+    expect(firstDump, `${why}: the relay's ?WDP,DUMP is read`).toBeGreaterThan(-1);
+    expect(firstDump, `${why}: after step 1`).toBeGreaterThan(rest.findIndex((s) => s.startsWith('?MGMT,FRAG,2,')));
+    expect(step2, `${why}: before step 2`).toBeGreaterThan(firstDump);
+    expect(sessions.length, why).toBeGreaterThan(2);
+    for (const x of sessions.slice(1)) {
+      expect(x.target, `${why}: step 2 to the new number`).toBe(5);
+      expect(x.total, `${why}: two chunks a session at least`).toBeGreaterThanOrEqual(2);
+      expect(x.total).toBeLessThanOrEqual(16);
+      expect(x.idx).toEqual(x.chunks.map((_, i) => i));
+    }
+    const all = sessions.slice(1).map((x) => x.chunks.join('')).join('^');
+    expect(all, why).not.toContain('WCB,5');
+    for (let i = 0; i < 20; i++) expect(all).toContain(`!SEQ,SAVE,s${i},;S1${'x'.repeat(180)}`);
+    expect(all, `${why}: the rest needs no restart of its own`).not.toContain('!reboot');
+    // It shows once, under its new number: slot 5 holds it and its route; slot 2 is gone (it is above the WCBQ floor).
+    expect(r.moved, why).toMatchObject({ cfg5: 5, base5: 5, base2: null, relay5: 1, relay2: null, s5: true });
+    if (r.moved.floor < 2) expect(r.moved.s2, `${why}: no section left for 2`).toBe(false);
+  }
+
+  // The mesh poll after the move: the relay still lists the old number's row (stale) beside the new one. Neither
+  // adds a section: the board is in slot 5 already, and the row for 2 is what it left behind.
+  const poll = await page.evaluate(async (dump) => {
+    window.__dump = dump;
+    window._wdpMeshConn = () => ({ slot: 1, conn: boardConnections[1], fc: '?', wcbNum: 1 });
+    await meshAutoDiscoverTick();
+    window._wdpMeshConn = () => null;
+    return { s5: document.querySelectorAll('#section-board-5').length, s2: !!document.getElementById('section-board-2'),
+             mesh2: _meshBoards.has(2), seen2: _meshSeen.has(2), floor: _boardFloor };
+  }, dumpWith([{ n: 2, alias: 'Dome', hw: 32, tags: 'mgmt.rx24', age: 100 },
+               { n: 5, alias: 'Dome', hw: 32, tags: 'mgmt.rx24', age: 1 }]));
+  expect(poll.s5, 'one section for WCB 5').toBe(1);
+  expect(poll.mesh2, 'the stale row for 2 surfaces no board').toBe(false);
+  expect(poll.seen2, 'nor counts as a board on the mesh').toBe(false);
+  if (poll.floor < 2) expect(poll.s2).toBe(false);
+
+  // Never heard back: step 1 only, then the push stops and says why; the slot stays where it was.
+  let r = await renumberPush({ dump: dumpWith([]), wait: 200 });
   expect(r.outcome.ok).toBe(false);
-  expect(r.outcome.reason).toMatch(/too large/);
-  expect(r.btn).toEqual([false, 'Push Config']);
-  expect(await page.locator('#toast-container').textContent()).toContain('too large to push via a relay');
+  expect(r.outcome.reason).toMatch(/WCB 5 was not heard through WCB 1 .* the rest of the push was not sent/);
+  expect(sessionsOf(r.sent.filter((s) => !s.endsWith('?FUNCCHAR,!'))).map((x) => x.target)).toEqual([2]);
+  expect(r.moved).toMatchObject({ base2: 2, relay2: 1, relay5: null, base5: null });
+
+  // The number change alone: one session, addressed to WCB 2 - the board takes 5 only once it has run it - and the
+  // board then shows under 5.
+  await relayBoard(page, RELAY_CHAIN);
+  r = await page.evaluate(async () => {
+    window.sleep = () => Promise.resolve();
+    boardConfigs[2].wcbNumber = 5;
+    await boardGo(2, { skipReboot: true });
+    return { sent: [...__sent].filter((s) => !s.includes('RTERM')), outcome: boardPushOutcome[2],
+             relay5: remoteRelayForBoard[5] ?? null, base5: boardBaselines[5]?.wcbNumber ?? null };
+  });
+  expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+  const alone = sessionsOf(r.sent);
+  expect(alone.length).toBe(1);
+  expect(alone[0].target).toBe(2);
+  expect(alone[0].chunks.join('')).toContain('?WCB,5');
+  expect([r.relay5, r.base5]).toEqual([1, 5]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.push_fake_wcb_number_taken a push that gives a board a number another board has asks first - by USB or through a relay, one session or two - with Cancel the default: Cancel, Escape or Enter send nothing; "Push anyway" pushes', async ({ page }) => {
+  const other5 = wdpDump([{ n: 1, alias: 'Relay', tags: 'mgmt.fwd24', peer: 3 },
+                          { n: 5, alias: 'Other', hw: 24, tags: 'mgmt.fwd24', age: 3, peer: 2 }]);
+  // What the relay's ?WDP,DUMP says after a restart: the board back under 5 (the other board's row is older).
+  const back5 = wdpDump([{ n: 1, alias: 'Relay', tags: 'mgmt.fwd24', peer: 3 },
+                         { n: 5, alias: 'Dome', hw: 32, tags: 'mgmt.rx24', age: 0, peer: 2 }]);
+  const modalOpen = () => page.locator('#wcb-number-taken-modal.open');
+
+  // Through a relay, the number change alone (one session), and a long push (two steps).
+  for (const long of [false, true]) {
+    for (const answer of ['cancel', 'escape', 'enter', 'confirm']) {
+      const why = `${long ? 'two steps' : 'one session'}, ${answer}`;
+      await relayBoard(page, RELAY_CHAIN);
+      await feedWdpDump(page, other5);
+      await page.evaluate(({ long, dump }) => {
+        window.sleep = () => Promise.resolve();
+        window.__dump = dump;
+        boardConnections[1].sendAndCollect = async (s) => { __sent.push(String(s)); return /WDP,DUMP/.test(s) ? window.__dump : ''; };
+        const cfg = boardConfigs[2];
+        if (long) {
+          cfg.sequences = Array.from({ length: 20 }, (_, i) => ({ key: `s${i}`, value: `;S1${'x'.repeat(180)}` }));
+          populateUIFromConfig(2, cfg);
+        }
+        cfg.wcbNumber = 5;
+        __sent.length = 0;
+        window.__go = boardGo(2, { skipReboot: true });
+      }, { long, dump: back5 });
+      await expect(modalOpen(), why).toBeVisible();
+      expect(await page.locator('#wcb-number-taken-body').textContent(), why).toMatch(/WCB 5 is already on the mesh/);
+      expect(await page.evaluate(() => [...__sent].filter((s) => !s.includes('RTERM'))), `${why}: nothing before the answer`).toEqual([]);
+      expect(await page.evaluate(() => document.activeElement?.id), `${why}: Cancel has the focus`).toBe('wcb-number-taken-cancel');
+      if (answer === 'cancel') await page.locator('#wcb-number-taken-cancel').click();
+      else if (answer === 'confirm') await page.locator('#wcb-number-taken-confirm').click();
+      else await page.keyboard.press(answer === 'escape' ? 'Escape' : 'Enter');
+      const r = await page.evaluate(async () => { await window.__go;
+        return { sent: [...__sent].filter((s) => !s.includes('RTERM') && !/WDP,DUMP/.test(s)), outcome: boardPushOutcome[2] }; });
+      await expect(modalOpen(), why).toHaveCount(0);
+      if (answer !== 'confirm') {
+        expect(r.outcome.ok, why).toBe(false);
+        expect(r.outcome.reason, why).toMatch(/^cancelled: WCB 5 is already on the mesh/);
+        expect(r.sent, `${why}: nothing sent`).toEqual([]);
+      } else {
+        expect(r.outcome.ok, `${why}: ${JSON.stringify(r.outcome)}`).toBe(true);
+        expect(sessionsOf(r.sent)[0].chunks.join(''), why).toContain('?WCB,5');
+      }
+    }
+  }
+
+  // By USB: a board pulled as WCB 1, given the number 2 that a board on the mesh has.
+  await openWizard(page);
+  await pullFake(page, board());
+  await feedWdpDump(page, wdpDump([{ n: 1, alias: 'Body', peer: 3 }, { n: 2, alias: 'Dome', tags: 'mgmt.fwd24', age: 4 }]));
+  for (const answer of ['cancel', 'confirm']) {
+    await page.evaluate(() => { boardConfigs[1].wcbNumber = 2; __sent.length = 0; window.__go = boardGo(1, { skipReboot: true }); });
+    await expect(modalOpen(), `USB, ${answer}`).toBeVisible();
+    expect(await page.evaluate(() => [...__sent]), 'USB: nothing before the answer').toEqual([]);
+    await page.locator(`#wcb-number-taken-${answer}`).click();
+    const r = await page.evaluate(async () => { await window.__go; return { sent: [...__sent], outcome: boardPushOutcome[1] }; });
+    if (answer === 'cancel') {
+      expect(r.outcome.reason).toMatch(/^cancelled: WCB 2 is already on the mesh/);
+      expect(r.sent).toEqual([]);
+    } else {
+      expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+      expect(r.sent).toContain('?WCB,2');
+    }
+  }
+  // A number nobody has: no question.
+  await openWizard(page);
+  await pullFake(page, board());
+  const free = await page.evaluate(async () => { boardConfigs[1].wcbNumber = 7; await boardGo(1, { skipReboot: true });
+    return { modal: document.getElementById('wcb-number-taken-modal').classList.contains('open'), sent: [...__sent] }; });
+  expect(free.modal).toBe(false);
+  expect(free.sent).toContain('?WCB,7');
+  expect(page.wizErrors).toEqual([]);
+});
+
+test('wizard.push_fake_relay_long_command one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24: an ESP32-S3, or a classic ESP32 since 2026-10-24) and the relay forwards it (mgmt.fwd24 or mgmt.rx24, or a WcbMgmt relay); a target saying mgmt.fwd24 alone (a classic ESP32 on 2026-10-23 firmware), older firmware or tags not seen yet are refused', async ({ page }) => {
+  const value = ';S1' + 'v'.repeat(3996);
+  // What each build sends (wcbOwnCapTags): rx24 says it forwards 24 too. Both chips send rx24 since 2026-10-24; W is a
+  // classic ESP32 on the firmware of the day before, which forwarded 24 and took 16.
+  const S3 = 'mgmt.rx24', W = 'mgmt.fwd24';
+  // [what, the relay's own row's tags (null: no dump at all), the target's row's tags (null: no row), WcbMgmt relay, ok]
+  for (const [what, relayTags, targetTags, mgmtRelay, ok] of [
+    ['a classic ESP32 target on 2026-10-23 firmware', W, W, false, false],
+    ['an S3 target on firmware from before the tags', W, '', false, false],
+    ['a relay on firmware from before the tags', '', S3, false, false],
+    ['no dump read yet', null, null, false, false],
+    ['the S3 target not in the dump', W, null, false, false],
+    ['an S3 target through a relay that forwards 24', W, S3, false, true],
+    ['an S3 target through an S3 relay (its mgmt.rx24: it forwards 24)', S3, S3, false, true],
+    ['an S3 target through a WcbMgmt relay', null, S3, true, true],
+  ]) {
+    await relayBoard(page, RELAY_CHAIN);
+    if (relayTags !== null || targetTags !== null) {
+      const rows = [];
+      if (relayTags !== null) rows.push({ n: 1, alias: 'Relay', tags: relayTags, peer: 3 });
+      if (targetTags !== null) rows.push({ n: 2, alias: 'Dome', hw: 32, tags: targetTags });
+      await feedWdpDump(page, wdpDump(rows));
+    }
+    const r = await page.evaluate(async ({ value, mgmtRelay }) => {
+      window.sleep = () => Promise.resolve();
+      boardConfigs[2].hwVersion = 32;
+      boardBaselines[2].hwVersion = 32;
+      if (!boardConfigs[1]) boardConfigs[1] = {};
+      boardConfigs[1].isRelay = mgmtRelay;
+      boardConfigs[2].sequences = [{ key: 'abcdefghijklmno', value }];
+      populateUIFromConfig(2, boardConfigs[2]);
+      await boardGo(2, { skipReboot: true });
+      return { sent: [...__sent], outcome: boardPushOutcome[2] };
+    }, { value, mgmtRelay });
+    if (!ok) {
+      expect(r.outcome.ok, what).toBe(false);
+      expect(r.outcome.reason).toMatch(/one command is 4025 bytes/);
+      expect(frags(r.sent)).toEqual([]);
+      continue;
+    }
+    expect(r.outcome.ok, JSON.stringify(r.outcome)).toBe(true);
+    const sessions = sessionsOf(r.sent);
+    expect(sessions.length).toBe(1);
+    expect(sessions[0].total).toBe(23);
+    expect(sessions[0].chunks.join('')).toBe(`?SEQ,SAVE,abcdefghijklmno,${value}`);
+  }
   expect(page.wizErrors).toEqual([]);
 });
 

@@ -72,6 +72,7 @@ def split_checked_chain(text):
 PULL_MAX = 16 * 182
 PULL_TAG = re.compile(r"^\[MGMT:(CONFIG|CFGPART|CFGERR),(\d+)\](.*)$", re.S)
 PART_BODY = re.compile(r"P([0-9A-F]{4}),(\d{1,2}),(\d{1,2}):(.*)~", re.S)     # fullmatch: the '~' must end the line
+PULL_MAX_PARTS = 64        # CFGP_MAX_PARTS (WCB_ConfigParts.h): K above it is TOOBIG, which no board's config reaches
 # Every code a target's CFGERR carries (cpjFail, WCB.ino), and EMPTY for the bare legacy reply: out of memory on a
 # target, seen alone through a relay with no CFGERR.
 REFUSALS = ("NOMEM", "CHANGED", "NOPARTS", "TOOBIG", "EMPTY")
@@ -79,7 +80,7 @@ REFUSALS = ("NOMEM", "CHANGED", "NOPARTS", "TOOBIG", "EMPTY")
 # what may pass differs by test (a ,P pull through a working relay never ends in NOPARTS, yet read_config retries it).
 # NOMEM (the target could not allocate the reply buffer) and CHANGED (the config changed under the build, three times
 # running) pass on their own, and so does NOPARTS on a ,P pull (every type-19 copy of the request was lost while a
-# type-5 copy got through; Pull already asks once more itself); TOOBIG (more than 16 parts) comes back every time, and
+# type-5 copy got through; Pull already asks once more itself); TOOBIG (more than 64 parts) comes back every time, and
 # so does MALFORMED (see REFUSAL_CODE).
 RETRYABLE = ("NOMEM", "CHANGED", "NOPARTS", "EMPTY")
 # What config text looks like. A CFGERR detail never carries any; one that does is a firmware bug, and its detail is
@@ -136,12 +137,13 @@ def parse_pull_line(line):
 
 
 def parse_part(body):
-    """A CFGPART body -> (id, k, K, data), or None unless it is strictly 'P<4 hex>,<k>,<K>:<data>~' with 1<=k<=K<=16."""
+    """A CFGPART body -> (id, k, K, data), or None unless it is strictly 'P<4 hex>,<k>,<K>:<data>~' with
+    1<=k<=K<=PULL_MAX_PARTS."""
     m = PART_BODY.fullmatch(body)
     if not m:
         return None
     k, total = int(m.group(2)), int(m.group(3))
-    if not 1 <= k <= total <= 16:
+    if not 1 <= k <= total <= PULL_MAX_PARTS:
         return None
     return m.group(1), k, total, m.group(4)
 

@@ -422,6 +422,74 @@ async function detectFlashSizeMB(loader) {
   return null;
 }
 
+// ─── Entering the ROM bootloader ──────────────────────────────────
+// esptool resets the chip into its ROM loader through the USB bridge's DTR and RTS lines and two
+// transistors: RTS alone pulls EN low, DTR alone pulls GPIO0 low, both or neither release both.
+// So leaving reset with GPIO0 low takes two line changes, and between them EN is already rising
+// with GPIO0 still high. A WCB 2.4's EN (10 kΩ / 0.1 µF) crosses its threshold ~1.2 ms after the
+// first change, so the PC must make both inside that: on the bench PC (Windows 11, CP210x driver
+// 11.1) ~1 ms passed every time and 0.5 ms more failed every time (2026-10-20), and a user's PC on
+// a hub never made it. No order of the two changes avoids the race. When the automatic reset
+// fails, the Wizard holds GPIO0 low (DTR alone) and asks for a RESET tap, which leaves reset with
+// GPIO0 already low whatever the PC's timing: 10 of 10 taps reached the ROM loader on the bench.
+const AUTO_RESET_ATTEMPTS = 2;      // esptool's connect() makes 7: ~50 s of failing on a slow PC
+let BOOTLOADER_ASSIST_MS = 60000;   // how long a RESET tap is waited for; a spec shortens it
+
+// esptool's "never synced" error, as opposed to a port that would not open or a step after sync.
+const isNoSync = (e) => /Failed to connect with the device/i.test(e?.message ?? String(e));
+
+// What to tell the user when the board never reached bootloader mode, even with the RESET tap.
+// A WCB 2.4 has one button, S1, and it is RESET (PCB/V2.4), so "hold BOOT" is advice its owner
+// cannot follow. The other revisions ride a module with its own buttons (S3-DevKitC-1 on 3.x has
+// BOOT; 1.0's T7 and 2.1/2.3 are not in this repo).
+function bootloaderAdvice(hwVersion) {
+  const retry = 'Try again, and tap the board\'s RESET button when the Wizard asks. If the board drops ' +
+                'off USB when you tap it, try another cable, or a USB port on the computer itself (no hub).';
+  if (String(hwVersion) === '24')
+    return `${retry} A WCB 2.4 has no BOOT button: RESET is its only button. OTA (⬆ OTA) needs no bootloader mode at all.`;
+  return `${retry} On a board with a BOOT button, holding BOOT while you tap RESET works too.`;
+}
+
+// Hold GPIO0 low and wait for the user's RESET tap, retrying main() with no reset of its own.
+// The port stays open from the failed automatic attempt: opening it again toggles DTR/RTS, which
+// can reset the chip back out of the ROM loader. So transport.connect() is a no-op while the port
+// is open, and still opens it after changeBaud() has closed it.
+async function enterBootloaderAssisted(loader, transport, { onLog, onStatus, quiet }) {
+  const lost = () => transport.device?.readable === null;   // Web Serial: null once the port is closed or gone
+  const dropped = 'the board dropped off USB - reconnect it and try again';
+  if (lost()) throw new Error(dropped);
+  await transport.setRTS(false);
+  await transport.setDTR(true);            // GPIO0 low with EN released: a RESET tap boots the ROM loader
+  const realConnect = transport.connect;
+  transport.connect = async function (baud, opts) {
+    if (this.device?.readable) { this.baudrate = baud; this.leftOver = new Uint8Array(0); return; }
+    return realConnect.call(this, baud, opts);
+  };
+  const ask = 'Tap the RESET button on the board now - the Wizard is holding it ready for bootloader mode';
+  onLog(`► ${ask}`);
+  if (typeof showToast === 'function') showToast(ask, 'warning', 15000);
+  const deadline = Date.now() + BOOTLOADER_ASSIST_MS;
+  loader._wcbAttemptCap = 1;               // one attempt per main(), so a tap is answered within ~4 s
+  quiet.on = true;
+  try {
+    for (;;) {
+      onStatus(`Tap RESET on the board now… ${Math.max(0, Math.ceil((deadline - Date.now()) / 1000))} s`);
+      try { return await loader.main('no_reset'); }
+      catch (e) {
+        if (!isNoSync(e)) throw e;
+        if (lost()) throw new Error(dropped);
+        if (Date.now() >= deadline) throw new Error('no RESET tap was seen');
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  } finally {
+    quiet.on = false;
+    loader._wcbAttemptCap = undefined;
+    transport.connect = realConnect;
+    try { await transport.setDTR(false); } catch (_) {}   // release GPIO0: the post-flash reset must boot the firmware
+  }
+}
+
 // ─── Main flash function ──────────────────────────────────────────
 //
 // port       — WebSerial SerialPort, must be CLOSED before calling
@@ -475,14 +543,16 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
   // ── Step 3: Connect to ESP bootloader ──────────────────────────
   onStatus('Connecting to bootloader…');
   onLog('Connecting to ESP bootloader…');
-  onLog('► Hold BOOT, tap RST, release BOOT — then watch for sync attempts below');
+  onLog('► Resetting the board into bootloader mode — watch for sync attempts below');
 
-  // Route esptool-js internal logs to the terminal so the user can see sync progress
-  const terminal = {
-    clean:     ()    => {},
-    writeLine: (msg) => { if (msg?.trim()) onLog(`[esptool] ${msg.trim()}`); },
-    write:     (msg) => { if (msg?.trim()) onLog(`[esptool] ${msg.trim()}`); },
+  // Route esptool-js internal logs to the terminal so the user can see sync progress. While a
+  // RESET tap is awaited, its per-sync dots and "Connecting..." would bury the request.
+  const quiet = { on: false };
+  const show = (msg) => {
+    const m = msg?.trim();
+    if (m && !(quiet.on && /^(\.+|_+|Connecting\.*)$/.test(m))) onLog(`[esptool] ${m}`);
   };
+  const terminal = { clean: () => {}, writeLine: show, write: show };
 
   const transport = new Transport(port, false);
   const loader    = new ESPLoader({
@@ -498,17 +568,32 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     terminal,
   });
 
+  // Fewer automatic attempts than esptool's 7: where the reset race is lost it is lost every time,
+  // and each attempt only delays the RESET-tap request. (The specs' fake esptool has no connect().)
+  if (typeof loader.connect === 'function') {
+    const connect = loader.connect.bind(loader);
+    loader.connect = (mode, attempts = 7, detecting) =>
+      connect(mode, Math.min(attempts, loader._wcbAttemptCap ?? AUTO_RESET_ATTEMPTS), detecting);
+  }
+
   let chip;
   try {
     chip = await loader.main();
-    onLog(`Chip identified: ${chip}`);
   } catch (e) {
-    try { await transport.disconnect(); } catch (_) {}
-    throw new Error(
-      `Bootloader connection failed: ${e.message}\n\n` +
-      `To enter bootloader mode: hold BOOT, press RST, release BOOT, then try again.`
-    );
+    if (!isNoSync(e)) {
+      try { await transport.disconnect(); } catch (_) {}
+      throw new Error(`Bootloader connection failed: ${e.message}\n\n${bootloaderAdvice(hwVersion)}`);
+    }
+    onLog('The automatic reset did not reach bootloader mode');
+    try {
+      chip = await enterBootloaderAssisted(loader, transport, { onLog, onStatus, quiet });
+      onLog('Bootloader mode entered after the RESET tap');
+    } catch (e2) {
+      try { await transport.disconnect(); } catch (_) {}
+      throw new Error(`Bootloader connection failed: ${e2.message}\n\n${bootloaderAdvice(hwVersion)}`);
+    }
   }
+  onLog(`Chip identified: ${chip}`);
 
   // ── Step 3a: Detect chip family + flash size, select bootloader ──
   // The connected chip is the ground truth. If the user picked the wrong HW
@@ -858,10 +943,11 @@ async function flashFirmware(port, hwVersion, { onProgress, onLog, onStatus, app
     } catch (e2) {
       try { await transport.disconnect(); } catch (_) {}
       // Surface a recovery message instead of just rethrowing the raw error.
+      // The ROM bootloader survives a half-written flash, so a retry can still reach it.
       const recoveryMsg = willWriteBootOrPart
         ? `\n\n⚠️  The board may be in an unbootable state. To recover:\n` +
-          `   1. Hold the BOOT button on the ESP32 while pressing RESET\n` +
-          `   2. Reconnect via the Flasher and try again\n` +
+          `   1. Reconnect via the Flasher and try again\n` +
+          `   2. If it cannot connect: ${bootloaderAdvice(hwVersion)}\n` +
           `   3. If the board still does not flash, contact support.`
         : '';
       throw new Error(`Flash write failed after retry: ${e2.message}${recoveryMsg}`);

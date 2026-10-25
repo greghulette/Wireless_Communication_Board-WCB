@@ -1,7 +1,7 @@
 // Wizard/parser.js on its own - no browser, no board. `node --test` (npm run unit), and wizard.parser in the harness.
 //
 // The identity and network tokens the 2026-10-12 coverage re-scan found unasserted (parseToken, parser.js:482-645):
-// the mesh channel clamped to 1-11, PEERSLIVE read and never written back, the USB echo (BCAST,OUT,S0) kept on its own
+// the mesh channel clamped to 1-13, PEERSLIVE read and never written back, the USB echo (BCAST,OUT,S0) kept on its own
 // flag and pushed only when it changes, SPECIAL as the legacy name of CONTROLLER (with its 1-20 id), and ALIAS keeping
 // a comma (and cut at 24). Re-scan row parser.tokens_misc (docs/hil_plan/rescan_2026-10-12/wizard.json).
 const test = require('node:test');
@@ -13,9 +13,11 @@ const parse = (...tokens) => P.parseBackupString(tokens.map((t) => `?${t}`).join
 // The verbs of a push's command string, each with its arguments, as boardGo splits it.
 const cmds = (s) => (s ? s.split('^?').map((x, i) => (i === 0 ? x.slice(1) : x)) : []);
 
-test('WCBCH: 1-11 kept, anything else (14, 0, 12, a word) read as channel 1', () => {
-  for (const ch of [1, 6, 11]) assert.equal(parse('WCB,1', `WCBCH,${ch}`).meshChannel, ch);
-  for (const bad of ['14', '0', '12', '-3', 'x', '']) assert.equal(parse('WCB,1', `WCBCH,${bad}`).meshChannel, 1, `WCBCH,${bad}`);
+// 12-13 since channel sync's ?REGION (docs/CHANNEL_SYNC.md §6): a board in a region that allows them can be on them,
+// and the board - not the parser - refuses one its region does not allow.
+test('WCBCH: 1-13 kept, anything else (14, 0, a word) read as channel 1', () => {
+  for (const ch of [1, 6, 11, 12, 13]) assert.equal(parse('WCB,1', `WCBCH,${ch}`).meshChannel, ch);
+  for (const bad of ['14', '0', '-3', 'x', '']) assert.equal(parse('WCB,1', `WCBCH,${bad}`).meshChannel, 1, `WCBCH,${bad}`);
 });
 
 test('PEERSLIVE: read as livePeerCount (null when absent or not a number) and never part of a push', () => {

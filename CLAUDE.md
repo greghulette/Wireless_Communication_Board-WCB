@@ -11,12 +11,14 @@ changing before editing.**
 |---|---|
 | WDP — discovery, device announce, election | [docs/WDP_DESIGN.md](docs/WDP_DESIGN.md), [docs/WDP_DEVICE_ANNOUNCE.md](docs/WDP_DEVICE_ANNOUNCE.md) |
 | Stored variables | [docs/VARIABLES_DESIGN.md](docs/VARIABLES_DESIGN.md) |
-| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| Stored sequences — where they are stored (`WCB_SeqStore`), nested recall and the cycle guard, `?SEQ,NAMES`, `?MGMT,SEQ` and its pages (`WCB_SeqNamesWire.h`, packet types 28/29, shared byte-identical with `WCB_Client`) | [docs/SEQUENCE_INVENTORY.md](docs/SEQUENCE_INVENTORY.md) |
+| The Wizard's sequence builder — timeline ↔ `;T` chain, its warnings, routing, the vendored command library (`Wizard/cmdlib/`) | [docs/SEQUENCE_BUILDER.md](docs/SEQUENCE_BUILDER.md) |
 | OTA | [docs/WCB_OTA_TECHNICAL.md](docs/WCB_OTA_TECHNICAL.md) |
 | WiFi — `?WIFI`, hosting/joining an AP (branch `WIFI`) | [docs/WIFI_DESIGN.md](docs/WIFI_DESIGN.md) |
+| Channel sync — `?CHSYNC`, `?REGION`, MOVE/PROBE/REPLY (ETM types 25-27), WDP TLV `0x14`, JOIN following its network | [docs/CHANNEL_SYNC.md](docs/CHANNEL_SYNC.md) |
 | WLED | [docs/WLED_INTEGRATION.md](docs/WLED_INTEGRATION.md) |
 | Kyber passthrough | [docs/WCB_KYBER_PASSTHROUGH_PARAMS.md](docs/WCB_KYBER_PASSTHROUGH_PARAMS.md) |
-| Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
+| Remote config pull — `?MGMT,PULL[,P]`, parts, `[MGMT:CFGERR`, relay reassembly; everything else the relay carries — `?MGMT,STATS` / `ETM,CHAR` / `SEQGET` results in parts (`WCB_ResultWire.h`, packet types 30-34, shared byte-identical with `WCB_Client`), the Wizard's push in sessions (§10) | [docs/MGMT_RELAY.md](docs/MGMT_RELAY.md) |
 | Device command translation | it's in [`WcbCmd`](https://github.com/greghulette/WcbCmd), not here |
 | Hardware-in-the-loop tests — `tests/hil`, the `wcb_probe` firmware | [docs/HIL_TESTING.md](docs/HIL_TESTING.md) |
 
@@ -260,6 +262,17 @@ changing before editing.**
     - A frame given up is counted in `?STATS` and reported by `loop()` once a second as `[MESH] ... not sent`.
     So a send from the receive callback is fine. A send while holding a spinlock, or with the scheduler suspended, is
     not, because the task's wait sleeps. `selftest.py` (`t_rule16_espnow_send_wrapped`) fails on any other call.
+    **The WiFi driver can wedge under load** (tracker #112; espressif/esp-idf #18682, #19269): it loses frames it
+    accepted - no send callback, the TX buffer never given back - until every `esp_now_send` returns
+    `ESP_ERR_ESPNOW_NO_MEM`, heartbeats included, while the board still receives. `wcbEspNowService()` (loop) calls it
+    a wedge after 10 s of frames with no completion and puts the radio back without a reboot: ESP-NOW restarted, then
+    the WiFi driver too on a board that booted with WiFi OFF (`espNowRestartForWedge`, `WCB.ino`); an AP or JOIN board
+    is never torn down; out of remedies, the board restarts itself, at most twice in a row (RTC count, ended by
+    10 min clear or any other restart), then says only a reboot by hand clears it. Every line starts
+    `[MESH] ESP-NOW transmit wedge`. So judge
+    the radio by completions, never by what `esp_now_send` accepted; a path that calls `esp_now_add_peer` off the loop
+    task checks `wcbEspNowRestarting()` first; a new kind of standing peer is registered again in
+    `espNowRegisterPeersAgain`. `?DEBUG,FAULT,TXWEDGE[,1-3]` simulates it (HIL `etm.tx_wedge_*`).
 
 17. **Stored sequences are not in NVS.** They are the lines of one file, `/seqs` (`<key>,<value>` in save order), in a
     LittleFS on the min_spiffs table's 128 KB `spiffs` partition, behind `WCB_SeqStore.{h,cpp}`. Go through its calls
@@ -269,8 +282,11 @@ changing before editing.**
       store call can fail for want of heap, so every caller handles `SEQ_E_*`. Don't keep it mounted between calls:
       held for 3 s, it cost a 250-token restore four tokens to out-of-memory. Loop task only, never the ESP-NOW
       receive callback (rule 11): a replace rewrites the whole file.
-    - **`SEQ_FILE_MAX` (32 KB) is set by the config pull, not the partition**: a full store's config must still fit 16
-      parts of 2880 bytes (`WCB_ConfigParts.h`), and 48 KB did not. Raise one and you must re-derive the other.
+    - **`SEQ_FILE_MAX` (32 KB) and the config pull's `CFGP_MAX_PARTS` (64) are sized together**: a full store's config
+      must still pull. Its sequences ride the pull as `^?SEQ,SAVE,` tokens, each its line + 10, so the most short ones
+      (6,572) make 98,488 characters; with 100 variables (3,700) and every other setting (under 40,000) a config stays
+      under 142,000, inside 64 parts of 2880 (184,320; `WCB_ConfigParts.h`). The 16 parts (46,080) it had did not cover
+      that. Raise one and you must re-derive the other (docs/MGMT_RELAY.md §10).
     - **NVS still decides when sequences are erased.** The Wizard's factory reset blanks only the NVS partition; a boot
       that finds the file without `stored_cmds/seq_mig_done` clears it. Keep that marker in NVS and keep it written
       at every boot that lacks it (`migrateOldStoredCommands`), or a factory reset stops clearing sequences.
@@ -278,6 +294,23 @@ changing before editing.**
       on, so a damaged file system can `abort()` in the mount and would boot-loop). So does one after `?DEBUG,SEQNVS`,
       which the full-NVS HIL tests use to fill NVS with sequences. Every boot that mounts moves what NVS lists into
       the file, NVS winning a key both hold.
+
+18. **The mesh channel moves at runtime** (channel sync, `WCB_ChanSync.{h,cpp}`, docs/CHANNEL_SYNC.md). A MOVE changes
+    `meshChannel` live, or saves it and restarts a board with an interface up; a search, and a JOIN board's full-band
+    scan, take the radio to other channels for ~1.5 s, reported by `chanSyncRadioAway()`. While that is true the
+    receive path drops everything but channel-sync frames (a heartbeat heard there would mark a missing board online and
+    cancel the search), and `loop()` holds the heartbeat, the WDP advert, ETM retries AND every command source - the
+    timed groups, the command queue, WebSocket lines, config-pull replies - so a command typed mid-search runs ~1.5 s
+    late instead of sending on the visited channel (a relayed `?OTA,BEGIN` was lost that way). A new sender or command
+    path in `loop()` must hold too, or it transmits to nobody. A scan wider than the mesh channel puts the radio back on the home
+    channel itself when it ends (`csFullScanDone`), rather than trusting the driver to return an unassociated station
+    there - and is finished on EVERY path of `wcbWifiService`, first thing: one left running after a `?WIFI` mode change
+    kept `chanSyncRadioAway()` true for good. Anything that takes the radio off the channel asks
+    `chanSyncMayLeaveChannel` first (the 40 s boot grace, an OTA, a config pull, ETM ACKs outstanding, RC passthrough
+    in use), and what it asks of WiFi is the running interface (`wcbWifiApUp`, the driver), never `wcbWifiMode`, which
+    `?WIFI` changes at once. Channel-sync frames never refresh presence. And a board stranded by hand (`?WCBCH` +
+    reboot) is searched for and brought back about a minute later, so a HIL test that strands one on purpose restores it
+    sooner or turns `?CHSYNC,OFF` for its length.
 
 ## Verifying
 
@@ -291,6 +324,10 @@ Code/bin/build.sh
 # Host tests — WDP wire format + election; config-pull parts (split, framing, UTF-8, error texts)
 g++ -std=c++11 -Wall -Wextra -O2 tests/wdp_wire_test.cpp -o wdp_wire_test && ./wdp_wire_test
 g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test && ./config_parts_test
+# sequence names in pages (split, header, join; WCB_SeqNamesWire.h, shared with WCB_Client)
+g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test && ./seqnames_page_test
+# STATS / ETM / SEQGET results in parts (split, header, join, the requester's clock; WCB_ResultWire.h, shared too)
+g++ -std=c++11 -Wall -Wextra -O2 tests/result_parts_test.cpp -o result_parts_test && ./result_parts_test
 
 # Hardware-in-the-loop — real boards on Greg's bench, pyserial only (docs/HIL_TESTING.md)
 python tests/hil/gui.py                  # the GUI Greg uses: devices, wiring, tests, log

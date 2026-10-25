@@ -123,17 +123,18 @@ static unsigned checkReply(const std::string &ver, const std::vector<std::string
   }
   if (plan != CFGP_PLAN_PARTS) return 0;
 
-  uint16_t split[CFGP_MAX_PARTS + 1];
-  const unsigned K = cfgpSplit(L, D, m.grid, split);
+  uint8_t back[CFGP_MAX_PARTS];
+  const unsigned K = cfgpSplit(L, D, m.grid, back);
   CHECKF(K == cfgpPartCount(L, D) && K >= 2 && K <= CFGP_MAX_PARTS, "%s: K=%u, ceil(L/D)=%zu", label, K,
          cfgpPartCount(L, D));
   if (K == 0) return 0;
-  CHECKF(split[0] == 0 && split[K] == L, "%s: split ends", label);
+  CHECKF(cfgpSplitAt(0, K, L, D, back) == 0 && cfgpSplitAt(K, K, L, D, back) == L, "%s: split ends", label);
+  for (unsigned k = 1; k < K; k++) CHECKF(back[k - 1] <= CFGP_UTF8_BACKOFF, "%s: back-off %u", label, back[k - 1]);
 
   std::string joined;
   const uint16_t id = (uint16_t)rnd();
   for (unsigned k = 1; k <= K; k++) {
-    const size_t lo = split[k - 1], hi = split[k];
+    const size_t lo = cfgpSplitAt(k - 1, K, L, D, back), hi = cfgpSplitAt(k, K, L, D, back);
     // grid-anchored, backed off at most 3, never onto a continuation byte (the text is valid UTF-8)
     if (k < K) {
       CHECKF(hi <= k * D && hi + CFGP_UTF8_BACKOFF >= k * D, "%s: split %u = %zu, grid %zu", label, k, hi, k * D);
@@ -207,9 +208,14 @@ static void test_plan_thresholds() {
   CHECK(cfgpPlan(2913, false, D) == CFGP_PLAN_NOPARTS, "2913, plain request: NOPARTS, never parts");
   CHECK(cfgpPlan(2913, true, D) == CFGP_PLAN_PARTS, "2913, parts request: parts");
   CHECK(cfgpPartCount(2913, D) == 2, "2913 in 2 parts");
-  CHECK(cfgpPlan(16 * D, true, D) == CFGP_PLAN_PARTS && cfgpPartCount(16 * D, D) == 16, "16*D: 16 parts");
-  CHECK(cfgpPlan(16 * D + 1, true, D) == CFGP_PLAN_TOOBIG, "16*D+1: TOOBIG");
-  CHECK(cfgpPlan(16 * D + 1, false, D) == CFGP_PLAN_NOPARTS, "over everything, plain request: NOPARTS");
+  CHECK(cfgpPlan(16 * D + 1, true, D) == CFGP_PLAN_PARTS && cfgpPartCount(16 * D + 1, D) == 17,
+        "16*D+1: 17 parts (the old limit was 16; docs/MGMT_RELAY.md §10)");
+  CHECK(cfgpPlan(64 * D, true, D) == CFGP_PLAN_PARTS && cfgpPartCount(64 * D, D) == 64, "64*D: 64 parts");
+  CHECK(cfgpPlan(64 * D + 1, true, D) == CFGP_PLAN_TOOBIG, "64*D+1: TOOBIG");
+  CHECK(cfgpPlan(64 * D + 1, false, D) == CFGP_PLAN_NOPARTS, "over everything, plain request: NOPARTS");
+  // The largest config a board can hold (WCB_ConfigParts.h): a full store of the most sequences, 100 variables and
+  // every other setting under 40,000 characters, all inside CFGP_MAX_PARTS at the default part size.
+  CHECK(cfgpPlan(98488 + 3700 + 40000, true, D) == CFGP_PLAN_PARTS, "the largest config pulls in parts");
   CHECK(cfgpPlan(3000, true, 600) == CFGP_PLAN_PARTS && cfgpPartCount(3000, 600) == 5, "D=600: 3000 in 5 parts");
   CHECK(cfgpPartDataSize(0) == 2880 && cfgpPartDataSize(512) == 512 && cfgpPartDataSize(2880) == 2880,
         "PULLPART accepted values");
@@ -219,8 +225,8 @@ static void test_plan_thresholds() {
 
 static void test_sizes() {
   char h[64];
-  CHECK(cfgpPartHeader(h, sizeof(h), 0xFFFF, 16, 16) == CFGP_PART_HDR_MAX && strcmp(h, "PFFFF,16,16:") == 0,
-        "widest header is 12 characters");
+  CHECK(cfgpPartHeader(h, sizeof(h), 0xFFFF, CFGP_MAX_PARTS, CFGP_MAX_PARTS) == CFGP_PART_HDR_MAX &&
+        strcmp(h, "PFFFF,64,64:") == 0, "widest header is 12 characters");
   CHECK(cfgpPartHeader(h, sizeof(h), 0x00A1, 1, 2) == 10 && strcmp(h, "P00A1,1,2:") == 0, "header format");
   CHECK(CFGP_PART_MSG_MAX == 2896 && CFGP_PART_MSG_MAX <= CFGP_MSG_MAX, "largest part 2896 <= 2912");
   // the relay's output slot: 2960 bytes = tag (<= 18) + 2912 + CRLF + NUL
@@ -248,8 +254,8 @@ static void test_errors() {
   CHECK(strcmp(e, "ENOMEM,need 2896 bytes; free 12000; largest block 8000") == 0, "NOMEM text");
   cfgpErrorText(e, sizeof(e), CFGP_E_NOMEM, 0, 12000, 8000);
   CHECK(strcmp(e, "ENOMEM,a config line did not fit; free 12000; largest block 8000") == 0, "NOMEM text, lost token");
-  cfgpErrorText(e, sizeof(e), CFGP_E_TOOBIG, 50000, 46080, 16);
-  CHECK(strcmp(e, "ETOOBIG,50000 chars; max 46080 in 16 parts; read it over USB with ?backup") == 0, "TOOBIG text");
+  cfgpErrorText(e, sizeof(e), CFGP_E_TOOBIG, 190000, 184320, 64);
+  CHECK(strcmp(e, "ETOOBIG,190000 chars; max 184320 in 64 parts; read it over USB with ?backup") == 0, "TOOBIG text");
   // The requester's length leads the detail (s03 wcb.pull_plain_over_limit looks for it); nothing in it blames the
   // Wizard, since a current one gets NOPARTS only when every type-19 copy of its ,P request was lost.
   cfgpErrorText(e, sizeof(e), CFGP_E_NOPARTS, 3062, 2912, 0);
@@ -353,7 +359,7 @@ static void test_boundaries_every_offset() {
 static void test_exact_multiple() {
   const size_t D = 600;
   const std::string ver = "X";
-  for (size_t K = 5; K <= 16; K++) {
+  for (size_t K = 5; K <= CFGP_MAX_PARTS; K++) {
     const size_t prefix = 5 + ver.size() + 1 + 1;   // "[VER:X]?"
     const size_t bodyTok = K * D - prefix - 13;      // + "^?CHK" + 8 hex = K*D
     std::string tok;
@@ -369,20 +375,25 @@ static void test_exact_multiple() {
     snprintf(label, sizeof(label), "L=%zu*D", K);
     CHECKF(checkReply(ver, tokens, D, true, label) == K, "%s: K stays %zu", label, K);
   }
-  // one byte over 16*D: TOOBIG, never 17 parts
-  std::vector<std::string> big = {std::string(16 * D - 5 - ver.size() - 1 - 1 - 13 + 1, 'b')};
-  CHECK(refReply(ver, big).size() == 16 * D + 1, "16*D+1 fixture");
-  CHECK(cfgpPlan(16 * D + 1, true, D) == CFGP_PLAN_TOOBIG, "16*D+1 is TOOBIG");
-  uint16_t split[CFGP_MAX_PARTS + 1];
+  // one byte over CFGP_MAX_PARTS*D: TOOBIG, never one part more
+  const size_t over = CFGP_MAX_PARTS * D + 1;
+  std::vector<std::string> big = {std::string(over - 5 - ver.size() - 1 - 1 - 13, 'b')};
+  CHECK(refReply(ver, big).size() == over, "64*D+1 fixture");
+  CHECK(cfgpPlan(over, true, D) == CFGP_PLAN_TOOBIG, "64*D+1 is TOOBIG");
+  uint8_t back[CFGP_MAX_PARTS];
   uint8_t grid[CFGP_MAX_PARTS][4] = {};
-  CHECK(cfgpSplit(16 * D + 1, D, grid, split) == 0, "cfgpSplit refuses 17 parts");
+  CHECK(cfgpSplit(over, D, grid, back) == 0, "cfgpSplit refuses 65 parts");
+  // a reply past the old 16-part limit and past 65,535 bytes (offsets no longer fit 16 bits): split and joined whole
+  std::string tok;
+  while (tok.size() < 70000) tok += (tok.size() % 997 == 0) ? std::string(U4) : std::string("abcdefg");
+  CHECKF(checkReply(ver, {"HW,32", tok}, CFGP_PART_DATA, true, "70 KB") == 25, "a 70 KB reply in 25 parts");
 }
 
 static void test_random_replies() {
   const size_t Ds[] = {512, 600, 1024, 2880};
   for (int i = 0; i < 400; i++) {
     const size_t D = Ds[i % 4];
-    const size_t len = 100 + rnd() % (16 * D);        // legacy and parts
+    const size_t len = 100 + rnd() % (20 * D);        // legacy and parts, past the old 16
     const std::vector<std::string> tokens = randomTokens(len, (int)(rnd() % 40));
     char label[48];
     snprintf(label, sizeof(label), "random #%d D=%zu", i, D);

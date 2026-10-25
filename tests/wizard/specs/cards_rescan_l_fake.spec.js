@@ -234,10 +234,12 @@ test('wizard.serial_fake_claim_ui each claim locks its serial row with a note sa
   expect(page.wizErrors).toEqual([]);
 });
 
-test('wizard.serial_fake_label_combobox a port label offers the known device names as you type (case-insensitive, by substring); ArrowDown and Enter pick one, which goes into the config like a typed label and is pushed; the next label clicked keeps its own list open; Escape closes it; a locked (claimed) label never opens it', async ({ page }) => {
+test('wizard.serial_fake_label_combobox a port label offers the known device names as you type (case-insensitive, by substring); ArrowDown and Enter pick one, which goes into the config like a typed label and is pushed; the next label clicked keeps its own list open; a scroll that leaves the field where it is keeps the list open, one that moves the field closes it; Escape closes it; a locked (claimed) label never opens it', async ({ page }) => {
   // initDeviceCombobox, _devRender, _devSetActive, _devCommit, _devHide (app.js:693-792); device-labels.js. Moving
   // straight from one label to the next opened the next one's list and 150 ms later closed it (the first one's blur
-  // timer): fixed 2026-10-13. Row serial.label_combobox.
+  // timer): fixed 2026-10-13. Any scroll on the page closed the list, the late scroll event of the click's own
+  // scroll-into-view included: on a slow CI runner it landed after the typing (CI, 2026-10-24). It closes now only
+  // when the field has moved. Row serial.label_combobox.
   await setup(page);
   await pullFake(page, 1, board(['BAUD,S3,57600', 'MAESTRO,M2:W1S3:57600']));
   await holdVerifyPulls(page);
@@ -266,6 +268,19 @@ test('wizard.serial_fake_label_combobox a port label offers the known device nam
   await s2.click();
   await page.waitForTimeout(400);
   expect(await pop()).toEqual({ open: true, items: names });
+  // A scroll event that leaves the field where it is (a late one, or another pane's) keeps the list; a page scroll
+  // that moves the field closes it, and typing opens it again.
+  await page.evaluate(() => document.dispatchEvent(new Event('scroll')));
+  expect((await pop()).open, 'a scroll that does not move the field').toBe(true);
+  const moved = await page.evaluate(() => {
+    const field = document.getElementById('b1-s2-label'), page = document.scrollingElement;
+    const y0 = field.getBoundingClientRect().top;
+    // Instant: the Wizard scrolls smoothly (html { scroll-behavior: smooth }), and the field must have moved here.
+    page.scrollBy({ top: page.scrollTop > 0 ? -40 : 40, behavior: 'instant' });
+    return field.getBoundingClientRect().top !== y0;
+  });
+  expect(moved, 'the page scrolls under the field').toBe(true);
+  await expect.poll(async () => (await pop()).open, 'a scroll that moves the field').toBe(false);
   // Escape closes it, the typed text stays.
   await s2.pressSequentially('dro');
   expect((await pop()).open).toBe(true);

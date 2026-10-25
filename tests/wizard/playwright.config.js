@@ -23,7 +23,9 @@ module.exports = defineConfig({
   fullyParallel: false,
   retries: 0,
   timeout: 240_000,          // covers a first-run authorization, where Greg picks the port by hand
-  reporter: 'line',
+  // On GitHub Actions the github reporter also turns each failure into an annotation on the check run, which the
+  // public API serves without a sign-in (the job log needs one), so a red run says which spec failed and why.
+  reporter: process.env.GITHUB_ACTIONS ? [['line'], ['github']] : 'line',
   use: { baseURL: ORIGIN },
   webServer: [
     {

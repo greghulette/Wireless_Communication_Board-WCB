@@ -21,7 +21,9 @@
 //  disagrees with the mesh is a total, silent blackout — every ESP-NOW packet
 //  dropped, nothing logged on the other boards, no fault indication anywhere.
 //  Every entry point below therefore passes meshChannel explicitly, and JOIN
-//  verifies the channel after associating rather than trusting it.
+//  verifies the channel after associating rather than trusting it. Channel sync
+//  (WCB_ChanSync.h) is the one thing that moves meshChannel at runtime, and it
+//  moves the whole mesh with it.
 //
 //  ── MODES ──────────────────────────────────────────────────────────────────
 //    OFF   ESP-NOW only. The default, and byte-for-byte the previous behaviour.
@@ -58,6 +60,14 @@ extern String      wcbWifiApPass;     // >= 8 chars or the AP refuses to start
 extern String      wcbWifiJoinSsid;
 extern String      wcbWifiJoinPass;
 
+// ---- WebSocket token (docs/WIFI_DESIGN.md §7) ------------------------------
+// What a WebSocket session sends as ?AUTH,<token> before anything it sends runs or any console output reaches it.
+// "" = none. JOIN does not start without one. A char array, not a String: a setter whose String allocation failed
+// would store "" - a cleared token - and say nothing (CLAUDE.md rule 14).
+static const size_t WCB_WIFI_TOKEN_MIN = 8;
+static const size_t WCB_WIFI_TOKEN_MAX = 32;
+extern char        wcbWifiToken[WCB_WIFI_TOKEN_MAX + 1];
+
 // ---- Lifecycle ------------------------------------------------------------
 // Load settings from NVS. Call BEFORE wcbWifiStart().
 void loadWifiSettings();
@@ -85,5 +95,20 @@ String wcbWifiIP();
 //   ?WIFI                       status (mode, SSID, IP, channel, free heap)
 //   ?WIFI,OFF                   disable (next boot)
 //   ?WIFI,AP,<ssid>,<pass>      host an AP  (next boot)
-//   ?WIFI,JOIN,<ssid>,<pass>    join an AP  (next boot)
+//   ?WIFI,JOIN,<ssid>,<pass>    join an AP  (next boot; needs a token)
+//   ?WIFI,TOKEN,<token>         the WebSocket token (sessions opened from then on)
+//   ?WIFI,TOKEN,CLEAR           no token
 void processWifiCommand(const String &args);
+
+// ---- Channel sync (WCB_ChanSync.cpp, docs/CHANNEL_SYNC.md) -----------------
+// The mesh channel moves at runtime now: a MOVE switches it live, or restarts a board whose interface is up. JOIN
+// follows its network to another channel by moving the mesh there first (§5).
+// These read what RUNS (the driver, the AP this boot started), never wcbWifiMode, which ?WIFI changes at once.
+bool wcbWifiJoinAssociated();            // the station is associated with an AP now: the AP owns the channel (F_PINNED)
+bool wcbWifiApUp();                      // this boot brought an access point up
+bool wcbWifiInterfaceUp();               // an AP is up, or the station is associated: a channel move needs a restart
+bool wcbWifiBootedOff();                 // this boot started no WiFi interface (?WIFI,OFF): ESP-NOW is all the driver runs
+bool wcbWifiCanHop(const char **why);    // may a search take the radio to other channels now? why = the reason not
+bool wcbWifiJoinScanning();              // a JOIN scan is running (the driver refuses a channel switch meanwhile)
+bool wcbWifiFullScanRunning();           // a JOIN full-band scan is running: the radio is off the mesh channel
+void wcbWifiJoinCancelConnect();         // JOIN, not associated: cancel a connect in progress before a live move

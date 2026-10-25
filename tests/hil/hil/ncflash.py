@@ -85,7 +85,14 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # navicore-fix18 since 2026-10-15 22:25: NaviCore main c4d27b6 (the GPIO ISR service registration starts just after a
 # tick; fix17 was the same change, dirty, for the 100-restart check) with the hooks, App SHA 86309ff96b9b4e6d,
 # v0.2.0_152222QOCT26; fix16 kept beside it.
-BENCH_IMAGE = "navicore-fix18"
+# navicore-chansync, built 2026-10-22 10:10 on the Mac for the chansync HIL tests, ahead of its flash (FLASHED.md says
+# when it went on): NaviCore chansync dd296e4 (channel sync and the WebSocket login token, ab762c1 and 3c2d37f; the
+# paged sequence-names wait, db5b1a4) with the hooks, against WCB_Client 1.19.0 from the WCBClient chansync checkout
+# (`build --library`, b1c44a7; the sketchbook's copy is 1.18.1), App SHA 383707811897fd08, v0.2.0_220941ROCT26.
+# navicore-fix18 stays beside it as the way back.
+# navicore-relay since 2026-10-23 11:40: NaviCore main 9e3d8b7 (mesh results in parts) with the hooks, against
+# WCB_Client 1.20.0 499fe6a (`build --library`), App SHA d721f5157076ef19, v0.2.0_231110ROCT26; navicore-chansync kept.
+BENCH_IMAGE = "navicore-relay"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.
@@ -326,15 +333,43 @@ def compare_tree(sketch_copy, repo, parts=LIB_PARTS):
     return res
 
 
-def check_libs(sketchbook=None, github=None):
+def library_overrides(paths):
+    """build(libraries=...) / `build --library DIR`: folders compiled instead of the sketchbook copies -> {library name:
+    folder}. Each must be a library root whose library.properties names one of LIBS (WCB_Client, WcbCmd), at most one
+    per name; BuildError otherwise. arduino-cli's --library takes a folder ahead of the sketchbook's libraries/, which is
+    how a branch of WCBClient is built without touching the sketchbook copy every other local compile uses (NaviCore's
+    chansync branch needs WCB_Client 1.19.0, NaviCore.ino:55-61, while the sketchbook held 1.18.1)."""
+    out = {}
+    names = [lib for lib, _ in LIBS]
+    for p in paths or ():
+        root = os.path.normpath(os.path.abspath(p))
+        name = None
+        props = os.path.join(root, "library.properties")
+        if os.path.isfile(props):
+            with open(props, encoding="utf-8", errors="replace") as f:
+                name = next((x.split("=", 1)[1].strip() for x in f if x.startswith("name=")), None)
+        if name not in names:
+            raise BuildError(f"--library {root}: its library.properties names {name!r}, not {' or '.join(names)}")
+        if name in out:
+            raise BuildError(f"--library names {name} twice ({out[name]}, {root})")
+        out[name] = root
+    return out
+
+
+def check_libs(sketchbook=None, github=None, overrides=None):
     """NaviCore's two shared libraries, the sketchbook copy a local compile uses (it shadows the real one, NaviCore
     BUILD_AND_RELEASE.md §3) against the repo CI clones -> {name: compare_tree(...) + 'sketchbook', 'repo', 'version',
-    'repo_state'}; a missing folder gives 'same': False and 'missing'. Reads only; never copies anything."""
+    'repo_state', 'override'}; a missing folder gives 'same': False and 'missing'. `overrides` ({name: folder},
+    library_overrides): that folder is what the compile reads, so it stands for both copies ('override': True) and its
+    own tree state is recorded; the sketchbook copy is not read. Reads only; never copies anything."""
     github = github or github_root()
     libraries = os.path.join(sketchbook or sketchbook_dir(github), "libraries")
+    overrides = overrides or {}
     out = {}
     for lib, repo_name in LIBS:
         a, b = os.path.join(libraries, lib), os.path.join(github, repo_name)
+        if lib in overrides:
+            a = b = overrides[lib]
         if not os.path.isdir(a) or not os.path.isdir(b):
             out[lib] = {"same": False, "missing": [p for p in (a, b) if not os.path.isdir(p)], "sketchbook": a,
                         "repo": b, "repo_name": repo_name, "version": None, "repo_state": None}
@@ -345,7 +380,8 @@ def check_libs(sketchbook=None, github=None):
         if os.path.isfile(props):
             with open(props, encoding="utf-8", errors="replace") as f:
                 version = next((x.split("=", 1)[1].strip() for x in f if x.startswith("version=")), None)
-        res.update(sketchbook=a, repo=b, repo_name=repo_name, version=version, repo_state=tree_state(b))
+        res.update(sketchbook=a, repo=b, repo_name=repo_name, version=version, repo_state=tree_state(b),
+                   override=lib in overrides)
         out[lib] = res
     return out
 
@@ -359,7 +395,7 @@ def libs_line(libs):
         if r.get("missing"):
             parts.append(f"{lib}: missing {', '.join(r['missing'])}")
             continue
-        extra = tree_line(r.get("repo_state"))
+        extra = tree_line(r.get("repo_state")) + (f", --library {r['repo']}" if r.get("override") else "")
         if r["same"]:
             eol = f", {len(r['eol_only'])} files in other line endings" if r["eol_only"] else ""
             parts.append(f"{lib} = {name} ({extra}{eol})")
@@ -437,13 +473,16 @@ def _run_cli(argv, low_priority=True, timeout_s=3600):
             time.monotonic() - t0)
 
 
-def compile_argv(out_dir, sketch_dir, hooks=False, jobs=None, cli=None):
-    """The compile command. Never -u/--upload and never -p: this only builds."""
+def compile_argv(out_dir, sketch_dir, hooks=False, jobs=None, cli=None, libraries=()):
+    """The compile command. Never -u/--upload and never -p: this only builds. `libraries`: folders passed as
+    --library, which arduino-cli takes ahead of the sketchbook's copies (library_overrides)."""
     argv = [cli or cli_path(), "compile", "--json", "--fqbn", FQBN, "--build-path", out_dir]
     if jobs:
         argv += ["--jobs", str(jobs)]
     if hooks:
         argv += ["--build-property", HOOKS_PROPERTY]
+    for folder in libraries:
+        argv += ["--library", folder]
     return argv + [sketch_dir]
 
 
@@ -470,7 +509,7 @@ def _error_lines(text, n=12):
 
 
 def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=False, jobs=None, low_priority=True,
-          timeout_s=3600, github=None, sketchbook=None, source=None):
+          timeout_s=3600, github=None, sketchbook=None, source=None, libraries=None):
     """Compile NaviCore's working tree into <builds_root>/navicore-<tag> (the build path is the folder itself, so the
     IDE's sketch cache is never touched) and return its manifest, also written there as BUILD.json beside the
     compiler's output (compile.log). hooks=True adds -DNAVICORE_HIL_HOOKS=1 (INF9). `source`: the NaviCore tree to
@@ -481,7 +520,10 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
     (line endings aside); BuildError names what differs, unless allow_drift=True, which records it instead. The
     manifest records NaviCore's commit, whether its tree is dirty (and a fingerprint of the change), both libraries,
     and the image check. BuildError also when the tree changed during the compile, or when the folder already holds a
-    build (rebuild=True recompiles it in place). One build at a time, at below-normal priority."""
+    build (rebuild=True recompiles it in place). `libraries`: WCB_Client / WcbCmd folders compiled instead of the
+    sketchbook copies (library_overrides, arduino-cli --library): the compile must then report that folder for that
+    library, and BUILD.json records it ('override' and its tree state, 'library_overrides'). One build at a time, at
+    below-normal priority."""
     if not TAG.fullmatch(tag or ""):
         raise ValueError(f"tag {tag!r}: letters, digits, '_', '.', '-', at most 40, not starting with a symbol")
     github = github or github_root()
@@ -500,8 +542,9 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
     out = os.path.join(builds_root, f"navicore-{tag}")
     if os.path.exists(os.path.join(out, MANIFEST)) and not rebuild:
         raise BuildError(f"{out} already holds a build ({MANIFEST}); pick another tag or pass rebuild=True")
+    overrides = library_overrides(libraries)
     cli = cli_path()
-    libs = check_libs(sketchbook, github)
+    libs = check_libs(sketchbook, github, overrides)
     drift = [lib for lib, r in libs.items() if not r["same"]]
     if drift and not allow_drift:
         raise BuildError(f"the sketchbook's copies differ from the repos CI builds against, so this build would not be "
@@ -526,13 +569,18 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
         if os.path.basename(navicore) != "NaviCore":
             stage = tempfile.mkdtemp(prefix="ncflash-src-")
             sketch_dir = stage_sketch(navicore, stage)
-        argv = compile_argv(out, sketch_dir, hooks, jobs, cli)
+        argv = compile_argv(out, sketch_dir, hooks, jobs, cli, libraries=list(overrides.values()))
         started = datetime.now().astimezone()
         try:
             rc, stdout, stderr, secs = _run_cli(argv, low_priority, timeout_s)
         except subprocess.TimeoutExpired:
             raise BuildError(f"the compile of {tag} ran past {timeout_s} s and was stopped") from None
         after = tree_state(navicore)
+        moved = []                                      # a --library folder whose tree changed during the compile
+        for lib, folder in overrides.items():
+            was, now = libs[lib].get("repo_state") or {}, tree_state(folder) or {}
+            if (was.get("head"), was.get("diff")) != (now.get("head"), now.get("diff")):
+                moved.append(f"{lib} ({tree_line(was)} -> {tree_line(now)})")
     finally:
         if stage:
             shutil.rmtree(stage, ignore_errors=True)    # a plain copy (stage_sketch), never a link to the source
@@ -543,15 +591,21 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
         doc = {}
     compiler_out = doc.get("compiler_out", "" if doc else stdout) if isinstance(doc, dict) else stdout
     compiler_err = (doc.get("compiler_err", "") if isinstance(doc, dict) else "") + stderr
+    result = (doc.get("builder_result") or {}) if isinstance(doc, dict) else {}
+    # --json leaves out the text compile's "Using library ..." lines; the same facts come from used_libraries, so the
+    # log still says which copy of each library went in (a sketchbook copy shadows a repo's, BUILD_AND_RELEASE.md §3).
+    used_lines = "".join(f"Using library {u.get('name')} at version {u.get('version')} in folder: "
+                         f"{u.get('install_dir')}\n" for u in result.get("used_libraries") or [])
     atomic_write_text(os.path.join(out, COMPILE_LOG),
-                      f"$ {' '.join(argv)}\n# exit {rc}, {secs:.0f} s\n\n{compiler_out}\n{compiler_err}\n")
+                      f"$ {' '.join(argv)}\n# exit {rc}, {secs:.0f} s\n\n{compiler_out}\n{compiler_err}\n{used_lines}")
     if rc != 0 or (isinstance(doc, dict) and doc.get("success") is False):
         raise BuildError(f"compile of {tag} failed (exit {rc}); see {os.path.join(out, COMPILE_LOG)}:\n    "
                          + "\n    ".join(_error_lines(compiler_err or compiler_out)))
     if (before["head"], before["diff"]) != (after["head"], after["diff"]):
         raise BuildError(f"NaviCore's tree changed during the compile ({tree_line(before)} -> {tree_line(after)}): "
                          f"what went into the image is unknown; build again")
-    result = doc.get("builder_result", {}) if isinstance(doc, dict) else {}
+    if moved:
+        raise BuildError(f"a --library tree changed during the compile: {'; '.join(moved)}; build again")
     props = result.get("build_properties") or []
     warnings = []
     if props and hooks != (HOOKS_PROPERTY in props):
@@ -569,7 +623,8 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
         lib = libs.get(u["name"])
         if lib and u["dir"] and os.path.normcase(os.path.normpath(u["dir"])) != \
                 os.path.normcase(os.path.normpath(lib["sketchbook"])):
-            raise BuildError(f"the compile took {u['name']} from {u['dir']}, not the sketchbook copy that was checked "
+            raise BuildError(f"the compile took {u['name']} from {u['dir']}, not the "
+                             f"{'--library' if lib.get('override') else 'sketchbook'} copy that was checked "
                              f"({lib['sketchbook']})")
     info = check_image(out)
     info.pop("data", None)
@@ -581,9 +636,11 @@ def build(tag, hooks=False, *, builds_root=None, allow_drift=False, rebuild=Fals
         "fqbn": FQBN, "hooks": bool(hooks), "hooks_in_source": hooks_src, "core": f"{CORE_ID}@{CORE_VERSION}",
         "arduino_cli": cli, "jobs": jobs, "navicore": before, "staged": bool(stage),
         "libraries": {lib: {k: r.get(k) for k in ("same", "eol_only", "differ", "only_sketchbook", "only_repo",
-                                                  "missing", "sketchbook", "repo", "version", "repo_state")}
+                                                  "missing", "sketchbook", "repo", "version", "repo_state",
+                                                  "override")}
                       for lib, r in libs.items()},
         "libraries_line": libs_line(libs), "drift_allowed": bool(drift), "used_libraries": used,
+        "library_overrides": overrides,
         "image": {k: info[k] for k in ("size", "elf_sha", "version", "slot", "slot_source", "segments")},
         "warnings": warnings,
     }
@@ -1564,6 +1621,12 @@ def main(argv=None):
     b.add_argument("--rebuild", action="store_true", help="recompile a folder that already holds a build")
     b.add_argument("--source", default=None, help="the NaviCore tree to compile, a checkout or a git worktree of one "
                    "(default: the NaviCore folder beside this repo)")
+    b.add_argument("--library", action="append", default=None, metavar="DIR",
+                   help="compile this WCB_Client or WcbCmd folder instead of the sketchbook's copy (arduino-cli "
+                        "--library; repeatable), e.g. a WCBClient branch checkout; BUILD.json records it")
+    b.add_argument("--builds-root", default=None, metavar="DIR",
+                   help="where navicore-<tag> goes (default: this checkout's results/builds; from a git worktree, "
+                        "name the main checkout's, where the bench images are)")
     sub.add_parser("check", help="check an image without a board").add_argument("image")
     sub.add_parser("libs", help="the sketchbook's WCB_Client and WcbCmd against their repos")
     st = sub.add_parser("status", help="PING and ?OTALOCAL,STATUS (read-only)")
@@ -1581,7 +1644,8 @@ def main(argv=None):
     try:
         if args.cmd == "build":
             print(json.dumps(build(args.tag, args.hooks, allow_drift=args.allow_drift, rebuild=args.rebuild,
-                                   source=args.source), indent=2))
+                                   source=args.source, libraries=args.library, builds_root=args.builds_root),
+                             indent=2))
             return 0
         if args.cmd == "check":
             info = check_image(args.image)

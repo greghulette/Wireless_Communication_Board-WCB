@@ -41,7 +41,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  MGMT,OFF          Disable MGMT debug"));
         Serial.println(F("  RAW,ON            Enable raw serial forwarding debug"));
         Serial.println(F("  RAW,OFF           Disable raw serial debug"));
-        Serial.println(F("\nTest knobs (mesh config pull, see ?MGMT?):"));
+        Serial.println(F("\nTest knobs (mesh config pull and results, see ?MGMT?):"));
         Serial.println(F("  PULLFAULT,OOM     The next config pull this board accepts fails its"));
         Serial.println(F("                      reply buffer allocation and answers CFGERR"));
         Serial.println(F("                      NOMEM (+ an empty reply if it fits one line)."));
@@ -55,6 +55,13 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      after moves them back into the store"));
         Serial.println(F("  PULLPART,<n>      Data bytes per part when this board sends a"));
         Serial.println(F("                      config in parts (512-2880; 0 or OFF = 2880)"));
+        Serial.println(F("  RESULTPART,<n>    A STATS, ETM or SEQGET result this board sends"));
+        Serial.println(F("                      over <n> bytes goes in parts of <n> to a relay"));
+        Serial.println(F("                      that takes parts (512-2880; 0 or OFF = one"));
+        Serial.println(F("                      reply up to 2912, parts of 2880 past it)"));
+        Serial.println(F("  ONEREPLY,ON|OFF   This board, as a relay, asks for ?MGMT,STATS /"));
+        Serial.println(F("                      ETM,CHAR / SEQGET results in one reply only,"));
+        Serial.println(F("                      as a relay before results in parts did"));
         Serial.println(F("\nFault knobs (?DEBUG,FAULT,<NAME>), for the bench tests: each drives"));
         Serial.println(F("one failure branch. RAM only: a knob fires once and lapses unfired"));
         Serial.println(F("after 60 s; FAULT,OFF and a reboot clear it."));
@@ -75,6 +82,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("                      drift check, then comes back"));
         Serial.println(F("  FAULT,LOOPSTALL[,s] loop() stops for s seconds (1-60, default 20)"));
         Serial.println(F("                      now: the loop watch must report it ([HANG])"));
+        Serial.println(F("  FAULT,TXWEDGE[,n] Every ESP-NOW frame is lost as a wedged radio"));
+        Serial.println(F("                      loses it, until the board's own remedy n clears"));
+        Serial.println(F("                      it: 1 an ESP-NOW restart (default), 2 a WiFi"));
+        Serial.println(F("                      driver restart, 3 neither. Holds; never lapses"));
         Serial.println(F("  FAULT,OFF         Disarm every FAULT knob, and PULLFAULT"));
         Serial.println(F(" These three write saved state on purpose; the test puts it back:"));
         Serial.println(F("  FAULT,BAUD0,S<n>  Save a baud of 0 for S<n> in NVS (the next boot"));
@@ -91,8 +102,9 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?DEBUG,PULLPART,600    - Split a large config into more parts"));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Debug settings are NOT saved to NVS and reset on reboot"));
-        Serial.println(F("  - PULLFAULT, PULLPART, SEQNVS and the FAULT knobs are never in"));
-        Serial.println(F("    ?backup; all but FAULT BAUD0/HWOTHER/SEQDAMAGE are RAM-only"));
+        Serial.println(F("  - PULLFAULT, PULLPART, RESULTPART, ONEREPLY, SEQNVS and the FAULT"));
+        Serial.println(F("    knobs are never in ?backup; all but FAULT BAUD0/HWOTHER/SEQDAMAGE"));
+        Serial.println(F("    are RAM-only"));
         Serial.println(F("  - ETM debug is very verbose during characterization runs"));
         Serial.println(F("  - PWM debug will print for every pulse received"));
         Serial.println(F("\nLegacy commands:"));
@@ -795,6 +807,10 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  SEQ,<n>           WCB n's sequence names:  [MGMT:SEQ,n]"));
         Serial.println(F("  SEQGET,<n>,<key>  One sequence from WCB n:  [MGMT:SEQVAL,n]"));
         Serial.println(F("  ETM,CHAR,<n>      ETM characterization on WCB n:  [MGMT:ETM,n]"));
+        Serial.println(F("                      STATS, SEQ, SEQGET and ETM results too long for"));
+        Serial.println(F("                      one reply come in parts and print here whole,"));
+        Serial.println(F("                      as one reply would; one that cannot finish"));
+        Serial.println(F("                      prints an untagged [MGMT] line saying why"));
         Serial.println(F("  FRAG,...          One fragment of a Wizard config push"));
         Serial.println(F("\nPull errors ([MGMT:CFGERR,n]<CODE>,<detail>):"));
         Serial.println(F("  NOMEM             The target was out of memory - try again"));
@@ -802,7 +818,7 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  NOPARTS           Over 2912 characters and no request for parts"));
         Serial.println(F("                      arrived (every ,P copy lost, or an older"));
         Serial.println(F("                      Wizard/relay): ask again with ,P"));
-        Serial.println(F("  TOOBIG            Too large even in parts: ?backup over USB"));
+        Serial.println(F("  TOOBIG            Over 64 parts, which no board's config reaches"));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?MGMT,PULL,3         - Config of WCB3"));
         Serial.println(F("  ?MGMT,PULL,3,P       - Config of WCB3, in parts if it is large"));
@@ -810,7 +826,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - A config pull carries the mesh password and any WiFi passphrase"));
         Serial.println(F("  - Older relays treat PULL,<n>,P as PULL,<n>"));
-        Serial.println(F("  - Test knobs, on the TARGET: ?DEBUG,PULLPART and ?DEBUG,PULLFAULT"));
+        Serial.println(F("  - Test knobs, on the TARGET: ?DEBUG,PULLPART, ?DEBUG,PULLFAULT and"));
+        Serial.println(F("    ?DEBUG,RESULTPART; on the RELAY: ?DEBUG,ONEREPLY"));
 
     // ================================================================
     } else if (c == "OTA" || c == "OTALOCAL") {
@@ -1003,6 +1020,19 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  ?WIFI,OFF                ESP-NOW only (the default)"));
         Serial.println(F("  ?WIFI,AP,<ssid>,<pass>   Host an access point"));
         Serial.println(F("  ?WIFI,JOIN,<ssid>,<pass> Join an existing one (e.g. a NaviCore's)"));
+        Serial.println(F("                           (needs a token: see below)"));
+        Serial.println(F("  ?WIFI,TOKEN,<token>      Set the WebSocket token (8-32 characters,"));
+        Serial.println(F("                           none of: space , ^ ; ? \" \\)"));
+        Serial.println(F("  ?WIFI,TOKEN,CLEAR        No token"));
+        Serial.println(F("\nTHE WEBSOCKET TOKEN:"));
+        Serial.println(F("  With a token set, a WebSocket session is sent nothing and runs"));
+        Serial.println(F("  nothing until it signs in with ?AUTH,<token> (see ?AUTH?)."));
+        Serial.println(F("  JOIN REQUIRES ONE: joining a network opens this board's command"));
+        Serial.println(F("  channel to every device on it, so a JOIN board with no token keeps"));
+        Serial.println(F("  WiFi off at boot. (7.0.1 joined without one.) An AP works without"));
+        Serial.println(F("  one - its WPA2 password is the lock - and enforces one if set."));
+        Serial.println(F("  A token applies at once, to sessions opened after it; ?WIFI shows"));
+        Serial.println(F("  only 'set' or 'none'. ?backup and a config pull carry it, like ?EPASS."));
         Serial.println(F("\nTHE CHANNEL IS NOT SEPARATELY CONFIGURABLE:"));
         Serial.println(F("  The ESP32 has ONE radio, so WiFi and ESP-NOW share a channel."));
         Serial.println(F("  It always follows ?WCBCH. A WiFi channel that disagreed with the"));
@@ -1010,18 +1040,92 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("  logged on the other boards — so it is not offered as a choice."));
         Serial.println(F("  In JOIN mode the channel is VERIFIED after associating; if the"));
         Serial.println(F("  AP put us elsewhere the board disconnects rather than go deaf."));
+        Serial.println(F("  With channel sync on (?CHSYNC?) a JOIN board that finds its"));
+        Serial.println(F("  network on another channel moves the whole mesh there first."));
         Serial.println(F("\nNotes:"));
         Serial.println(F("  - Settings apply on the NEXT REBOOT, like ?WCBCH."));
-        Serial.println(F("  - The AP password is MANDATORY (8+ chars). This interface accepts"));
-        Serial.println(F("    commands for the whole mesh with no credential of its own, so an"));
-        Serial.println(F("    open AP would hand the droid to anyone in range."));
+        Serial.println(F("  - The AP password is MANDATORY (8+ chars). With no token this"));
+        Serial.println(F("    interface accepts commands for the whole mesh with no credential"));
+        Serial.println(F("    of its own, so an open AP would hand the droid to anyone in range."));
         Serial.println(F("  - Default AP SSID is WCB-<alias> (or WCB-<number> with no alias)."));
         Serial.println(F("  - JOIN retries forever and never falls back to hosting — a board"));
         Serial.println(F("    that quietly became an AP is a surprise nobody wants."));
         Serial.println(F("\nExamples:"));
         Serial.println(F("  ?WIFI,AP,R2-Dome,astromech1"));
+        Serial.println(F("  ?WIFI,TOKEN,dome-lock-77"));
         Serial.println(F("  ?WIFI,JOIN,NaviCore-20,mypassword"));
         Serial.println(F("  ?WIFI,OFF"));
+
+    // ================================================================
+    } else if (c == "CHSYNC") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?CHSYNC[,ON|,OFF|,SEARCH|,MOVE,<channel>]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Channel sync keeps the whole mesh on one radio channel. The board"));
+        Serial.println(F("  that leads (NaviCore, else the lowest WCB number; a board joined"));
+        Serial.println(F("  to an access point before either) moves everyone with it, and a"));
+        Serial.println(F("  leader that misses a board it knows visits the other channels to"));
+        Serial.println(F("  find it and bring it back. ON by default. Requires ETM and WDP."));
+        Serial.println(F("\nCommands:"));
+        Serial.println(F("  ?CHSYNC              Status, and a [CHSYNC:...] machine line"));
+        Serial.println(F("  ?CHSYNC,ON | ,OFF    Take part or not (saved, live)"));
+        Serial.println(F("  ?CHSYNC,SEARCH       Search the other channels once (group leader)"));
+        Serial.println(F("  ?CHSYNC,MOVE,<ch>    Move the whole mesh to channel <ch>"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - A board with an access point up, or joined to one, moves by"));
+        Serial.println(F("    restarting; any other switches live and saves the channel."));
+        Serial.println(F("  - MOVE is refused while a board joined to an access point is"));
+        Serial.println(F("    heard: move the access point instead, and the mesh follows."));
+        Serial.println(F("  - A search takes this board off the mesh for about 1.5 s."));
+        Serial.println(F("  - With it OFF the board never moves, searches or answers one."));
+        Serial.println(F("  - Older firmware does not take part and is left behind."));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?CHSYNC,MOVE,6"));
+        Serial.println(F("  ?CHSYNC,OFF"));
+
+    // ================================================================
+    } else if (c == "REGION") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?REGION[,<cc>]"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  The WiFi region, which decides the channels the radio may use."));
+        Serial.println(F("  01 (the default, world safe) allows 1-11. Channels 12-13 need a"));
+        Serial.println(F("  region that allows them, set on EVERY board and client."));
+        Serial.println(F("\nCommands:"));
+        Serial.println(F("  ?REGION              Show the region and its channels"));
+        Serial.println(F("  ?REGION,<cc>         Save one; it applies at the next boot"));
+        Serial.println(F("\nRegions: 01 AT AU BE BG BR CA CH CN CY CZ DE DK EE ES FI FR GB GR"));
+        Serial.println(F("         HK HR HU IE IN IS IT JP KR LI LT LU LV MT MX NL NO NZ PL"));
+        Serial.println(F("         PT RO SE SI SK TW US"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - Legality is the operator's call: 12-13 are legal in Europe and"));
+        Serial.println(F("    most of the world; WiFi devices in the US are limited to 1-11."));
+        Serial.println(F("  - ?WCBCH and every channel move are checked against it. A saved"));
+        Serial.println(F("    channel the region does not allow runs on 1 for that boot."));
+        Serial.println(F("  - Channel 14 is never used."));
+        Serial.println(F("\nExamples:"));
+        Serial.println(F("  ?REGION,DE"));
+        Serial.println(F("  ?REGION,01"));
+
+    // ================================================================
+    } else if (c == "AUTH") {
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("---------------------------------------------------"));
+        Serial.println(F("\nUsage: ?AUTH,<token>"));
+        Serial.println(F("\nDescription:"));
+        Serial.println(F("  Signs a WebSocket session in on a board with a token set"));
+        Serial.println(F("  (?WIFI,TOKEN). The WebSocket endpoint answers it itself; it never"));
+        Serial.println(F("  runs as a command:"));
+        Serial.println(F("    [AUTH:REQUIRED]  sent when a session opens, and for every line"));
+        Serial.println(F("                     it sends before signing in (the line is dropped)"));
+        Serial.println(F("    [AUTH:OK]        signed in for the life of the session"));
+        Serial.println(F("    [AUTH:FAIL]      wrong token: the session is closed"));
+        Serial.println(F("\nNotes:"));
+        Serial.println(F("  - After a failure every ?AUTH fails for 1 s, on any session."));
+        Serial.println(F("  - With no token set, ?AUTH,<anything> answers [AUTH:OK]."));
+        Serial.println(F("  - Sent over USB or the mesh it does nothing."));
 
     // ================================================================
     } else if (c == "WDP") {
@@ -1263,6 +1367,8 @@ void printCommandHelp(const String &cmd) {
         Serial.println(F("    ?STATS          ESP-NOW transmission statistics"));
         Serial.println(F("    ?NVS            Settings storage use, by namespace (read-only)"));
         Serial.println(F("    ?WDP            Mesh discovery + neighbor table (auto-join peers)"));
+        Serial.println(F("    ?CHSYNC         Channel sync: the whole mesh on one radio channel"));
+        Serial.println(F("    ?REGION         WiFi region: which channels the radio may use"));
         Serial.println(F("    ?MGMT           Relay a config pull/push to another board (Wizard)"));
         Serial.println(F("\n  FIRMWARE UPDATE:"));
         Serial.println(F("    ?OTA            Relay a firmware image to another WCB over the mesh"));

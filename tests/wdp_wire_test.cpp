@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include "../Code/WCB/WCB_ChanSyncWire.h"   // TLV 0x14 CHAN: the same pure header the firmware uses
 
 // ---- constants mirrored from WCB_WDP.cpp -----------------------------------
 static const uint8_t WDP_MAGIC          = 'W';
@@ -38,7 +39,7 @@ static const uint8_t T_END      = 0x00, T_ALIAS = 0x01, T_FWVER = 0x03, T_HWVER 
 static const uint8_t T_CAPFLAGS = 0x05, T_MAESTRO = 0x06, T_PORTLABEL = 0x09, T_CTRLID = 0x0A;
 static const uint8_t T_DEVTYPE  = 0x0B, T_HWREV = 0x0C, T_CAPTAGS = 0x0D;
 static const uint8_t T_MAESTRO_CFG = 0x0E, T_WLED_CFG = 0x0F, T_PWMTARGET = 0x10, T_SOLICIT = 0x11;
-static const uint8_t T_FLAGS = 0x12, T_SEQHASH = 0x13;
+static const uint8_t T_FLAGS = 0x12, T_SEQHASH = 0x13, T_CHAN = chansync::TLV_CHAN;   // 0x14
 
 static const uint16_t CAP_HCR = 0x0001, CAP_MP3 = 0x0002, CAP_WLED = 0x0004;
 
@@ -69,6 +70,7 @@ struct Neighbor {
   std::string portLabels[5];
   uint8_t pwmSelfPorts[5]={0}; int pwmSelfCount=0;
   uint32_t seqHash=0;   // T_SEQHASH; 0 = not advertised (an EMPTY set is 0x811C9DC5)
+  bool hasChan=false; chansync::ChanFacts chan{};   // T_CHAN; absent = firmware without channel sync
 };
 
 // Result of feeding a packet to the decoder.
@@ -125,6 +127,7 @@ static DecodeKind decode(int senderWCB, uint8_t srcMacLastOctet,
             if(!dup && nb.pwmSelfCount<5) nb.pwmSelfPorts[nb.pwmSelfCount++]=prt; } break; }
       case T_SEQHASH: if(len>=4) nb.seqHash=(uint32_t)val[0]|((uint32_t)val[1]<<8)|
                                             ((uint32_t)val[2]<<16)|((uint32_t)val[3]<<24); break;
+      case T_CHAN:    nb.hasChan=chansync::parseChanTlv(val,(uint8_t)len,nb.chan); break;   // WCB_WDP.cpp WDP_TLV_CHAN
       default: break;                    // unknown TLV — skipped via length (forward compatible)
     }
     o += 2 + len;
@@ -588,11 +591,149 @@ static void test_da_nvs_blob(){
   CHECK(daLoad(cut).size()==2, "a truncated blob keeps the records before the damage");
 }
 
+// T_CHAN (0x14) - channel sync's facts (docs/CHANNEL_SYNC.md §2). Encoded by chansync::putChanTlv, which the firmware
+// calls (chanSyncPutTlv), and decoded by chansync::parseChanTlv, both from the pure header. A peer without channel sync
+// skips it by its length like any unknown TLV (test_unknown_and_truncated), so the TLVs after it must still parse.
+static void test_chan(){
+  printf("chan TLV (0x14) round-trip, short and longer values...\n");
+  uint8_t buf[200]; memset(buf,0,sizeof(buf));
+  int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+  chansync::ChanFacts f; f.channel=6; f.rank=3; f.flags=chansync::F_SYNC|chansync::F_PINNED;
+  f.cc[0]='D'; f.cc[1]='E'; f.cc[2]=0;
+  o=chansync::putChanTlv(buf,o,200,f);
+  o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"AfterChan",9);
+  buf[o++]=T_END;
+  CHECK(buf[2]==T_CHAN && buf[3]==chansync::TLV_CHAN_LEN, "chan TLV header");
+  Neighbor nb;
+  CHECK(decode(3,3,buf,o,1,nb)==DK_ADVERT && nb.hasChan, "advert with chan decodes");
+  CHECK(nb.chan.channel==6 && nb.chan.rank==3 && nb.chan.flags==(chansync::F_SYNC|chansync::F_PINNED) &&
+        strcmp(nb.chan.cc,"DE")==0, "chan fields round-trip");
+  CHECK(nb.alias=="AfterChan", "TLVs after chan still parse");
+
+  // A short value is ignored, not half-applied; the next TLV still parses.
+  uint8_t sh[200]; memset(sh,0,sizeof(sh));
+  int s=0; sh[s++]=WDP_MAGIC; sh[s++]=WDP_PROTO_VERSION;
+  { uint8_t v[4]={6,3,3,'D'}; s=putTLV(sh,s,200,T_CHAN,v,4); }
+  s=putTLV(sh,s,200,T_ALIAS,(const uint8_t*)"Short",5);
+  sh[s++]=T_END;
+  Neighbor nb2;
+  CHECK(decode(3,3,sh,s,1,nb2)==DK_ADVERT && !nb2.hasChan && nb2.alias=="Short", "short chan value ignored");
+
+  // A longer value (fields appended by a later version) is accepted for the fields it knows.
+  uint8_t lg[200]; memset(lg,0,sizeof(lg));
+  int l=0; lg[l++]=WDP_MAGIC; lg[l++]=WDP_PROTO_VERSION;
+  { uint8_t v[7]={11,0,chansync::F_SYNC,'U','S',0xAA,0xBB}; l=putTLV(lg,l,200,T_CHAN,v,7); }
+  lg[l++]=T_END;
+  Neighbor nb3;
+  CHECK(decode(20,20,lg,l,1,nb3)==DK_ADVERT && nb3.hasChan && nb3.chan.channel==11 && nb3.chan.rank==0 &&
+        strcmp(nb3.chan.cc,"US")==0, "longer chan value accepted");
+
+  // No chan TLV: hasChan stays false - channel sync derives the key (a WCB's rank is its number, SYNC off).
+  uint8_t old[200]; memset(old,0,sizeof(old));
+  int p=0; old[p++]=WDP_MAGIC; old[p++]=WDP_PROTO_VERSION;
+  p=putTLV(old,p,200,T_ALIAS,(const uint8_t*)"OldFw",5);
+  old[p++]=T_END;
+  Neighbor nb4;
+  CHECK(decode(4,4,old,p,1,nb4)==DK_ADVERT && !nb4.hasChan, "absent chan reads as not advertised");
+}
+
+// A WCB's OWN capability tags (TLV 0x0D CAPTAGS), since 2026-10-23: wcbOwnCapTags (WCB.ino), from its push-session
+// limits MGMT_FWD_MAX_CHUNKS / MGMT_RX_MAX_CHUNKS - the classic ESP32 forwards 24 and takes 16 (mgmt.fwd24), the S3
+// takes 24 and so forwards 24 too (mgmt.rx24 alone: rx implies fwd). The Wizard reads them from ?WDP,DUMP
+// (WCBParser.relayLongChunks) to send one long ?SEQ,SAVE as one 23-chunk session.
+static const char OWN_TAGS_ESP32[] = "mgmt.fwd24";
+static const char OWN_TAGS_S3[]    = "mgmt.rx24";
+
+// wdpBuildPayload's order (WCB_WDP.cpp) with every field at its largest: alias 24, firmware 27, hw, capability flags,
+// controller, 9 Maestros (ids, then id+baud), 9 WLEDs, 10 PWM targets, the sequence hash, CHAN, CAPTAGS, then the five
+// port labels (24 characters each) for whatever is left of the 200 bytes. Returns the length; *beforeLabels gets the
+// length before the first label, *labels how many labels fitted.
+static int buildWorstAdvert(uint8_t*buf, const char*tags, int*beforeLabels, int*labels){
+  memset(buf,0,200);
+  int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+  o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"AAAAAAAAAAAAAAAAAAAAAAAA",24);
+  o=putTLV(buf,o,200,T_FWVER,(const uint8_t*)"7.0.2_311259RDEC2026_xxxxxx",27);
+  { uint8_t hw=32; o=putTLV(buf,o,200,T_HWVER,&hw,1); }
+  { uint8_t cf[2]={0xFF,0x01}; o=putTLV(buf,o,200,T_CAPFLAGS,cf,2); }
+  { uint8_t id=20; o=putTLV(buf,o,200,T_CTRLID,&id,1); }
+  { uint8_t ids[9]={1,2,3,4,5,6,7,8,9}; o=putTLV(buf,o,200,T_MAESTRO,ids,9);
+    uint8_t rec[18]; for(int i=0;i<9;i++){rec[i*2]=ids[i]; rec[i*2+1]=baudToCode(57600);} o=putTLV(buf,o,200,T_MAESTRO_CFG,rec,18); }
+  { uint8_t rec[18]; for(int i=0;i<9;i++){rec[i*2]=(uint8_t)(i+1); rec[i*2+1]=baudToCode(115200);} o=putTLV(buf,o,200,T_WLED_CFG,rec,18); }
+  { uint8_t rec[20]; for(int i=0;i<10;i++){rec[i*2]=(uint8_t)(i+2); rec[i*2+1]=(uint8_t)(1+i%5);} o=putTLV(buf,o,200,T_PWMTARGET,rec,20); }
+  { uint8_t v[4]={0xC5,0x9D,0x1C,0x81}; o=putTLV(buf,o,200,T_SEQHASH,v,4); }
+  { chansync::ChanFacts f; f.channel=6; f.rank=3; f.flags=chansync::F_SYNC; f.cc[0]='U'; f.cc[1]='S'; f.cc[2]=0;
+    o=chansync::putChanTlv(buf,o,200,f); }
+  { int L=(int)strlen(tags); if(L>0) o=putTLV(buf,o,200,T_CAPTAGS,(const uint8_t*)tags,L); }
+  *beforeLabels=o; *labels=0;
+  for(int p=1;p<=5;p++){
+    uint8_t v[25]; v[0]=(uint8_t)p; memset(v+1,'L',24);
+    int before=o; o=putTLV(buf,o,200,T_PORTLABEL,v,25); if(o!=before) (*labels)++;
+  }
+  if(o<200) buf[o++]=T_END;
+  return o;
+}
+
+static void test_own_captags(){
+  printf("a WCB's own CAPTAGS: fits the advert, decodes, never makes it a client, skipped by an old decoder...\n");
+  CHECK(strlen(OWN_TAGS_S3)<=48 && strlen(OWN_TAGS_ESP32)<=48, "tags within the 48 bytes every receiver keeps");
+  CHECK(!strpbrk(OWN_TAGS_S3,",]") && !strpbrk(OWN_TAGS_ESP32,",]"), "no ',' or ']' (the dump's separators)");
+  const char* builds[2]={OWN_TAGS_ESP32, OWN_TAGS_S3};
+  for(int b=0;b<2;b++){
+    uint8_t buf[200]; int before=0, labels=0;
+    int len=buildWorstAdvert(buf,builds[b],&before,&labels);
+    printf("  %s: %d bytes before the labels (%d with no tags), %d of 5 24-char labels fit, %d bytes in all\n",
+           builds[b], before, before-2-(int)strlen(builds[b]), labels, len);
+    CHECK(len<=200, "the advert fits its 200-byte field");
+    CHECK(before<=200-1, "every TLV before the labels fits, with room for END");
+    Neighbor nb;
+    CHECK(decode(3,3,buf,len,1,nb)==DK_ADVERT, "worst-case advert decodes");
+    CHECK(nb.capTags==builds[b], "CAPTAGS round-trip");
+    CHECK(!nb.isClient, "CAPTAGS without DEVTYPE leaves the sender a WCB");
+    CHECK(nb.alias.size()==24 && nb.fwVer.size()==27 && nb.hwVer==32 && nb.maestroCount==9 && nb.wledCount==9 &&
+          nb.seqHash==0x811C9DC5u && nb.hasChan, "every identity field and record intact beside the tags");
+    // A decoder from before 0x0D (it skips an unknown TLV by its length) reads everything else the same.
+    uint8_t old[200]; memcpy(old,buf,200);
+    for(int o=2;o+2<=200 && old[o]!=T_END;o+=2+old[o+1]) if(old[o]==T_CAPTAGS) old[o]=0x3F;   // as if unknown
+    Neighbor nb2;
+    CHECK(decode(3,3,old,len,1,nb2)==DK_ADVERT && nb2.capTags.empty() && nb2.alias==nb.alias && nb2.hasChan &&
+          nb2.maestroCount==9, "an older receiver skips the tags and keeps the rest");
+  }
+  // The usual board - alias, firmware, hw, caps, one Maestro, the hash, CHAN - with five labels of `len` characters:
+  // how many labels fit beside the tags. The tags cost the labels their last bytes, never an identity field: an S3
+  // board or a classic one keeps five labels of up to 23 characters (24 before).
+  auto usualLabels=[](const char*tags,int len,int*bytes){
+    uint8_t buf[200]; memset(buf,0,sizeof(buf));
+    int o=0; buf[o++]=WDP_MAGIC; buf[o++]=WDP_PROTO_VERSION;
+    o=putTLV(buf,o,200,T_ALIAS,(const uint8_t*)"Dome",4);
+    o=putTLV(buf,o,200,T_FWVER,(const uint8_t*)"7.0.2_311259RDEC2026",20);
+    { uint8_t hw=32; o=putTLV(buf,o,200,T_HWVER,&hw,1); }
+    { uint8_t cf[2]={0x80,0x00}; o=putTLV(buf,o,200,T_CAPFLAGS,cf,2); }
+    { uint8_t id=2; o=putTLV(buf,o,200,T_MAESTRO,&id,1); uint8_t rec[2]={2,baudToCode(57600)}; o=putTLV(buf,o,200,T_MAESTRO_CFG,rec,2); }
+    { uint8_t v[4]={1,2,3,4}; o=putTLV(buf,o,200,T_SEQHASH,v,4); }
+    { chansync::ChanFacts f; f.channel=1; f.rank=2; f.flags=chansync::F_SYNC; f.cc[0]='0'; f.cc[1]='1'; f.cc[2]=0;
+      o=chansync::putChanTlv(buf,o,200,f); }
+    if(tags[0]) o=putTLV(buf,o,200,T_CAPTAGS,(const uint8_t*)tags,(int)strlen(tags));
+    *bytes=o;
+    int fitted=0;
+    for(int p=1;p<=5;p++){ uint8_t v[25]; v[0]=(uint8_t)p; memset(v+1,'L',len); int b4=o; o=putTLV(buf,o,200,T_PORTLABEL,v,1+len); if(o!=b4) fitted++; }
+    return fitted;
+  };
+  int bNone=0, bW=0, bS3=0;
+  int none24=usualLabels("",24,&bNone), w23=usualLabels(OWN_TAGS_ESP32,23,&bW), w24=usualLabels(OWN_TAGS_ESP32,24,&bW);
+  int s23=usualLabels(OWN_TAGS_S3,23,&bS3), s24=usualLabels(OWN_TAGS_S3,24,&bS3);
+  printf("  a usual board, before its labels: %d bytes with no tags, %d classic, %d S3; five 24-char labels fit %d / %d / %d\n",
+         bNone, bW, bS3, none24, w24, s24);
+  CHECK(none24==5 && w23==5 && s23==5, "five labels still fit: 24 characters without tags, 23 with either build's");
+  CHECK(w24==4 && s24==4, "five labels of 24 characters lose the last one to the tags (the identity never)");
+}
+
 int main(){
   printf("== WDP wire-format & election spec test ==\n");
+  test_own_captags();
   test_roundtrip();
   test_unknown_and_truncated();
   test_seqhash();
+  test_chan();
   test_maestro_cfg_supersedes();
   test_pwmtarget_self_only();
   test_solicit();

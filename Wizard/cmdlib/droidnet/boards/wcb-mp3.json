@@ -1,0 +1,53 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {},
+  "components": [
+    {
+      "id": "wcb-mp3",
+      "name": "WCB · MP3 Trigger",
+      "kind": "wcb-verb",
+      "confidence": "high",
+      "firmware": "WCB 6.1.5_290119RJUN2026",
+      "routing": { "class": "wcb-verb" },
+      "commands": [
+        { "id": "mp3.play", "name": "Play Track", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,PLAY,{track}",
+          "params": [ { "name": "track", "type": "int", "min": 1, "max": 255, "required": true } ],
+          "examples": [";A,PLAY,1"], "commentLabel": "MP3 play", "category": "Sound" },
+        { "id": "mp3.playCb", "name": "Play Track + Callback", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,PLAY,{track},ONFIN,{key}",
+          "params": [ { "name": "track", "type": "int", "min": 1, "max": 255, "required": true },
+                      { "name": "key", "pattern": "[A-Za-z0-9_]+", "required": true } ],
+          "examples": [";A,PLAY,1,ONFIN,wave"], "commentLabel": "MP3 play+cb", "category": "Sound" },
+        { "id": "mp3.playFs", "name": "Play Track (filesystem order)", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,PLAYFS,{track}",
+          "params": [ { "name": "track", "type": "int", "min": 0, "max": 255, "required": true } ],
+          "examples": [";A,PLAYFS,0"], "commentLabel": "MP3 play FS", "category": "Sound" },
+        { "id": "mp3.playFsCb", "name": "Play Track (FS) + Callback", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,PLAYFS,{track},ONFIN,{key}",
+          "params": [ { "name": "track", "type": "int", "min": 0, "max": 255, "required": true },
+                      { "name": "key", "pattern": "[A-Za-z0-9_]+", "required": true } ],
+          "examples": [";A,PLAYFS,0,ONFIN,done"], "commentLabel": "MP3 play FS+cb", "category": "Sound" },
+        { "id": "mp3.stop", "name": "Start/Stop Toggle", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,STOP", "params": [], "examples": [";A,STOP"], "commentLabel": "MP3 stop", "category": "Sound" },
+        { "id": "mp3.next", "name": "Next Track", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,NEXT", "params": [], "examples": [";A,NEXT"], "commentLabel": "MP3 next", "category": "Sound" },
+        { "id": "mp3.prev", "name": "Previous Track", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,PREV", "params": [], "examples": [";A,PREV"], "commentLabel": "MP3 prev", "category": "Sound" },
+        { "id": "mp3.vol", "name": "Set Volume", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,VOL,{level}",
+          "params": [ { "name": "level", "type": "int", "min": 0, "max": 64, "required": true } ],
+          "examples": [";A,VOL,32"], "commentLabel": "MP3 volume", "category": "Volume" },
+        { "id": "mp3.volUp", "name": "Volume Up", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,VOLUP", "params": [], "examples": [";A,VOLUP"], "commentLabel": "MP3 vol up", "category": "Volume" },
+        { "id": "mp3.volDown", "name": "Volume Down", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,VOLDN", "params": [], "examples": [";A,VOLDN"], "commentLabel": "MP3 vol down", "category": "Volume" },
+        { "id": "mp3.count", "name": "Request Track Count", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,COUNT", "params": [], "examples": [";A,COUNT"], "commentLabel": "MP3 count", "category": "System" },
+        { "id": "mp3.ver", "name": "Request Firmware Version", "safety": "cosmetic", "encoder": "template",
+          "template": ";A,VER", "params": [], "examples": [";A,VER"], "commentLabel": "MP3 version", "category": "System" }
+      ],
+      "categories": ["Sound", "Volume", "System"]
+    }
+  ]
+}

@@ -56,7 +56,7 @@ packet type) — the ESP‑NOW receive callback runs on the WiFi task and must n
 
 | Trigger | Count | Notes |
 |---|---|---|
-| Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce |
+| Boot burst | 3× starting ~1.6 s after boot | fast initial population, follows the ETM boot announce. With channel sync on, the first is followed by one SOLICIT, so the neighbors' CHAN facts (`0x14`) arrive within seconds rather than at their next backstop ([`CHANNEL_SYNC.md`](CHANNEL_SYNC.md) §4); the two boot adverts after it repair the record of a `WCB_Client` older than 1.15.1, which takes a SOLICIT for an empty advert |
 | Periodic backstop | every 60 s | staggered per board (`WCB_Number`‑based phase) so co‑booted boards don't collide |
 | Solicited | 1× on hearing a SOLICIT (or local `?WDP,POLL`) | jittered 0–600 ms by board number so a fleet doesn't reply in lockstep; lets an operator refresh the whole mesh on demand |
 | Advert change | 1× + 1 re‑send 800 ms later | the payload is hashed every 500 ms; any change (a label, a capability, a device) goes out now |
@@ -111,13 +111,14 @@ SOLICIT **before** decoding, and return without touching the table
 | `0x0A` | CTRLID | controller (special‑peer) id this board links to | WCB, only when linked |
 | `0x0B` | DEVTYPE | device type name — marks the sender as a **client device**; doubles as its display name | client |
 | `0x0C` | HWREV | hardware revision string, ≤15 | client |
-| `0x0D` | CAPTAGS | space‑separated capability tags, ≤48 | client |
+| `0x0D` | CAPTAGS | space‑separated capability tags, ≤48. A WCB sends its own (below) | client + WCB |
 | `0x0E` | MAESTRO_CFG | `[id][baudCode]` pairs — Maestro id+baud, for remote-proxy auto-config | WCB |
 | `0x0F` | WLED_CFG | `[id][baudCode]` pairs — WLED id+baud, for remote-proxy auto-config | WCB |
 | `0x10` | PWMTARGET | `[targetWCB][port]` pairs — this board's REMOTE PWM outputs; each named board self-configures that output port | WCB |
 | `0x11` | SOLICIT | len 0 — a bare "advertise now" request (`?WDP,POLL`); carries no facts, receivers reply with a jittered advert and never record it | WCB |
 | `0x12` | FLAGS | `[flags:1]` advert-flags bitmap. Bit `0x01` **TEMPORARY** = "adopt me as a **temporary** peer" — live so the mesh can reach it, but never persisted, evicted on silence, gone on reboot. For occasional devices (e.g. a management relay) | client (or WCB) |
 | `0x13` | SEQHASH | `[hash:4 LE]` FNV‑1a over the board's stored‑sequence `key_list` **and every stored value** — a fingerprint of what sequences the board has, contents included, so an in‑place edit moves it too. A consumer caches what it pulled and re‑pulls only when this changes. Absent (`0`) means the firmware predates the TLV; an **empty** inventory is `0x811C9DC5`, not `0`. See [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md) | WCB |
+| `0x14` | CHAN | `[channel][rank][flags][cc0][cc1]` — channel sync's facts: the channel the device is on, its leader rank, flags `0x01` PINNED (associated with an access point) / `0x02` SYNC (takes part), and the region it applied. In every advert, before PORTLABEL; a longer value is accepted (appended fields), a shorter one ignored. Absent = firmware without channel sync, whose key is derived. Encoded and decoded by `WCB_ChanSyncWire.h` (`putChanTlv` / `parseChanTlv`). See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md) §2 | WCB + client |
 | `0x40–0xFE` | *reserved* | vendor / future | — |
 
 *(Draft types `0x02 ROLE`, `0x07 CONTROLLER`, `0x08 HEALTH` were never shipped — see §10.)*
@@ -125,6 +126,36 @@ SOLICIT **before** decoding, and return without touching the table
 **CAPFLAGS bits:** `0x0001` HCR · `0x0002` MP3 · `0x0004` WLED · `0x0008` Kyber‑local ·
 `0x0010` Maestro‑remote · `0x0020` PWM · `0x0040` Controller‑link · `0x0080` Maestro‑host ·
 `0x0100` DFPlayer.
+
+**A WCB's own CAPTAGS** say what its firmware takes, where a build date would only guess. Today they describe the
+`?MGMT,FRAG` push sessions ([`MGMT_RELAY.md`](MGMT_RELAY.md) §10), built from the firmware's limits
+(`wcbOwnCapTags`, `WCB.ino`, next to `MGMT_FWD_MAX_CHUNKS` / `MGMT_RX_MAX_CHUNKS`):
+
+| Tag | Means | Sent by |
+|---|---|---|
+| `mgmt.fwd<N>` | as a relay it forwards a push session of up to N chunks | none now; the classic ESP32 build of 2026-10-23 sent `mgmt.fwd24` (it forwarded 24 and took 16) |
+| `mgmt.rx<N>` | as a target it reassembles a push session of up to N chunks - and, since a board forwards at least what it takes (`MGMT_RX_MAX_CHUNKS <= MGMT_FWD_MAX_CHUNKS`), forwards N as a relay too | both builds since 2026-10-24: `mgmt.rx24` |
+
+A tag is sent only past the 16 chunks every released relay and target take, and `mgmt.fwd` only where it says more than
+`mgmt.rx`, so both chips advertise `mgmt.rx24` alone (an 11‑byte TLV); firmware from before 2026-10-23 sends no
+CAPTAGS.
+The same string is in the board's own `?WDP,DUMP` row (`PEER=3`), and `?WDP,<n>` shows a WCB neighbour's as
+`Tags`. The Wizard reads them from the dump rows - the target's from the relay's dump (or any board's), the relay's
+from its own row - and sends one command longer than a session as one long session only when the target's `mgmt.rx`
+and the relay's `mgmt.fwd` or `mgmt.rx` both cover it (`WCBParser.relayLongChunks`); tags it has not seen count as
+none.
+
+The TLV goes after CHAN and before the port labels, so it always fits: with every field at its largest (24‑character
+alias, 27‑character firmware string, 9 Maestros, 9 WLEDs, 10 PWM targets) the payload before the labels is 153 bytes
+without tags, 165 with the classic tag and 164 with the S3's, of 200. The labels get what is left: a usual board (an
+alias, one Maestro) keeps five labels of up to 23 characters, 24 before; a longer label set loses its last label, never
+an identity field (`tests/wdp_wire_test.cpp` `test_own_captags`).
+
+Every receiver already takes it: a WCB (`wdpOnAdvertReceived`) and `WCB_Client` (`_handleWdpAdvert`, 1.8.0 on) copy
+CAPTAGS into the neighbour's `capTags` whatever the sender is - only DEVTYPE makes it a client - and a WcbMgmt dump
+(NaviCore, MgmtRelay) prints it in the WCB's row; older code skips it by its length. Nothing reads a WCB's tags but the
+Wizard: its mesh view shows tags for clients only, and its `rc` match (the RC launcher) is anchored, so `mgmt.*` never
+matches it. Intellex reads the dump by key. Tags are lowercase `domain.function`; the `mgmt.` domain is the WCB's.
 
 Wire strings are scrubbed on receive (`,`/`]`/control chars → `_`) so they can't corrupt the
 machine‑readable dump lines (§7).
@@ -279,12 +310,15 @@ address, so "add a peer" is a pure local `esp_now_add_peer` — no handshake nee
 [WDPX:N=..,MB=<id@baud.…>,WL=<id@baud.…>]  ← per board hosting Maestro/WLED: the per-device baud the
                                              main line omits, plus the full WLED list (`-` = none)
 [WDPSEQ:N=..,HASH=<8 hex>]                 ← stored-sequence fingerprint (see SEQUENCE_INVENTORY.md)
+[WDPCH:N=..,CH=..,RANK=..,PIN=<0|1>,SYNC=<0|1>,CC=..]
+                                           ← channel sync (TLV 0x14), self and every device that sent it
+                                             (see CHANNEL_SYNC.md §2)
 [WDPPWM:N=<src>,DST=<dst>,S=<port>]         ← a remote-PWM drive edge: board <src> drives WCB <dst>'s S<port>
 [WDPCFG:EN=..,AUTOJOIN=..,PEERS=..]
 [WDP:END,count=..]
 ```
 
-The self row is emitted first, flagged `PEER=3`. `WDPDA`/`WDPX`/`WDPSEQ`/`WDPPWM` are separate
+The self row is emitted first, flagged `PEER=3`; its `CAPTAGS` are the board's own (§3). `WDPDA`/`WDPX`/`WDPSEQ`/`WDPCH`/`WDPPWM` are separate
 lines (not new fields on `[WDP:...]`) so older Wizards ignore them instead of failing to parse the record; only
 edges *touching the queried board* are reconstructable from one dump (a board keeps just the
 `PWMTARGET` entries that name itself), so the full graph is assembled across per‑board pulls.
@@ -399,6 +433,7 @@ so any device can opt in regardless of id.)*
 - Serial device announce: [`WDP_DEVICE_ANNOUNCE.md`](WDP_DEVICE_ANNOUNCE.md).
 - Stored-sequence inventory (the `SEQHASH` TLV and the pull it triggers):
   [`SEQUENCE_INVENTORY.md`](SEQUENCE_INVENTORY.md).
+- Channel sync (the `CHAN` TLV, and MOVE / PROBE / PROBE_REPLY on ETM types 25-27): [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md).
 
 ---
 
@@ -406,6 +441,11 @@ so any device can opt in regardless of id.)*
 
 | Date | Change | Commit |
 |---|---|---|
+| 2026-10-23 | **The ESP32-S3 sends `mgmt.rx24` alone** (11 bytes, not 22): `mgmt.rx<N>` now also means the board forwards N as a relay, as every build does what it takes, so `mgmt.fwd` is sent only where it would say more. The Wizard reads a relay's forwarding from either tag. 164 of 200 bytes at most before the labels on the S3. | — |
+| 2026-10-23 | **A WCB advertises its own CAPTAGS (`0x0D`)**, which until now only clients sent: `mgmt.fwd24` (it forwards a 24-chunk push session as a relay; every build) and, on the ESP32-S3, `mgmt.rx24` (it reassembles one as a target), from the firmware's `MGMT_FWD_MAX_CHUNKS` / `MGMT_RX_MAX_CHUNKS` (`wcbOwnCapTags`, a literal: no RAM). After CHAN, before the labels: 12 / 22 bytes, 175 of 200 at most before the labels. Also in the board's own `?WDP,DUMP` row and, for a WCB neighbour, `?WDP,<n>`'s `Tags` line. The Wizard reads them in place of a firmware build date to decide whether one long `?SEQ,SAVE` may go as one long relay session (Greg: a capability flag, not a date; [`MGMT_RELAY.md`](MGMT_RELAY.md) §10). No receiver changes: WCBs and `WCB_Client` 1.8.0+ already decode CAPTAGS from any sender (only DEVTYPE marks a client), WcbMgmt dumps print it, older code skips it by length. Host test: `tests/wdp_wire_test.cpp` `test_own_captags`. | — |
+| 2026-10-24 | **A classic ESP32 says `mgmt.rx24` too**: it takes a 24-chunk push session as a target since a `?SEQ,SAVE` stopped costing ~7× its length in heap ([SEQUENCE_INVENTORY.md](SEQUENCE_INVENTORY.md) §3b), so both chips send the same tag. | — |
+| 2026-10-21 | **A boot SOLICIT with channel sync on**, after the first boot advert: every neighbor re-advertises (jittered), so channel sync has their CHAN facts long before its 40 s boot grace ends - without them every key is derived, SYNC off, and each board took itself for its group's leader. | — |
+| 2026-10-21 | Added TLV `0x14` **CHAN** — channel sync's channel, rank, PINNED/SYNC flags and region, in every advert ahead of the port labels, so in the change hash: associating, moving or `?CHSYNC,OFF` re-advertises within 500 ms. Decoded into `WdpNeighbor::hasChan` / `::chan` (`wdpNeighborGet` for channel sync); new `[WDPCH:...]` dump record, self first; `?WDP,<n>` shows it. Older peers skip it by length. Host test: `tests/wdp_wire_test.cpp` `test_chan`. See [`CHANNEL_SYNC.md`](CHANNEL_SYNC.md). | — |
 | 2026-09-28 | **A learned peer's late ACK promotes it.** `etmProcessAck` promoted a learned peer only for an ACK that matched a still-pending entry, so one that was only ever broadcast to, whose ACK usually lands after the configured boards resolved the entry, was never counted or retried (tracker #96). | `cc231ba` |
 | 2026-09-27 | **The advert stagger uses the board's own number.** `setup()` loaded `WCB_Number` after `wdpBegin()`, so the backstop phase was computed from the default 1 and every board advertised in WCB1's slot, in lockstep when powered together. `WCB_Number` now loads first; the same move fixes saved PWM outputs to W1 reloading as local ports (WCB coverage re-scan #1, #16). | `cc2a8a9` |
 | 2026-09-23 | **PWMTARGET auto-config can claim the free hardware port of a Kyber‑local board.** `canUsePWMOnPort` now reserves only the port a Kyber mode owns (the Kyber's own port; S1 under Maestro REMOTE — `kyberModeReservesPort`, WCB_Storage.cpp), so the other hardware port takes an auto-configured PWM output like any port; before, it was refused along with the Kyber port (tracker #73 D4, HIL `kyber.local_free_port_takes_pwm`). Nothing changes on the wire. | `95dd811` |

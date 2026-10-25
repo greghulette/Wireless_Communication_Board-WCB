@@ -61,6 +61,7 @@ _FAKE_PULL = (
     ("fifo", "one attempt on the air per relay: a second board waits until the first settles"),
     ("errors", "CFGERR NOMEM and NOPARTS retry, TOOBIG stops at once, not-UTF-8 retries once and stops on a second job's, empty replies fail after 3 attempts, a CRC failure retries"),
     ("deadline", "parts that trickle in forever end the pull at PULL_DEADLINE_MS from the call, once, including a pull queued behind dead targets"),
+    ("many_parts", "a 43-part reply (600 sequences) whose first job loses a part completes on the retry 63 s after the call, and 35 parts 1.3 s apart 46 s after it: the cap follows the parts still to come"),
     ("display", "a throwing listener costs no other listener its line, pull lines are summarised, a relayed or direct stats capture skips them"),
     ("reader", "parts read in small chunks, cut inside multi-byte characters, reassemble through both readers"),
     ("edges", "a relay that is not connected, a send that throws, and a superseded pull each settle once"),
@@ -80,7 +81,10 @@ _FAKE_PUSH = (
     ("delimiter", "the characters change in an order the board takes, a ',' board changes its delimiter first, and the General inputs refuse what the firmware refuses (W-2)"),
     ("bidir", "a mapping row touched but not changed re-sends no mapping, so a PWM input does not reboot the board (W-5)"),
     ("reboot_matchers", "the reboot and network-group checks read each command, not a substring of a label or a sequence (W-8)"),
-    ("relay_cap", "a relay push over 16 chunks is refused before the network-group confirm, the bootstrap or any send (W-9, F14)"),
+    ("relay_sessions", "a relay push over one 16-chunk session goes as several, whole commands each, the mesh password in the last; the network-group confirm and the bootstrap still come first (F14, docs/MGMT_RELAY.md §10)"),
+    ("relay_wcb_change", "a push that changes the board number and does not fit one session goes in two steps, through a WCB or a WcbMgmt relay: ?WCB,<new> and ?reboot to the number the board has now, then - once the relay's ?WDP,DUMP shows it under the new number - the rest to the new number, two chunks a session; a board never heard back stops the push after step 1 and says so; the board then shows once, under its new number, and the mesh poll adds no section for either number; one that fits goes as one session to the number the board has now"),
+    ("wcb_number_taken", "a push that gives a board a number another board has asks first - by USB or through a relay, one session or two - with Cancel the default: Cancel, Escape or Enter send nothing; \"Push anyway\" pushes"),
+    ("relay_long_command", "one command longer than a session (a 3999-character sequence) goes as one long session of 23 chunks only where the WDP capability tags say the target takes it (mgmt.rx24: an ESP32-S3, or a classic ESP32 since 2026-10-24) and the relay forwards it (mgmt.fwd24 or mgmt.rx24, or a WcbMgmt relay); a target saying mgmt.fwd24 alone (a classic ESP32 on 2026-10-23 firmware), older firmware or tags not seen yet are refused"),
     ("relay_chars", "a relay push with a character change the board would refuse on the way sends nothing, and a ',' target takes ?D^ first (W-2)"),
     ("relay_push", "a relay push still asks before a network-group change, bootstraps a new function id first, and frames the chain in 179-char chunks"),
     ("seq_roundtrip", "an untouched sequence row gives back its stored value exactly; an edited row is sent as before (W-10)"),
@@ -115,6 +119,102 @@ def seq_bytes_match_board(bench):
     with config_guard(bench, 1):
         run_wizard_test(bench, "wizard.seq_bytes_match_board", args={"count": count, "bytes": used, "cap": cap})
     bench.note(f"wizard.seq_bytes_match_board: W1 {count} sequence(s), {used} of {cap} bytes - the page showed the same")
+
+
+# ======================================================================================================================
+# A full sequence store loads (Greg 2026-10-23: "it shouldn't matter how many he has. it should work as long as it has
+# enough room to store it in the board"). The board's store is the only limit: a full one of long sequences (41 of
+# ~800 characters: ~9 s of ?backup over a classic ESP32's 115200-baud USB, past the Wizard's old fixed 3 s and 8 s
+# reads) and one of the most sequences it holds (the shortest values, thousands of them), over USB and through a relay.
+SEQ_STORE_LINE = re.compile(r"^Sequences: (\d+) in the sequence store, (\d+) of (\d+) bytes")
+FULL_SIZES = (1000, 200, 40)        # seq.store_full's fill (s17): long values, then what still fits
+MANY_VALUE = ";S0"                  # the shortest value worth storing: a write to the USB console, never recalled
+MANY_BURST = 8                      # saves sent back to back before the echo: ~25 bytes each, inside the RX buffer
+
+
+def _store_line(w):
+    line = next((x.rstrip() for x in w.run("?NVS", timeout=6) if x.startswith("Sequences:")), "")
+    m = SEQ_STORE_LINE.match(line)
+    if not m:
+        raise Skip(f"{w.dev.name}'s ?NVS has no sequence-store line ({line[:80]!r}): firmware before the file store")
+    return tuple(int(v) for v in m.groups())       # count, bytes, cap
+
+
+def _fill_store(w, many):
+    """Fill w's sequence store with throwaway sequences until it refuses one: FULL_SIZES (seq.store_full's fill) or,
+    with many, MANY_VALUE under 6-character keys, MANY_BURST saves to a burst. Each value is a ;S0 write that nothing
+    recalls. -> {key: value length} of every one stored. Stops at the first refusal; any other reply fails the fill."""
+    stored, n = {}, 0
+    sizes = (len(MANY_VALUE),) if many else FULL_SIZES
+    for size in sizes:
+        full = False
+        while not full:
+            burst = []
+            for _ in range(MANY_BURST if many else 1):
+                n += 1
+                key = f"HM{n:04d}" if many else f"HILSF{n:02d}"
+                head = MANY_VALUE if many else f";S0{marker('f')}^***"
+                burst.append((key, head + "x" * (size - len(head))))
+            m = w.dev.mark()
+            for key, value in burst[:-1]:
+                w.dev.send(f"?SEQ,SAVE,{key},{value}")
+            w.run(f"?SEQ,SAVE,{burst[-1][0]},{burst[-1][1]}", timeout=10)
+            out = [x.rstrip() for x in w.dev.since(m)]
+            for key, value in burst:
+                if any(f"Stored: Key='{key}'" in x for x in out):
+                    stored[key] = len(value)
+                else:
+                    full = True
+            if full and not any("the sequence store is full" in x for x in out):
+                raise AssertionError(f"filling {w.dev.name}'s sequence store: a save was refused with no 'store is full' "
+                                     f"line ({len(stored)} stored)")
+            if n > 9999:
+                raise AssertionError(f"{w.dev.name}'s sequence store took {n} saves without filling")
+    return stored
+
+
+def _empty_store(w, before):
+    """?SEQ,CLEAR,ALL, then the board's own sequences saved again in their order (before: its config tokens)."""
+    out = w.run("?SEQ,CLEAR,ALL", timeout=15)
+    if not any("All stored sequences cleared" in x for x in out):
+        raise AssertionError(f"?SEQ,CLEAR,ALL on {w.dev.name} was not confirmed")
+    for t in before:
+        if t.upper().startswith("?SEQ,SAVE,"):
+            w.run(t, timeout=8)
+
+
+def _pull_full_store(bench, test_id, many):
+    w = usb_wcb(bench)
+    _store_line(w)
+    with config_guard(bench, 1) as before:
+        try:
+            t0 = time.monotonic()
+            seqs = _fill_store(w, many)
+            fill_s = round(time.monotonic() - t0)
+            count, used, cap = _store_line(w)
+            if cap - used > (len(MANY_VALUE) + 8 if many else 49):
+                raise AssertionError(f"the fill stopped with {cap - used} of {cap} bytes free")
+            bench.note(f"{test_id}: W1's store full: {count} sequences, {used} of {cap} bytes ({len(seqs)} throwaway, "
+                       f"filled in {fill_s} s)")
+            run_wizard_test(bench, test_id, args={"seqs": seqs, "count": count, "bytes": used, "cap": cap},
+                            timeout=900.0)
+        finally:
+            _empty_store(w, before[1])
+
+
+@test("wizard.pull_full_store", "The Wizard pulls W1 over USB with its sequence store full of long sequences (seq.store_full's "
+      "fill: ~9 s of ?backup at 115200 baud, past the old fixed 3 s and 8 s reads): every sequence in the page, whole, the "
+      "pager counting them all and showing the board's bytes; the store emptied and W1's own sequences saved back after",
+      needs=["wcb1"])
+def pull_full_store(bench):
+    _pull_full_store(bench, "wizard.pull_full_store", many=False)
+
+
+@test("wizard.pull_many_sequences", "The Wizard pulls W1 over USB with its sequence store full of the shortest sequences - the "
+      "most it holds, thousands - every one in the page, whole, and the pager counting them all; the store emptied and "
+      "W1's own sequences saved back after", needs=["wcb1"])
+def pull_many_sequences(bench):
+    _pull_full_store(bench, "wizard.pull_many_sequences", many=True)
 
 
 @test("wizard.push_label", "A label typed into the Wizard and pushed lands in W1's saved config", needs=["wcb1"])
@@ -173,6 +273,40 @@ def remote_pull_parts(bench):
     _remote_pull(bench, "wizard.remote_pull_parts", over=True)
 
 
+def _remote_pull_full_store(bench, test_id, many):
+    """_remote_pull with W2's sequence store full (_fill_store on W2's own USB), pulled through W1 by the real Wizard."""
+    w2 = WCB(bench.dev("wcb2"))
+    _store_line(w2)
+    with config_guard(bench, 1, 2) as before:
+        try:
+            ver = w2.version()
+            seqs = _fill_store(w2, many)
+            count, used, cap = _store_line(w2)
+            chain = _factory_reply(w2, ver, timeout=60)
+            bench.note(f"{test_id}: W2's store full: {count} sequences, {used} of {cap} bytes; its reply is {len(chain)} "
+                       f"characters")
+            run_wizard_test(bench, test_id, args={"relay": 1, "target": 2, "ver": ver, "seqs": seqs,
+                                                  "length": len(chain), "minParts": 2}, timeout=900.0)
+        finally:
+            w2.run("?RTERM,STOP")
+            _empty_store(w2, before[2])
+
+
+@test("wizard.remote_pull_full_store", "The Wizard, connected to W1 only, pulls W2 through it with W2's sequence store full of "
+      "long sequences: the config in parts, joined and checked, every sequence whole (W2's store emptied and its own "
+      "sequences saved back after)", needs=["wcb1", "wcb2"])
+def remote_pull_full_store(bench):
+    _remote_pull_full_store(bench, "wizard.remote_pull_full_store", many=False)
+
+
+@test("wizard.remote_pull_many_sequences", "The Wizard, connected to W1 only, pulls W2 through it with W2's sequence store full "
+      "of the shortest sequences - the most it holds, the longest config a board makes: every part joined, every sequence "
+      "whole, the pull not given up while its parts arrive (W2's store emptied and its own sequences saved back after)",
+      needs=["wcb1", "wcb2"])
+def remote_pull_many_sequences(bench):
+    _remote_pull_full_store(bench, "wizard.remote_pull_many_sequences", many=True)
+
+
 # ======================================================================================================================
 # WCB-WP20, WP40 and WP41 (docs/hil_plan/WCB.md §2): the rest of the push side, the app.js logic and panels, the
 # editors and the flasher, against fake boards in the page - no board, so CI runs them too (wizard-tests.yml runs every
@@ -189,6 +323,8 @@ _FAKE_MORE = (
     ("push_fake_reboot_path", "A USB push that needs a reboot sends ?reboot 1.5 s after the last ACK, closes and reopens the port, and pulls 3 s after the reconnect"),
     ("push_fake_shared_reboot_repull", "(should) A push that reboots a board on the shared port pulls it again afterwards, as a USB push does (W-14)"),
     ("pull_fake_usb_guards", "The USB pull: a cut backup changes nothing, the fixed pull command goes first, ?RELAY,1 becomes a relay card, a board reporting another number moves slot, a duplicate number warns, the first pull seeds General"),
+    ("pull_fake_many_sequences", "A board with 2,970 sequences (a full store of the shortest) loads in seconds, every row in the page and the pager counting them all; a push with no edit sends nothing"),
+    ("pull_fake_usb_long_backup", "A USB backup that takes 12 s to arrive (a full sequence store at 115200 baud is ~9 s) loads every sequence: the read lasts while the board sends, an earlier backup's tail is not taken for it, and no fallback ?backup lands in its middle; a cut one changes nothing"),
     ("push_fake_general_fields", "The General fields reach every board's push: a differing password opens the keep/use modal; Keep sends the first board's (with the network-group confirm through a relay), Use incoming rewrites General"),
     ("push_fake_planned_verbs", "The bench specs' pre-flight (tests/wizard/lib/wizard.js plannedVerbs) names the verbs a push then sends, directly and through a relay, sends nothing itself, and would stop a push carrying another board's WCB quantity"),
     ("push_fake_general_wcbq", "(should) A second board whose WCB quantity differs is named in the keep/use modal, like every other General field every push writes (W-16)"),
@@ -213,6 +349,7 @@ _FAKE_MORE = (
     ("editors_fake_mappings", "The mapping editor sends at once: Save with bidir puts the reverse on the destination board through the relay, Remove sends CLEAR, a removal while disconnected is only local (left as found), a moved PWM output is cleared"),
     ("editors_fake_bidir_remove", "(should) Removing a bidirectional serial mapping also clears its mirror on the destination board (W-21)"),
     ("editors_fake_seq_var", "The sequence and variable editors: save, rename, test, remove; a remote save in one packet or as a multi-chunk session; variables set, rename, clear, a bad name refused, ;V for a temporary; ?VAR,LIST parsed, relay too"),
+    ("editors_fake_relay_seq_checked", "A sequence saved on W2 through W1 is checked with ?MGMT,SEQGET: a lost session is sent again and checked; lost every time, three tries end in an error and the baseline keeps what W2 has; through a WcbMgmt relay it is sent once and said so"),
     ("editors_fake_live_controls", "The WLED controls send ;L<id>,<verb> directly or through the relay; the HCR status modal renders the firmware's line, polls every 3 s only while open, and says when HCR is not configured"),
     ("flasher_fake_helpers", "The flasher's decisions: the detected chip wins, S2 and an unknown chip with no HW refused, the S3 bootloader by flash size (none when unknown), a changed partition table makes an update full, the branch from /dev/ or a valid override"),
 )
@@ -294,7 +431,7 @@ _FAKE_RESCAN_M = (
     ("flash_fake_failure_recovery", "A failed flash reopens the same port; in the setup wizard a board already on the target firmware is pushed its config whole with the pre-flash General, another version told to retry; on Windows the port is closed (retried) first (flash.failure_recovery)"),
     ("flash_fake_factory_modal", "Factory Reset opens its modal for a USB board (refused relayed or disconnected); Erase NVS + Load Fresh Firmware runs boardGo in factory mode with the push-config box as ticked; Cancel runs nothing (flash.factory_modal)"),
     ("ota_fake_serial_stream", "An OTA over USB follows the board's cursor (a NAK rewinds), verifies with END, reconnects (direct) or waits on the shared port, and pulls; END failing or the cursor collapsing sends ABORT and restores a raised baud (ota.serial_stream)"),
-    ("ota_fake_relay", "A wireless OTA through a relay frames BEGIN / 192-byte DATA / END by target and session following the target's cursor, re-arms the link and pulls with 12 attempts 8 s later; a non-zero status or collapsed cursor stops it with ABORT (ota.relay)"),
+    ("ota_fake_relay", "A wireless OTA through a relay frames BEGIN / 192-byte DATA (a window at a time, each with a CRC-32) / END by target and session following the target's cursor, resends a lost frame from the cursor, re-arms the link and pulls with 12 attempts 8 s later; a non-zero status or collapsed cursor stops it with ABORT (ota.relay)"),
     ("ota_fake_edges_replay", "Once the last OTA ends, the ETM edges held during it are replayed one board at a time (pull, then terminal re-armed), skipping the OTA's target and a board with no relay; kept while another OTA runs (ota.suppressed_edges_replay)"),
     ("file_fake_load", "Load File sets General and a 'loaded file' baseline from the file, ETM and NaviCore included, so its own boards pulled afterwards open no modal; renders its boards, derives the controller, toasts; a sectionless text is refused, nothing changed; a failed parse toasts (file.load)"),
     ("wiz_fake_navigation", "The setup wizard: Next validates then saves, a card click advances 200 ms later once and not after Back, Review reads Apply & Connect, and leaving Firmware stamps each WCB slot factory or erase and no client slot (wiz.navigation)"),
@@ -359,9 +496,10 @@ _FAKE_RESCAN_L = (
     ("rpull_fake_badges", "A remote pull shows Retrying, then Pull Failed with Retry after its last attempt; Retry and a pull that lands show Remote (rpull.badges)"),
     ("flash_fake_erase_no_reconnect", "An erase whose board never comes back says so, pushes and probes nothing, and gives the Push button back (flash.erase_path)"),
     ("flasher_fake_windows_baud", "The flasher loads at 460800 (ROM 115200), at 115200 on Windows (flasher.windows_baud)"),
+    ("flasher_fake_reset_tap", "An automatic reset that never syncs becomes a request to tap RESET: GPIO0 held low, retries with no reset of its own until the chip answers, GPIO0 released before any reset, then the flash; no tap, a lost port or another failure stops with advice for that board (flasher.reset_tap)"),
     ("ota_fake_entry_guards", "The OTA button takes the relay path for a relayed board and USB otherwise; each refuses an unreachable board (ota.entry_guards)"),
     ("stats_fake_modal", "The ETM test shows only the last summary block; a relayed capture that times out shows what came; Refresh and errors (stats.modal)"),
-    ("wdp_fake_render", "The mesh table's self row, capability names, Controller kind, peers count and toolbar, and the empty-mesh note (wdp.render)"),
+    ("wdp_fake_render", "The mesh table's self row, capability names, Controller kind, peers count and toolbar, and the empty-mesh note; the channel sync column and leader with [WDPCH] lines, the older-firmware note without (wdp.render)"),
     ("wdp_fake_refresh_no_board", "The mesh Refresh with no board says to connect one; a failed dump shows its error (wdp.refresh_no_board)"),
     ("wdp_fake_client_cards", "A client's card shows status and age, kind, controller, firmware and capability chips; an rc client feeds the RC panel (wdp.client_cards)"),
     ("rc_fake_discovery", "rc_hb/rc_trig/rc_mode lines make and update an RC card that goes 12 s after the last beat; a mesh-only RC shows telemetry off and goes after 40 s (rc.discovery)"),
@@ -408,6 +546,25 @@ for _key, _title in _SEQ_PAGER:
     def _seq_pager(bench, _id=f"wizard.{_key}"):
         run_wizard_test(bench, _id, device=None)
     test(f"wizard.{_key}", f"{_title} (no board: a fake board's sequences in the page)")(_seq_pager)
+
+
+# The sequence builder (2026-10-20, Greg: build sequences from the command library on a timeline, adjustable to the ms,
+# and show them graphically): a stored sequence on a timeline, written back into its row. Spec:
+# specs/seq_builder_fake.spec.js (Wizard/seq-builder.js, docs/SEQUENCE_BUILDER.md).
+_SEQ_BUILDER = (
+    ("seq_builder_open", "A stored sequence opens as it is: a lane per device, each step decoded through the command library, the same value out; the row shows a timing strip"),
+    ("seq_builder_edit", "A step moves to the ms in the inspector and by dragging (snapped), its fields re-encode it, undo/redo, and Apply writes the row a push sends"),
+    ("seq_builder_library", "The library lists the WCB group first; a command is set up in the composer and added at the playhead or dragged on; a device command goes to the port labelled for it; Apply makes a new row"),
+    ("seq_builder_rules", "Warnings where the board would not run it as drawn (a timed sequence started mid-way, a self-recall), an IF written after its delay, Save & Test saves and runs it"),
+    ("seq_builder_devices", "Three devices sent to one unlabelled port get a lane and a colour each, named by device with the port underneath"),
+    ("seq_builder_lineup", "Other sequences line up above this one: started where this one runs them or dragged, a dragged step sticks to their steps, remembered, and they change nothing"),
+    ("seq_builder_droidnet", "DroidNet's Maestro trigger by name: @A<name> out this board's Serial 0 (USB), or another board's, in a lane of its own"),
+    ("seq_builder_align", "Selected steps line up on the first, the last or the playhead, or spread evenly, in one undo; each step marks its firing time with a dot"),
+)
+for _key, _title in _SEQ_BUILDER:
+    def _seq_builder(bench, _id=f"wizard.{_key}"):
+        run_wizard_test(bench, _id, device=None)
+    test(f"wizard.{_key}", f"{_title} (no board: a fake board in the page)")(_seq_builder)
 
 
 # WCB-WP21: the same on the bench, through the HIL bridge. W1 is handed to Chrome; W2 stays on its own USB, which is how

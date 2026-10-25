@@ -40,11 +40,15 @@ test("rig: the model reads JSON the way ArduinoJson 7's `|` does (type, not trut
 
 test('rig: the model keeps what a SET_CONFIG omits and rebuilds what it names (the nc_guard trap)', () => {
   const m = model();
-  m.fromJSON({ tapWindowMs: 50, holdMs: 520, wcbNetwork: { channel: 13 } });
+  m.fromJSON({ tapWindowMs: 50, holdMs: 520, wcbNetwork: { channel: 14 } });
   let c = m.toJSON();
   assert.equal(c.tapWindowMs, 500, 'a sub-100 ms window reads as unset');
   assert.equal(c.holdMs, 750, 'a hold at or under tapWindow + 100 becomes tapWindow + 250');
   assert.equal(c.wcbNetwork.channel, 1, 'an out-of-range mesh channel falls back to 1');
+  m.fromJSON({ wcbNetwork: { channel: 13 } });
+  assert.equal(m.toJSON().wcbNetwork.channel, 13, '13 is a channel since channel sync (1-13, whatever the region)');
+  m.fromJSON({ wcbNetwork: { channel: 1 } });
+  c = m.toJSON();
   assert.equal(c.wcbNetwork.password, BENCH.wcbNetwork.password, 'an omitted password is kept');
   assert.deepEqual(Object.keys(c.mappings), Object.keys(BENCH.mappings), 'an absent mappings key changes nothing');
   m.fromJSON({ mappings: { 101: { t2: [{ type: 'stop' }] } } });
@@ -102,7 +106,9 @@ test('rig: the emulator answers direct USB lines like NaviCore.ino processInputL
 
 test('rig: via WCB, the emulator reassembles a fragmented SET_CONFIG, strips the transport fields and ACKs with sys', async () => {
   const emu = new NaviEmulator({ mode: 'via-wcb', config: BENCH });
-  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: { wcbNetwork: { deviceId: 7, password: 'x', channel: 3 }, tapWindowMs: 650 }, saveId: 9 });
+  const inner = JSON.stringify({ sys: 1, type: 'SET_CONFIG', data: {
+    wcbNetwork: { deviceId: 7, password: 'x', channel: 3, region: 'DE' }, tapWindowMs: 650,
+    wifiEnabled: !BENCH.wifiEnabled, wifiSsid: 'HILother', wifiPassword: 'HILother1', wifiToken: 'HILtoken42' }, saveId: 9 });
   const parts = fragSlices(inner);
   const lines = parts.map((s, i) => ';w20,' + JSON.stringify({ f: i + 1, of: parts.length, sid: 4, s }));
   const out = await run(emu, ['{"sys":1,"type":"PING"}', ';w20,{"sys":1,"type":"PING"}', ...lines.reverse()]);
@@ -112,8 +118,52 @@ test('rig: via WCB, the emulator reassembles a fragmented SET_CONFIG, strips the
   assert.equal(c.tapWindowMs, 650);
   assert.equal(c.wcbNetwork.deviceId, 20, 'deviceId stripped (_applyReassembled)');
   assert.equal(c.wcbNetwork.password, BENCH.wcbNetwork.password, 'password stripped');
-  assert.equal(c.wcbNetwork.channel, 3, 'channel is NOT stripped by the firmware (D-NC18)');
+  // D-NC18, fixed in NaviCore 7f47f3c, and channel sync's two (chansync rc_telemetry.h:1151-1191): the channel and the
+  // region, and the SoftAP settings with the WebSocket token, never change over the mesh.
+  assert.equal(c.wcbNetwork.channel, BENCH.wcbNetwork.channel, 'channel stripped');
+  assert.equal(c.wcbNetwork.region, BENCH.wcbNetwork.region, 'region stripped');
+  assert.deepEqual([c.wifiEnabled, c.wifiSsid, c.wifiPassword, c.wifiToken],
+                   [BENCH.wifiEnabled, BENCH.wifiSsid, BENCH.wifiPassword, BENCH.wifiToken], 'the wifi* fields stripped');
   emu.stop();
+});
+
+test('rig: the channel-sync fields - the token and region rules, chanSync, and a mesh copy without the token', () => {
+  const m = model();
+  let c = m.toJSON();
+  assert.deepEqual(Object.keys(c).slice(3, 9), ['wifiEnabled', 'wifiSsid', 'wifiPassword', 'wifiToken', 'chanSync', 'maeGateMs'],
+                   'rcConfigToJSON order (rc_config.h:1368-1374)');
+  assert.deepEqual(Object.keys(c.wcbNetwork), ['macOct2', 'macOct3', 'password', 'quantity', 'deviceId', 'channel', 'region']);
+  assert.deepEqual([c.wifiToken, c.chanSync, c.wcbNetwork.region], ['', true, '01'], 'the bench fixture: no token, sync on, 01');
+  for (const bad of ['HILtok7', 'HIL' + 'x'.repeat(30), 'HIL token1', ...[',', '^', ';', '?', '"', '\\'].map((x) => `HILtok${x}12`), 'HILtoké12']) {
+    m.fromJSON({ wifiToken: bad });
+    assert.equal(m.toJSON().wifiToken, '', `a refused token is ignored (${bad.length} characters)`);
+  }
+  m.fromJSON({ wifiToken: 'HILtoken42' });
+  assert.equal(m.toJSON().wifiToken, 'HILtoken42');
+  for (const v of [null, 5, true]) {
+    m.fromJSON({ wifiToken: v });
+    assert.equal(m.toJSON().wifiToken, 'HILtoken42', `a non-string (${v}) leaves the token alone`);
+  }
+  assert.equal(JSON.parse(m.text(true)).wifiToken, undefined, 'the mesh copy never carries the token');
+  assert.equal(JSON.parse(m.text()).wifiToken, 'HILtoken42', 'the USB copy does');
+  m.fromJSON({ wifiToken: '' });
+  assert.equal(m.toJSON().wifiToken, '', '"" clears it');
+  for (const bad of ['XX', 'us', 'DEU', '', 5]) {
+    m.fromJSON({ wcbNetwork: { region: bad } });
+    assert.equal(m.toJSON().wcbNetwork.region, '01', `a refused region (${JSON.stringify(bad)}) is ignored, never folded`);
+  }
+  m.fromJSON({ wcbNetwork: { region: 'DE' } });
+  m.fromJSON({ wcbNetwork: { region: null } });
+  m.fromJSON({ wcbNetwork: { channel: 1 } });
+  assert.equal(m.toJSON().wcbNetwork.region, 'DE', 'a null or absent region is left alone');
+  m.fromJSON({ chanSync: false });
+  m.fromJSON({ chanSync: 0 });
+  assert.equal(m.toJSON().chanSync, false, 'chanSync takes a bool only');
+  m.fromJSON({ wcbProfiles: [{ name: 'HILa', channel: 13 }, { name: 'HILb', channel: 14 }] });
+  assert.deepEqual(m.toJSON().wcbProfiles.map((p) => p.channel), [13, 1], "a profile's channel is 1-13 too");
+  m.loadDefaults();
+  c = m.toJSON();
+  assert.deepEqual([c.wifiToken, c.chanSync, c.wcbNetwork.region], ['', true, '01'], 'rcConfigLoadDefaults (rc_config.h:899-900, :1054)');
 });
 
 // nctool.emulator_contract's helpers (lib/navicore/contract.js), on the emulator and on lines put together from the

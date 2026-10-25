@@ -2497,16 +2497,19 @@ def shim_still_trying_banner(bench):
 
 # ------------------------------------------------------------------ the tools' Pages half, and the launchers
 @test("intellex.webui_version_online", "GET /_api/webui-version online, GitHub Pages stood in for on 127.0.0.1: a "
-      "bundle older than its published copy is stale with checked true and no reason, an equal one is not stale, each "
-      "tool asks its configured branch's copy (settings.tool_base: <site>/config_tool, <site>/dev/<branch>/Wizard), "
-      "and a failure says why - certs.ADVICE for a certificate the venv cannot verify, the HTTP error for a 404 - "
-      "without hiding the other tool's answer (in-process; IX re-scan host.api.webui_version)")
+      "bundle older than its published copy is stale with checked true and no reason, an equal one is not stale "
+      "(missing [], repaired None), an equal one whose page loads files it lacks is stale with missing naming them "
+      "(Intellex 0.2.3), each tool asks its configured branch's copy (settings.tool_base: <site>/config_tool, "
+      "<site>/dev/<branch>/Wizard), and a failure says why - certs.ADVICE for a certificate the venv cannot verify, "
+      "the HTTP error for a 404 - without hiding the other tool's answer (in-process; IX re-scan "
+      "host.api.webui_version)")
 def webui_version_online(bench):
-    """Intellex src/host.py api_webui_version, _published_dtg and _wcb_published_ver on its real build_app() in the venv
-    (tests/intellex/py/webui_units.py group webui_version). urlopen answers https://greghulette.github.io/<path> from
-    a local HTTP stand-in (and, for the certificate case, an HTTPS one with a self-signed certificate the venv's own
-    verification refuses); flash.reachable answers True; anything else is refused, so nothing reaches the network.
-    intellex.offline_con_floor and intellex.routes_api cover the offline half."""
+    """Intellex src/host.py api_webui_version, _published_dtg, _wcb_published_ver and _tool_missing (src/webfiles.py
+    missing_from) on its real build_app() in the venv (tests/intellex/py/webui_units.py group webui_version). urlopen
+    answers https://greghulette.github.io/<path> from a local HTTP stand-in (and, for the certificate case, an HTTPS
+    one with a self-signed certificate the venv's own verification refuses); flash.reachable answers True; anything
+    else is refused, so nothing reaches the network. intellex.offline_con_floor and intellex.routes_api cover the
+    offline half."""
     require(bench)
     run_intellex_py(bench, "intellex.webui_version_online", "webui_units.py", args={"group": "webui_version"})
 
@@ -2514,29 +2517,33 @@ def webui_version_online(bench):
 @test("intellex.fetch_webui_unit", "tools/fetch_webui.py against a local stand-in for GitHub Pages: _safe_relname; "
       "the cmdlib manifest walk; each tool's update one atomic swap, byte-identical to what was served, the old bundle "
       "kept whole as <dir>.prev; up to date, --check and --force; one missing file changes nothing and leaves no "
-      "staging directory; the branch's /dev/<branch>/ copy, else main's with a note; --tool all as two independent "
-      "swaps (in-process; IX re-scan tools.fetch_webui)")
+      "staging directory, except a Wizard vendor/ file (a line, not a failure); the Wizard also takes what its "
+      "index.html loads beyond WCB_FILES, the cmdlib/ its code names and their images, and a same-stamp copy lacking "
+      "one is fetched whole again (Intellex 0.2.2-0.2.3); the branch's /dev/<branch>/ copy, else main's with a note; "
+      "--tool all as two independent swaps (in-process; IX re-scan tools.fetch_webui)")
 def fetch_webui_unit(bench):
     """Intellex tools/fetch_webui.py (_safe_relname, cmdlib_names, _swap_in, fetch_wcb, _fetch_navicore, resolve_base,
-    main) in the venv (tests/intellex/py/webui_units.py group fetch_webui), its main() run per argv against a
-    127.0.0.1 server laid out like gh-pages (--base for the row's own case, and urlopen answering greghulette.github.io
-    from it for the branch cases); fetch_webui.reachable answers True. The bundles are the stage's src/webui and
-    src/webui_wcb, the staging directories go to a scratch directory in the stage. intellex.offline_con_floor covers
-    the offline refusal."""
+    main) and src/webfiles.py (page_refs, named_vendors, missing_from) in the venv (tests/intellex/py/webui_units.py
+    group fetch_webui), its main() run per argv against a 127.0.0.1 server laid out like gh-pages (--base for the row's
+    own case, and urlopen answering greghulette.github.io from it for the branch cases); fetch_webui.reachable answers
+    True. The bundles are the stage's src/webui and src/webui_wcb, the staging directories go to a scratch directory in
+    the stage. intellex.offline_con_floor covers the offline refusal."""
     require(bench)
     run_intellex_py(bench, "intellex.fetch_webui_unit", "webui_units.py", args={"group": "fetch_webui"})
 
 
-@test("intellex.selfupdate_unit", "Intellex updating itself (src/selfupdate.py) against a stand-in for GitHub Releases: "
-      "the check (none, up to date, newer with this computer's build and checksums, without either, offline, cached); "
-      "Windows swaps the running .exe by rename and restarts, refusing a download that fails SHA256SUMS.txt; macOS "
+@test("intellex.selfupdate_unit", "Intellex updating itself (src/selfupdate.py) against a stand-in for GitHub "
+      "Releases' own github.com links, never the REST API (Intellex 0.2.4): the check (none, GitHub failing, up to "
+      "date, newer with this computer's build in its checksums, without either, offline, cached; the tag from the "
+      "/releases/latest redirect, not followed); Windows swaps the running .exe by rename and restarts, refusing a download that fails SHA256SUMS.txt; macOS "
       "swaps the .app (symlinks kept, the old one kept); a git checkout fast-forwards and restarts, refusing over "
       "uncommitted changes or its own commits; install is 409 with nothing to install or a flash running; "
       "version.info() ignores a stale build stamp from source (in-process)")
 def selfupdate_unit(bench):
     """Intellex src/selfupdate.py and its host routes in the venv (tests/intellex/py/selfupdate_units.py group
     selfupdate): sys.executable and selfupdate.mode/root point at stand-ins under the stage, restart() is recorded,
-    and every request goes to a 127.0.0.1 server - nothing reaches GitHub and nothing of Greg's is replaced."""
+    and every request goes to a 127.0.0.1 server (selfupdate.WEB) - nothing reaches GitHub and nothing of Greg's is
+    replaced."""
     require(bench)
     run_intellex_py(bench, "intellex.selfupdate_unit", "selfupdate_units.py", args={"group": "selfupdate"})
 

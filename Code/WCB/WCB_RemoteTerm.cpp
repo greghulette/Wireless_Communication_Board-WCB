@@ -123,8 +123,9 @@ void WCBSerial::_sendPacket(const char *data, uint8_t len) {
   // Ensure the relay is a registered ESP-NOW peer first: a relay numbered above
   // this board's WCBQ (e.g. a high-numbered MgmtRelay) may not be in the peer
   // table, and esp_now_send would then fail ESP_ERR_ESPNOW_NOT_FOUND and silently
-  // drop every mirrored line. Mirrors the on-demand registration the ETM retry uses.
-  if (!esp_now_is_peer_exist(WCBMacAddresses[_relayWCB - 1])) {
+  // drop every mirrored line. Mirrors the on-demand registration the ETM retry uses. Not while a transmit-wedge remedy
+  // restarts ESP-NOW (WCB_EspNow.h): any task prints, and the send below is refused then anyway.
+  if (!wcbEspNowRestarting() && !esp_now_is_peer_exist(WCBMacAddresses[_relayWCB - 1])) {
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, WCBMacAddresses[_relayWCB - 1], 6);
     p.channel = 0; p.encrypt = false;
@@ -133,7 +134,7 @@ void WCBSerial::_sendPacket(const char *data, uint8_t len) {
   // Paced like every ESP-NOW send: a burst of short lines outran the radio, and each
   // failed esp_now_send was a mirrored line lost unnoticed (tracker #107). Nothing can
   // print here - a print would come straight back into this mirror - so a line given
-  // up is counted and loop() says so (wcbEspNowReportDrops).
+  // up is counted and loop() says so (wcbEspNowService).
   wcbEspNowSend(WCBMacAddresses[_relayWCB - 1], (uint8_t *)&pkt, sizeof(pkt));
 }
 

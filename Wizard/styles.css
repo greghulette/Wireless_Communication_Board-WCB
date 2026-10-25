@@ -25,6 +25,14 @@
   --mono:       'JetBrains Mono', monospace;
   --sans:       'Syne', sans-serif;
   --transition: 150ms ease;
+  /* Names some rules use that were never defined: each fell back to a fixed dark-theme value (or to nothing), so the
+     WDP Mesh, RC Controllers and Management Relays panels stayed #1a1d28 in the light theme, under its dark text
+     (Greg, 2026-10-21). Aliases of the tokens above, so they follow :root.light like everything else. */
+  --card-bg:        var(--bg2);
+  --text-secondary: var(--text2);
+  --text1:          var(--text);
+  --radius1:        var(--radius);
+  --muted:          var(--text3);
 }
 
 :root.light {
@@ -1519,6 +1527,14 @@ select[id$="-hcr-port"], select[id$="-mp3-port"], select[id$="-kyber-port"] { wi
   margin-left: 6px;
 }
 .wdp-btn-forget:hover { border-color: var(--red); color: var(--red); }
+/* Channel sync facts in the Channel column (docs/CHANNEL_SYNC.md). Outline tags: the colour is on the edge and the
+   text, never a fill. */
+.wdp-ch-tag { display: inline-block; padding: 0 6px; border: 1px solid var(--border); border-radius: 10px;
+              font-size: 11px; font-weight: 600; white-space: nowrap; vertical-align: middle; color: var(--text2); }
+.wdp-ch-lead { border-color: var(--green);  color: var(--green); }
+.wdp-ch-pin  { border-color: var(--accent); color: var(--accent); }
+.wdp-ch-off  { border-color: var(--text3);  color: var(--text2); }
+.wdp-ch-old  { border-color: var(--yellow); color: var(--yellow); white-space: normal; }
 
 /* "⇄ also on Wx" hint — this key also exists on other boards, so a top-level
    ;C/;SEQ triggers them all at once. Compact, sits right under the key name. */

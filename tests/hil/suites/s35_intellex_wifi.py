@@ -128,11 +128,25 @@ def rterm_starts(lines, relay):
     return sum(1 for x in lines if x.startswith(STARTED) and x.rstrip().endswith(f"WCB{relay}"))
 
 
-def move_order_problems(lines):
-    """A host's printed lines around an access-point move -> [problem]: each 'network changed' note must come before
-    the next 'reconnected' line (host.py reconnect_loop: _reidentify_if_moved, then the attach - rule 10: the role is
-    corrected before the page can read it), and at least one move must have been noted. Lines arrive scrubbed."""
+def move_lines(lines):
+    """The host lines that say how it reattached: its move notes, its 'reconnected' lines and its holds."""
+    return [x for x in lines if "network changed" in x or x.startswith("reconnected") or "not reattaching" in x]
+
+
+def move_order_problems(lines, before=0):
+    """A host's printed lines around an access-point move (move_lines) -> [problem]: each 'network changed' note must
+    come before the next 'reconnected' line (host.py reconnect_loop: _reidentify_if_moved, then the attach - rule 10:
+    the role is corrected before the page can read it), and at least one move must have been noted. Lines arrive
+    scrubbed. The first `before` lines were printed before the hop, while nothing had moved: a 'reconnected' among
+    them is the attached link dropping and coming back on its own, said as that - run 20261022-145043 read it as the
+    hop's reattach under the old role, where Intellex's reconnect loop had raced the attach a second after it
+    answered - and the order is judged on the hop's lines only."""
     out = []
+    early = sum(1 for x in lines[:before] if x.startswith("reconnected"))
+    if early:
+        out.append(f"the host printed 'reconnected' {early} time(s) before the hop, with nothing moved: the link it had "
+                   f"attached dropped and came back on its own")
+    lines = lines[before:]
     moves = [i for i, x in enumerate(lines) if "network changed" in x]
     if not moves:
         return ["the host printed no 'network changed' line: it reattached without re-identifying the board"]
@@ -410,7 +424,13 @@ def wifi_link_loss(bench):
                 a = LinkTap(host.port, name="A")
                 time.sleep(0.5)                # the host binds a page just after its 101
                 a.send(PING)
-                a.wait_for(PONG, 6)
+                try:
+                    a.wait_for(PONG, 6)
+                except AssertionError as e:
+                    # How the host says it reattached, scrubbed: run 20261022-145043's page lost the link because its
+                    # reconnect loop raced the attach, which only its 'reconnected' line showed.
+                    raise AssertionError(f"{e}; the host's reattach lines so far: {move_lines(host.lines) or 'none'}") \
+                        from None
                 m = g.nc.dev.mark()
                 dead0 = _dead_lines(host)
                 t_cmd = time.monotonic()
@@ -500,6 +520,7 @@ def wifi_ap_hop_reidentify(bench):
         stack = contextlib.ExitStack()
 
         def hop(host, body):
+            seen["before"] = len(move_lines(host.lines))      # what the host said while nothing had moved
             stack.enter_context(_pc_on_w1_ap(bench, problems))
             st, took = _wait_status(host, lambda s: s.get("attached") and s.get("role") == "wcb", 90)
             seen["hop"] = None if took is None else round(took, 1)
@@ -509,8 +530,7 @@ def wifi_ap_hop_reidentify(bench):
             stack.close()
             st, took = _wait_status(host, lambda s: s.get("attached") and s.get("role") == "navicore", 90)
             seen["back"] = None if took is None else round(took, 1)
-            seen["lines"] = [x for x in host.lines if "network changed" in x or x.startswith("reconnected")
-                             or "not reattaching" in x]
+            seen["lines"] = move_lines(host.lines)
             return {"status": status_view(st, hide), "seconds": seen["back"]}
         try:
             version = nc.ping()
@@ -521,7 +541,7 @@ def wifi_ap_hop_reidentify(bench):
             stack.close()
             _nc_quiet(bench)
     if "lines" in seen:
-        problems += move_order_problems(seen["lines"])
+        problems += move_order_problems(seen["lines"], seen.get("before", 0))
         bench.note(f"{tid}: re-identified in {seen.get('hop')} s after the hop and {seen.get('back')} s after the hop "
                    f"back; the host's lines: {seen['lines']}")
     assert not problems, "; ".join(problems)

@@ -76,12 +76,19 @@ def w3_led_window(cfg):
     return tuple(float(x) for x in v) if isinstance(v, list) and len(v) == 4 else W3_LED_WINDOW
 
 
+class CameraMissing(RuntimeError):
+    """No camera named like CAMERA is connected: the bench's camera is unplugged, or on another computer."""
+
+
 def blue_light(out_jpg, window, frames=8, timeout=60):
     """Grab `frames` frames about 0.12 s apart and count each one's blue-LED pixels in `window` -> the list of counts.
     The last frame is saved to `out_jpg` with the window drawn on it, the evidence a failure points at. Raises
-    RuntimeError when the camera cannot be used."""
+    CameraMissing when no such camera is connected, RuntimeError when it cannot be used."""
     r = subprocess.run([VENV_PY, "-c", _SCRIPT, SNAP_DIR, out_jpg, CAMERA, str(frames), ",".join(str(v) for v in window)],
                        capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
-        raise RuntimeError(f"bench camera: {(r.stderr or r.stdout).strip().splitlines()[-1:] or r.returncode}")
+        last = (r.stderr or r.stdout).strip().splitlines()[-1:]
+        if last and "no camera named like" in last[0]:
+            raise CameraMissing(f"bench camera: {last[0]}")
+        raise RuntimeError(f"bench camera: {last or r.returncode}")
     return json.loads(r.stdout.strip().splitlines()[-1])["blue"]

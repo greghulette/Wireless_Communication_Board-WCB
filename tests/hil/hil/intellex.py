@@ -212,10 +212,58 @@ def seed_bundles(bench, src_dir, tools="worktree"):
                    f"not the worktree (HIL_WIZARD_REF)")
     put = (lambda sub, f, dst: _copy_from_ref(ref, f"{sub}/{f}", dst)) if ref else \
         (lambda sub, f, dst: _copy(os.path.join(REPO, sub, f), dst))
+    wiz = os.path.join(wcb, lists["WCB_SUBDIR"])
     for f in list(lists["WCB_FILES"]) + list(lists["WCB_VENDOR"]):
-        put("Wizard", f, os.path.join(wcb, lists["WCB_SUBDIR"], f))
+        put("Wizard", f, os.path.join(wiz, f))
+    # Then what fetch_webui.py adds to the lists (Intellex 0.2.3+): whatever index.html loads beside itself that they
+    # lack (webfiles.page_refs - the sequence builder's seq-builder.js and .css, 2026-10-20), and the command library
+    # under cmdlib/ once the page's code loads one (webfiles.cmdlib_needed). Without them every intellex.wizard_* test
+    # failed on the page's 404s (run 20261022-145043).
+    webfiles = _intellex_webfiles(idir)
+    index = os.path.join(wiz, "index.html")
+    listed = set(lists["WCB_FILES"]) | set(lists["WCB_VENDOR"])
+    extra = []
+    if os.path.isfile(index):
+        with open(index, "rb") as fh:
+            extra = [n for n in webfiles.page_refs(fh.read()) if n not in listed]
+    for f in extra:
+        put("Wizard", f, os.path.join(wiz, f))
+    sources = []
+    for f in list(lists["WCB_FILES"]) + extra:
+        p = os.path.join(wiz, f)
+        if f.endswith((".html", ".js", ".css")) and os.path.isfile(p):
+            with open(p, "rb") as fh:
+                sources.append(fh.read())
+    if webfiles.cmdlib_needed(*sources):
+        for rel in _repo_files("Wizard/cmdlib", ref):
+            put("Wizard", rel, os.path.join(wiz, rel))
     for f in lists["WCB_IMAGES"]:
         put("Images", f, os.path.join(wcb, "Images", f))
+
+
+def _intellex_webfiles(idir):
+    """Intellex's src/webfiles.py (pure: re and pathlib), loaded from its checkout so the staging reads a page the way
+    Intellex's own fetch does."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("intellex_webfiles", os.path.join(idir, "src", "webfiles.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _repo_files(sub, ref=""):
+    """This repo's files under `sub` ('Wizard/cmdlib'), relative to its first component ('cmdlib/...'): from git ref
+    `ref` when one is set, else from the worktree."""
+    head = sub.split("/", 1)[0] + "/"
+    if ref:
+        r = subprocess.run(["git", "-C", REPO, "ls-tree", "-r", "--name-only", ref, sub], capture_output=True,
+                           text=True, timeout=60, **OWN_GROUP)
+        return [p[len(head):] for p in r.stdout.splitlines() if p.startswith(head)] if r.returncode == 0 else []
+    out = []
+    for dirpath, _, names in os.walk(os.path.join(REPO, sub)):
+        for n in names:
+            out.append(os.path.relpath(os.path.join(dirpath, n), os.path.join(REPO, head)))
+    return sorted(out)
 
 
 def _copy_from_ref(ref, path, dst):

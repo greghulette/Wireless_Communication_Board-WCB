@@ -18,10 +18,12 @@ test.describe(() => {
       ids: (window.NC_COMMAND_LIBRARY?.boards || []).map((b) => b.id),
       seedOnly: window.NC_COMMAND_LIBRARY === undefined,
     }));
-    expect(lib.seedOnly).toBe(false);                            // the vendored manifests loaded (cmdlib/droidnet, cmdlib/navicore)
+    expect(lib.seedOnly).toBe(false);                            // the vendored manifests loaded (cmdlib/droidnet, cmdlib/wcb, cmdlib/navicore)
     expect(lib.ids.length).toBeGreaterThan(10);
     expect(lib.ids).not.toContain('wcb-native');                 // NC_CMDLIB_HIDDEN
-    expect(lib.ids).not.toContain('maestro');                    // superseded by nc-maestro-wcb (NC_CMDLIB_SUPERSEDE)
+    expect(lib.ids).not.toContain('maestro');                    // superseded by wcb-maestro (NC_CMDLIB_SUPERSEDE)
+    expect(lib.ids).toContain('wcb-maestro');                    // cmdlib/wcb loaded, and replaced nc-maestro-wcb
+    expect(lib.ids).not.toContain('nc-maestro-wcb');
     expect(lib.ids[0]).toBe('wcb-sequences');                    // NC_CMDLIB_ORDER_TOP pins the WCB group first
     expect(lib.ids).toContain('navicore');
 

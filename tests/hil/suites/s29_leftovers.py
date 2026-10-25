@@ -4,16 +4,19 @@ the ;T timer's 30-minute cap and a ;T chain received over the mesh, the ?MGMT an
 banner on both boards, checked line by line against each board's own config chain.
 
 Restore if aborted: ?DEBUG,OFF / ?DEBUG,MGMT,OFF / ?STOP / ?TRACK,ON on W1's USB console; ?MAESTRO,CLEAR,M8:W11S1 if a
-chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF. Nothing here moves a servo.
+chain shows ?MAESTRO,M8:W11S1:57600; ?WDP,ON if the chain shows ?WDP,OFF; ?WCB,2 and ?reboot on W2's USB console if
+W2 answers to another number (mesh.relay_renumber_reboot), then ?WDP,FORGET,<n> on W1 and W3 and, for each Maestro
+W2 hosts, ?MAESTRO,CLEAR,M<id>:W<n>S1 on both (WDP auto-adds a proxy to the new number). Nothing here moves a servo.
 """
 import re
 import time
 
 from hil.runner import Skip, test
 from hil.wcb import WCB
-from suites.common import (Console, config_guard, fault, fault_off, marker, require_tokens, snapshot, token, usb_wcb,
-                           wire)
+from suites.common import (Console, absent_wcbs, config_guard, fault, fault_off, marker, remote_wcbs, require_tokens,
+                           snapshot, token, usb_wcb, wifi_mode_token, wire, ws_token)
 from suites.s22_maestro_kyber import _wdp_off
+from suites.s18_etm_config_wdp import _forget_everywhere
 
 
 def _has(lines, text):
@@ -688,7 +691,7 @@ def mgmt_errors(bench):
                 (f"?MGMT,FRAG,21,{sid},0,1,x", "[MGMT] Invalid parameters"),
                 (f"?MGMT,FRAG,0,{sid},0,1,x", "[MGMT] Invalid parameters"),
                 (f"?MGMT,FRAG,2,{sid},0,0,x", "[MGMT] Invalid parameters"),
-                (f"?MGMT,FRAG,2,{sid},0,17,x", "[MGMT] Invalid parameters"),
+                (f"?MGMT,FRAG,2,{sid},0,25,x", "[MGMT] Invalid parameters"),   # a relay forwards up to 24 chunks (MGMT_FWD_MAX_CHUNKS)
                 ("?MGMT,PULL,0", "[MGMT] PULL: invalid targetWCB"),
                 ("?MGMT,PULL,21", "[MGMT] PULL: invalid targetWCB"),
             ]
@@ -702,6 +705,98 @@ def mgmt_errors(bench):
                     problems.append(f"{cmd} printed {out}, expected nothing")
         finally:
             w.run("?DEBUG,MGMT,OFF")
+    assert not problems, "; ".join(problems)
+
+
+@test("mesh.relay_renumber_reboot", "A board renumbered through a relay in two steps, as the Wizard does it (planRelayPush, "
+      "docs/MGMT_RELAY.md §10): W1 relays ?WCB,<n>^?reboot to W2 (one chunk, ETM, to 2); W2 restarts as <n>, and W1's "
+      "?WDP,DUMP shows a WCB row for <n> heard since then within 45 s; a two-chunk session to <n> then runs on W2; a "
+      "two-chunk ?WCB,2^?reboot to <n> puts it back, and W1 hears it as 2 again (<n> forgotten everywhere and the Maestro "
+      "proxies the other WCBs learned for it cleared; 2 W2 reboots)",
+      needs=["wcb1", "wcb2"], links=[])
+def relay_renumber_reboot(bench):
+    """What the Wizard's two-step renumber relies on. saveWCBNumberToPreferences (WCB_Storage.cpp) sets WCB_Number at
+    once, but the radio address follows it only at the next boot (esp_wifi_set_mac in setup()), so step 1 carries the
+    restart; the Wizard sends step 2 once the relay's ?WDP,DUMP has a fresh row for the new number (_awaitBoardAs).
+    Step 2's sessions go as two chunks at least: a relay sends a one-chunk session as an ETM unicast, which needs the new
+    number in its ESP-NOW peer table (only once WDP auto-join has learned it), while two go as broadcasts the board
+    picks by the number in them (handleMgmtForward / handleMgmtPacket). Whether W1 already takes a one-chunk session to
+    <n> is noted, not judged. W2's ?WDP,STATUS line on its own USB console shows which sessions ran. W2 is put back over
+    the mesh and, failing that, over its USB; <n> is forgotten on every WCB and NaviCore, which learn it from its adverts
+    (_forget_everywhere). Every other WCB also auto-adds a remote proxy for each Maestro W2 advertises as <n>
+    (maestroAutoAddRemote, WCB_Maestro.cpp), which by design stays until cleared, so those are cleared too; config_guard
+    on every WCB proves the bench is as it was."""
+    own2 = bench.usb_wcbs().get(2)
+    if not own2:
+        raise Skip("W2 has no USB console here")
+    w, w2 = usb_wcb(bench), WCB(bench.dev(own2))
+    new = absent_wcbs(bench)[0]
+    problems, notes = [], []
+
+    def session(target, chunks, wait=2.0):
+        sid = marker()[3:7]
+        m = w2.dev.mark()
+        for i, c in enumerate(chunks):
+            w.send(f"?MGMT,FRAG,{target},{sid},{i},{len(chunks)},{c}")
+            time.sleep(0.03)
+        time.sleep(wait)
+        return m
+
+    def heard_as(num, since_t, timeout=45.0):
+        """W1's ?WDP,DUMP has a WCB row for num heard after since_t -> (seconds it took, its PEER), or None."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for x in w.run("?WDP,DUMP", timeout=8):
+                m = re.match(rf"^\[WDP:N={num},CLIENT=0,.*,AGE=(\d+),SEEN=1(?:,PEER=(\d))?", x.rstrip())
+                if m and int(m.group(1)) <= time.monotonic() - since_t:
+                    return round(time.monotonic() - since_t, 1), m.group(2)
+            time.sleep(2.0)
+        return None
+
+    ran = lambda m: _has([x.rstrip() for x in w2.dev.since(m)], "[WDP:en=")   # ?WDP,STATUS's one line
+    back = False
+    with config_guard(bench, *bench.wcb_numbers()) as before:
+        hosted = sorted({int(m.group(1)) for t in before[2] for m in [re.match(r"^\?MAESTRO,M(\d):W2S\d", t)] if m})
+        try:
+            t0 = time.monotonic()
+            m = session(2, [f"?WCB,{new}^?reboot"], wait=0.5)
+            w2.wait_boot(m, timeout=45)
+            if not _has([x.rstrip() for x in w2.dev.since(m)], f"Changed WCB Number to: {new}"):
+                back = True                          # it never left 2
+                raise AssertionError(f"W2 did not take ?WCB,{new} relayed to WCB 2")
+            heard = heard_as(new, t0)
+            if heard is None:
+                problems.append(f"W1's ?WDP,DUMP showed no fresh row for WCB {new} within 45 s of step 1: the Wizard "
+                                f"would stop there")
+            else:
+                notes.append(f"W1 heard WCB {new} {heard[0]} s after step 1 (PEER={heard[1]})")
+                if not ran(session(new, ["?WDP,", "STATUS"])):
+                    problems.append(f"a two-chunk session to {new} did not run on W2 after its restart")
+                one = ran(session(new, ["?WDP,STATUS"]))
+                notes.append(f"a one-chunk session to {new} {'ran' if one else 'did not run'}")
+            t1 = time.monotonic()
+            m = session(new, ["?WCB,", "2^?reboot"], wait=0.5)
+            try:
+                w2.wait_boot(m, timeout=45)
+            except AssertionError:
+                pass
+            back = _has([x.rstrip() for x in w2.dev.since(m)], "Changed WCB Number to: 2")
+            if not back:
+                problems.append(f"a two-chunk ?WCB,2^?reboot to {new} did not put W2 back")
+            elif heard_as(2, t1) is None:
+                problems.append("W1 did not hear W2 as WCB 2 again within 45 s")
+        finally:
+            if not back:
+                w2.run("?WCB,2")                     # over its own USB: never leave W2 on another number
+                w2.reboot()
+            _forget_everywhere(bench, new, navicore=True)
+            for mid in hosted:                       # the proxies W1 and W3 learned from W2's adverts as <n>
+                w.run(f"?MAESTRO,CLEAR,M{mid}:W{new}S1")
+                for k in remote_wcbs(bench):
+                    if k != 2:
+                        w.send(f";W{k},?MAESTRO,CLEAR,M{mid}:W{new}S1")
+                        time.sleep(0.4)
+    bench.note("mesh.relay_renumber_reboot: " + "; ".join(notes))
     assert not problems, "; ".join(problems)
 
 
@@ -840,12 +935,14 @@ def _banner_problems(banner, toks, version, live):
         exact += [f"Maestro data from the mesh goes to: "
                   + (", ".join(f"S{x}" for x in ports) if ports else "S1 (no local Maestro configured - legacy default)"),
                   "Maestro_Remote Task Created"]
-    wifi = token(toks, "?WIFI,")
+    wifi = wifi_mode_token(toks)
     mode = wifi.split(",")[1].upper() if wifi else "OFF"
     ssid = wifi.split(",")[2] if wifi and len(wifi.split(",")) > 2 else ""
     if mode == "AP":
         starts.append(f'[WIFI] SoftAP "{ssid}" up on channel {ch} — ws://' if ssid else "[WIFI] SoftAP ")
         exact.append("[WIFI] ESP-NOW shares this channel (WIFI_AP_STA).")
+    elif mode == "JOIN" and ws_token(toks) is None:     # no token, no JOIN (docs/WIFI_DESIGN.md §7)
+        exact.append("[WIFI] JOIN REFUSED: no WebSocket token is set, so WiFi stays OFF.")
     elif mode == "JOIN":
         starts.append(f'[WIFI] will join "{ssid}" on channel {ch}')
     elif _has(banner, "[WIFI] SoftAP"):

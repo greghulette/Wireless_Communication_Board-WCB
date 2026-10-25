@@ -1,0 +1,1284 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "wcb.port": { "label": "Serial Port", "values": [
+      { "code": "1", "label": "S1" }, { "code": "2", "label": "S2" }, { "code": "3", "label": "S3" },
+      { "code": "4", "label": "S4" }, { "code": "5", "label": "S5" } ] },
+    "wcb.baud": { "label": "Baud", "values": [
+      { "code": "110", "label": "110" }, { "code": "300", "label": "300" }, { "code": "600", "label": "600" },
+      { "code": "1200", "label": "1200" }, { "code": "2400", "label": "2400" }, { "code": "9600", "label": "9600" },
+      { "code": "14400", "label": "14400" }, { "code": "19200", "label": "19200" }, { "code": "38400", "label": "38400" },
+      { "code": "57600", "label": "57600" }, { "code": "115200", "label": "115200" },
+      { "code": "128000", "label": "128000" }, { "code": "256000", "label": "256000" } ] },
+    "wcb.hwVersion": { "label": "Hardware", "values": [
+      { "code": "1", "label": "v1.0" }, { "code": "21", "label": "v2.1" }, { "code": "23", "label": "v2.3" },
+      { "code": "24", "label": "v2.4" }, { "code": "31", "label": "v3.1" }, { "code": "32", "label": "v3.2" } ] },
+    "wcb.onOff": { "label": "State", "values": [ { "code": "ON", "label": "On" }, { "code": "OFF", "label": "Off" } ] }
+  },
+  "components": [
+    {
+      "id": "wcb-native",
+      "name": "WCB (native config)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "WCB 6.1.5_290119RJUN2026",
+      "commands": [
+        {
+          "id": "wcb.hw",
+          "name": "Set Hardware Version",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HW,{ver}",
+          "params": [
+            {
+              "name": "ver",
+              "enum": "wcb.hwVersion",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?HW,31"
+          ],
+          "commentLabel": "WCB hardware ver",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.num",
+          "name": "Set Board Number",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?WCB,{n}",
+          "params": [
+            {
+              "name": "n",
+              "type": "int",
+              "min": 1,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?WCB,1"
+          ],
+          "commentLabel": "WCB number",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.qty",
+          "name": "Set Board Quantity",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?WCBQ,{n}",
+          "params": [
+            {
+              "name": "n",
+              "type": "int",
+              "min": 1,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?WCBQ,3"
+          ],
+          "commentLabel": "WCB quantity",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.mac2",
+          "name": "Set MAC Byte 2",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAC,2,{hex}",
+          "params": [
+            {
+              "name": "hex",
+              "pattern": "[0-9A-Fa-f]{2}",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAC,2,AB"
+          ],
+          "commentLabel": "WCB MAC byte2",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.mac3",
+          "name": "Set MAC Byte 3",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAC,3,{hex}",
+          "params": [
+            {
+              "name": "hex",
+              "pattern": "[0-9A-Fa-f]{2}",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAC,3,CD"
+          ],
+          "commentLabel": "WCB MAC byte3",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.epass",
+          "name": "Set AP Password",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?EPASS,{password}",
+          "params": [
+            {
+              "name": "password",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?EPASS,mysecret"
+          ],
+          "commentLabel": "WCB AP password",
+          "category": "Setup"
+        },
+        {
+          "id": "wcb.baud",
+          "name": "Set Baud Rate",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?BAUD,S{port},{rate}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "rate",
+              "enum": "wcb.baud",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?BAUD,S1,57600"
+          ],
+          "commentLabel": "WCB baud",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.label",
+          "name": "Set Port Label",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?LABEL,S{port},{text}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "text",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?LABEL,S1,Marcduino"
+          ],
+          "commentLabel": "WCB port label",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.labelClear",
+          "name": "Clear Port Label",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?LABEL,CLEAR,S{port}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?LABEL,CLEAR,S1"
+          ],
+          "commentLabel": "WCB label clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.labelClearAll",
+          "name": "Clear All Port Labels",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?LABEL,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?LABEL,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB label clear all",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.bcastIn",
+          "name": "Set Broadcast In",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?BCAST,IN,S{port},{state}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?BCAST,IN,S3,OFF"
+          ],
+          "commentLabel": "WCB bcast in",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.bcastOut",
+          "name": "Set Broadcast Out",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?BCAST,OUT,S{port},{state}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?BCAST,OUT,S2,OFF"
+          ],
+          "commentLabel": "WCB bcast out",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.bcastReset",
+          "name": "Reset Broadcast Settings",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?BCAST,RESET",
+          "params": [],
+          "examples": [
+            "?BCAST,RESET"
+          ],
+          "commentLabel": "WCB bcast reset",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapSerial",
+          "name": "Map Serial Port",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,SERIAL,S{port},{dest}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "dest",
+              "pattern": "(?:S[1-5]|W[1-9]S[1-5])",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,SERIAL,S5,W3S2"
+          ],
+          "commentLabel": "WCB map serial",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapSerialRaw",
+          "name": "Map Serial Port (Raw)",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,SERIAL,S{port},R,{dest}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "dest",
+              "pattern": "(?:S[1-5]|W[1-9]S[1-5])",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,SERIAL,S5,R,W3S2"
+          ],
+          "commentLabel": "WCB map serial raw",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapSerialList",
+          "name": "List Serial Maps",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,SERIAL,LIST",
+          "params": [],
+          "examples": [
+            "?MAP,SERIAL,LIST"
+          ],
+          "commentLabel": "WCB map serial list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapSerialClear",
+          "name": "Clear Serial Map",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,SERIAL,CLEAR,S{port}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,SERIAL,CLEAR,S5"
+          ],
+          "commentLabel": "WCB map serial clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapSerialClearAll",
+          "name": "Clear All Serial Maps",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,SERIAL,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?MAP,SERIAL,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB map serial clear all",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapPwm",
+          "name": "Map PWM Port",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,PWM,S{port},{dest}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "dest",
+              "pattern": "(?:S[1-5]|W[1-9]S[1-5])",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,PWM,S1,W2S3"
+          ],
+          "commentLabel": "WCB map pwm",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapPwmOut",
+          "name": "Set PWM Output Port",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,PWM,OUT,S{port}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,PWM,OUT,S1"
+          ],
+          "commentLabel": "WCB map pwm out",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapPwmList",
+          "name": "List PWM Maps",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,PWM,LIST",
+          "params": [],
+          "examples": [
+            "?MAP,PWM,LIST"
+          ],
+          "commentLabel": "WCB map pwm list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapPwmClear",
+          "name": "Clear PWM Map",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,PWM,CLEAR,S{port}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAP,PWM,CLEAR,S1"
+          ],
+          "commentLabel": "WCB map pwm clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapPwmClearAll",
+          "name": "Clear All PWM Maps",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,PWM,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?MAP,PWM,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB map pwm clear all",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mapClearAll",
+          "name": "Clear All Maps",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAP,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?MAP,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB map clear all",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.kyberLocal",
+          "name": "Kyber Local Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?KYBER,LOCAL",
+          "params": [],
+          "examples": [
+            "?KYBER,LOCAL"
+          ],
+          "commentLabel": "WCB kyber local",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.kyberRemote",
+          "name": "Kyber Remote Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?KYBER,REMOTE",
+          "params": [],
+          "examples": [
+            "?KYBER,REMOTE"
+          ],
+          "commentLabel": "WCB kyber remote",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.kyberClear",
+          "name": "Clear Kyber Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?KYBER,CLEAR",
+          "params": [],
+          "examples": [
+            "?KYBER,CLEAR"
+          ],
+          "commentLabel": "WCB kyber clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.kyberList",
+          "name": "List Kyber Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?KYBER,LIST",
+          "params": [],
+          "examples": [
+            "?KYBER,LIST"
+          ],
+          "commentLabel": "WCB kyber list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.maestroList",
+          "name": "List Maestro Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAESTRO,LIST",
+          "params": [],
+          "examples": [
+            "?MAESTRO,LIST"
+          ],
+          "commentLabel": "WCB maestro list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.maestroClear",
+          "name": "Clear Maestro Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAESTRO,CLEAR,{id}",
+          "params": [
+            {
+              "name": "id",
+              "type": "int",
+              "min": 1,
+              "max": 9,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAESTRO,CLEAR,1"
+          ],
+          "commentLabel": "WCB maestro clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.maestroClearAll",
+          "name": "Clear All Maestro Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAESTRO,CLEAR,ALL",
+          "params": [],
+          "examples": [
+            "?MAESTRO,CLEAR,ALL"
+          ],
+          "commentLabel": "WCB maestro clear all",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.maestro",
+          "name": "Configure Maestro",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MAESTRO,{spec}",
+          "params": [
+            {
+              "name": "spec",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MAESTRO,M1:W2S1:57600"
+          ],
+          "commentLabel": "WCB maestro",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mp3Cfg",
+          "name": "Configure MP3 Trigger",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MP3,{spec}",
+          "params": [
+            {
+              "name": "spec",
+              "pattern": "S[1-5]:\\d+:V\\d+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MP3,S5:9600:V0"
+          ],
+          "commentLabel": "WCB mp3 config",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mp3List",
+          "name": "List MP3 Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MP3,LIST",
+          "params": [],
+          "examples": [
+            "?MP3,LIST"
+          ],
+          "commentLabel": "WCB mp3 list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mp3OnErrClear",
+          "name": "Clear MP3 On-Error Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MP3,ONERR,CLEAR",
+          "params": [],
+          "examples": [
+            "?MP3,ONERR,CLEAR"
+          ],
+          "commentLabel": "WCB mp3 onerr clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mp3OnErr",
+          "name": "Set MP3 On-Error Sequence",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MP3,ONERR,{key}",
+          "params": [
+            {
+              "name": "key",
+              "pattern": "[A-Za-z0-9_]+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?MP3,ONERR,errseq"
+          ],
+          "commentLabel": "WCB mp3 onerr",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.mp3Clear",
+          "name": "Clear MP3 Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?MP3,CLEAR",
+          "params": [],
+          "examples": [
+            "?MP3,CLEAR"
+          ],
+          "commentLabel": "WCB mp3 clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrPort",
+          "name": "Set HCR Port",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,PORT,S{port}:{baud}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "baud",
+              "enum": "wcb.baud",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?HCR,PORT,S1:9600"
+          ],
+          "commentLabel": "WCB hcr port",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrPoll",
+          "name": "Set HCR Poll Interval",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,POLL,{sec}",
+          "params": [
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 0,
+              "max": 3600,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?HCR,POLL,10"
+          ],
+          "commentLabel": "WCB hcr poll",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrList",
+          "name": "List HCR Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,LIST",
+          "params": [],
+          "examples": [
+            "?HCR,LIST"
+          ],
+          "commentLabel": "WCB hcr list",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrStatus",
+          "name": "HCR Status",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,STATUS",
+          "params": [],
+          "examples": [
+            "?HCR,STATUS"
+          ],
+          "commentLabel": "WCB hcr status",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrRefresh",
+          "name": "Refresh HCR",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,REFRESH",
+          "params": [],
+          "examples": [
+            "?HCR,REFRESH"
+          ],
+          "commentLabel": "WCB hcr refresh",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrClear",
+          "name": "Clear HCR Config",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,CLEAR",
+          "params": [],
+          "examples": [
+            "?HCR,CLEAR"
+          ],
+          "commentLabel": "WCB hcr clear",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.hcrGet",
+          "name": "Get HCR Field",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?HCR,GET,{field}",
+          "params": [
+            {
+              "name": "field",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?HCR,GET,WAVCOUNT"
+          ],
+          "commentLabel": "WCB hcr get",
+          "category": "Config"
+        },
+        {
+          "id": "wcb.routeSerial",
+          "name": "Route to Serial Port",
+          "safety": "config",
+          "encoder": "template",
+          "template": ";S{port},{message}",
+          "params": [
+            {
+              "name": "port",
+              "enum": "wcb.port",
+              "required": true
+            },
+            {
+              "name": "message",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";S1,#SD01"
+          ],
+          "commentLabel": "WCB route serial",
+          "category": "Routing"
+        },
+        {
+          "id": "wcb.routeWcb",
+          "name": "Route to WCB",
+          "safety": "config",
+          "encoder": "template",
+          "template": ";W{wcb},{message}",
+          "params": [
+            {
+              "name": "wcb",
+              "type": "int",
+              "min": 1,
+              "max": 9,
+              "required": true
+            },
+            {
+              "name": "message",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";W2,;A,PLAY,1"
+          ],
+          "commentLabel": "WCB route wcb",
+          "category": "Routing"
+        },
+        {
+          "id": "wcb.timer",
+          "name": "Delayed Command",
+          "safety": "config",
+          "encoder": "template",
+          "template": ";T{ms},{command}",
+          "params": [
+            {
+              "name": "ms",
+              "type": "int",
+              "min": 0,
+              "max": 600000,
+              "required": true
+            },
+            {
+              "name": "command",
+              "pattern": ".+",
+              "required": true
+            }
+          ],
+          "examples": [
+            ";T500,;A,PLAY,1"
+          ],
+          "commentLabel": "WCB timer",
+          "category": "Routing"
+        },
+        {
+          "id": "wcb.etmOn",
+          "name": "ETM On",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,ON",
+          "params": [],
+          "examples": [
+            "?ETM,ON"
+          ],
+          "commentLabel": "WCB etm on",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmOff",
+          "name": "ETM Off",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,OFF",
+          "params": [],
+          "examples": [
+            "?ETM,OFF"
+          ],
+          "commentLabel": "WCB etm off",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmTimeout",
+          "name": "Set ETM Timeout",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,TIMEOUT,{ms}",
+          "params": [
+            {
+              "name": "ms",
+              "type": "int",
+              "min": 0,
+              "max": 60000,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,TIMEOUT,500"
+          ],
+          "commentLabel": "WCB etm timeout",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmHb",
+          "name": "Set ETM Heartbeat Interval",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,HB,{sec}",
+          "params": [
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 1,
+              "max": 3600,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,HB,10"
+          ],
+          "commentLabel": "WCB etm heartbeat",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmMiss",
+          "name": "Set ETM Miss Count",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,MISS,{count}",
+          "params": [
+            {
+              "name": "count",
+              "type": "int",
+              "min": 1,
+              "max": 99,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,MISS,3"
+          ],
+          "commentLabel": "WCB etm miss",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmBoot",
+          "name": "Set ETM Boot Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,BOOT,{sec}",
+          "params": [
+            {
+              "name": "sec",
+              "type": "int",
+              "min": 0,
+              "max": 60,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,BOOT,2"
+          ],
+          "commentLabel": "WCB etm boot",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmCount",
+          "name": "Set ETM Sample Count",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,COUNT,{n}",
+          "params": [
+            {
+              "name": "n",
+              "type": "int",
+              "min": 10,
+              "max": 200,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,COUNT,20"
+          ],
+          "commentLabel": "WCB etm count",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmDelay",
+          "name": "Set ETM Delay",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,DELAY,{ms}",
+          "params": [
+            {
+              "name": "ms",
+              "type": "int",
+              "min": 0,
+              "max": 10000,
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,DELAY,100"
+          ],
+          "commentLabel": "WCB etm delay",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmChar",
+          "name": "ETM Character Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,CHAR",
+          "params": [],
+          "examples": [
+            "?ETM,CHAR"
+          ],
+          "commentLabel": "WCB etm char",
+          "category": "System"
+        },
+        {
+          "id": "wcb.etmChksum",
+          "name": "ETM Checksum",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?ETM,CHKSM,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?ETM,CHKSM,ON"
+          ],
+          "commentLabel": "WCB etm checksum",
+          "category": "System"
+        },
+        {
+          "id": "wcb.debug",
+          "name": "Debug Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DEBUG,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DEBUG,ON"
+          ],
+          "commentLabel": "WCB debug",
+          "category": "System"
+        },
+        {
+          "id": "wcb.debugEtm",
+          "name": "Debug ETM",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DEBUG,ETM,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DEBUG,ETM,ON"
+          ],
+          "commentLabel": "WCB debug etm",
+          "category": "System"
+        },
+        {
+          "id": "wcb.debugPwm",
+          "name": "Debug PWM",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DEBUG,PWM,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DEBUG,PWM,OFF"
+          ],
+          "commentLabel": "WCB debug pwm",
+          "category": "System"
+        },
+        {
+          "id": "wcb.debugMaestro",
+          "name": "Debug Maestro",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DEBUG,MAESTRO,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DEBUG,MAESTRO,ON"
+          ],
+          "commentLabel": "WCB debug maestro",
+          "category": "System"
+        },
+        {
+          "id": "wcb.debugHcr",
+          "name": "Debug HCR",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DEBUG,HCR,{state}",
+          "params": [
+            {
+              "name": "state",
+              "enum": "wcb.onOff",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DEBUG,HCR,ON"
+          ],
+          "commentLabel": "WCB debug hcr",
+          "category": "System"
+        },
+        {
+          "id": "wcb.stats",
+          "name": "Show Stats",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?STATS",
+          "params": [],
+          "examples": [
+            "?STATS"
+          ],
+          "commentLabel": "WCB stats",
+          "category": "System"
+        },
+        {
+          "id": "wcb.statsReset",
+          "name": "Reset Stats",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?STATS,RESET",
+          "params": [],
+          "examples": [
+            "?STATS,RESET"
+          ],
+          "commentLabel": "WCB stats reset",
+          "category": "System"
+        },
+        {
+          "id": "wcb.delim",
+          "name": "Set Step Delimiter",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?DELIM,{char}",
+          "params": [
+            {
+              "name": "char",
+              "pattern": ".",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?DELIM,#"
+          ],
+          "commentLabel": "WCB delimiter char",
+          "category": "System"
+        },
+        {
+          "id": "wcb.funcChar",
+          "name": "Set Function Character",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?FUNCCHAR,{char}",
+          "params": [
+            {
+              "name": "char",
+              "pattern": ".",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?FUNCCHAR,?"
+          ],
+          "commentLabel": "WCB function char",
+          "category": "System"
+        },
+        {
+          "id": "wcb.cmdChar",
+          "name": "Set Command Character",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?CMDCHAR,{char}",
+          "params": [
+            {
+              "name": "char",
+              "pattern": ".",
+              "required": true
+            }
+          ],
+          "examples": [
+            "?CMDCHAR,;"
+          ],
+          "commentLabel": "WCB command char",
+          "category": "System"
+        },
+        {
+          "id": "wcb.config",
+          "name": "Print Configuration",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?config",
+          "params": [],
+          "examples": [
+            "?config"
+          ],
+          "commentLabel": "WCB config",
+          "category": "System"
+        },
+        {
+          "id": "wcb.backup",
+          "name": "Backup Configuration",
+          "safety": "config",
+          "encoder": "template",
+          "template": "?backup",
+          "params": [],
+          "examples": [
+            "?backup"
+          ],
+          "commentLabel": "WCB backup",
+          "category": "System"
+        },
+        {
+          "id": "wcb.reboot",
+          "name": "Reboot",
+          "safety": "power",
+          "encoder": "template",
+          "template": "?reboot",
+          "params": [],
+          "examples": [
+            "?reboot"
+          ],
+          "commentLabel": "WCB reboot",
+          "category": "Power"
+        },
+        {
+          "id": "wcb.eraseNvs",
+          "name": "Erase NVS",
+          "safety": "power",
+          "encoder": "template",
+          "template": "?ERASE,NVS",
+          "params": [],
+          "examples": [
+            "?ERASE,NVS"
+          ],
+          "commentLabel": "WCB erase nvs",
+          "category": "Power"
+        }
+      ],
+      "categories": ["Setup", "Config", "Routing", "System", "Power"]
+    }
+  ]
+}

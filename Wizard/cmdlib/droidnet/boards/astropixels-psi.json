@@ -1,0 +1,105 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "generatedFrom": "reeltwo AstroPixelsPlus MarcduinoPSI.h — @<addr>P<effect> PSI sequence commands",
+  "enums": {
+    "ap.psiAddr": {
+      "label": "PSI",
+      "values": [
+        {
+          "code": "0",
+          "label": "Both"
+        },
+        {
+          "code": "1",
+          "label": "Front"
+        },
+        {
+          "code": "2",
+          "label": "Rear"
+        }
+      ]
+    },
+    "ap.psiEffect": {
+      "label": "Effect",
+      "values": [
+        {
+          "code": "1",
+          "label": "Normal"
+        },
+        {
+          "code": "2",
+          "label": "Flashing Color"
+        },
+        {
+          "code": "3",
+          "label": "Alarm"
+        },
+        {
+          "code": "4",
+          "label": "Failure"
+        },
+        {
+          "code": "5",
+          "label": "Red Alert (Scream)"
+        },
+        {
+          "code": "6",
+          "label": "Leia"
+        },
+        {
+          "code": "11",
+          "label": "March"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "astropixels-psi",
+      "name": "AstroPixelsPlus (PSI)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "AstroPixelsPlus",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": false
+        }
+      },
+      "commands": [
+        {
+          "id": "ap.psi.effect",
+          "name": "PSI Effect",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "@{addr}P{effect}",
+          "params": [
+            {
+              "name": "addr",
+              "enum": "ap.psiAddr",
+              "required": true,
+              "default": "0"
+            },
+            {
+              "name": "effect",
+              "enum": "ap.psiEffect",
+              "required": true,
+              "default": "1"
+            }
+          ],
+          "examples": [
+            "@1P1",
+            "@2P6",
+            "@0P11"
+          ],
+          "commentLabel": "AP PSI effect",
+          "category": "Lighting"
+        }
+      ],
+      "categories": [
+        "Lighting"
+      ]
+    }
+  ]
+}

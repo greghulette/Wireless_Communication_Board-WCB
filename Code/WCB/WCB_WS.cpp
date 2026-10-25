@@ -59,6 +59,21 @@ static const uint32_t WS_STUCK_MS     = 10000;
 // up and a PC on it W1 has 14-18 KB; the floor leaves the radio and the rest of the firmware about 8 KB of it. PONG and
 // CLOSE frames are a few bytes and pass it.
 static const size_t   WS_HEAP_FLOOR   = 8192;
+// THE TOKEN (WCB_WS.h; docs/WIFI_DESIGN.md §7):
+//   WS_AUTH_LOCKOUT_MS - after a failed ?AUTH every ?AUTH, on any session, fails for this long: a guess a second.
+//   WS_BYE_WAIT_MS - a session whose ?AUTH failed is sent [AUTH:FAIL] and a CLOSE, then given this long to echo the
+//     CLOSE before it is closed anyway. A close can go out as a reset - lwIP resets a socket closed with bytes from the
+//     client still unread, which a client that goes on sending leaves (wsClose) - and a reset can throw away what the
+//     client has not read yet (Windows does): waiting for the echo is what gets the [AUTH:FAIL] line read.
+static const uint32_t WS_AUTH_LOCKOUT_MS = 1000;
+static const uint32_t WS_BYE_WAIT_MS     = 1000;
+//   WS_SIGNIN_MS - a session that has not signed in this long after it opened is closed: with two slots, a client that
+//     never signs in would otherwise hold one for good. Intellex signs in at once; the HIL signed-out test keeps one
+//     open about 12 s, so not shorter.
+//   WS_REQ_OWED_MAX - at most this many [AUTH:REQUIRED] lines owed at once. One is owed per line a signed-out session
+//     sends; a client that floods lines and reads nothing was owed up to 65535 before.
+static const uint32_t WS_SIGNIN_MS       = 15000;
+static const uint16_t WS_REQ_OWED_MAX    = 2;
 
 // Serial0 is the source id the USB reader uses. Reusing it means a WebSocket
 // command takes byte-for-byte the same path as a typed one — same routing, same
@@ -80,6 +95,7 @@ static bool     sinkDropping = false;
 static uint32_t sinkDrops    = 0;     // whole lines dropped; reported from loop()
 static uint32_t cmdDrops     = 0;     // commands refused at the queue
 static uint32_t stuckCloses  = 0;     // clients closed by WS_STUCK_MS; reported from loop()
+static uint32_t signinCloses = 0;     // clients closed by WS_SIGNIN_MS; reported from loop()
 // The loop task, captured the first time wcbWsService() runs. wcbWsSinkWrite() may
 // only flush inline while running on THIS task — see the note there.
 static TaskHandle_t sinkLoopTask = nullptr;
@@ -92,6 +108,57 @@ static uint32_t passWaitMs = 0;
 // counted as a dropped line: with a stalled client it would be, and each report would cause the next, one a pass, for
 // as long as the client stayed stalled (HIL run 20261014-021636: twelve '[WS] dropped 1 output line(s)' in 50 ms).
 static bool sinkReporting = false;
+
+// ---- The token ------------------------------------------------------------
+// Written on the loop task (wcbWsSetToken), read on the httpd task (sinkAdd, wsAdmit): copied in and out whole under
+// the spinlock, never compared in place. Zero-padded to its full size (tokenMatches reads every byte).
+static char         wsToken[WCB_WIFI_TOKEN_MAX + 1] = "";
+static size_t       wsTokenLen = 0;
+static portMUX_TYPE tokenMux   = portMUX_INITIALIZER_UNLOCKED;
+// The httpd task only (wsAdmit): millis() | 1 of the latest failed ?AUTH, 0 = none yet.
+static uint32_t     authFailMs = 0;
+
+void wcbWsSetToken(const char *token) {
+  const size_t n = token ? strnlen(token, WCB_WIFI_TOKEN_MAX) : 0;
+  taskENTER_CRITICAL(&tokenMux);
+  memset(wsToken, 0, sizeof(wsToken));
+  if (n) memcpy(wsToken, token, n);
+  wsTokenLen = n;
+  taskEXIT_CRITICAL(&tokenMux);
+}
+
+static bool wsTokenSet() {
+  taskENTER_CRITICAL(&tokenMux);
+  const bool set = wsTokenLen != 0;
+  taskEXIT_CRITICAL(&tokenMux);
+  return set;
+}
+
+// Constant time in what was sent: all WCB_WIFI_TOKEN_MAX bytes are compared whatever matched before, so how long a
+// wrong token takes says nothing about how much of it was right. Only the lengths, which are no secret, branch.
+static bool tokenMatches(const char *tok, size_t tokLen, const char *cand, size_t candLen) {
+  uint8_t diff = (candLen != tokLen) ? 1 : 0;
+  for (size_t i = 0; i < WCB_WIFI_TOKEN_MAX; i++)
+    diff |= (uint8_t)((uint8_t)tok[i] ^ (uint8_t)(i < candLen ? cand[i] : 0));
+  return diff == 0;
+}
+
+// What the session layer owes a client, in the order it goes: every [AUTH:REQUIRED] first, then the verdict.
+enum : uint8_t { SAY_NONE = 0, SAY_REQ, SAY_OK, SAY_FAIL, SAY_BYE };
+
+// The frame for `say`, whole, header included (at most 2 + 17 bytes). The same bytes every call, so a frame part-sent
+// on one pass carries on from saySent on the next.
+static size_t sayFrame(uint8_t say, uint8_t *out) {
+  if (say == SAY_BYE) {                    // CLOSE, status 1008 "policy violation" (RFC 6455 7.4.1)
+    out[0] = 0x88; out[1] = 2; out[2] = 0x03; out[3] = 0xF0;
+    return 4;
+  }
+  const char *line = say == SAY_OK ? "[AUTH:OK]\r\n" : say == SAY_FAIL ? "[AUTH:FAIL]\r\n" : "[AUTH:REQUIRED]\r\n";
+  const size_t n = strlen(line);
+  out[0] = 0x81; out[1] = (uint8_t)n;      // FIN + TEXT, each line under 126 bytes
+  memcpy(out + 2, line, n);
+  return 2 + n;
+}
 
 // ---- The clients and what each still owes --------------------------------
 // Every client is sent the same frame: frameHdr, then sinkBuf[0..frameLen). Each keeps its own place in it, because
@@ -111,6 +178,14 @@ struct WsTx {
   size_t   ctlLen   = 0;
   size_t   ctlSent  = 0;
   bool     closing  = false;   // its close could not be queued yet: retried every pass (txClose), nothing sent to it
+  // The session layer (THE TOKEN, WCB_WS.h). Its frames go to this client alone, between data frames like a PONG.
+  bool     authed   = false;   // signed in: in the tee, and what it sends runs
+  bool     failed   = false;   // its ?AUTH failed: nothing it sends runs; [AUTH:FAIL], a CLOSE, then closed
+  uint16_t reqOwed  = 0;       // [AUTH:REQUIRED] lines owed: one at the open, one per line dropped
+  uint8_t  verdict  = SAY_NONE;  // owed after them: SAY_OK, SAY_FAIL, or SAY_BYE (the CLOSE after a FAIL)
+  size_t   saySent  = 0;       // of the session-layer frame going out now
+  uint32_t byeAt    = 0;       // millis() | 1 once its CLOSE went: closed WS_BYE_WAIT_MS later unless it echoes first
+  uint32_t openedMs = 0;       // millis() when the session took its slot (WS_SIGNIN_MS)
 };
 static WsTx     tx[WS_MAX_CLIENTS];
 static uint8_t  frameHdr[4];
@@ -123,14 +198,21 @@ static SemaphoreHandle_t txLock = nullptr;
 static void txReset(WsTx &c, int fd) {
   c.fd = fd; c.inFrame = false; c.hdrSent = c.paySent = 0; c.ctlLen = c.ctlSent = 0; c.lastTook = millis();
   c.closing = false;
+  c.authed = c.failed = false; c.reqOwed = 0; c.verdict = SAY_NONE; c.saySent = 0; c.byeAt = 0;
+  c.openedMs = millis();
 }
 
 static bool txLive(const WsTx &c) { return c.fd >= 0 && !c.closing; }
 
-static bool txOwes(const WsTx &c) { return txLive(c) && (c.inFrame || c.ctlLen > c.ctlSent); }
+// Signed in, so sent the console. A client that is not gets only the session layer's own frames (and PONGs).
+static bool txInTee(const WsTx &c) { return txLive(c) && c.authed; }
+
+static uint8_t txSayNext(const WsTx &c) { return c.reqOwed ? (uint8_t)SAY_REQ : c.verdict; }
+
+static bool txOwes(const WsTx &c) { return txLive(c) && (c.inFrame || c.ctlLen > c.ctlSent || txSayNext(c)); }
 
 static bool txMidFrame(const WsTx &c) {
-  return (c.inFrame && (c.hdrSent || c.paySent)) || c.ctlSent;
+  return (c.inFrame && (c.hdrSent || c.paySent)) || c.ctlSent || c.saySent;
 }
 
 static WsTx *txFor(int fd) {
@@ -139,7 +221,7 @@ static WsTx *txFor(int fd) {
 }
 
 bool wcbWsSinkLive() {
-  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (txLive(tx[i])) return true;
+  for (int i = 0; i < WS_MAX_CLIENTS; i++) if (txInTee(tx[i])) return true;
   return false;
 }
 
@@ -157,26 +239,38 @@ int wcbWsClientCount() {
   return n;
 }
 
+// The first client in the tee after a quiet period starts from a clean sheet (txLock held). sinkDropping is set when
+// the sink overflows mid-line; without this reset it survives the last client leaving and eats the first whole line
+// the NEXT client is sent.
+static void sinkFreshStart() {
+  taskENTER_CRITICAL(&sinkMux);
+  sinkLen = 0; sinkDropping = false;
+  taskEXIT_CRITICAL(&sinkMux);
+  frameLen = 0;
+}
+
 // httpd task (handshake, traffic).
 static void sinkAdd(int fd) {
   if (!txLock) return;
   xSemaphoreTake(txLock, portMAX_DELAY);
   if (!txFor(fd)) {
-    // First client after a quiet period: start from a clean sheet. sinkDropping is
-    // set when the sink overflows mid-line; without this reset it survives the last
-    // client leaving and eats the first whole line the NEXT client is sent.
-    if (!wcbWsSinkLive()) {
-      taskENTER_CRITICAL(&sinkMux);
-      sinkLen = 0; sinkDropping = false;
-      taskEXIT_CRITICAL(&sinkMux);
-      frameLen = 0;
-    }
+    if (!wcbWsSinkLive()) sinkFreshStart();
     WsTx *slot = txFor(-1);
-    if (!slot) {                       // full: evict the oldest rather than refuse the newcomer
-      slot = &tx[0];
+    if (!slot) {                       // full: evict rather than refuse the newcomer - a session that is closing or
+      slot = &tx[0];                   // failed first, then one not signed in, and only then the oldest signed-in one
+      for (int pass = 0; pass < 2; pass++) {
+        bool found = false;
+        for (int i = 0; i < WS_MAX_CLIENTS && !found; i++)
+          if (pass == 0 ? (tx[i].closing || tx[i].failed) : !tx[i].authed) { slot = &tx[i]; found = true; }
+        if (found) break;
+      }
       if (wsServer) httpd_sess_trigger_close(wsServer, slot->fd);   // its stream stops mid-frame: close it
     }
     txReset(*slot, fd);                // joins at the next frame, never part-way into this one
+    // The token as it is now decides this session (THE TOKEN, WCB_WS.h): with one set it starts outside the tee,
+    // owed its [AUTH:REQUIRED]; a token set later never reaches back into a session already open.
+    slot->authed  = !wsTokenSet();
+    slot->reqOwed = slot->authed ? 0 : 1;
   }
   xSemaphoreGive(txLock);
 }
@@ -202,22 +296,6 @@ static void queuePong(int fd, const uint8_t *payload, size_t len) {
     c->ctl[1] = (uint8_t)len;
     if (len) memcpy(c->ctl + 2, payload, len);
     c->ctlLen = 2 + len;
-  }
-  xSemaphoreGive(txLock);
-}
-
-// httpd task: the client sent CLOSE. Echo an empty CLOSE if no frame is part-way out (best effort, never waits), then
-// leave the tee; httpd closes the session when the handler returns.
-static void closeEcho(int fd) {
-  if (!txLock) return;
-  xSemaphoreTake(txLock, portMAX_DELAY);
-  WsTx *c = txFor(fd);
-  if (c) {
-    if (!c->closing && !txMidFrame(*c)) {
-      static const uint8_t bye[2] = { 0x88, 0x00 };
-      send(fd, bye, sizeof(bye), MSG_DONTWAIT);
-    }
-    txReset(*c, -1);
   }
   xSemaphoreGive(txLock);
 }
@@ -255,6 +333,49 @@ static bool txSome(WsTx &c, const uint8_t *buf, size_t len, size_t &sent, uint32
     return e == EAGAIN || e == EWOULDBLOCK || e == ENOMEM || e == ENOBUFS || e == EINTR;
   }
   return true;
+}
+
+// httpd task, txLock held: finish whatever frame is part-way out to this client - a console frame, a PONG or a
+// session-layer line; at most one is, since sinkPump starts the next only at a frame boundary - with what the socket
+// takes now, never waiting. True when nothing is left part-way, so a control frame may follow. sinkBuf[0..frameLen)
+// cannot move meanwhile: only sinkPump compacts it, and it does so holding txLock.
+static bool txFinishPartial(WsTx &c, uint32_t now) {
+  bool alive = true;
+  if (c.ctlSent) {
+    alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now, false);
+    if (alive && c.ctlSent == c.ctlLen) c.ctlLen = c.ctlSent = 0;
+  } else if (c.saySent) {
+    uint8_t f[2 + 17];
+    const size_t n = sayFrame(txSayNext(c), f);
+    alive = txSome(c, f, n, c.saySent, now, false);
+    if (alive && c.saySent == n) c.saySent = 0;   // what it owed next does not matter: the session is ending
+  } else if (c.inFrame && (c.hdrSent || c.paySent)) {
+    alive = txSome(c, frameHdr, frameHdrLen, c.hdrSent, now);
+    if (alive && c.hdrSent == frameHdrLen) alive = txSome(c, (const uint8_t *)sinkBuf, frameLen, c.paySent, now);
+    if (alive && c.hdrSent == frameHdrLen && c.paySent == frameLen) c.inFrame = false;
+  }
+  return alive && !txMidFrame(c);
+}
+
+// httpd task: the client sent CLOSE, carrying `code` (its status code, 2 bytes, or none). Echo a CLOSE with the same
+// code (RFC 6455 5.5.1: an endpoint that receives a CLOSE sends one back, typically echoing the status code) unless
+// this end has sent one already - a failed sign-in's, which this CLOSE answers. A frame part-way out is finished first
+// if the socket takes the rest now; one it does not take leaves no room for the echo (a control frame cannot go inside
+// a frame) and the session closes without it. Never waits. Then the client leaves the tee; httpd closes the session
+// when the handler returns, with a FIN behind the echo - provided nothing the client sent is left unread (wsHandler).
+static void closeEcho(int fd, const uint8_t *code, size_t codeLen) {
+  if (!txLock) return;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c) {
+    if (!c->closing && !c->byeAt && txFinishPartial(*c, millis())) {
+      uint8_t bye[4] = { 0x88, 0x00, 0, 0 };
+      if (code && codeLen == 2) { bye[1] = 2; bye[2] = code[0]; bye[3] = code[1]; }
+      send(fd, bye, 2 + bye[1], MSG_DONTWAIT);
+    }
+    txReset(*c, -1);
+  }
+  xSemaphoreGive(txLock);
 }
 
 // Ask httpd to close the session; free the slot once it has the request or the session is gone. The request is a
@@ -318,7 +439,7 @@ static bool sinkPump() {
       else { frameHdr[1] = 126; frameHdr[2] = (uint8_t)(n >> 8); frameHdr[3] = (uint8_t)n; frameHdrLen = 4; }
       for (int i = 0; i < WS_MAX_CLIENTS; i++) {
         WsTx &c = tx[i];
-        if (!txLive(c)) continue;
+        if (!txInTee(c)) continue;         // not signed in: no console (THE TOKEN, WCB_WS.h)
         if (!txOwes(c)) c.lastTook = now;  // its no-progress clock starts when it begins to owe
         c.inFrame = true; c.hdrSent = 0; c.paySent = 0;
       }
@@ -329,20 +450,41 @@ static bool sinkPump() {
       if (c.fd < 0) continue;
       if (c.closing) { txTryClose(c); continue; }
       bool alive = true;
-      if (c.ctlLen && !(c.inFrame && (c.hdrSent || c.paySent))) {     // a PONG, between frames only
+      const bool dataMid = c.inFrame && (c.hdrSent || c.paySent);
+      if (c.ctlLen && !dataMid && !c.saySent) {                      // a PONG, between frames only
         alive = txSome(c, c.ctl, c.ctlLen, c.ctlSent, now, false);
         if (alive && c.ctlSent == c.ctlLen) c.ctlLen = c.ctlSent = 0;
       }
-      if (alive && c.inFrame && !c.ctlLen) {
+      // The session layer's frames, between frames too, after a PONG: a client that has just signed in is in no frame
+      // yet, so its [AUTH:OK] goes ahead of the first console frame it joins. Held at the heap floor like console
+      // output, all but the CLOSE (a few bytes that end a session, like a PONG).
+      while (alive && !c.ctlLen && !dataMid && txSayNext(c)) {
+        const uint8_t say = txSayNext(c);
+        uint8_t f[2 + 17];
+        const size_t n = sayFrame(say, f);
+        alive = txSome(c, f, n, c.saySent, now, say != SAY_BYE);
+        if (!alive || c.saySent < n) break;                          // the rest on a later pass
+        c.saySent = 0;
+        if (c.reqOwed) c.reqOwed--;
+        else if (say == SAY_FAIL) c.verdict = SAY_BYE;
+        else { c.verdict = SAY_NONE; if (say == SAY_BYE) c.byeAt = now | 1; }
+      }
+      // The console frame. One already part-way out carries on whatever is queued behind it, a PONG or a line from
+      // the session layer: those go at its end. (Holding the frame for a PONG that waits for the frame's end held
+      // both until WS_STUCK_MS closed the client.)
+      if (alive && c.inFrame && (dataMid || (!c.ctlLen && !txSayNext(c)))) {
         alive = txSome(c, frameHdr, frameHdrLen, c.hdrSent, now);
         if (alive && c.hdrSent == frameHdrLen) alive = txSome(c, (const uint8_t *)sinkBuf, frameLen, c.paySent, now);
         if (alive && c.hdrSent == frameHdrLen && c.paySent == frameLen) c.inFrame = false;
       }
       // Close the session, not just leave the tee: a session left open holds its unsent output in lwIP (up to a
       // whole TCP send buffer, ~5.7 KB) for as long as TCP retries a peer that has gone, and two or three such
-      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113). wsClose resets it.
+      // sessions emptied W1's AP-mode heap until no new client could connect (HIL tracker #113). Closed, what the
+      // client never ACKed still waits in lwIP until TCP gives up on it (wsClose: there is no forced reset).
       if (!alive) txClose(c);
+      else if (c.byeAt && now - c.byeAt >= WS_BYE_WAIT_MS) txClose(c);   // a failed sign-in that did not echo
       else if (txOwes(c) && now - c.lastTook >= WS_STUCK_MS) { stuckCloses++; txClose(c); }
+      else if (!c.authed && !c.failed && now - c.openedMs >= WS_SIGNIN_MS) { signinCloses++; txClose(c); }
     }
 
     // Free what every client still in the frame has sent: the slowest one sets the pace. When none is left in it
@@ -373,12 +515,12 @@ static bool sinkPump() {
   return live;
 }
 
-// A client the tee may wait for: it owes output and took some within WS_FRESH_MS. Read without the lock - a
-// stale answer costs one wait of at most a tick or one line dropped early.
+// A client the tee may wait for: in the tee, it owes output and took some within WS_FRESH_MS. Read without the lock -
+// a stale answer costs one wait of at most a tick or one line dropped early.
 static bool sinkClientFresh() {
   const uint32_t now = millis();
   for (int i = 0; i < WS_MAX_CLIENTS; i++)
-    if (txOwes(tx[i]) && now - tx[i].lastTook < WS_FRESH_MS) return true;
+    if (txInTee(tx[i]) && txOwes(tx[i]) && now - tx[i].lastTook < WS_FRESH_MS) return true;
   return false;
 }
 
@@ -472,15 +614,73 @@ static void accRelease(int fd) {
     if (accs[i].fd == fd) { accs[i].fd = -1; accs[i].len = 0; accs[i].overrun = false; }
 }
 
+// ---- The session layer (THE TOKEN, WCB_WS.h) -------------------------------
+// httpd task, for every whole line: true when it may run. A ?AUTH line is answered here and never runs; so is a line
+// from a session that has not signed in, which is dropped. No print, no allocation, no send: the answers are owed in
+// the client's slot and sinkPump sends them from loop(). Matched on the line as the drain will see it, trimmed, so
+// " ?AUTH,x" is the same line; '?' is the protocol's, whatever ?FUNCCHAR is set to.
+static bool isAuthLine(const char *s, size_t n) {
+  if (n < 5 || s[0] != '?') return false;
+  for (int i = 0; i < 4; i++) if (toupper((unsigned char)s[1 + i]) != "AUTH"[i]) return false;
+  return n == 5 || s[5] == ',';
+}
+
+static bool wsAdmit(int fd, const char *line, size_t len) {
+  while (len && isspace((unsigned char)*line)) { line++; len--; }
+  while (len && isspace((unsigned char)line[len - 1])) len--;
+  if (!len || !txLock) return false;       // the drain drops an empty line too
+  const bool  auth    = isAuthLine(line, len);
+  const char *cand    = (auth && len > 6) ? line + 6 : "";
+  const size_t candLen = (auth && len > 6) ? len - 6 : 0;
+  char   tok[WCB_WIFI_TOKEN_MAX + 1];
+  size_t tokLen;
+  taskENTER_CRITICAL(&tokenMux);
+  memcpy(tok, wsToken, sizeof(tok));
+  tokLen = wsTokenLen;
+  taskEXIT_CRITICAL(&tokenMux);
+
+  bool run = false;
+  xSemaphoreTake(txLock, portMAX_DELAY);
+  WsTx *c = txFor(fd);
+  if (c && txLive(*c) && !c->failed) {     // a failed session's lines are dropped unanswered
+    const uint32_t now  = millis();
+    const bool     owed = txOwes(*c);
+    if (!auth) {
+      if (c->authed) run = true;
+      else if (c->reqOwed < WS_REQ_OWED_MAX) c->reqOwed++;
+    } else if (c->authed || !tokLen) {     // signed in already, or nothing to sign in to: OK, compared with nothing
+      if (!c->authed && !wcbWsSinkLive()) sinkFreshStart();
+      c->authed  = true;
+      c->verdict = SAY_OK;
+    } else {
+      const bool match = tokenMatches(tok, tokLen, cand, candLen);
+      if (match && !(authFailMs && now - authFailMs < WS_AUTH_LOCKOUT_MS)) {
+        if (!wcbWsSinkLive()) sinkFreshStart();
+        c->authed  = true;                 // joins the tee at the next frame, after its [AUTH:OK]
+        c->verdict = SAY_OK;
+      } else {
+        authFailMs = now | 1;              // a failure inside the lockout starts it again
+        c->failed  = true;
+        c->verdict = SAY_FAIL;
+      }
+    }
+    if (!owed && txOwes(*c)) c->lastTook = now;   // its no-progress clock starts when it begins to owe
+  }
+  xSemaphoreGive(txLock);
+  return run;
+}
+
 static void accFeed(WsAcc *a, int fd, char c) {
   if (c == '\n' || c == '\r') {
     if (a->overrun) { a->overrun = false; a->len = 0; return; }   // drop the WHOLE line
     if (!a->len) return;
     a->buf[a->len] = '\0';
+    const size_t n = a->len;
+    a->len = 0;
+    if (!wsAdmit(fd, a->buf, n)) return;
     WsCmd cmd;
     cmd.fd = fd;
-    memcpy(cmd.line, a->buf, a->len + 1);
-    a->len = 0;
+    memcpy(cmd.line, a->buf, n + 1);
     if (!wsQueue) return;
     if (xQueueSend(wsQueue, &cmd, pdMS_TO_TICKS(WS_ENQUEUE_WAIT_MS)) != pdTRUE) cmdDrops++;
     return;
@@ -514,8 +714,24 @@ static esp_err_t wsHandler(httpd_req_t *req) {
   esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);   // length probe
   if (err != ESP_OK) return err;
   // Control frames come here too (handle_ws_control_frames, wcbWsBegin): httpd no longer answers them itself.
-  if (frame.type == HTTPD_WS_TYPE_CLOSE) { accRelease(fd); closeEcho(fd); return ESP_OK; }   // httpd then closes it
-  if (frame.type == HTTPD_WS_TYPE_PING && frame.len > 125) return ESP_FAIL;                 // RFC 6455 5.5
+  // RFC 6455 5.5: a control frame carries at most 125 bytes. Failed, httpd closes the session (wsClose frees the slot).
+  if ((frame.type == HTTPD_WS_TYPE_PING || frame.type == HTTPD_WS_TYPE_CLOSE) && frame.len > 125) return ESP_FAIL;
+  // A CLOSE: its payload is read before the echo. httpd closes the session once this returns, and lwIP closes a socket
+  // holding received bytes nobody read with a RESET instead of a FIN (tcp_close_shutdown: "not all data received by
+  // application"), sent right behind the echo - or in its place, while the echo is still queued. A Windows client
+  // loses what it has not read yet when a reset arrives, so it saw a dropped connection and no echo (HIL
+  // ws.ping_pong_and_close, run 20261022-072416); the Mac read the echo first. The unread bytes were the status code,
+  // which nearly every client sends. With them read, the close is a FIN behind the echo.
+  if (frame.type == HTTPD_WS_TYPE_CLOSE) {
+    size_t got = 0;
+    if (frame.len) {
+      frame.payload = rxBuf;
+      if (httpd_ws_recv_frame(req, &frame, sizeof(rxBuf)) == ESP_OK) got = frame.len;
+    }
+    accRelease(fd);
+    closeEcho(fd, rxBuf, got >= 2 ? 2 : 0);   // the status code back; the reason text is not echoed
+    return ESP_OK;                            // httpd then closes the session (wsClose)
+  }
 
   // OVERSIZED: we cannot read it, and we must not leave it unread. The call above
   // is a LENGTH PROBE — esp_http_server has parsed the header but the payload is
@@ -552,14 +768,14 @@ static esp_err_t wsHandler(httpd_req_t *req) {
 // departed client holds both until some later send happens to fail on it, and
 // the unowned tail of a half-accumulated line eats the next client's first command.
 //
-// Closed with a reset (SO_LINGER 0), not a FIN: a graceful close keeps the socket's unsent data queued while TCP
-// retries a peer that may be gone - a phone out of range, a PC moved to another network - and that is the heap the
-// next client needs (#113). A client that is still there sees its connection reset, which it treats as closed.
+// close() is a FIN behind whatever the client has not ACKed yet, which lwIP keeps sending until the client ACKs it or
+// TCP gives up on a client that has gone - or a RESET at once when the client sent bytes nobody read (wsHandler's
+// CLOSE). There is no forced reset: this file set SO_LINGER 0 here from 2026-10-07 to reset every close (#113), but the
+// core's lwIP is built without SO_LINGER (CONFIG_LWIP_SO_LINGER unset, LWIP_SO_LINGER 0 in lwipopts.h), so the option
+// was refused and every close was already this one. A reset would also throw away the CLOSE echo a client has not read.
 static void wsClose(httpd_handle_t /*hd*/, int sockfd) {
   accRelease(sockfd);
   sinkDrop(sockfd);
-  struct linger lg = { 1, 0 };
-  setsockopt(sockfd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
   close(sockfd);
 }
 
@@ -693,7 +909,7 @@ void wcbWsService() {
   // print would block the wrong task. Summed, at most once a second: while a client
   // is stalled nearly every pass that prints drops something for it.
   static uint32_t lastReportMs = 0;
-  if ((sinkDrops || cmdDrops || stuckCloses) && millis() - lastReportMs >= 1000) {
+  if ((sinkDrops || cmdDrops || stuckCloses || signinCloses) && millis() - lastReportMs >= 1000) {
     lastReportMs = millis();
     sinkReporting = true;
     if (sinkDrops) { uint32_t n = sinkDrops; sinkDrops = 0;
@@ -703,6 +919,9 @@ void wcbWsService() {
     if (stuckCloses) { uint32_t n = stuckCloses; stuckCloses = 0;
                        Serial.printf("[WS] closed %u client(s) that took no output for %u s\n", (unsigned)n,
                                      (unsigned)(WS_STUCK_MS / 1000)); }
+    if (signinCloses) { uint32_t n = signinCloses; signinCloses = 0;
+                        Serial.printf("[WS] closed %u client(s) that did not sign in within %u s\n", (unsigned)n,
+                                      (unsigned)(WS_SIGNIN_MS / 1000)); }
     sinkReporting = false;
   }
 

@@ -3,6 +3,7 @@
 #include "esp_heap_caps.h"   // byte-addressable heap for the out-of-memory message
 #include "WCB_Storage.h"
 #include "WCB_SeqStore.h"  // stored sequences: a file of their own, not NVS
+#include "WCB_ChanSyncWire.h"  // chansync::MAX_CHANNEL_CAP: the mesh channel's hard cap (13)
 #include <sdkconfig.h>   // CONFIG_IDF_TARGET_ESP32S3 (hwVersionFitsChip)
 #include "driver/gpio.h"                    // GPIO_IS_VALID_OUTPUT_GPIO (ledPinRefusal)
 #include "soc/uart_pins.h"                  // U0TXD_GPIO_NUM / U0RXD_GPIO_NUM: the USB console's UART
@@ -582,12 +583,13 @@ void saveWCBQuantityPreferences(int quantity) {
 
 // Load the ESP-NOW mesh channel from preferences (default WCB_MESH_CHANNEL_DEFAULT).
 // A stale or out-of-range value falls back to the default so a corrupt NVS blob
-// can't strand the board off-channel.
+// can't strand the board off-channel. 12-13 load as saved: whether the region allows
+// them is known only once WiFi is up, and chanSyncApplyRegionAtBoot checks it there.
 void loadMeshChannelFromPreferences() {
     preferences.begin("wcb_config", true);
     meshChannel = preferences.getUChar("mesh_channel", WCB_MESH_CHANNEL_DEFAULT);
     preferences.end();
-    if (meshChannel < 1 || meshChannel > 11) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
+    if (meshChannel < 1 || meshChannel > chansync::MAX_CHANNEL_CAP) meshChannel = WCB_MESH_CHANNEL_DEFAULT;
 }
 
 // Save the ESP-NOW mesh channel to preferences. Applied on the NEXT REBOOT, NOT
@@ -596,10 +598,12 @@ void loadMeshChannelFromPreferences() {
 // unicast), because the sender stays on the old channel and can no longer reach
 // this board to confirm or retry. Deferring keeps the whole fleet reachable on the
 // old channel until a coordinated reboot moves everyone at once. The boot path
-// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it.
+// (loadMeshChannelFromPreferences + esp_wifi_set_channel) applies it. The region's
+// top channel is the caller's to check (?WCBCH: chanSyncWcbchLimit); this is the
+// hard cap. Channel sync moves the RUNNING mesh, and saves through its own write.
 void saveMeshChannelToPreferences(uint8_t channel) {
-    if (channel < 1 || channel > 11) {
-        Serial.printf("Invalid mesh channel %d. Valid range: 1-11.\n", channel);
+    if (channel < 1 || channel > chansync::MAX_CHANNEL_CAP) {
+        Serial.printf("Invalid mesh channel %d. Valid range: 1-%u.\n", channel, (unsigned)chansync::MAX_CHANNEL_CAP);
         return;
     }
     preferences.begin("wcb_config", false);
@@ -822,26 +826,28 @@ void recallCommandSlot(const String &key, int sourceID) {
 
 // Save a stored sequence ("<key>,<value>", from ?SEQ,SAVE / ?C). True when it was stored.
 bool saveStoredCommandsToPreferences(const String &message) {
-  int commaIndex = message.indexOf(',');
-  if (commaIndex == -1 || commaIndex == 0) {
+  return saveSequenceChars(message.c_str(), message.length());
+}
+
+// "<key>,<value>" as characters, the value read in place: only the key (at most 15 characters, plus any spaces around
+// it) is copied. Through Strings a long value was copied again here, after the dispatcher's own copies, and a classic
+// board hosting its access point (~19 KB free) refused anything past ~2,400 characters, under the store's 3,999
+// (handleSingleCommand's ?SEQ,SAVE path; run 20261024-053854: "largest free block 692 bytes" for 2,784).
+// Whitespace around the key and the value is dropped, as String::trim did.
+bool saveSequenceChars(const char *msg, size_t len) {
+  const char *comma = msg ? (const char *)memchr(msg, ',', len) : nullptr;
+  if (!comma || comma == msg) {
     Serial.println("Invalid format. Use ?Ckey,value");
     return false;
   }
+  const char *k0 = msg, *k1 = comma, *v0 = comma + 1, *v1 = msg + len;
+  while (k0 < k1 && isspace((unsigned char)*k0)) k0++;
+  while (k1 > k0 && isspace((unsigned char)k1[-1])) k1--;
+  while (v0 < v1 && isspace((unsigned char)*v0)) v0++;
+  while (v1 > v0 && isspace((unsigned char)v1[-1])) v1--;
+  const size_t klen = (size_t)(k1 - k0), vlen = (size_t)(v1 - v0);
 
-  String key = message.substring(0, commaIndex);
-  String value = message.substring(commaIndex + 1);
-  // An Arduino String whose allocation fails comes back EMPTY, not as an error - so a long value
-  // on a busy heap fell through to 'Key or value cannot be empty', naming the wrong problem.
-  if (value.length() == 0 && message.length() > (unsigned)commaIndex + 1) {
-    Serial.printf("Out of memory: could not copy a %u-character value (largest free block %u bytes). Not stored.\n",
-                  (unsigned)(message.length() - commaIndex - 1),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));   // not ESP.getMaxAllocHeap(): see ?STATS
-    return false;
-  }
-  key.trim();
-  value.trim();
-
-  if (key.length() == 0 || value.length() == 0) {
+  if (klen == 0 || vlen == 0) {
     Serial.println("Key or value cannot be empty.");
     return false;
   }
@@ -850,28 +856,36 @@ bool saveStoredCommandsToPreferences(const String &message) {
   // either store (WCB_SeqStore.h). A longer one once made the NVS write fail while the name was still listed - so the
   // sequence was reported as "Stored:" and advertised to peers, but recalling it found nothing. Both shipping clients
   // already enforce 15 (the Wizard's maxlength and WCB_Client's wcbSeqKeyValid); this closes the hand-typed path.
-  if (key.length() > SEQ_KEY_MAX_LEN) {
-    Serial.printf("Sequence key '%s' is %u characters — the limit is 15. Not stored.\n",
-                  key.c_str(), (unsigned)key.length());
+  if (klen > SEQ_KEY_MAX_LEN) {
+    Serial.printf("Sequence key '%.*s' is %u characters — the limit is 15. Not stored.\n", (int)klen, k0,
+                  (unsigned)klen);
     return false;
   }
+  const String key(k0, (unsigned)klen);
   if (seqKeyReserved(key)) {
     Serial.printf("'%s' is a reserved name (the sequence store keeps its own records under it). Not stored.\n",
                   key.c_str());
     return false;
   }
 
-  const int rc = seqStorePut(key, value);
+  const int rc = seqStorePut(key, v0, vlen);
   if (rc != SEQ_OK) {
     if (rc == SEQ_E_TOOBIG)
       Serial.printf("Failed to store sequence '%s' (it is %u characters - the limit is %u). Not stored.\n",
-                    key.c_str(), (unsigned)value.length(), (unsigned)SEQ_VALUE_MAX);
+                    key.c_str(), (unsigned)vlen, (unsigned)SEQ_VALUE_MAX);
     else
       Serial.printf("Failed to store sequence '%s' (%s). Not stored.\n", key.c_str(), seqStoreError(rc));
     return false;
   }
   invalidateSequenceInventoryHash();   // WDP re-advertises the new fingerprint within ~500 ms
-  Serial.printf("Stored: Key='%s', Value='%s'\n", key.c_str(), value.c_str());
+  // A long value goes out in three writes rather than through printf, which would allocate a buffer its size.
+  if (vlen < 200) {
+    Serial.printf("Stored: Key='%s', Value='%.*s'\n", key.c_str(), (int)vlen, v0);
+  } else {
+    Serial.printf("Stored: Key='%s', Value='", key.c_str());
+    Serial.write((const uint8_t *)v0, vlen);
+    Serial.println("'");
+  }
   return true;
 }
 
@@ -931,12 +945,12 @@ static uint32_t seqInvHashFailMs = 0;   // when the store last could not be hash
 
 void invalidateSequenceInventoryHash() { seqInvHashValid = false; }
 
-uint32_t sequenceInventoryHash() {
+uint32_t sequenceInventoryHash(bool now) {
     if (seqInvHashValid) return seqInvHashCache;
     // A store that cannot be read right now (it will not mount below SEQ_MIN_FREE_HEAP) keeps the last fingerprint and
     // is tried again every few seconds - not at the WDP dirty-check's 2 Hz, and never cached wrong: a value that
     // could not be read used to be hashed as empty and advertised until the next save.
-    if (seqInvHashFailMs && millis() - seqInvHashFailMs < 5000) return seqInvHashCache;
+    if (!now && seqInvHashFailMs && millis() - seqInvHashFailMs < 5000) return seqInvHashCache;
     uint32_t h;
     if (seqStoreHash(h) != SEQ_OK) {
         seqInvHashFailMs = millis() | 1;
@@ -948,44 +962,127 @@ uint32_t sequenceInventoryHash() {
     return h;
 }
 
-String buildSequenceNamesString() {
-    String keyList;
-    if (seqStoreKeyList(keyList) != SEQ_OK) return String();
+// The names reply for one request (docs/SEQUENCE_INVENTORY.md §3; the split and the header are WCB_SeqNamesWire.h).
+// One walk of the keys, no copy of the list: the key text kept is at most one reply's (a few hundred keys are more
+// than a classic board can copy twice, CLAUDE.md rule 14). Every page of a list comes from the same walk, so the split
+// never differs between the requests for one list.
+int buildSequenceNamesReply(int page, String &reply, uint8_t &type, SeqNamesInfo &info) {
+    reply = String();
+    type  = 0;
+    info  = SeqNamesInfo{0, 0, 0};
+    const bool     legacy = page < 0;
+    const unsigned want   = legacy ? 0 : (unsigned)page;
+    seqn::Pager pg(want);
+    // Page 0 (and an old request) keeps every key while the list could still fit one reply, and remembers where page 0
+    // ends; a later page keeps only its own keys. Every append is checked: a failed one would drop names from a list
+    // that still reads as whole.
+    String text;
+    size_t page0End = 0;
+    bool   ok = true;
+    const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+        const bool mine = pg.add(len);
+        if (want == 0) {
+            if (ok && pg.keyBytes <= seqn::REPLY_MAX) ok = text.concat(',') && text.concat(k, (unsigned)len);
+            if (pg.page == 0) page0End = text.length();
+        } else if (mine && ok) {
+            ok = text.concat(',') && text.concat(k, (unsigned)len);
+        }
+        return true;
+    });
+    if (rc != SEQ_OK || !ok) return SEQN_UNREAD;
 
     // Same cached hash the WDP_TLV_SEQHASH advert carries — a consumer compares
     // the two directly, so they must never be computed two different ways. One
     // that could not be computed now makes no answer: a stale hash beside a
-    // current list would read as current.
-    const uint32_t h = sequenceInventoryHash();
-    if (!seqInvHashValid) return String();
+    // current list would read as current. A request asks now, past the background check's 5 s backoff.
+    const uint32_t h = sequenceInventoryHash(true);
+    if (!seqInvHashValid) return SEQN_UNREAD;
+    info = SeqNamesInfo{pg.count, pg.keyBytes, pg.pages()};
 
-    // Walk the key list — trailing comma, and in the NVS layout possible empty
-    // entries from a legacy erase — but emit only the names. Every append is
-    // checked: a failed one would drop names from a list that still reads as whole.
-    String names = "";
-    int    count = 0;
-    int    startIdx = 0;
-    bool   ok = true;
-    while (ok && startIdx < (int)keyList.length()) {
-        int commaIndex = keyList.indexOf(',', startIdx);
-        if (commaIndex == -1) commaIndex = keyList.length();
-
-        String key = keyList.substring(startIdx, commaIndex);
-        ok = key.c_str() != nullptr;
-        key.trim();
-        if (ok && key.length() > 0) {
-            ok = names.concat(',') && names.concat(key);
-            count++;
-        }
-        startIdx = commaIndex + 1;
+    char hdr[seqn::HEADER_MAX + 1];
+    const char *body = text.length() ? text.c_str() : "";
+    size_t bodyLen = text.length();
+    int n;
+    if (want == 0 && seqn::wholeFits(pg.count, pg.keyBytes)) {
+        type = seqn::PT_SEQ_FRAG;                  // the one-reply form, to an old request and a new one alike
+        n = seqn::formatWholeHeader(hdr, sizeof(hdr), h, pg.count);
+    } else if (legacy) {
+        return SEQN_NOFIT;                         // an old requester cannot page: it gets the [ERROR] text
+    } else {
+        type = seqn::PT_PAGE;
+        seqn::PageHeader ph;
+        ph.hash = h; ph.count = pg.count; ph.page = want; ph.pages = pg.pages(); ph.keyBytes = pg.keyBytes;
+        n = seqn::formatPageHeader(hdr, sizeof(hdr), ph);
+        if (want == 0) bodyLen = page0End;         // page 0 only; a page past the last (the list shrank) has no key
     }
-    if (!ok) return String();
+    if (n < 0 || !body) return SEQN_UNREAD;
+    if (!reply.reserve((unsigned)n + bodyLen) || !reply.concat(hdr, (unsigned)n) ||
+        (bodyLen && !reply.concat(body, (unsigned)bodyLen))) {
+        reply = String();
+        return SEQN_UNREAD;
+    }
+    return SEQN_REPLY;
+}
 
-    char hdr[16];
-    snprintf(hdr, sizeof(hdr), "%08X,%d", h, count);
-    String out = hdr;
-    if (!out.concat(names)) return String();
-    return out;
+// ?SEQ,NAMES. The line is built in one buffer of its exact size and printed with one write; with no heap for that it is
+// streamed a piece at a time instead. The count is taken first, and the second walk is checked against it.
+bool printSequenceNames() {
+    unsigned count = 0, keyBytes = 0;
+    if (seqStoreForEachKey([&](const char *, size_t len) -> bool {
+            count++;
+            keyBytes += seqn::keyCost(len);
+            return true;
+        }) != SEQ_OK)
+        return false;
+    const uint32_t h = sequenceInventoryHash(true);   // asked for: read now, not the background check's backoff
+    if (!seqInvHashValid) return false;
+
+    char head[48];
+    const int hn = snprintf(head, sizeof(head), "[MGMT:SEQ,%d]%08X,%u", WCB_Number, (unsigned)h, count);
+    if (hn < 0 || hn >= (int)sizeof(head)) return false;
+    const size_t total = (size_t)hn + keyBytes + 1;   // the head, every key with its comma, the newline
+    char *line = (char *)malloc(total);
+    if (line) {
+        memcpy(line, head, (size_t)hn);
+        size_t at = (size_t)hn;
+        unsigned seen = 0;
+        const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+            if (at + 1 + len > total - 1) return false;   // more than the first walk counted
+            line[at++] = ',';
+            memcpy(line + at, k, len);
+            at += len;
+            seen++;
+            return true;
+        });
+        const bool whole = rc == SEQ_OK && seen == count && at == total - 1;
+        if (whole) {
+            line[at++] = '\n';
+            Serial.write((const uint8_t *)line, at);
+        }
+        free(line);
+        return whole;
+    }
+    // Streamed: the head, then the keys in pieces of up to 128 characters.
+    Serial.write((const uint8_t *)head, (size_t)hn);
+    char buf[128];
+    size_t at = 0;
+    unsigned seen = 0;
+    const int rc = seqStoreForEachKey([&](const char *k, size_t len) -> bool {
+        if (at + 1 + len > sizeof(buf)) {
+            Serial.write((const uint8_t *)buf, at);
+            at = 0;
+        }
+        buf[at++] = ',';
+        memcpy(buf + at, k, len);
+        at += len;
+        seen++;
+        return true;
+    });
+    if (at) Serial.write((const uint8_t *)buf, at);
+    Serial.write((const uint8_t *)"\n", 1);
+    if (rc != SEQ_OK || seen != count)
+        Serial.println("Could not read the sequence store to the end: the line above is not the whole list.");
+    return true;   // printed, and said so if it is not whole
 }
 
 // Clear all stored sequences - the sequence store and whatever NVS still holds of them. True when all are gone.

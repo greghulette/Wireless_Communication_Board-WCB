@@ -3,10 +3,14 @@ name: WDP wire tests
 # Host-side unit tests. Pure C++11, no Arduino toolchain — each compiles and runs in
 # seconds on the GitHub runner's g++. Independent of the firmware build workflow so
 # they can never block a firmware push.
-#   wdp_wire_test      the WDP wire format + election logic (a mirror of WCB_WDP.cpp)
-#   config_parts_test  the mesh config pull's split/framing arithmetic: it includes
-#                      Code/WCB/WCB_ConfigParts.h itself, so it tests the firmware's code
-# Two jobs, so one failing never hides the other's result. Both run on either test's
+#   wdp_wire_test       the WDP wire format + election logic (a mirror of WCB_WDP.cpp)
+#   config_parts_test   the mesh config pull's split/framing arithmetic: it includes
+#                       Code/WCB/WCB_ConfigParts.h itself, so it tests the firmware's code
+#   seqnames_page_test  the sequence-names reply in pages (split, header, join): it includes
+#                       Code/WCB/WCB_SeqNamesWire.h itself, the file WCB_Client ships too
+#   result_parts_test   ?MGMT,STATS / ETM,CHAR / SEQGET results in parts (split, header, join, the
+#                       requester's clock): it includes Code/WCB/WCB_ResultWire.h, shipped by WCB_Client too
+# One job each, so one failing never hides another's result. All run on any test's
 # paths: the workflow name is kept so existing links and badges still resolve.
 
 on:
@@ -17,6 +21,10 @@ on:
       - 'Code/WCB/WCB_WDP.h'
       - 'tests/config_parts_test.cpp'
       - 'Code/WCB/WCB_ConfigParts.h'
+      - 'tests/seqnames_page_test.cpp'
+      - 'Code/WCB/WCB_SeqNamesWire.h'
+      - 'tests/result_parts_test.cpp'
+      - 'Code/WCB/WCB_ResultWire.h'
       - '.github/workflows/wdp-tests.yml'
   pull_request:
     paths:
@@ -25,6 +33,10 @@ on:
       - 'Code/WCB/WCB_WDP.h'
       - 'tests/config_parts_test.cpp'
       - 'Code/WCB/WCB_ConfigParts.h'
+      - 'tests/seqnames_page_test.cpp'
+      - 'Code/WCB/WCB_SeqNamesWire.h'
+      - 'tests/result_parts_test.cpp'
+      - 'Code/WCB/WCB_ResultWire.h'
       - '.github/workflows/wdp-tests.yml'
   workflow_dispatch:
 
@@ -46,3 +58,21 @@ jobs:
         run: g++ -std=c++11 -Wall -Wextra -O2 tests/config_parts_test.cpp -o config_parts_test
       - name: Run
         run: ./config_parts_test
+
+  seqnames-page-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++11 -Wall -Wextra -O2 tests/seqnames_page_test.cpp -o seqnames_page_test
+      - name: Run
+        run: ./seqnames_page_test
+
+  result-parts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: g++ -std=c++11 -Wall -Wextra -O2 tests/result_parts_test.cpp -o result_parts_test
+      - name: Run
+        run: ./result_parts_test

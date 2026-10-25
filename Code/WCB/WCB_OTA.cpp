@@ -354,7 +354,7 @@ void processOtaLocalCommand(const String &args) {
 static void otaEnsurePeer(uint8_t wcbNum) {
   if (wcbNum < 1 || wcbNum > MAX_WCB_COUNT) return;
   const uint8_t *mac = WCBMacAddresses[wcbNum - 1];
-  if (esp_now_is_peer_exist(mac)) return;
+  if (wcbEspNowRestarting() || esp_now_is_peer_exist(mac)) return;   // a transmit-wedge remedy is restarting ESP-NOW
   esp_now_peer_info_t p = {};
   memcpy(p.peer_addr, mac, 6);
   p.channel = 0; p.encrypt = false;
@@ -607,31 +607,70 @@ typedef struct {
   uint8_t  buf[244];   // largest OTA packet (ota_data = 243 B)
   uint16_t len;
 } OtaPktSlot;
+// Made on the first OTA packet and given back once no session is open and nothing has come for OTA_QUEUE_IDLE_MS: 12
+// slots of 244 bytes, about 3 KB, which a classic board hosting its access point (~19 KB free) kept until its next
+// boot after a single stray or aborted OTA packet - W2 was 3.1 KB down for good after ncmesh.raw_hook_interleave's
+// relayed ?OTA,DATA and ?OTA,ABORT with no session, and later could not build its whole ?backup (run 20261023-213338).
+// The receive callback and loop() share it under s_otaQMux: the callback takes a use before it sends, and loop()
+// detaches the queue only while nobody holds one, so a send never meets a deleted queue.
 static QueueHandle_t otaPktQueue = nullptr;
+static portMUX_TYPE  s_otaQMux   = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t       s_otaQUsers = 0;        // callbacks between taking the queue and their send
+static volatile uint32_t s_otaQLastMs = 0;   // the last packet queued or handled
+static const uint32_t OTA_QUEUE_IDLE_MS = 30000;
+static const UBaseType_t OTA_PKT_QUEUE_DEPTH = 12;   // above every relay window (tests/wizard/unit/ota_relay_window)
 
 void enqueueOtaPacket(const uint8_t *raw, uint16_t len) {
   if (len == 0 || len > sizeof(((OtaPktSlot *)0)->buf)) return;
-  if (!otaPktQueue) {
-    otaPktQueue = xQueueCreate(12, sizeof(OtaPktSlot));
-    if (!otaPktQueue) return;
+  portENTER_CRITICAL(&s_otaQMux);
+  QueueHandle_t q = otaPktQueue;
+  if (q) s_otaQUsers++;
+  portEXIT_CRITICAL(&s_otaQMux);
+  if (!q) {
+    QueueHandle_t made = xQueueCreate(OTA_PKT_QUEUE_DEPTH, sizeof(OtaPktSlot));   // the heap: outside the critical section
+    if (!made) return;
+    portENTER_CRITICAL(&s_otaQMux);
+    if (!otaPktQueue) { otaPktQueue = made; made = nullptr; }
+    q = otaPktQueue;
+    s_otaQUsers++;
+    portEXIT_CRITICAL(&s_otaQMux);
+    if (made) vQueueDelete(made);   // one was made meanwhile: keep that
   }
   OtaPktSlot slot;
   memcpy(slot.buf, raw, len);
   slot.len = len;
-  xQueueSend(otaPktQueue, &slot, 0);   // drop if full — the browser resends from its cursor
+  xQueueSend(q, &slot, 0);   // drop if full — the browser resends from its cursor
+  s_otaQLastMs = millis();
+  portENTER_CRITICAL(&s_otaQMux);
+  s_otaQUsers--;
+  portEXIT_CRITICAL(&s_otaQMux);
+}
+
+static void otaDispatch(const OtaPktSlot &slot) {
+  if (slot.len == sizeof(espnow_struct_ota_data)) {
+    handleOtaDataPacket(slot.buf);
+  } else if (slot.len == sizeof(espnow_struct_ota_ctrl)) {
+    uint8_t pt = ((const espnow_struct_ota_ctrl *)slot.buf)->packetType;
+    if      (pt == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(slot.buf);
+    else if (pt == PACKET_TYPE_OTA_END)   handleOtaEndPacket(slot.buf);
+    else if (pt == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(slot.buf);
+  }
 }
 
 void drainOtaPackets() {
-  if (!otaPktQueue) return;
+  QueueHandle_t q = otaPktQueue;   // only loop() clears it, so it cannot go while this runs
+  if (!q) return;
   OtaPktSlot slot;
-  while (xQueueReceive(otaPktQueue, &slot, 0) == pdTRUE) {
-    if (slot.len == sizeof(espnow_struct_ota_data)) {
-      handleOtaDataPacket(slot.buf);
-    } else if (slot.len == sizeof(espnow_struct_ota_ctrl)) {
-      uint8_t pt = ((espnow_struct_ota_ctrl *)slot.buf)->packetType;
-      if      (pt == PACKET_TYPE_OTA_BEGIN) handleOtaBeginPacket(slot.buf);
-      else if (pt == PACKET_TYPE_OTA_END)   handleOtaEndPacket(slot.buf);
-      else if (pt == PACKET_TYPE_OTA_ABORT) handleOtaAbortPacket(slot.buf);
-    }
+  while (xQueueReceive(q, &slot, 0) == pdTRUE) {
+    otaDispatch(slot);
+    s_otaQLastMs = millis();
   }
+  if (ota.active || millis() - s_otaQLastMs < OTA_QUEUE_IDLE_MS || uxQueueMessagesWaiting(q)) return;
+  bool detached = false;
+  portENTER_CRITICAL(&s_otaQMux);
+  if (s_otaQUsers == 0 && otaPktQueue == q) { otaPktQueue = nullptr; detached = true; }
+  portEXIT_CRITICAL(&s_otaQMux);
+  if (!detached) return;
+  while (xQueueReceive(q, &slot, 0) == pdTRUE) otaDispatch(slot);   // one that landed just before the detach
+  vQueueDelete(q);
 }

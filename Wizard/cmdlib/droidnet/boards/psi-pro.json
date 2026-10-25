@@ -1,0 +1,170 @@
+{
+  "$schema": "droidnet-command-library/library/v1",
+  "enums": {
+    "psi.address": {
+      "label": "PSI",
+      "values": [
+        { "code": "0", "label": "All" },
+        { "code": "4", "label": "Front" },
+        { "code": "5", "label": "Rear" }
+      ]
+    },
+    "psi.mode": {
+      "label": "Effect",
+      "values": [
+        { "code": "0", "label": "Off" },
+        { "code": "1", "label": "Swipe (Default)" },
+        { "code": "2", "label": "Flash" },
+        { "code": "3", "label": "Alarm" },
+        { "code": "4", "label": "Short Circuit" },
+        { "code": "5", "label": "Scream" },
+        { "code": "6", "label": "Leia" },
+        { "code": "7", "label": "I Heart U" },
+        { "code": "8", "label": "Radar" },
+        { "code": "9", "label": "Heart" },
+        { "code": "10", "label": "Star Wars Title" },
+        { "code": "11", "label": "Imperial March" },
+        { "code": "12", "label": "Disco (timed)" },
+        { "code": "13", "label": "Disco" },
+        { "code": "14", "label": "Rebel Symbol" },
+        { "code": "15", "label": "Knight Rider" },
+        { "code": "16", "label": "Test Pattern" },
+        { "code": "17", "label": "Solid Red" },
+        { "code": "18", "label": "Solid Green" },
+        { "code": "19", "label": "Lightsaber" },
+        { "code": "20", "label": "Star Wars Intro" },
+        { "code": "21", "label": "VU Meter (timed)" },
+        { "code": "92", "label": "VU Meter" }
+      ]
+    },
+    "psi.alwaysOn": {
+      "label": "Always-On",
+      "values": [
+        { "code": "0", "label": "Revert after sequence" },
+        { "code": "1", "label": "Always On" }
+      ]
+    },
+    "psi.brightnessSource": {
+      "label": "Brightness Source",
+      "values": [
+        { "code": "0", "label": "External POT" },
+        { "code": "1", "label": "Internal value" }
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "psi-pro",
+      "name": "PSIPro (Process State Indicators)",
+      "kind": "device-native",
+      "confidence": "high",
+      "firmware": "nhutchison/PSIPro v1.7 (JawaLite)",
+      "routing": {
+        "class": "broadcast",
+        "nativeWrapper": "none",
+        "durationSuffix": {
+          "supported": true,
+          "sep": "|",
+          "unit": "seconds",
+          "max": 255
+        }
+      },
+      "commands": [
+        {
+          "id": "psi.mode",
+          "name": "Run Effect",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{address}T{mode}",
+          "params": [
+            { "name": "address", "enum": "psi.address", "required": true },
+            { "name": "mode", "enum": "psi.mode", "required": true }
+          ],
+          "supportsDuration": true,
+          "examples": ["0T18", "4T92", "5T3", "0T1", "0T11|47"],
+          "commentLabel": "PSI {address} — {mode}",
+          "category": "Lighting"
+        },
+        {
+          "id": "psi.swipe",
+          "name": "Standard Swipe",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{address}A",
+          "params": [
+            { "name": "address", "enum": "psi.address", "required": true }
+          ],
+          "examples": ["0A", "4A", "5A"],
+          "commentLabel": "PSI {address} — Standard Swipe",
+          "category": "Lighting"
+        },
+        {
+          "id": "psi.default",
+          "name": "Default Pattern",
+          "safety": "cosmetic",
+          "encoder": "template",
+          "template": "{address}D",
+          "params": [
+            { "name": "address", "enum": "psi.address", "required": true }
+          ],
+          "examples": ["0D", "4D", "5D"],
+          "commentLabel": "PSI {address} — Default Pattern",
+          "category": "Lighting"
+        },
+        {
+          "id": "psi.cfg.alwaysOn",
+          "name": "Always-On Mode",
+          "safety": "config",
+          "encoder": "template",
+          "template": "0P{onoff}",
+          "params": [
+            { "name": "onoff", "enum": "psi.alwaysOn", "default": "0" }
+          ],
+          "examples": ["0P0", "0P1"],
+          "commentLabel": "PSI always-on — {onoff}",
+          "category": "Config"
+        },
+        {
+          "id": "psi.cfg.brightSource",
+          "name": "Brightness Source",
+          "safety": "config",
+          "encoder": "template",
+          "template": "1P{source}",
+          "params": [
+            { "name": "source", "enum": "psi.brightnessSource", "default": "0" }
+          ],
+          "examples": ["1P0", "1P1"],
+          "commentLabel": "PSI brightness source — {source}",
+          "category": "Config"
+        },
+        {
+          "id": "psi.cfg.brightSave",
+          "name": "Brightness · Save",
+          "safety": "config",
+          "encoder": "template",
+          "template": "2P{level}",
+          "params": [
+            { "name": "level", "label": "Brightness (0–200; keep ≤20 on USB power)", "type": "int", "min": 0, "max": 200, "default": 20 }
+          ],
+          "examples": ["2P20", "2P150", "2P200"],
+          "commentLabel": "PSI brightness {level} (saved)",
+          "category": "Config"
+        },
+        {
+          "id": "psi.cfg.brightTemp",
+          "name": "Brightness · Temp",
+          "safety": "config",
+          "encoder": "template",
+          "template": "3P{level}",
+          "params": [
+            { "name": "level", "label": "Brightness (0–200; 0 = restore)", "type": "int", "min": 0, "max": 200 }
+          ],
+          "examples": ["3P0", "3P100", "3P200"],
+          "commentLabel": "PSI brightness {level} (temp)",
+          "category": "Config"
+        }
+      ],
+      "categories": ["Lighting", "Config"]
+    }
+  ]
+}

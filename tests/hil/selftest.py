@@ -1,7 +1,8 @@
 """Harness self-test: the run checkpoint and the runner loop, with a fake bench and fake tests. No hardware, no serial
 port, no bench - it runs anywhere Python and pyserial are.
 
-    python tests/hil/selftest.py
+    python tests/hil/selftest.py                      # all of it
+    python tests/hil/selftest.py 'probe_*' ncwire_links   # only the tests these globs name
 
 It covers pause and resume (docs/HIL_TESTING.md §9): a new run to done; the finished single-segment report byte for
 byte against the layout write_report produced before checkpoints existed (GOLDEN); a PAUSE-file pause that releases
@@ -64,6 +65,7 @@ which talks to the boards) are replaced by a stub. What only the real bench can 
 docs/HIL_TESTING.md §9.
 """
 import collections
+import fnmatch
 import json
 import os
 import re
@@ -79,6 +81,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from hil import checkpoint, durations, optin, resume, runner, servos  # noqa: E402
+from hil.probe import PROBE_MIN_VERSION  # noqa: E402
 from hil.checkpoint import Checkpoint, CheckpointError, RunBusy, RunLock  # noqa: E402
 
 # report.md exactly as runner.write_report wrote it for GOLDEN_RESULTS with elapsed=3725.4, captured from that function
@@ -101,8 +104,8 @@ GOLDEN_RESULTS = [
     ("pwm.out", "PWM out", "PASS", "", 65.0),
 ]
 
-SECRETS = ("hunter2", "sekrit99", "DomeNet")
-CONFIG = ["?HW,24", "?WCB,1", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2", "?CMDCHAR,;"]
+SECRETS = ("hunter2", "sekrit99", "DomeNet", "domelock77")
+CONFIG = ["?HW,24", "?WCB,1", "?WIFI,TOKEN,domelock77", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2", "?CMDCHAR,;"]
 
 
 # ---------------------------------------------------------------------------- fakes
@@ -598,6 +601,8 @@ def t_redaction(tmp):
     w = r("?WIFI,AP,DomeNet,sekrit99")
     assert w.startswith("?WIFI,AP,<redacted:") and "DomeNet" not in w and "sekrit99" not in w
     assert r("?WIFI,JOIN,Net,pw").startswith("?WIFI,JOIN,<redacted:")
+    tk = r("?WIFI,TOKEN,domelock77")
+    assert tk.startswith("?WIFI,TOKEN,<redacted:") and "domelock77" not in tk and r(tk) == tk, tk
     assert r("?WIFI,OFF") == "?WIFI,OFF" and r("?HW,24") == "?HW,24"
     assert r("?EPASS,hunter2") == e and r("?EPASS,hunter3") != e
     # a paused run's checkpoint and report carry the redacted form only
@@ -611,7 +616,7 @@ def t_redaction(tmp):
         leaked = [s for s in SECRETS if s in text]
         assert not leaked, f"{name} contains {leaked}"
     toks = ck.data["config_ref"]["tokens"]["1"]
-    assert e in toks and w in toks
+    assert e in toks and w in toks and tk in toks
     # the resume's config comparison works on the redacted forms, and its diff shows only those
     old = resume.read_config
     try:
@@ -1584,8 +1589,12 @@ def t_redaction_free_text(tmp):
                  "last lines:\n    ESP-NOW password updated to: hunter2", "ESP-NOW Password updated to: x hunter2",
                  "last lines:\n    Password: DomeNet sekrit99\n    ;S0marker",
                  "probe2: 'MESH JOIN ID=11 OCT2=AB OCT3=CD QTY=9 CHAN=1 CHK=1 TEMP=1 TYPE=HILProbe PASS=hunter2' -> "
-                 "ERR already joined"):
+                 "ERR already joined",
+                 "sent '?AUTH,domelock77' -> no answer", "?HW,24^?WIFI,TOKEN,domelock77^?WIFI,OFF",
+                 "W1: missing ['?WIFI,TOKEN,domelock77'] / extra []"):
         assert not any(s in rt(text) for s in SECRETS), rt(text)
+    for text in ("[AUTH:REQUIRED]", "[AUTH:OK]", "[AUTH:FAIL]", "Token         : set", "OAuth,x"):
+        assert rt(text) == text, f"not a secret: {text!r} -> {rt(text)!r}"
     assert "extra ['?EPASS,<redacted:" in rt("W1: missing ['?EPASS,hunter2'] / extra ['?EPASS,x']")
     assert rt("AP password   : set") == "AP password   : set" and rt("?WIFI,OFF") == "?WIFI,OFF"
     assert rt("PASS: 3, FAIL: 0") == "PASS: 3, FAIL: 0", "a status count is not a password"
@@ -1896,7 +1905,7 @@ def t_rule16_espnow_send_wrapped(tmp):
     assert rule16_problems(copy) == []
 
 # ---------------------------------------------------------------------------- probe restarts (tracker #78)
-PROBE_BOOT = "BOOT wcb_probe 8 mac=AA:BB:CC:DD:EE:01"
+PROBE_BOOT = f"BOOT wcb_probe {PROBE_MIN_VERSION} mac=AA:BB:CC:DD:EE:01"   # the oldest version the harness takes
 
 
 class FakeProbeDev:
@@ -2280,12 +2289,19 @@ GATED = {
                                                 "on, and reboots each board twice"),
     "wifi.join_absent_ssid_keeps_mesh": ("wifi_modes", "points W1's JOIN at a network nobody hosts for about 70 s and "
                                                        "reboots W1 twice"),
+    "wifi.join_needs_token": ("wifi_modes", "saves a JOIN with no token on W1 and reboots it twice; W1's WiFi is off in "
+                                            "between"),
+    "ncmesh.tx_watchdog_reboot": ("navicore_reboot", "restarts NaviCore: the mesh and SBUS OUT lose it for about 5 s"),
+    "intellex.wifi_wizard_terminal_via_navicore": ("navicore_wifi", "the PC's spare WiFi adapter joins NaviCore's "
+                                                                    "access point for about 30 s"),
     "input.usb_line_cap_32k": ("wifi_modes", "turns W1's access point off for one boot and reboots it twice"),
     "etm.seq_wrap": ("etm_seq_wrap", "floods the mesh with about 65,000 JSON broadcasts from W1 for several minutes "
                                      "and reboots W2"),
     **{t: ("wifi_pc", "a WiFi adapter on this PC leaves its network for about 30 s; run it with someone at the keyboard")
        for t in ("wifi.pc_joins_ap_ws", "ws.line_framing", "ws.backup_over_ws", "ws.client_slots",
-                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released", "ws.drop_reports")},
+                 "wifi.ap_dhcp_no_gateway", "ws.ota_chunk", "ws.vanished_client_released", "ws.drop_reports",
+                 "ws.burst_keeps_live_client", "ws.ping_pong_and_close", "ws.stalled_client_costs_nothing",
+                 "ws.token_signed_out", "ws.token_wrong_closes", "ws.token_signs_in")},
     "ident.epass_live": ("mesh_password", "takes W1 off the mesh for a few seconds with a throwaway password"),
     "nvs.erase_defaults_restore": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
     "nvs.wcb_erase_alias": ("nvs_erase", "erases all of W1's settings and restores them from its chain"),
@@ -2401,6 +2417,9 @@ GATED = {
                                         "has it")
        for n in ("aux_bytes", "soft_tx_integrity", "s3_console_quiet", "tx_interleave", "rx_monitor_bcast_in",
                  "sbus_out_tee", "maestro_bus_tap", "maestro_bus_live_baud")},
+    # Channel sync (suites/s55_chsync.py, docs/CHANNEL_SYNC.md), 2026-10-21
+    **{f"chsync.{n}": ("chsync", "moves W1 and W2 to another radio channel and back, with up to six reboots")
+       for n in ("status_line", "operator_move_and_back", "stranded_found", "region_refuses_12")},
 }
 
 
@@ -2837,6 +2856,73 @@ def t_ws_frames(tmp):
     assert "Software Version: 1" in text and "End of Version" in text, text
 
 
+def t_ws_sign_in(tmp):
+    """The WebSocket token's client side (hil/ws.py; docs/WIFI_DESIGN.md §7) against WsEndpoint speaking the WCB's
+    sign-in: a client with the right token signs in when asked, keeps [AUTH:...] out of its text and gets answers; a
+    wrong one raises AuthFailed after [AUTH:FAIL] and reads the 1008 CLOSE; a client with no token is answered only
+    [AUTH:REQUIRED]; a token is never sent to an endpoint that does not ask; with none set any ?AUTH is answered
+    [AUTH:OK]. And hil/config.py's wifi_mode_token passes over ?WIFI,TOKEN, ws_token reads it."""
+    from hil import config as C
+    from hil import ws as W
+    toks = ["?HW,24", "?WIFI,TOKEN,domelock77", "?WIFI,AP,DomeNet,sekrit99", "?EPASS,hunter2"]
+    assert C.wifi_mode_token(toks) == "?WIFI,AP,DomeNet,sekrit99" and C.ws_token(toks) == "domelock77"
+    assert C.wifi_mode_token(["?WIFI,OFF"]) == "?WIFI,OFF" and C.ws_token(["?WIFI,OFF"]) is None
+    assert C.wifi_mode_token(["?HW,24"]) is None and C.ws_token(["?wifi,token,a,b"]) == "a,b"
+    ep = W.WsEndpoint("127.0.0.1", 0, token="domelock77")
+    try:
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="domelock77")
+        try:
+            assert c.auth_lines == [W.AUTH_REQUIRED, W.AUTH_OK] and "[AUTH" not in c.text, (c.auth_lines, c.text)
+            c.send_text('{"type":"PING"}\n')
+            assert '"type":"PONG"' in c.read_until('"PONG"', timeout=3) and "[AUTH" not in c.text, c.text
+        finally:
+            c.close()
+        try:
+            W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="wrongtoken9")
+            raise AssertionError("a wrong token signed in")
+        except W.AuthFailed:
+            pass
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3)
+        try:
+            c.read_until(W.AUTH_REQUIRED, timeout=3)
+            try:
+                c.sign_in("wrongtoken9")
+                raise AssertionError("a wrong token signed in")
+            except W.AuthFailed:
+                pass
+            c.read_until("\x00never\x00", timeout=3)
+            assert c.close_frames and c.close_frames[0][:2] == W.CLOSE_POLICY, c.close_frames
+            assert c.auth_lines == [W.AUTH_REQUIRED, W.AUTH_FAIL], c.auth_lines
+        finally:
+            c.sock.close()
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3)
+        try:
+            c.send_text('{"type":"PING"}\n')
+            time.sleep(0.5)
+            c.read_until("\x00never\x00", timeout=0.5)
+            lines = [x.strip() for x in c.text.splitlines() if x.strip()]
+            assert lines == [W.AUTH_REQUIRED, W.AUTH_REQUIRED], lines
+        finally:
+            c.close()
+    finally:
+        ep.close()
+    ep = W.WsEndpoint("127.0.0.1", 0)              # no token: nothing asks
+    try:
+        t0 = time.monotonic()
+        c = W.WsClient("127.0.0.1", ep.port, "/ws", timeout=3, token="domelock77", auth_wait=0.4)
+        try:
+            assert c.auth_lines == [] and time.monotonic() - t0 < 2.0, c.auth_lines
+            c.send_text('{"type":"PING"}\n')
+            c.read_until('"PONG"', timeout=3)
+            c.sign_in("anything-at-all")
+            assert c.auth_lines == [W.AUTH_OK], c.auth_lines
+        finally:
+            c.close()
+        assert not any("domelock77" in x for x in ep.received), "the token went to an endpoint that never asked"
+    finally:
+        ep.close()
+
+
 # ---------------------------------------------------------------------------- the PC's WiFi and NaviCore's socket (INF5)
 # `netsh wlan show interfaces` and `show networks mode=bssid` as Windows 11 prints them (English), names made up.
 NETSH_INTERFACES = """
@@ -2954,25 +3040,41 @@ class FakeNetsh:
 
 
 def t_runner_mesh_stall(tmp):
-    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' after the test's
-    mark is reported, with its last report quoted; lines before the mark, a clean console and a non-WCB device are not."""
+    """hil/runner.py _wcb_marks/_wcb_stalls: a WCB console that logs '[MESH] ESP-NOW transmit stalled' or '... wedged'
+    (tracker #112) after the test's mark is reported, with its last report quoted; lines before the mark, a clean
+    console, a non-WCB device and the lines a ?DEBUG,FAULT,TXWEDGE knob caused ('(simulated, ...)') are not."""
     b = tmp.bench({"wcb1": {"port": "COMW1", "kind": "wcb", "wcb": 1}, "wcb2": {"port": "COMW2", "kind": "wcb", "wcb": 2},
-                   "navicore": {"port": "COMNAV", "kind": "navicore"}})
-    w1, w2, nav = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="navicore")
-    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame accepted or completed while frames are given up (in flight 0, "
-             "internal heap free 9000, largest block 4000, min since boot 1800)")
+                   "wcb3": {"port": "COMW3", "kind": "wcb", "wcb": 3}, "navicore": {"port": "COMNAV", "kind": "navicore"}})
+    w1, w2, w3 = FakeNaviDev(name="wcb1"), FakeNaviDev(name="wcb2"), FakeNaviDev(name="wcb3")
+    nav = FakeNaviDev(name="navicore")
+    stall = ("[MESH] ESP-NOW transmit stalled 5s: no frame completed while frames are given up (in flight 8, "
+             "heap free 9000, largest block 4000, min since boot 1800)")
+    wedge = ("[MESH] ESP-NOW transmit wedged: 4 frame(s) handed to the radio over 10s and none completed (in flight 8, "
+             "8 counted out unfinished since boot, STA MAC 02:05:4B:00:00:03, channel 1, heap free 90000, largest block "
+             "60000, min since boot 50000) - restarting ESP-NOW, no reboot (tracker #112)")
+    cleared = ("[MESH] ESP-NOW transmit wedge cleared after 12s: the ESP-NOW restart cleared it, frames complete again, "
+               "no reboot")
+    sim = " (simulated, ?DEBUG,FAULT,TXWEDGE)"
     w2._append(stall.replace("5s", "40s"))                        # before the test: not this test's
-    b.devs.update({"wcb1": w1, "wcb2": w2, "navicore": nav})
+    b.devs.update({"wcb1": w1, "wcb2": w2, "wcb3": w3, "navicore": nav})
     marks = runner._wcb_marks(b)
-    assert set(marks) == {"wcb1", "wcb2"}, marks
+    assert set(marks) == {"wcb1", "wcb2", "wcb3"}, marks
     assert runner._wcb_stalls(b, marks) == ""
     nav._append(stall)                                            # not a WCB
+    for line in (stall, wedge, cleared):                          # caused on purpose by a test's knob
+        w1._append(line + sim)
+    assert runner._wcb_stalls(b, marks) == "", runner._wcb_stalls(b, marks)
     w2._append("[MESH] 3 ESP-NOW frame(s) not sent: the radio's queue stayed full (3 since the stats were reset)")
     w2._append(stall)
     w2._append(stall.replace("5s", "35s"))
     got = runner._wcb_stalls(b, marks)
     assert got.startswith("wcb2 reported its ESP-NOW transmit stalled (2 report(s), the last '[MESH] ESP-NOW transmit "
-                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got, got
+                          "stalled 35s:") and "wcb1" not in got and "navicore" not in got and "wedged" not in got, got
+    w3._append(wedge)                                             # a wedge with too few frames sent for a stall line
+    w3._append(cleared)
+    got = runner._wcb_stalls(b, marks)
+    assert "; wcb3 reported its ESP-NOW transmit wedged (2 line(s): the first '[MESH] ESP-NOW transmit wedged: 4 " in got \
+        and "the last '[MESH] ESP-NOW transmit wedge cleared after 12s" in got and "wcb1" not in got, got
     b.devs.clear()
     b.close()
 
@@ -3680,6 +3782,18 @@ def t_ncwifi_helpers(tmp):
     check(banner[:3] + [banner[4], banner[3]] + banner[5:], cfg, "out of order")
     check(banner + ['[WIFI] SoftAP "DomeAP" FAILED to start on channel 1.'], cfg, "a [WIFI] failure line (not quoted")
     check(banner + ["[WS] httpd_start failed — endpoint disabled"], cfg, "a failure line: '[WS] httpd_start")
+    # Since channel sync the endpoint line says whether a login token is set (chansync navicore_wsserver.h:926-928):
+    # it must agree with the config's wifiToken, and is never more than set / none.
+    ws = banner.index("[WS] command endpoint ready — ws://192.168.4.1/ws")
+    for state, token in (("none", ""), ("set", "domelock77")):
+        b2 = banner[:ws] + [banner[ws] + f" (login token: {state})"] + banner[ws + 1:]
+        assert S.ap_block(b2, dict(cfg, wifiToken=token))[0] == [], (state, S.ap_block(b2, dict(cfg, wifiToken=token)))
+        assert S.ap_block(b2, cfg)[0] == [], "a config without wifiToken (older firmware) checks no login state"
+        other = "domelock77" if state == "none" else ""
+        got, _ = S.ap_block(b2, dict(cfg, wifiToken=other))
+        assert len(got) == 1 and f"says login token {state}" in got[0] and "domelock77" not in got[0], got
+    check(banner[:ws] + [banner[ws] + " (login token: sekrit)"] + banner[ws + 1:], cfg,
+          "missing: the '[WS] command endpoint ready' line")
     refused = ["=== NaviCore ===", "[WIFI] REFUSED: password is 3 character(s); WPA2 requires 8.", S.NOT_OPEN,
                "[WCB] Joined network as device ID 20 (quantity=1)"]
     assert S.refused_block(refused, 3) == []
@@ -3828,6 +3942,12 @@ def t_mgmt_pull_parts(tmp):
         assert [col.feed(x) for x in (p[1], p[1], noise[1], noise[5], "plain text", p[2])] == \
             ["partial", "duplicate", "ignored", "malformed", "ignored", "partial"]
         assert col.feed(p[0]) == "complete" and col.reply[1] == reply
+        # more parts than the 16 a pull carried until 2026-10-23 (CFGP_MAX_PARTS is 64): 20 parts join; 65 is no part
+        p20 = parts_of(reply, list(range(6, 6 * 20, 6)))
+        col = W.PullCollector(2)
+        assert len(p20) == 20 and [col.feed(x) for x in p20] == ["partial"] * 19 + ["complete"], len(p20)
+        assert col.reply[1] == reply
+        assert W.parse_part("P1A2B,64,64:x~")[2] == 64 and W.parse_part("P1A2B,65,65:x~") is None
         # a missing part: a timeout that names what arrived, and nothing else
         e = fails(lambda: W.pull_config(answer(p[0], p[2]), 2, timeout=0.3))
         assert not isinstance(e, W.PullRefused) and "parts [1, 3] of 3 under id 1A2B" in str(e), e
@@ -6126,6 +6246,18 @@ def t_nc_log_filter(tmp):
     esc = rt('{"line":"{\\"type\\":\\"SET_CONFIG\\",\\"data\\":{\\"wifiPassword\\":\\"sekrit99\\"}}"}')
     assert "sekrit99" not in esc and rt(esc) == esc, esc
     assert rt('{"meshPassword":"hunter2","apPass":"x"}').startswith('{"meshPassword":"<redacted:'), "any *password key"
+    # NaviCore's WebSocket token (chansync rc_config.h:1371-1372, the USB copy of GET_CONFIG): hashed as the string it
+    # encodes, alike in JSON, in an escaped JSON string and in the ?AUTH / ?WIFI,TOKEN lines that carry it; "" left
+    # alone; a credential key for nc_guard's leak scan and for redacted_diff.
+    tok = rt('{"type":"CONFIG","data":{"wifiPassword":"sekrit99","wifiToken":"domelock77","chanSync":true}}')
+    assert "domelock77" not in tok and '"wifiToken":"<redacted:' in tok and rt(tok) == tok, tok
+    assert tok[tok.index('"wifiToken":"') + 13:].split('"')[0] == rt("?AUTH,domelock77")[len("?AUTH,"):], tok
+    assert rt('{"wifiToken":""}') == '{"wifiToken":""}', "no token is no secret"
+    esc = rt('{"line":"{\\"type\\":\\"SET_CONFIG\\",\\"data\\":{\\"wifiToken\\":\\"domelock77\\"}}"}')
+    assert "domelock77" not in esc and rt(esc) == esc, esc
+    from hil.nc_guard import secrets_of
+    assert secrets_of({"wifiToken": "domelock77", "chanSync": True, "wcbNetwork": {"region": "DE"}}) == ["domelock77"]
+    assert rd({"wifiToken": ""}, {"wifiToken": "domelock77"})[0].startswith("wifiToken: \"\" -> <redacted:")
     a = {"tapWindowMs": 500, "mappings": {"101": {}}, "maestros": [{"type": 1}, {"type": 2}],
          "wcbNetwork": {"password": "hunter2", "deviceId": 20}, "wcbProfiles": [{"password": "hunter2"}]}
     z = json.loads(json.dumps(a))
@@ -6511,9 +6643,16 @@ class NaviModel:
     ?FORGET,ALL, ?REC,START...) fails the selftest outright. Two fixes of the 2026-10-04 campaign are ported, because
     normal tests now assert them: RESET_DEFAULTS keeps the network identity (D-NC16, rcConfigResetKeepIdentity) and
     TEST_ACTION answers a skipped action ok:false with its reason (D-NC20, dskip); every other (should) test still
-    fails against it by design."""
+    fails against it by design. Channel sync's config (NaviCore ab762c1, the chansync tree's rc_config.h) is ported
+    too: wifiToken (rcWsTokenValid :69-79, ignored with its [CFG] line :1677-1687; kept by RESET_DEFAULTS :1071-1091),
+    chanSync (:1688), wcbNetwork.region (rcRegionValid :57-62, ignored with its line :1962-1970) and channels 1-13
+    (:1960-1961, :1988). The bench config carries a token, a SECRETS value, so every suite run against a model proves
+    session.log hashes it."""
     FW = "v0.2.0_102105QSEP26"
     FACTORY_PW = "DomeNet"
+    REGIONS = ("01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
+               "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT", "JP", "KR", "LI", "LT", "LU", "LV", "MT", "MX", "NL",
+               "NO", "NZ", "PL", "PT", "RO", "SE", "SI", "SK", "TW", "US")     # RC_REGIONS (chansync rc_config.h:50-54)
     BAND = [b for b in [("B1", 1799, 1823), ("B2", 1758, 1782), ("B3", 1718, 1742), ("B4", 1676, 1700),
                         ("B5", 1634, 1658), ("B6", 1594, 1618), ("T4 Left", 1553, 1577), ("T4 Right", 1512, 1536),
                         ("T5 Left", 1471, 1495), ("T5 Right", 1430, 1454), ("T3 Up", 1389, 1413),
@@ -6532,7 +6671,9 @@ class NaviModel:
 
     def __init__(self):
         self.c = self.defaults()
+        self.cfg_lines = []        # the [CFG] lines rcConfigFromJSON printed during a merge, for the save's output
         bench = {"sbusOutEnabled": True, "wifiEnabled": True, "wifiSsid": "HILap", "wifiPassword": "sekrit99",
+                 "wifiToken": "domelock77",
                  "wcbNetwork": {"password": "hunter2", "quantity": 1},
                  "wcbProfiles": [{"name": "Dev", "macOct2": 0, "macOct3": 0, "password": "hunter2", "quantity": 1,
                                   "deviceId": 20, "channel": 1},
@@ -6580,7 +6721,8 @@ class NaviModel:
     @classmethod
     def defaults(cls):
         return {"txModel": 0, "threeAxisGimbals": False, "sbusOutEnabled": False, "wifiEnabled": False, "wifiSsid": "",
-                "wifiPassword": "", "maeGateMs": 250, "boardType": 0, "tapWindowMs": 500, "holdMs": 750,
+                "wifiPassword": "", "wifiToken": "", "chanSync": True, "maeGateMs": 250, "boardType": 0,
+                "tapWindowMs": 500, "holdMs": 750,
                 "switchSettleMs": 80, "chRateHz": 5, "matrixChannel": 7, "matrixDebounceFrames": 1, "modeSwitch": 4,
                 "peerAlert": True, "peerActions": [],
                 "thresholds": [{"id": i + 1, "label": b[0], "minPwm": b[1], "maxPwm": b[2]} for i, b in enumerate(cls.BAND)],
@@ -6592,7 +6734,7 @@ class NaviModel:
                 "hcrDest": {"transport": 2, "target": "S3", "wcbPort": 1},
                 "maestros": [{"type": 0, "device": i + 1, "channels": {}} for i in range(8)],
                 "wcbNetwork": {"macOct2": 0, "macOct3": 0, "password": cls.FACTORY_PW, "quantity": 4, "deviceId": 20,
-                               "channel": 1},
+                               "channel": 1, "region": "01"},
                 "wcbProfiles": [], "mp3Dest": {"transport": 2, "target": "2"}, "dfpDest": {"transport": 2, "target": "S3"},
                 "wledSlots": [{"wledID": 0, "serialPort": 0, "remoteWCB": 0, "configured": False} for _ in range(4)],
                 "auxBaud": [9600, 9600, 9600], "maestroBaud": 115200, "serialLabels": ["", "", "", ""],
@@ -6679,6 +6821,17 @@ class NaviModel:
                         "releaseIdleMs": _nm_wrap(_nm_pick(o, "releaseIdleMs", 0), 16)})
         return out
 
+    def _cfg_line(self, text):
+        """A line rcConfigFromJSON prints while it applies (a refused token or region); the save that follows prints
+        them first (take_cfg_lines)."""
+        if not hasattr(self, "cfg_lines"):
+            self.cfg_lines = []
+        self.cfg_lines.append(text)
+
+    def take_cfg_lines(self):
+        out, self.cfg_lines = list(getattr(self, "cfg_lines", [])), []
+        return out
+
     def merge(self, d):
         """rcConfigFromJSON (rc_config.h:1502-1905): each branch only when its key is present. Always true."""
         c = d if isinstance(d, dict) else {}
@@ -6693,6 +6846,16 @@ class NaviModel:
             r["wifiSsid"] = _nm_cut(g("wifiSsid", r["wifiSsid"]), 33)
         if "wifiPassword" in c:
             r["wifiPassword"] = _nm_cut(g("wifiPassword", r["wifiPassword"]), 64)
+        if isinstance(c.get("wifiToken"), str):          # rc_config.h:1682-1687: a non-string is left alone, silently
+            t = c["wifiToken"]
+            if t == "" or (8 <= len(t.encode("utf-8")) <= 32 and all("!" <= ch <= "~" and ch not in ",^;?\"\\"
+                                                                     for ch in t)):
+                r["wifiToken"] = t
+            else:
+                self._cfg_line("[CFG] wifiToken ignored: 8-32 printable characters, none of space , ^ ; ? \" \\ "
+                               "(the stored token stays)")
+        if isinstance(c.get("chanSync"), bool):
+            r["chanSync"] = c["chanSync"]
         if "maeGateMs" in c:
             r["maeGateMs"] = _nm_wrap(g("maeGateMs", 250), 16)
         if "boardType" in c:
@@ -6808,7 +6971,14 @@ class NaviModel:
             net["quantity"] = _nm_wrap(_nm_pick(o, "quantity", net["quantity"]), 8)
             net["deviceId"] = _nm_wrap(_nm_pick(o, "deviceId", net["deviceId"]), 8)
             ch = _nm_pick(o, "channel", net["channel"])
-            net["channel"] = 1 if ch < 1 or ch > 11 else ch
+            net["channel"] = 1 if ch < 1 or ch > 13 else ch
+            if o.get("region") is not None:              # rc_config.h:1962-1970: absent or null, left alone
+                cc = o["region"] if isinstance(o["region"], str) else ""
+                if cc in self.REGIONS:
+                    net["region"] = cc
+                else:
+                    self._cfg_line(f'[CFG] wcbNetwork.region "{cc[:8]}" ignored: "01" or an upper-case IDF country '
+                                   f'code (the stored "{net["region"]}" stays)')
         if "wcbProfiles" in c:
             r["wcbProfiles"] = []
             for o in (c["wcbProfiles"] if isinstance(c["wcbProfiles"], list) else [])[:6]:
@@ -6820,7 +6990,7 @@ class NaviModel:
                                          "password": _nm_cut(_nm_pick(o, "password", ""), 40),
                                          "quantity": _nm_wrap(_nm_pick(o, "quantity", 4), 8),
                                          "deviceId": _nm_wrap(_nm_pick(o, "deviceId", 20), 8),
-                                         "channel": 1 if ch < 1 or ch > 11 else ch})
+                                         "channel": 1 if ch < 1 or ch > 13 else ch})
         if "wledSlots" in c:
             arr = (c["wledSlots"] if isinstance(c["wledSlots"], list) else [])[:4]
             for i in range(4):
@@ -6871,8 +7041,8 @@ class NaviModel:
         """rcConfigToJSON (rc_config.h:1211-1482), key for key."""
         r = self.c
         d = {k: r[k] for k in ("txModel", "threeAxisGimbals", "sbusOutEnabled", "wifiEnabled", "wifiSsid",
-                               "wifiPassword", "maeGateMs", "boardType", "tapWindowMs", "holdMs", "switchSettleMs",
-                               "chRateHz", "matrixChannel", "matrixDebounceFrames")}
+                               "wifiPassword", "wifiToken", "chanSync", "maeGateMs", "boardType", "tapWindowMs",
+                               "holdMs", "switchSettleMs", "chRateHz", "matrixChannel", "matrixDebounceFrames")}
         d["funcBindings"] = {"mode": r["modeSwitch"]}
         d["peerEvent"] = {"alert": r["peerAlert"], "actions": [self.action_to(a) for a in r["peerActions"]]}
         d["thresholds"] = [dict(t) for t in r["thresholds"]]
@@ -7231,7 +7401,7 @@ class NaviModel:
             if "data" not in full:
                 return [f'{{"type":"ACK","of":"SET_CONFIG","ok":false,"msg":"missing data","saveId":{sid}}}']
             self.merge(full["data"] if isinstance(full["data"], dict) else None)
-            out = [self.save()]
+            out = self.take_cfg_lines() + [self.save()]
             fx = self.side_effects()
             out += [INFO_LINE] if fx is None else fx
             return out + [f'{{"type":"ACK","of":"SET_CONFIG","ok":true,"saveId":{sid}}}']
@@ -7249,7 +7419,8 @@ class NaviModel:
             return [f"[CALIB] action dispatch {'SUPPRESSED (calibrating)' if self.calib else 'resumed'}", ack]
         if t == "RESET_DEFAULTS":                 # rcConfigResetKeepIdentity: the network identity stays (D-NC16)
             keep = {k: json.loads(json.dumps(self.c[k])) for k in ("wcbNetwork", "wcbProfiles", "boardType",
-                                                                  "wifiEnabled", "wifiSsid", "wifiPassword") if k in self.c}
+                                                                  "wifiEnabled", "wifiSsid", "wifiPassword",
+                                                                  "wifiToken") if k in self.c}
             self.c = self.defaults()
             self.c.update(keep)
             return [ack]
@@ -7636,8 +7807,8 @@ def t_ncflash_build(tmp):
         props = script["props"] if script["props"] is not None else \
             (["compiler.cpp.extra_flags=-DNAVICORE_HIL_HOOKS=1"] if "--build-property" in argv else
              ["compiler.cpp.extra_flags="])
-        used = [{"name": lib, "version": "1", "install_dir": script["used_dir"] or os.path.join(sb, "libraries", lib)}
-                for lib in ("WCB_Client", "WcbCmd")]
+        used = [{"name": lib, "version": "1", "install_dir": (script.get("dirs") or {}).get(lib) or script["used_dir"]
+                 or os.path.join(sb, "libraries", lib)} for lib in ("WCB_Client", "WcbCmd")]
         doc = {"compiler_out": "Sketch uses 1 bytes", "compiler_err": script["err"], "success": script["rc"] == 0,
                "builder_result": {"build_properties": props, "used_libraries": used,
                                   "build_platform": {"id": "esp32:esp32", "version": "3.3.4"}}}
@@ -7694,6 +7865,42 @@ def t_ncflash_build(tmp):
             f.write(NC_FQBN_DOC.replace(",PSRAM=opi", ""))
         assert "does not name" in str(_raises(lambda: F.build("t7", allow_drift=True, **kw), F.BuildError))
         _raises(lambda: F.build("../x", **kw), ValueError)
+        # libraries=: a WCBClient branch folder compiled instead of the sketchbook copy (arduino-cli --library; NaviCore
+        # chansync needs WCB_Client 1.19.0 where the sketchbook held 1.18.1). It goes on the command line, stands for
+        # both copies - no drift, though the sketchbook's copy differs - and the compile must report that folder; the
+        # manifest, the libraries line and compile.log say so. A folder that is not WCB_Client / WcbCmd is refused
+        # before anything runs.
+        with open(os.path.join(nav, "CLAUDE.md"), "w", encoding="utf-8") as f:
+            f.write(NC_FQBN_DOC)
+        with open(os.path.join(sb, "libraries", "WcbCmd", "src", "x.h"), "w") as f:
+            f.write("int x;\n")
+        with open(os.path.join(sb, "libraries", "WCB_Client", "src", "x.h"), "w") as f:
+            f.write("int old;\n")                       # the sketchbook copy is behind the branch
+        branch = os.path.join(tmp.root, "wcbclient-chansync")
+        os.makedirs(os.path.join(branch, "src"))
+        for rel, text in (("src/x.h", "int branch;\n"), ("library.properties", "name=WCB_Client\nversion=1.19.0\n")):
+            with open(os.path.join(branch, *rel.split("/")), "w") as f:
+                f.write(text)
+        assert "WCB_Client DIFFERS" in str(_raises(lambda: F.build("t8", **kw), F.BuildError))
+        script["dirs"] = {"WCB_Client": branch}
+        man = F.build("t8", hooks=True, libraries=[branch], **kw)
+        argv = calls[-1][0]
+        assert argv[argv.index("--library") + 1] == branch and argv.count("--library") == 1 and argv[-1] == nav, argv
+        wc = man["libraries"]["WCB_Client"]
+        assert wc["override"] and wc["same"] and wc["sketchbook"] == wc["repo"] == branch and wc["version"] == "1.19.0", wc
+        assert not man["libraries"]["WcbCmd"]["override"] and man["library_overrides"] == {"WCB_Client": branch}, man
+        assert not man["drift_allowed"] and f"--library {branch}" in F.build_line(man), F.build_line(man)
+        log = read(os.path.join(builds, "navicore-t8", "compile.log"))
+        assert f"Using library WCB_Client at version 1 in folder: {branch}" in log, log[-300:]
+        script["dirs"] = None                          # the compile took the sketchbook's copy after all
+        assert "not the --library copy" in str(_raises(lambda: F.build("t9", libraries=[branch], **kw), F.BuildError))
+        stray = os.path.join(tmp.root, "notalib")
+        os.makedirs(stray)
+        n = len(calls)
+        e = str(_raises(lambda: F.build("t10", libraries=[stray], **kw), F.BuildError))
+        assert "names None, not WCB_Client or WcbCmd" in e and len(calls) == n, e
+        e = str(_raises(lambda: F.build("t10", libraries=[branch, branch], **kw), F.BuildError))
+        assert "names WCB_Client twice" in e and len(calls) == n, e
     finally:
         F._run_cli, F.tree_state, F._core_version, F.cli_path = saved
 
@@ -8385,7 +8592,7 @@ class NaviBootModel(NaviModel):
     seconds; the tests' own constants are patched to match."""
     FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if rx.pattern != r"^#[Ll]0?2$")
     WCB2_FW = "6.2.1_TEST"
-    HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L93 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
+    HOOK = ("[HIL] NAVICORE_HIL_HOOKS build: #L90-#L94 fault verbs and DBG_WIRE (debug bit 7) are live - a test image, "
             "never a release")
 
     def __init__(self, app_sha, grace_s=0.5, roll_call_s=1.0, idle_s=1.5, boot_s=0.8, mut=()):
@@ -8504,7 +8711,9 @@ class NaviBootModel(NaviModel):
                 out += [f'[WIFI] SoftAP "{c["wifiSsid"] or "NaviCore-%d" % net["deviceId"]}" up on channel '
                         f'{net["channel"]} — 192.168.4.1', "[WIFI] ESP-NOW will share this channel (WIFI_AP_STA).",
                         "[WIFI] DHCP offers no default gateway — clients keep their own route.",
-                        "[WS] command endpoint ready — ws://192.168.4.1/ws"]
+                        # chansync navicore_wsserver.h:926-928: whether a login is needed, never the token
+                        f"[WS] command endpoint ready — ws://192.168.4.1/ws (login token: "
+                        f"{'none' if 'banner_token_state' in self.mut or not c.get('wifiToken') else 'set'})"]
         if not 1 <= net["deviceId"] <= 20:
             out += [f"[WCB_Client] ERROR: device_id {net['deviceId']} is out of range (1–20)",
                     "[WCB] ERROR: wcb->begin() failed — check WCB Network settings in GUI"]
@@ -8820,6 +9029,18 @@ def t_ncboot_helpers(tmp):
     check(lambda b: b, lambda c: c["auxBaud"].update(S4=19200), "S4: missing (expected '[AUX] S4 open @ 19200 baud')")
     check(lambda b: b, lambda c: c.update(wifiSsid="OTHERap"), "the SoftAP on the mesh channel: missing")
     check(lambda b: b, lambda c: c["wcbNetwork"].update(channel=6), "the SoftAP on the mesh channel: missing")
+    # The endpoint line's login state follows the config's token (chansync navicore_wsserver.h:926-928): the model's
+    # bench config has one, so a config with none expects '(login token: none)'; a config from before channel sync (no
+    # wifiToken) takes the line with or without the suffix.
+    ws = next(k for k, x in enumerate(banner) if x.startswith("[WS] command endpoint ready"))
+    assert banner[ws].endswith("/ws (login token: set)"), banner[ws]
+    check(lambda b: b, lambda c: c.update(wifiToken=""), "the WebSocket endpoint: missing (expected '[WS] command "
+                                                         "endpoint ready — ws://<ip>/ws (login token: none)')")
+    for line in ("[WS] command endpoint ready — ws://192.168.4.1/ws", banner[ws]):
+        c3 = {k: v for k, v in cfg.items() if k != "wifiToken"}
+        got, _ = S46.banner_problems(banner[:ws] + [line] + banner[ws + 1:], S46.banner_anchors(c3, m.FW, m.app_sha,
+                                                                                                True))
+        assert not got, (line, got)
     i, j = banner.index("[AUX] S3 open @ 115200 baud (hw UART0)"), banner.index("[BOARD] NaviCore v2 pin profile")
     check(lambda b: b[:j] + [b[i]] + b[j:i] + b[i + 1:], None,
           "S3: out of order (expected '[AUX] S3 open @ 115200 baud (hw UART0)')")
@@ -9007,6 +9228,7 @@ def t_ncboot_ncota_against_model(tmp):
 NCBOOT_MUTATIONS = (
     ("ncboot.reboot_resets_ram_state", "flags_survive", "FAIL", "a debug flag survived the restart"),
     ("ncboot.banner_order", "banner_s4", "FAIL", "S4: missing"),
+    ("ncboot.banner_order", "banner_token_state", "FAIL", "the WebSocket endpoint: missing"),
     ("ncota.relay_target_nosession", "ack_ok_no_session", "FAIL", "expected {'DATA': (0, 1)"),
     # recover() itself calls this rung a success: its fallback PING answers, since the app never went down. Only the
     # uptime tells.
@@ -9021,7 +9243,8 @@ NCBOOT_MUTATIONS = (
 
 def t_ncboot_mutations(tmp):
     """The s46/s47 tests catch what they exist to catch: against a NaviBootModel broken in one way each - debug flags that
-    outlive a restart, a banner with the wrong S4 baud, a relayed DATA ACKed OK with no session (the #70 twin), a
+    outlive a restart, a banner with the wrong S4 baud or a WebSocket line that says no login token while the config
+    holds one, a relayed DATA ACKed OK with no session (the #70 twin), a
     USB-Serial/JTAG reset that does nothing, a bootloader that refuses the new image, rejected chunks that keep a local
     session alive - the test fails and says why; and with each D-NC fix in the model (the new-peer grace, an ACKed and
     deferred mesh REBOOT) its (should) test passes, and with D-NC19 undone (boardType stored unclamped) its fixed test
@@ -9143,7 +9366,8 @@ class NaviMeshModel(NaviModel):
     W1's side of it: the 20 s relay window any ';W20,{' opens (WCB.ino:8019-8021), the relay it gates (:5513-5520), the
     [TERM:20] lines it prints and drops when empty (WCB_RemoteTerm.cpp:178-207). W1's S2 is a byte buffer that ';S2'
     writes land in; W2 is a console that stores and reads back sequences. As today's firmware: a bridged WCB_SEND answers
-    ok:true whatever the send did and a fragmented one is dropped (D-NC27), the strip leaves wifiEnabled (D-NC18),
+    ok:true whatever the send did and a fragmented one is dropped (D-NC27), the strip leaves the channel, the region,
+    wifiEnabled and the token (D-NC18; strip_radio is NaviCore 7f47f3c plus channel sync's two),
     RESET_DEFAULTS resets the identity too (D-NC16) and the RTERM reply uses the RAM password (D-NC17), and a sequence
     value loses its quotes (D-NC46). `mut` fixes each finding, or breaks one behaviour a test exists to catch."""
     ALIASES = ("Body", "Dome")
@@ -9348,7 +9572,8 @@ class NaviMeshModel(NaviModel):
             old = copy.deepcopy(self.c)
             self.c = self.defaults()
             if "keep_identity" in self.mut:
-                for k in ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword"):
+                for k in ("wcbNetwork", "wcbProfiles", "boardType", "wifiEnabled", "wifiSsid", "wifiPassword",
+                          "wifiToken"):
                     self.c[k] = old[k]
             fx = [] if "reset_no_effects" in self.mut else (self.side_effects() or [])
             self.nav._append(*fx, f"[RC] RESET_DEFAULTS from W{sender} → live config reset to factory defaults "
@@ -9417,16 +9642,21 @@ class NaviMeshModel(NaviModel):
                     self.nav._append(f"[RC] SET_CONFIG: ignoring incoming wcbNetwork.deviceId={wnet['deviceId']} "
                                      f"(WCB-transport saves can't change our own slot)")
                 for k in ("deviceId", "macOct2", "macOct3", "password", "quantity") + \
-                        (("channel",) if "strip_radio" in self.mut else ()):
+                        (("channel", "region") if "strip_radio" in self.mut else ()):
                     wnet.pop(k, None)
                 if not wnet:
                     data.pop("wcbNetwork")
-            if "strip_radio" in self.mut:
-                for k in ("wifiEnabled", "wifiSsid", "wifiPassword"):
-                    data.pop(k, None)
+            if "strip_radio" in self.mut:                 # NaviCore 7f47f3c, and the token since ab762c1
+                stripped = [k for k in ("wifiEnabled", "wifiSsid", "wifiPassword", "wifiToken") if k in data]
+                for k in stripped:
+                    data.pop(k)
+                if stripped:
+                    self.nav._append("[RC] SET_CONFIG: ignoring incoming wifi* fields (WCB-transport saves can't "
+                                     "change the SoftAP)")
             self.merge(data)
             fx = self.side_effects()
-            self.nav._append(self.save(), "[RC] SET_CONFIG → applied + saved to LittleFS", *(fx or []))
+            self.nav._append(*self.take_cfg_lines(), self.save(), "[RC] SET_CONFIG → applied + saved to LittleFS",
+                             *(fx or []))
             self.to_sender(sender, {"sys": 1, "type": "ACK", "of": "SET_CONFIG", "id": 20, "ok": True,
                                     "saveId": doc.get("saveId", 0)})
         elif t == "SET_CMDLIB":
@@ -9968,13 +10198,24 @@ class NaviDevModel(NaviModel):
         return [f"[WIRE] {port} {o}/{len(data)}: {data[o:o + 48].hex(' ').upper()}" for o in range(0, len(data), 48)]
 
     def flush(self):
-        """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1."""
+        """WCBStream _flushBuffer: one Kyber broadcast, which W1 and W2 write to their S1. The kyber_lose_* mutations
+        are the WiFi driver losing packets it accepted, as NaviCore's did in HIL runs 20261022-154502 and -213953:
+        logged OK, reaching no WCB - 'one'/'two' the first one or two 28-byte packets (a remote restartScript,7,p<P>:
+        P's two channels and the subroutine frame), 'six*' the first 6-byte one (a setTarget), 'many*' the first eight (6.7 % of the audit's 120).
+        #L11's [TXAUDIT:...] (hash_cmd) counts them as WCB_Client 1.19.1's transmit audit would."""
         if not self.stream:
             return []
         pkt = bytes(self.stream)
         self.stream.clear()
-        for k in ("W1S1", "W2S1"):
-            self.links[k].write(pkt)
+        size, budget = next(((n, b) for name, n, b in (("kyber_lose_one", 28, 1), ("kyber_lose_two", 28, 2),
+                                                         ("kyber_lose_many", 6, 8), ("kyber_lose_six", 6, 1))
+                             if any(m.startswith(name) for m in self.mut)), (0, 0))
+        self.lost, self.flushes = getattr(self, "lost", 0), getattr(self, "flushes", 0) + 1
+        if len(pkt) == size and self.lost < budget:
+            self.lost += 1
+        else:
+            for k in ("W1S1", "W2S1"):
+                self.links[k].write(pkt)
         return [f"[WCBStream] Broadcast (Kyber) {len(pkt)} bytes — OK"]
 
     def mwrite(self, i, cmd, payload=b""):
@@ -10372,6 +10613,13 @@ class NaviDevModel(NaviModel):
             return [f"[HCR TEST] -> {port} : SetEmotion(HAPPY,80) via hcrFormatCommand + raw frame"] + \
                 self.wire(port, HcrPy().fmt(2, 0, 80).encode()) + self.wire(port, b"<OH80,QEH>\n") + \
                 ["[HCR TEST] sent — watch the HCR; check TX wiring to HCR RX, common ground"]
+        if fn == 11 and any(m.endswith(("_audited", "_air")) for m in self.mut):
+            # WCB_Client 1.19.1's transmit audit in #L11: '_audited' counts the lost packets, '_air' does not (they
+            # completed - lost on the air, not in the driver).
+            lost = getattr(self, "lost", 0) if any(m.endswith("_audited") for m in self.mut) else 0
+            acc = getattr(self, "flushes", 0)
+            return [f"  Transmit audit: {acc} frame(s) accepted since boot, {lost} lost by the WiFi driver (no send "
+                    f"completion)", f"[TXAUDIT:ACC={acc},LOST={lost}]"] + super().hash_cmd(text)
         return super().hash_cmd(text)
 
     def _resume(self, ms):
@@ -10497,6 +10745,8 @@ def t_ncdev_helpers(tmp):
     """The pure parts of s44: wire_log joins one port's [WIRE] blocks and names each block a lost line left short (a
     missing head, a missing middle, a missing tail) while other ports are ignored; kyber_packets reads the WCBStream's
     flush lines; stream_packets cuts a burst between frames only (32 six-byte frames and a subroutine frame: 174 + 22);
+    step_packets cuts NaviCore's WCBStream copy into its Kyber packets, and refuses a copy a lost line or a FAIL left
+    short; lost_packet finds the one whole packet a wire missed, and nothing for two, half of one, or a reordering;
     pololu, frame_lengths and dev_stream build, measure and filter Pololu frames; hcr_payload reassembles a local HCR
     dispatch line whose payload spans lines; aux_label, free_profiles, profile_without and managed_channels read a
     config. And the tables agree with this file's ports of the WcbCmd codecs and of NaviCore's formatters - HcrCodec and
@@ -10518,6 +10768,25 @@ def t_ncdev_helpers(tmp):
                             "[WCBStream] Broadcast (Kyber) 22 bytes — FAIL"]) == [(174, "OK"), (22, "FAIL")]
     assert S.stream_packets([6] * 32 + [4]) == [174, 22] and S.stream_packets([6] * 29) == [174]
     assert S.stream_packets([6] * 30) == [174, 6] and S.stream_packets([3, 4]) == [7] and S.stream_packets([]) == []
+    # step_packets / lost_packet: NaviCore's [WIRE] copy cut into its Kyber packets, and a wire missing exactly one.
+    spd, acc, sub = S.pololu(4, 0x07, 5, 290), S.pololu(4, 0x09, 5, 18), S.pololu(4, 0x27, 7)
+    other = S.pololu(2, 0x07, 0, 30)                     # another device's frame in the same packet: not kept
+    step = ([f"[WIRE] WCBStream 0/{len(b)}: {b.hex(' ').upper()}" for b in (spd, acc, other)] +
+            ["[WCBStream] Broadcast (Kyber) 18 bytes — OK", "noise",
+             f"[WIRE] WCBStream 0/4: {sub.hex(' ').upper()}", "[WCBStream] Broadcast (Kyber) 4 bytes — OK"])
+
+    def dev4(d, c, ch, v):
+        return d == 4
+    per = S.step_packets(step, dev4)
+    assert per == [[(7, 5, 290), (9, 5, 18)], [(39, 7, None)]], per
+    assert S.lost_packet(per, [(39, 7, None)]) == 0 and S.lost_packet(per, [(7, 5, 290), (9, 5, 18)]) == 1
+    assert S.lost_packet(per, []) is None and S.lost_packet(per, [(7, 5, 290)]) is None   # two lost, or half of one
+    assert S.lost_packet(per, [(39, 7, None), (7, 5, 290), (9, 5, 18)]) is None           # out of order is not a loss
+    assert S.lost_packet([[], [(39, 7, None)]], [(39, 7, None)]) is None                  # nothing of ours went missing
+    assert S.step_packets(step[1:], dev4) is None                                         # a [WIRE] line lost
+    assert S.step_packets(step[:5] + step[6:], dev4) is None                              # ...the second packet's
+    assert S.step_packets(step[:4], dev4) == [[(7, 5, 290), (9, 5, 18)]]                  # the step cut after packet 1
+    assert S.step_packets([x.replace("4 bytes — OK", "4 bytes — FAIL") for x in step], dev4) is None
     assert S.pololu(4, 0x84, 5, 6000) == bytes.fromhex("AA 04 04 05 70 2E")
     assert S.pololu(4, 0x27, 200) == b"\xaa\x04\x27\xc8" and S.pololu(2, 0x22) == b"\xaa\x02\x22"
     burst = S.pololu(4, 0x07, 5, 105) + S.pololu(2, 0x22) + S.pololu(4, 0x27, 0)
@@ -10615,7 +10884,8 @@ def _run_dev_suite(tmp, ids=None, mut=()):
             model.w2audio = None
     patches = [(S44, "link", lambda bench, w, p: model.links[f"W{w}{p}"]), (S44, "_hcr_w2", hcr_w2),
                (S44, "_w2_audio", w2_audio), (S44, "config_guard", lambda bench, *w: contextlib.nullcontext()),
-               (S44, "snapshot", lambda bench, n: ["?WLED,1:W2S2:115200"]), (S44, "_settle_maestro2", lambda w: None)]
+               (S44, "snapshot", lambda bench, n: ["?WLED,1:W2S2:115200"]), (S44, "_settle_maestro2", lambda w: None),
+               (S44, "KYBER_AUDIT_N", 120), (S44, "KYBER_AUDIT_GAP_S", 0.0)]   # the loss audit's 2 min, cut short
     saved = [(mod, name, getattr(mod, name)) for mod, name, _ in patches]
     for mod, name, value in patches:
         setattr(mod, name, value)
@@ -10646,7 +10916,7 @@ def t_ncdev_suite_against_model(tmp):
     res, model, x = _run_dev_suite(tmp)
     bad = [f"{tid}: {r['status']} (expected {'FAIL' if tid in NCDEV_SHOULD else 'PASS'}) {r['detail'][:400]}"
            for tid, r in res.items() if r["status"] != ("FAIL" if tid in NCDEV_SHOULD else "PASS")]
-    assert len(res) == x["count"] == 22, (len(res), x["count"])
+    assert len(res) == x["count"] == 23, (len(res), x["count"])
     assert not bad, "\n".join(bad)
     for tid, dnc in NCDEV_SHOULD.items():
         assert f"(should, {dnc})" in res[tid]["detail"], (tid, res[tid]["detail"][:200])
@@ -10655,12 +10925,20 @@ def t_ncdev_suite_against_model(tmp):
     assert not any(s in x["log"] for s in SECRETS), "a credential reached session.log"
 
 
-# (test, model mutation, the status it must then get, a piece of its detail): a break of the behaviour each test exists
-# to catch, and each D-NC fix its (should) test asks for. The byte tables need no break of their own here: every row is
+# (test, model mutation, the status it must then get, a piece of its detail - of its session.log notes for a PASS): a
+# break of the behaviour each test exists to catch, each D-NC fix its (should) test asks for, and the lone lost Kyber
+# packet a test must ride out. The byte tables need no break of their own here: every row is
 # compared byte-exact, t_ncdev_helpers checks each against its codec port, and the whole-suite run passes on them.
 NCDEV_MUTATIONS = (
     ("ncdev.mae_remote_stream_exact", "cut_mid_frame", "FAIL", "expected [174, 22]"),
     ("ncdev.easing_repeat_frames", "repeat_zero", "FAIL", "setEasing,off"),
+    ("ncdev.easing_repeat_frames", "kyber_lose_one", "PASS", "one Kyber packet NaviCore logged OK never reached W1 S1"),
+    ("ncdev.easing_repeat_frames", "kyber_lose_two", "FAIL", "2 Kyber packets NaviCore broadcast never reached W1 S1"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six", "PASS", "both wires missed 1 (0.83 %)"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six_audited", "PASS", "transmit audit: 1 of 120 frames lost"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_six_air", "PASS", "were lost on the air"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_many", "FAIL", "reached neither wire: over 5 %"),
+    ("ncdev.kyber_loss_audit", "kyber_lose_many_audited", "FAIL", "NaviCore's WiFi driver lost 8 frame(s)"),
     ("ncdev.mae_remote_read", "no_relay_marker", "FAIL", "[TERM:20]"),
     ("ncdev.mesh_forward_burst", "queue_5", "FAIL", "expected the first 4"),
     ("ncdev.bcast_out_opt_in", "json_fanned", "FAIL", "declined JSON"),
@@ -10677,13 +10955,17 @@ NCDEV_MUTATIONS = (
 def t_ncdev_mutations(tmp):
     """The s44 tests catch what they exist to catch: against a NaviDevModel broken in one way each - a burst cut inside a
     frame, an easing repeat that drives 0, a remote read never mirrored to the bridge, a 5-deep forward queue, declined
-    JSON fanned out, a local fade that outlives the save that moved the HCR - the test fails and says why; and with
+    JSON fanned out, a local fade that outlives the save that moved the HCR, two Kyber packets the WiFi driver lost
+    (one is passed, from NaviCore's [WIRE] copy), a lost broadcast the transmit audit did not count, over 1 % of
+    broadcasts lost (one in 120 is counted and passed, audited or not) - the test fails and says why; and with
     each D-NC fix in the model (D-NC56, D-NC23, D-NC57, D-NC59, D-NC58, D-NC60) its (should) test passes. Each runs
     alone on a fresh model."""
     for tid, mut, want, why in NCDEV_MUTATIONS:
-        res, _, _ = _run_dev_suite(tmp, ids={tid}, mut={mut})
+        res, _, x = _run_dev_suite(tmp, ids={tid}, mut={mut})
         r = res[tid]
-        assert r["status"] == want and why in r["detail"], (tid, mut, r["status"], r["detail"][:300])
+        # A FAIL's piece is in its detail; a PASS's, if it has one, in the note it left in session.log.
+        assert r["status"] == want and why in (r["detail"] if want == "FAIL" else x["log"]), \
+            (tid, mut, r["status"], r["detail"][:300])
 
 
 # ---------------------------------------------------------------------------- NC-WP12: NaviCore's recorder (s48)
@@ -11988,6 +12270,7 @@ TESTS = [t_new_run_to_done, t_golden_report, t_pause_file_and_resume, t_stop, t_
          t_rule12_remoteterm_first, t_rule16_espnow_send_wrapped, t_probe_reboot_rebinds, t_device_sends_tap_hidden, t_run_lost_marker, t_watch11_witness, t_runner_fails_test_on_probe_panic, t_probe_restart_forgets_only_what_it_lost,
          t_probe_port_reopen_counts_as_restart,
          t_durations, t_optin_gate_up_front, t_list_lines, t_no_servos, t_config_guard_auto_restore, t_ws_frames,
+         t_ws_sign_in,
          t_nvs_parse, t_mgmt_pull_parts, t_mgmt_pull_noparts_and_codes, t_pull_over_limit_policy,
          t_backup_chain_parse, t_run_glued_sentinel, t_intellex_stage_filter, t_intellex_py_judge,
          t_intellex_stream_helpers, t_intellex_link_tap, t_intellex_handed_over, t_intellex_github_dir,
@@ -12353,7 +12636,8 @@ def t_bridge_hooks(tmp):
 def t_intellex_wifi_flash_helpers(tmp):
     """suites/s35_intellex_wifi.py and s36_intellex_flash.py's pure helpers and the harness pieces IX-WP9/10 added:
     status_view keeps what the host is attached to and scrubs lastError's network names; rterm_starts counts one relay's
-    session starts; move_order_problems wants each 'network changed' before its 'reconnected'; bounce_problems fails
+    session starts; move_order_problems wants each 'network changed' before its 'reconnected' and says a 'reconnected'
+    from before the hop as that (move_lines picks the lines); bounce_problems fails
     any sample of the internet adapter off 'connected'; the W2 image's checks (partition rows, the version it carries),
     its release names and seed (a file left out on request); flash_log_problems on an Update's log, a region missing or
     unverified, an esptool 4 spelling, a refusal; percent_path; w2_want / nc_want; IntellexHost hide and copy_logs take
@@ -12382,6 +12666,14 @@ def t_intellex_wifi_flash_helpers(tmp):
     assert len(S35.move_order_problems(["reconnected  ws://192.168.4.1/ws"])) == 1
     p = S35.move_order_problems(["reconnected  WCB 192.168.4.1 → mesh"] + good[:1])
     assert any("before its first" in x for x in p) and any("no 'reconnected'" in x for x in p), p
+    # Run 20261022-145043: a reattach before the hop (the attach raced by Intellex's reconnect loop) is said as that,
+    # not as the hop's reattach under the old role; the hop's own lines are judged alone.
+    early = S35.move_lines(["serving   http://127.0.0.1:1/", "reconnected  ws://192.168.4.1/ws"])
+    assert early == ["reconnected  ws://192.168.4.1/ws"], early
+    p = S35.move_order_problems(early + good, before=len(early))
+    assert len(p) == 1 and "before the hop" in p[0] and "before its first" not in p[0], p
+    p = S35.move_order_problems(early + ["reconnected  WCB 192.168.4.1 → mesh"] + good[:1], before=1)
+    assert any("before the hop" in x for x in p) and any("before its first" in x for x in p), p
     ok = [(0.0, {"Wi-Fi": "connected", "Wi-Fi 2": "connected"}), (0.5, {"Wi-Fi": "Connected", "Wi-Fi 2": "disconnected"})]
     assert S35.bounce_problems(ok, "Wi-Fi", "Wi-Fi 2") == ([], {"samples": 2, "spare_not_connected": 1})
     bad, _ = S35.bounce_problems(ok + [(1.0, {"Wi-Fi": "disconnecting", "Wi-Fi 2": "connected"})], "Wi-Fi", "Wi-Fi 2")
@@ -12839,7 +13131,7 @@ class WireProbe(FakeProbeDev):
         with self.lk:
             if verb == "HELLO":
                 self.sent.append(text)
-                self._rx(f"HELLO wcb_probe 8 mac={self.mac} mesh=0")
+                self._rx(f"HELLO wcb_probe {PROBE_MIN_VERSION} mac={self.mac} mesh=0")   # the oldest the harness takes
             elif verb == "BIND":
                 self.sent.append(text)
                 answer = self._bind(tok)
@@ -13748,8 +14040,13 @@ def main():
         setattr(m, n, v)
     registry = list(runner.REGISTRY)
     failed = 0
+    # Optional globs on the command line pick tests by name (selftest.py 'probe_*' ncwire_links); none runs them all.
+    picked = [fn for fn in TESTS if not sys.argv[1:] or any(fnmatch.fnmatchcase(fn.__name__[2:], g) for g in sys.argv[1:])]
+    if not picked:
+        print(f"no self-test matches {' '.join(sys.argv[1:])}")
+        return 1
     try:
-        for fn in TESTS:
+        for fn in picked:
             tmp = Tmp()
             t0 = time.monotonic()
             try:
@@ -13764,7 +14061,7 @@ def main():
         for m, n, v in saved:
             setattr(m, n, v)
         runner.REGISTRY[:] = registry
-    print(f"\n{len(TESTS) - failed} of {len(TESTS)} passed")
+    print(f"\n{len(picked) - failed} of {len(picked)} passed")
     return 1 if failed else 0
 
 
@@ -13860,7 +14157,7 @@ def t_absent_wcbs(tmp):
     assert two.wcb_numbers() == [1, 2] and C.absent_wcbs(two) == [3], C.absent_wcbs(two)
     assert C.absent_wcbs(bench(1, 2, 3)) == [4], "a WCB3 with its own USB is not absent"
     assert C.absent_wcbs(bench(1, 2, mesh_only=[3])) == [4], "a mesh-only WCB3 is not absent"
-    assert C.absent_wcbs(bench(1, 2, 3, 4, 5)) == [7], "6 is one of W1's persisted learned peers (FORBIDDEN_MESH_IDS)"
+    assert C.absent_wcbs(bench(1, 2, 3, 4, 5)) == [7], "6 is reserved (FORBIDDEN_MESH_IDS: W1's learned peer until 2026-10-22)"
     every = C.absent_wcbs(two, 14)
     assert every == [3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18], every
     assert NAVICORE_ID == 20 and not set(every) & {1, 2, 6, 9, 19, NAVICORE_ID}, every

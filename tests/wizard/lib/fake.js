@@ -155,4 +155,70 @@ async function relayFake(page, relay, targets) {
   }, { relay, targets });
 }
 
-module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake };
+// One ?WDP,DUMP row, as printWdpDump (WCB_WDP.cpp) prints it. tags is the CAPTAGS field: a WCB's own capability tags
+// since 2026-10-23 - "mgmt.fwd24" on a classic ESP32, "mgmt.rx24" on an ESP32-S3 (it forwards what it takes) - and ""
+// from firmware before. peer 3 is the queried board's own row.
+function wdpRow({ n, client = 0, alias = '', hw = 24, hwrev = '', fw = '7.0.2_TEST', cap = '0000', ctrl = 0, tags = '',
+                  maestro = '-', age = 0, seen = 1, peer = 1 }) {
+  return `[WDP:N=${n},CLIENT=${client},ALIAS=${alias},HW=${hw},HWREV=${hwrev},FW=${fw},CAP=${cap},CTRL=${ctrl},` +
+         `CAPTAGS=${tags},MAESTRO=${maestro},AGE=${age},SEEN=${seen},PEER=${peer}]`;
+}
+// A whole dump of those rows (the self row first, as the firmware prints it), with its WDPCFG and END lines.
+function wdpDump(rows) {
+  const self = rows.filter((r) => r.peer === 3), rest = rows.filter((r) => r.peer !== 3);
+  return [...self, ...rest].map(wdpRow).concat([`[WDPCFG:EN=1,AUTOJOIN=1,PEERS=${rest.length}]`,
+                                                `[WDP:END,count=${rest.length}]`]).join('\r\n');
+}
+// The page reads `text` as the answer to its mesh panel's ?WDP,DUMP (the real wdpMeshRefresh, through a stand-in for
+// the board it queries), as the 12 s poll would: what it keeps of each row (_meshSeen) is what a push then reads.
+async function feedWdpDump(page, text, { slot = 1, wcbNum = 1 } = {}) {
+  await page.evaluate(async ({ text, slot, wcbNum }) => {
+    const keep = window._wdpMeshConn;
+    window._wdpMeshConn = () => ({ slot, conn: { sendAndCollect: async () => text }, fc: '?', wcbNum });
+    try { await wdpMeshRefresh(); } finally { window._wdpMeshConn = keep; }
+  }, { text, slot, wcbNum });
+}
+
+// The board behind a fake relay, as far as its sequences go: it joins the ?MGMT,FRAG sessions slot `relay` was sent
+// for `target`, in the order they completed, applies their ?SEQ,SAVE and ?SEQ,CLEAR to `seqs`, and answers
+// ?MGMT,SEQGET,<target>,<key> as a WCB relay prints the reply. `drop` (the source of (i) => bool) loses the i-th
+// completed session, 0-based - a chunk lost on the air. Asked again, it answers from everything sent so far.
+async function relayTargetSeqs(page, { relay = 1, target = 2, seqs = {}, drop = '' } = {}) {
+  await page.evaluate(({ relay, target, seqs, drop }) => {
+    const c = boardConnections[relay];
+    const lost = drop ? new Function('i', `return (${drop})(i);`) : () => false;
+    const held = () => {
+      const store = { ...seqs };
+      const sessions = new Map();
+      const done = [];
+      for (const e of __fake.log) {
+        if (e.slot !== relay || e.op !== 'send') continue;
+        const m = /^.MGMT,FRAG,(\d+),([0-9A-F]{4}),(\d+),(\d+),([\s\S]*)$/.exec(e.s);
+        if (!m || +m[1] !== target) continue;
+        if (!sessions.has(m[2])) sessions.set(m[2], { total: +m[4], chunks: {} });
+        const ss = sessions.get(m[2]);
+        ss.chunks[+m[3]] = m[5];
+        if (!ss.done && Object.keys(ss.chunks).length === ss.total) { ss.done = true; done.push(ss); }
+      }
+      done.forEach((ss, i) => {
+        if (lost(i)) return;
+        const cmd = Array.from({ length: ss.total }, (_, k) => ss.chunks[k]).join('');
+        let m;
+        if ((m = /^.SEQ,SAVE,([^,]+),([\s\S]*)$/.exec(cmd))) store[m[1]] = m[2];
+        else if ((m = /^.SEQ,CLEAR,(.+)$/.exec(cmd))) delete store[m[1]];
+      });
+      return store;
+    };
+    const prior = c.sendAndCollect;
+    c.sendAndCollect = async (s, ...rest) => {
+      const m = /^.MGMT,SEQGET,(\d+),(.+)$/.exec(String(s));
+      if (!m || +m[1] !== target) return prior.call(c, s, ...rest);
+      __fake.log.push({ slot: relay, op: 'collect', s: String(s), at: Date.now() });
+      const st = held();
+      return m[2] in st ? `[MGMT:SEQVAL,${target}]${m[2]},OK,${st[m[2]]}` : `[MGMT:SEQVAL,${target}]${m[2]},NOTFOUND,`;
+    };
+  }, { relay, target, seqs, drop });
+}
+
+module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake, wdpRow, wdpDump, feedWdpDump,
+                   relayTargetSeqs };

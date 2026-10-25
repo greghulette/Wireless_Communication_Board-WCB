@@ -116,6 +116,10 @@ const MGMT_MAX_CHUNKS  = 16;    // must match MGMT_MAX_CHUNKS in Code/WCB/WCB.in
                                 // reassembles into chunks[16][181] and tracks arrival in a
                                 // uint16_t bitmask, so a 17th chunk has nowhere to land
 const MGMT_CHUNK_DELAY = 250;   // ms between chunks — gives relay time to forward
+// The longest command the relay takes as ONE chunk, in bytes, for its ETM shortcut (WCB.ino handleMgmtForward): 198
+// characters, but 186 when the relay runs ?ETM,CHKSM (ETM_MAX_CMD_WITH_CRC - 1), which the Wizard cannot see. Over
+// 186 a single command goes as a session of 179-byte chunks, which any relay takes.
+const MGMT_SINGLE_MAX  = 186;
 
 // ─── General Settings Baseline ────────────────────────────────────
 let generalBaseline = null;     // { sourceBoard: n|'file', fields: {...} } — source of truth
@@ -124,7 +128,7 @@ let generalSettingsDirty = false; // true when general settings have been change
 // ─── UI Version ───────────────────────────────────────────────────
 // Auto-updated by the pre-commit git hook whenever any Wizard/ file is committed.
 // Format: DD.HH:MM.R.MON.YYYY (Eastern time) — compare footer on local vs hosted to spot stale copies.
-const UI_VERSION = '15.12:07.R.OCT.2026';
+const UI_VERSION = '23.21:07.R.OCT.2026';
 
 // ─── Wizard / Firmware Version ────────────────────────────────────
 let _wizardOpen      = false;        // suppress mismatch modals while wizard is open
@@ -148,6 +152,7 @@ function runWizardInit() {
   safe(checkBrowserCompat,         'checkBrowserCompat');
   safe(loadThemePreference,        'loadThemePreference');
   safe(initSystemConfig,           'initSystemConfig');
+  safe(initChanSyncFields,         'initChanSyncFields');
   safe(loadModePreference,         'loadModePreference');
   safe(initDeviceCombobox,         'initDeviceCombobox');
   safe(initTerminalResize,         'initTerminalResize');
@@ -729,7 +734,7 @@ function addBoardSection(n) {
 // fires the same 'change' path a manual edit does (→ onSerialFieldChange).
 // A single body-level popup (not a per-input one) avoids serial-table clipping
 // and works for boards/ports added later via event delegation.
-let _devPop = null, _devInput = null, _devOpts = [], _devActive = -1;
+let _devPop = null, _devInput = null, _devOpts = [], _devActive = -1, _devAt = { left: 0, top: 0 };
 
 function _devLabels() {
   return (typeof WCB_DEVICE_LABELS !== 'undefined' && Array.isArray(WCB_DEVICE_LABELS)) ? WCB_DEVICE_LABELS : [];
@@ -771,12 +776,15 @@ function initDeviceCombobox() {
     const left = _devInput;
     setTimeout(() => { if (_devInput === left) _devHide(); }, 150);
   });
-  // A fixed popup can't track the input while the PAGE scrolls, so close it —
-  // but NOT when the scroll is the list's own internal scroll (capture phase
-  // catches both; the list stays put since it's position:fixed).
-  window.addEventListener('scroll', (e) => {
-    if (_devPop && (e.target === _devPop || (e.target.nodeType === 1 && _devPop.contains(e.target)))) return;
-    _devHide();
+  // A fixed popup can't track the input while the page (or a pane the input sits in) scrolls, so close it then - but
+  // only when the input has moved since the list was placed. The capture phase sees every scroll on the page: the
+  // list's own, an unrelated pane's (the terminal following its output) and a page scroll event that lands after the
+  // list was placed (Playwright's click scrolls the field into view first; on a slow CI runner that event came after
+  // the typing and closed the list) leave the field where it was, so the list stays.
+  window.addEventListener('scroll', () => {
+    if (!_devPop || _devPop.style.display === 'none' || !_devInput) return;
+    const r = _devInput.getBoundingClientRect();
+    if (Math.round(r.left) !== _devAt.left || Math.round(r.bottom + 2) !== _devAt.top) _devHide();
   }, true);
   window.addEventListener('resize', _devHide);
 }
@@ -800,8 +808,9 @@ function _devRender() {
     _devOpts.push(el);
   }
   const r = input.getBoundingClientRect();
-  _devPop.style.left     = Math.round(r.left) + 'px';
-  _devPop.style.top      = Math.round(r.bottom + 2) + 'px';
+  _devAt = { left: Math.round(r.left), top: Math.round(r.bottom + 2) };   // where the field was: the scroll check
+  _devPop.style.left     = _devAt.left + 'px';
+  _devPop.style.top      = _devAt.top + 'px';
   _devPop.style.minWidth = Math.max(160, Math.round(r.width)) + 'px';
   _devPop.style.display  = 'block';
 }
@@ -985,9 +994,21 @@ function updateWifiVisibility(n, mode) {
       `Takes effect after a reboot.`;
   } else if (mode === 'join') {
     note.style.display = '';
-    note.innerHTML = `That network <b>must be on channel ${ch}</b> — the mesh channel. A NaviCore ` +
-      `hosts its AP on its own mesh channel, so it matches by construction. If the board lands ` +
-      `elsewhere it disconnects on purpose rather than go deaf, and says so. Takes effect after a reboot.`;
+    // Channel sync (docs/CHANNEL_SYNC.md §5): a JOIN board that finds its network on another channel takes the mesh
+    // there. Without it - sync off, or firmware before channel sync - the old rule stands.
+    const sync = systemConfig?.general?.chanSync !== false;
+    note.innerHTML = (sync
+      ? `If that network is not on <b>channel ${ch}</b> (the mesh channel), channel sync moves the whole mesh to ` +
+        `its channel when the board finds it; boards on firmware from before channel sync stay behind. With ` +
+        `channel sync off, that network must be on channel ${ch}: the board disconnects on purpose rather than ` +
+        `go deaf, and says so.`
+      : `That network <b>must be on channel ${ch}</b> — the mesh channel. A NaviCore ` +
+        `hosts its AP on its own mesh channel, so it matches by construction. If the board lands ` +
+        `elsewhere it disconnects on purpose rather than go deaf, and says so.`) +
+      ` Takes effect after a reboot.` +
+      // The firmware refuses to start WiFi in Join mode with no token (docs/WIFI_DESIGN.md §7).
+      (boardConfigs[n]?.wifiToken ? '' : ` <b>Needs an access token</b> (below): without one the board refuses to ` +
+        `start WiFi in Join mode.`);
   } else {
     note.style.display = 'none';
     note.innerHTML = '';
@@ -1014,6 +1035,37 @@ function onWifiFieldChange(n) {
   config.wifi.joinSsid = val('join-ssid');
   config.wifi.joinPass = val('join-pass');
   onBoardFieldChange(n);   // mark the board unsaved (WiFi needs a reboot to apply)
+}
+
+// The WebSocket access token (?WIFI,TOKEN). Checked as typed against the firmware's rule (WCBParser.wifiTokenProblem):
+// the field turns red and says why, and a push refuses it (_pushRowProblem). Blank is no token.
+function onWifiTokenChange(n) {
+  const config = boardConfigs[n];
+  if (!config) return;
+  config.wifiToken = document.getElementById(`b${n}-wifi-token`)?.value ?? '';
+  _showWifiTokenProblem(n);
+  const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+  if (mode) updateWifiVisibility(n, mode);   // the Join note says whether a token is still needed
+  onBoardFieldChange(n);
+}
+
+function _showWifiTokenProblem(n) {
+  const input = document.getElementById(`b${n}-wifi-token`);
+  const err   = document.getElementById(`b${n}-wifi-token-err`);
+  const tok   = input?.value ?? '';
+  const why   = tok ? WCBParser.wifiTokenProblem(tok) : null;
+  if (input) input.style.borderColor = why ? 'var(--red)' : '';
+  if (err) { err.textContent = why ? `${why[0].toUpperCase()}${why.slice(1)}.` : ''; err.style.display = why ? '' : 'none'; }
+}
+
+// Masked by default, like the WiFi passwords; Show reveals it for checking what was typed.
+function toggleWifiTokenReveal(n) {
+  const input = document.getElementById(`b${n}-wifi-token`);
+  const btn   = document.getElementById(`b${n}-wifi-token-reveal`);
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  if (btn) { btn.textContent = show ? 'Hide' : 'Show'; btn.title = show ? 'Hide the token' : 'Show the token'; }
 }
 
 function onKyberChange(n) {
@@ -1366,6 +1418,60 @@ function onMeshChannelChange() {
     const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
     if (mode) updateWifiVisibility(n, mode);
   }
+  _refreshChannelOptions();
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+// ─── Channel sync: region and on/off (docs/CHANNEL_SYNC.md §6-7) ────
+// Network-wide like the mesh channel. The region's options are built from WCBParser.CHSYNC_REGIONS, the one list.
+// Channels 12-13 are offered only in a region that allows them (WCBParser.regionMaxChannel - its comment says which
+// regions that is, and that the board's own check is the authority).
+function _regionOptionLabel(cc) {
+  return cc === '01' ? '01 — world-safe (1–11)' : `${cc} (1–${WCBParser.regionMaxChannel(cc)})`;
+}
+
+function initChanSyncFields() {
+  const sel = document.getElementById('g-region');
+  if (!sel) return;
+  sel.innerHTML = WCBParser.CHSYNC_REGIONS.map(cc => `<option value="${cc}">${_regionOptionLabel(cc)}</option>`).join('');
+  sel.value = systemConfig?.general?.region ?? '01';
+  _refreshChannelOptions();
+}
+
+// Enable 12-13 in the mesh channel dropdown only when the region allows them. A selected channel above the region's
+// top stays selected (it is what the boards hold), marked, and the push refuses it (_pushRowProblem) rather than this
+// moving the fleet to another channel unasked.
+function _refreshChannelOptions() {
+  const max = WCBParser.regionMaxChannel(document.getElementById('g-region')?.value ?? '01');
+  const sel = document.getElementById('g-meshch');
+  if (!sel) return;
+  for (const o of sel.options) o.disabled = parseInt(o.value, 10) > max && o.value !== sel.value;
+  const over = (parseInt(sel.value, 10) || 1) > max;
+  sel.style.borderColor = over ? 'var(--red)' : '';
+  sel.title = over ? `Channel ${sel.value} is outside this region (1–${max}): pick another channel or region` : '';
+}
+
+function onRegionChange() {
+  const cc = document.getElementById('g-region')?.value || '01';
+  systemConfig.general.region = cc;
+  for (const n in boardConfigs) boardConfigs[n].region = cc;
+  _refreshChannelOptions();
+  const ch = parseInt(document.getElementById('g-meshch')?.value, 10) || 1;
+  if (ch > WCBParser.regionMaxChannel(cc) && !_mirroringGeneral)
+    showToast(`Region ${cc} allows channels 1–${WCBParser.regionMaxChannel(cc)}: the mesh is on ${ch}. Pick another channel before pushing.`, 'warning', 8000);
+  updateGeneralBaseline();
+  _notifyGeneralChanged();
+}
+
+function onChanSyncChange() {
+  const on = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
+  systemConfig.general.chanSync = on;
+  for (const n in boardConfigs) boardConfigs[n].chanSync = on;
+  for (const n in boardConfigs) {   // a Join note says what happens when its network is on another channel
+    const mode = document.querySelector(`input[name="b${n}-wifi"]:checked`)?.value;
+    if (mode) updateWifiVisibility(n, mode);
+  }
   updateGeneralBaseline();
   _notifyGeneralChanged();
 }
@@ -1417,6 +1523,7 @@ function _badMacOctet() {
 //  - A sequence with IF inside a ;t or ;w payload, refused as TEST and SAVE/UPDATE refuse it (validateSequenceValue):
 //    the firmware rejects it as a timer payload. Only a row the push would send - one that differs from what the
 //    board holds - is checked.
+//  - The access token and the mesh channel against the region, below.
 function _pushRowProblem(n, config, baseline) {
   if (config.kyber?.mode === 'local' && !config.kyber.port) {
     showToast(`WCB ${n}: Kyber is set to Local, but S1 and S2 are both in use — free one of them for the Kyber, or set Kyber to None. Nothing was sent.`, 'error', 10000);
@@ -1427,6 +1534,21 @@ function _pushRowProblem(n, config, baseline) {
   if (seq) {
     showToast(`WCB ${n}: sequence "${seq.key}" — IF cannot be embedded in a ;t or ;w payload — the firmware rejects it. Put the IF before the token: IF,cond^;t500^cmd  /  IF,cond^;w2,cmd. Nothing was sent.`, 'error', 10000);
     return { reason: `sequence "${seq.key}" has IF inside a ;t or ;w payload — nothing was sent` };
+  }
+  //  - A WebSocket token the firmware would refuse (WCBParser.wifiTokenProblem is its rule): the board would keep its
+  //    old token, or none, while the baseline recorded this one.
+  const tokProblem = config.wifiToken ? WCBParser.wifiTokenProblem(config.wifiToken) : null;
+  if (tokProblem) {
+    showToast(`WCB ${n}: ${tokProblem}. Nothing was sent.`, 'error', 10000);
+    return { reason: `invalid access token (${tokProblem}) — nothing was sent` };
+  }
+  //  - A mesh channel above the General region's top (12-13 in a 1-11 region): the board refuses the ?WCBCH, so this
+  //    board would stay where it is while the rest of the fleet moved.
+  const cc = document.getElementById('g-region')?.value || '01';
+  const ch = parseInt(document.getElementById('g-meshch')?.value, 10) || 1;
+  if (ch > WCBParser.regionMaxChannel(cc)) {
+    showToast(`WCB ${n}: mesh channel ${ch} is outside region ${cc} (1–${WCBParser.regionMaxChannel(cc)}). Pick another channel or region. Nothing was sent.`, 'error', 10000);
+    return { reason: `mesh channel ${ch} is outside region ${cc} — nothing was sent` };
   }
   return null;
 }
@@ -1677,6 +1799,8 @@ function onNavicoreIdChange() {
 const GENERAL_FIELD_LABELS = {
   wcbQuantity:    'WCB Quantity',
   meshChannel:    'Mesh Channel',
+  region:         'Region',
+  chanSync:       'Channel Sync',
   espnowPassword: 'ESP-NOW Password',
   macOctet2:      'MAC Octet 2',
   macOctet3:      'MAC Octet 3',
@@ -1699,6 +1823,8 @@ function extractGeneralFields(config) {
   return {
     wcbQuantity:    config.wcbQuantity             ?? 1,
     meshChannel:    config.meshChannel             ?? 1,
+    region:         config.region                  ?? '01',
+    chanSync:       config.chanSync                !== false,
     espnowPassword: config.espnowPassword          ?? '',
     macOctet2:      config.macOctet2               ?? '00',
     macOctet3:      config.macOctet3               ?? '00',
@@ -1745,6 +1871,8 @@ function applyGeneralFieldsToBoardConfig(n, fields) {
   if (!cfg) return;
   cfg.wcbQuantity    = fields.wcbQuantity;
   cfg.meshChannel    = fields.meshChannel;
+  cfg.region         = fields.region;
+  cfg.chanSync       = fields.chanSync;
   cfg.espnowPassword = fields.espnowPassword;
   cfg.macOctet2      = fields.macOctet2;
   cfg.macOctet3      = fields.macOctet3;
@@ -1826,6 +1954,17 @@ const OTA_XFER_FALLBACKS = [460800];       // tried in order when a faster rate 
 let OTA_SESSION_TIMEOUT_MS = 30000;        // the board's session timeout, from BEGIN (WCB_OTA.cpp); a spec shortens it
 const OTA_BAUD_PROOF_MS = 1500;            // how long the board gets to answer STATUS at a raised rate
 
+// A board's partition table is whatever its last USB flash wrote. OTA carries a new version
+// onto the board without touching the table, so the version it reports says nothing about it.
+// Releases before 6.1.0 shipped ESP32's default table (two 1.25 MB app slots), and so does an
+// Arduino IDE upload on the Default scheme: such a board can OTA its way to 6.2.1 (which fit,
+// by 11 KB) and then refuse 7.x at BEGIN. Only a USB flash rewrites the table - the flasher's
+// migration check does it and keeps NVS - so say that, not the raw size line.
+const OTA_LEGACY_SLOT_BYTES = 0x140000;    // the default table's app slot (1310720)
+const _otaMB = (b) => (b / 1048576).toFixed(2);
+const OTA_LEGACY_FIX = 'OTA cannot change a board\'s partition layout: update it once over USB with Update FW ' +
+                       '(its config is kept). OTA works again after that.';
+
 function _otaBaudKey(conn) {
   try {
     const i = conn?.port?.getInfo?.() || {};
@@ -1892,8 +2031,14 @@ async function boardOtaSerial(n) {
     let beganAt = 0;
     const begin = async () => {
       const beginResp = await conn.sendAndCollect(cmd(`BEGIN,${total},${family}`), 8000, '[OTA:BEGIN,');
-      if (!/\[OTA:BEGIN,OK,/.test(beginResp))
-        throw new Error('board rejected OTA BEGIN — ' + (beginResp.match(/\[OTA\][^\r\n]*/)?.[0] || 'see terminal'));
+      if (!/\[OTA:BEGIN,OK,/.test(beginResp)) {
+        const why  = beginResp.match(/\[OTA\][^\r\n]*/)?.[0];
+        const slot = parseInt(why?.match(/exceeds partition '[^']*' \((\d+) B\)/)?.[1], 10);
+        if (slot > 0 && total > slot)
+          throw new Error(`this board has the old partition layout: ${_otaMB(slot)} MB firmware slots, too small ` +
+                          `for this ${_otaMB(total)} MB image. ${OTA_LEGACY_FIX}`);
+        throw new Error('board rejected OTA BEGIN — ' + (why || 'see terminal'));
+      }
       beganAt = performance.now();   // the board's session timeout runs from here
     };
     await begin();
@@ -2096,11 +2241,63 @@ async function _otaRelayAwaitAck(relayConn, command, targetWcb, session, timeout
   return m ? { offset: parseInt(m[1]), status: parseInt(m[2]) } : null;
 }
 
+// Every [OTA:ACK,<src>,<session>,<offset>,<status>] line the relay prints, from the moment this is called, queued in
+// arrival order for the windowed stream (WCBParser.otaRelayStream). A listener of its own rather than sendAndCollect:
+// with a window in flight the ACKs are not answers to the line just sent, and one arriving between two waits must
+// not be lost. close() removes it.
+function _otaAckReader(conn) {
+  const queue = [];
+  let waiter = null;
+  const onLine = (line) => {
+    const m = /\[OTA:ACK,(\d+),(\d+),(\d+),(\d+)\]/.exec(line);
+    if (!m) return;
+    const a = { src: +m[1], session: +m[2], offset: +m[3], status: +m[4] };
+    if (waiter) { const w = waiter; waiter = null; w(a); } else queue.push(a);
+  };
+  conn._dataCallbacks.push(onLine);
+  return {
+    nextAck(timeoutMs) {
+      if (queue.length) return Promise.resolve(queue.shift());
+      return new Promise((resolve) => {
+        const t = setTimeout(() => { waiter = null; resolve(null); }, Math.max(0, timeoutMs));
+        waiter = (a) => { clearTimeout(t); resolve(a); };
+      });
+    },
+    close() {
+      conn._dataCallbacks = conn._dataCallbacks.filter(cb => cb !== onLine);
+      if (waiter) { const w = waiter; waiter = null; w(null); }
+    },
+  };
+}
+
+// Which link reaches the relay, as a key of WCBParser.OTA_RELAY_LINKS (the window and pace, and why, are there).
+// Web Serial - a direct port or a shared-hub tab - is 'usb'. Under Intellex the page's port is a WebSocket to the
+// Intellex host (intellex_shim.js sets window.__intellexShimInstalled), and behind the host is either a COM port or the
+// relay's own WebSocket; the host's /_api/status says which ("kind": "serial" | "ws"). A port that is not a real
+// SerialPort with no Intellex to ask, or an Intellex that does not answer, gets the WebSocket's smaller window: too
+// small costs time, too large drops lines at the relay.
+async function _otaRelayLink(conn) {
+  const intellex = !!window.__intellexShimInstalled;
+  const foreignPort = !!conn?.port && typeof SerialPort === 'function' && !(conn.port instanceof SerialPort);
+  if (!intellex && !foreignPort) return 'usb';
+  if (intellex) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 1500);
+      const st = await (await fetch('/_api/status', { cache: 'no-store', signal: ctl.signal })).json();
+      clearTimeout(t);
+      if (st?.kind === 'serial') return 'usb';
+    } catch (_) {}
+  }
+  return 'ws';
+}
+
 // ─── OTA over ESP-NOW via a relay (Phase 2) ─────────────────────────────────
 // The board is reachable only via a USB-connected RELAY. We stream the firmware
 // to the relay over USB; the relay forwards each frame to the target over
 // ESP-NOW; the target writes its inactive slot and reboots — no USB on the
-// target at all. ACK-paced: the target's cumulative write cursor drives flow.
+// target at all. Windowed: several frames in flight, the target's cumulative
+// write cursor pulling the window along (WCBParser.otaRelayStream).
 async function boardOtaRelay(n) {
   const relayN    = remoteRelayForBoard[n];
   const relayConn = boardConnections[relayN];
@@ -2111,6 +2308,7 @@ async function boardOtaRelay(n) {
   const fc        = _relayFuncChar(relayN);
   const cmd       = (s) => `${fc}OTA,${s}`;
   const btn       = document.getElementById(`b${n}-btn-ota-serial`);
+  let acks        = null;   // the stream's ACK listener (_otaAckReader), removed in finally
 
   // Chip family from the target's known HW version (firmware BEGIN guard is the backstop).
   const hw         = boardConfigs[n]?.hwVersion;
@@ -2141,52 +2339,43 @@ async function boardOtaRelay(n) {
     setFlashStatus(n, 'Starting OTA…');
     const beginAck = await _otaRelayAwaitAck(relayConn, cmd(`BEGIN,${targetWcb},${session},${total},${family}`), targetWcb, session, 8000);
     if (!beginAck)              throw new Error(`no response from WCB${targetWcb} via relay — is it online & on this firmware?`);
-    if (beginAck.status !== 0)  throw new Error(`WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
+    // The relay ACK carries a status, not the reason. Past the legacy slot the likely reason is
+    // the old partition layout (see OTA_LEGACY_SLOT_BYTES); the family above comes from the HW
+    // version setting, so a wrong one stays the other suspect.
+    if (beginAck.status !== 0)  throw new Error(total > OTA_LEGACY_SLOT_BYTES
+      ? `WCB${targetWcb} rejected OTA BEGIN. The likely cause is the old partition layout, whose ` +
+        `${_otaMB(OTA_LEGACY_SLOT_BYTES)} MB firmware slots can't hold this ${_otaMB(total)} MB image. ` +
+        `${OTA_LEGACY_FIX} If that isn't it, check its HW version (chip family).`
+      : `WCB${targetWcb} rejected OTA BEGIN (chip family / partition?) — check its HW version`);
 
-    // Stream 192-byte ESP-NOW frames, ACK-paced (target reports its write cursor).
-    const CHUNK = 192;
-    let offset = 0, stalls = 0, peak = 0;
-    while (offset < total) {
-      const slice = bytes.subarray(offset, Math.min(offset + CHUNK, total));
-      const ack = await _otaRelayAwaitAck(relayConn, cmd(`DATA,${targetWcb},${session},${offset},${_u8ToBase64(slice)}`), targetWcb, session, 4000);
-      // Cursor collapsed to 0 after real progress → the target dropped/timed out the
-      // session. Re-streaming the whole image from 0 can never succeed (the session
-      // id no longer matches), so fail fast with a clear message instead of spinning.
-      if (ack && ack.offset === 0 && peak > CHUNK) {
-        throw new Error(`target lost the OTA session at ${peak} bytes (it likely timed out or rebooted) — retry the OTA`);
-      }
-      // The target flags a dead/torn-down session with OTA_ST_ERR (status != 0) — an
-      // image overrun, a flash-write error, or an idle-timeout abort. That session id
-      // can never accept another byte, so resending is futile: fail fast with the cause
-      // rather than stalling to the retry cap. (WCB firmware + navicore_ota.h both send
-      // this honest status; a live in-flight dup/gap still ACKs OK, so it can't misfire
-      // on normal loss-recovery. The collapse-to-0 check above wins for the nicer
-      // "lost at N bytes" message when progress had been made.)
-      if (ack && ack.status !== 0) {
-        throw new Error(`target rejected OTA data near ${offset} bytes (write error or lost session) — retry the OTA`);
-      }
-      if (!ack || ack.offset <= offset) {        // lost frame/ACK or cursor didn't advance → resend from cursor
-        if (++stalls > 60) throw new Error(`OTA stalled at ${offset} (no progress after retries)`);
-        if (ack && ack.offset < offset) offset = ack.offset;   // target is behind us — rewind
-        // Back off before resending. A stall means a frame or ACK was lost — almost
-        // always to ESP-NOW congestion (e.g. a controller broadcasting on the mesh).
-        // Re-sending instantly just floods the relay→target hop and deepens the
-        // congestion, so a single transient drop cascades straight to the cap. An
-        // escalating pause lets the target drain its queue + re-sync; the target's
-        // keep-alive means the slower cadence won't trip its 30 s session timeout.
-        await sleep(Math.min(stalls * 50, 600));
-        continue;
-      }
-      stalls = 0;
-      offset = ack.offset;                       // advance to the target's confirmed cursor
-      if (offset > peak) peak = offset;
-      updateFlashBar(n, offset, total);
-      setFlashStatus(n, `Uploading… ${Math.round(offset / total * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
-    }
+    // Stream 192-byte ESP-NOW frames, a window of them in flight, the target's write cursor pulling the window along
+    // and rewinding it past a loss (WCBParser.otaRelayStream, which also holds the fast-fails: a cursor collapsing to
+    // 0 after progress, and a non-zero ACK status). Window and pace come from the link to the relay
+    // (WCBParser.OTA_RELAY_LINKS): its input queue is what overflows.
+    const link = await _otaRelayLink(relayConn);
+    const { window: win, paceMs } = WCBParser.OTA_RELAY_LINKS[link];
+    termLog(n, `[OTA] relay link ${link === 'usb' ? 'USB serial' : 'WebSocket'}: ${win} frames in flight, ${paceMs} ms apart`, 'sys');
+    const io = {
+      send: (line) => relayConn.send(line + '\r'),
+      nextAck: (ms) => acks.nextAck(ms),
+      sleep,
+      now: () => performance.now(),
+      log: (text) => termLog(n, text, 'sys'),
+      progress: (done, all) => {
+        updateFlashBar(n, done, all);
+        setFlashStatus(n, `Uploading… ${Math.round(done / all * 100)}% • ${_fmtDur(performance.now() - _t0)}`);
+      },
+    };
+    acks = _otaAckReader(relayConn);
+    const _ts = performance.now();
+    const st = await WCBParser.otaRelayStream(bytes, io, { target: targetWcb, session, prefix: cmd(''), window: win, paceMs });
+    const _sec = (performance.now() - _ts) / 1000;
+    termLog(n, `[OTA] ${total} bytes sent in ${_fmtDur(_sec * 1000)} (${(total / 1024 / _sec).toFixed(1)} KB/s): ` +
+               `${st.frames} frames, ${st.rewinds} rewind${st.rewinds === 1 ? '' : 's'}, ${st.timeouts} timeout${st.timeouts === 1 ? '' : 's'}`, 'sys');
 
-    // END — target verifies (SHA) + switches boot + reboots.
+    // END — target verifies (SHA) + switches boot + reboots. Late DATA ACKs are skipped (WCBParser.otaRelayFinish).
     setFlashStatus(n, 'Verifying…');
-    const endAck = await _otaRelayAwaitAck(relayConn, cmd(`END,${targetWcb},${session}`), targetWcb, session, 12000);
+    const endAck = await WCBParser.otaRelayFinish(io, { target: targetWcb, session, prefix: cmd(''), timeoutMs: 12000 });
     if (!endAck || endAck.status !== 0) throw new Error('OTA verify/finalize failed on the target');
 
     const _el = _fmtDur(performance.now() - _t0);
@@ -2224,6 +2413,7 @@ async function boardOtaRelay(n) {
     showToast(`Wireless OTA failed: ${e.message}`, 'error');
     try { await relayConn.send(cmd(`ABORT,${targetWcb},${session}`) + '\r'); } catch (_) {}
   } finally {
+    acks?.close();
     _otaInProgress.delete(n);          // re-enable ETM-listener pulls now the OTA is done
     _otaInProgress.delete(targetWcb);
     // Replay ETM edges swallowed during the transfer — but only once the LAST
@@ -3464,6 +3654,8 @@ function populateUIFromConfig(n, config) {
   setVal('ap-pass',   w.apPass);
   setVal('join-ssid', w.joinSsid);
   setVal('join-pass', w.joinPass);
+  setVal('token',     config.wifiToken);
+  _showWifiTokenProblem(n);
   updateWifiVisibility(n, w.mode ?? 'off');
 
   // Kyber — None / Local / Remote are all directly selectable. "Remote" means
@@ -3507,7 +3699,8 @@ function populateUIFromConfig(n, config) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (tbody) {
     tbody.innerHTML = '';
-    for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value);
+    for (const seq of config.sequences) appendSequenceRow(n, seq.key, seq.value, { bulk: true });
+    updateSequencePlayButtons(n);
     refreshAllSeqSharedIndicators();   // board n's keys changed → refresh every board's hints
     _seqPager(n).page = 1;
     applySeqPager(n);                  // one page of them, with the filter kept
@@ -4832,6 +5025,7 @@ function updateSeqValCount(rowId, n) {
     const delim = boardConfigs[n]?.delimiter ?? '^';
     el.textContent = _seqRowValue(row, ta, delim).length;
   }
+  window.SeqBuilder?.scheduleThumb(n, rowId);   // the row's timing strip follows the text (seq-builder.js)
 }
 
 function addSequenceRow(n) {
@@ -5007,7 +5201,8 @@ function seqPagerSize(n, value) {
   }
 }
 
-function appendSequenceRow(n, key, value) {
+// bulk: one of many rows a load appends (populateUIFromConfig), which updates the play buttons once after them all.
+function appendSequenceRow(n, key, value, { bulk = false } = {}) {
   const tbody = document.getElementById(`b${n}-seq-tbody`);
   if (!tbody) return;
   const rowId = `seq-row-${n}-${++_rowIdCounter}`;
@@ -5035,8 +5230,12 @@ function appendSequenceRow(n, key, value) {
                 oninput="autoResizeTextarea(this); updateSeqValCount('${rowId}',${n})"
                 >${escHtml(lines)}</textarea>
       <div class="seq-char-count" id="${rowId}-val-count">${valLen}</div>
+      <div class="seq-thumb" id="${rowId}-thumb" role="button" tabindex="0" hidden
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.SeqBuilder?.open(${n},'${rowId}')}"></div>
     </td>
     <td class="seq-action-cell">
+      <button class="btn btn-ghost btn-sm" title="Open on a timeline"
+              onclick="window.SeqBuilder?.open(${n},'${rowId}')">TIMELINE</button>
       <button class="btn btn-primary btn-sm" title="Test"
               onclick="playSequence(${n},'${rowId}')" id="${rowId}-play">TEST</button>
       <button class="btn btn-primary btn-sm" title="Save/Update"
@@ -5055,8 +5254,11 @@ function appendSequenceRow(n, key, value) {
   // (';w2 ***note' -> ';w2***note', 'a^^b' -> 'a^b', the spaces around a ^), and each rewrite was a ?SEQ,SAVE the
   // user never asked for on the next push (W-10). An edited row is read from its text exactly as before.
   tr._seqLoaded = { value, text: ta ? ta.value : lines, delim };
+  window.SeqBuilder?.renderRowThumb(n, rowId);
 
-  updateSequencePlayButtons(n);
+  // Every row's buttons, so once per load: per append, a board with thousands of sequences took ~15 s to load
+  // (2,970 rows, each re-reading all the rows before it).
+  if (!bulk) updateSequencePlayButtons(n);
   // NB: the "⇄ also on Wx" hint is populated by the caller — populateUIFromConfig runs one
   // refreshAllSeqSharedIndicators() after its append loop, and a single addSequenceRow starts
   // with an empty key (nothing to hint) and gets refreshed on the key's oninput. Refreshing
@@ -5263,36 +5465,68 @@ async function updateSequence(n, rowId) {
       // Remote board — send via MGMT FRAG through the relay
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
       const relayFc   = _relayFuncChar(relayN);
       const seqSaveTargetWCB = boardConfigs[n]?.wcbNumber || n;
       logTarget = relayN;
       // A sequence is easily longer than one packet. Sending it as chunkIdx 0 of 1 used to hand
       // the relay a payload it could not carry: the relay's single-chunk ETM shortcut only takes
-      // payload.length() <= 198 (Code/WCB/WCB.ino:2626), and anything longer fell through to the
-      // FRAG path where strncpy truncated it to 179 — storing half a sequence under a green
-      // "updated" toast. Fragment properly when it does not fit the shortcut.
-      if (cmd.length <= 198) {
-        await sendMgmtReliable(relayConn,
-          `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
-        showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
-      } else {
-        const chunks = fragmentString(cmd, MGMT_CHUNK_SIZE);
-        if (chunks.length > MGMT_MAX_CHUNKS) {
-          showToast(`Sequence "${key}" is too long to send via a relay `
-                  + `(${cmd.length} chars, max ${MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE})`, 'error');
+      // payload.length() <= 198 BYTES (186 under ?ETM,CHKSM; WCB.ino handleMgmtForward), and anything
+      // longer fell through to the FRAG path, where one chunk over 179 bytes is refused. Fragment
+      // properly when it does not fit the shortcut, by bytes (a value can hold multi-byte characters).
+      const single = new TextEncoder().encode(cmd).length <= MGMT_SINGLE_MAX;
+      let plan = null;
+      if (!single) {
+        // One command: one session, of up to MGMT_MAX_CHUNKS chunks, or a long one where this board and relay take
+        // it (_relayLongChunks: the target and the relay say so in their WDP capability tags) - docs/MGMT_RELAY.md §10.
+        plan = WCBParser.planRelayPush(cmd, { funcChar, delim, chunkBytes: MGMT_CHUNK_SIZE,
+                                              maxChunks: MGMT_MAX_CHUNKS, longChunks: _relayLongChunks(relayN, n) });
+        if (plan.problem || plan.sessions.length !== 1) {
+          showToast(`Sequence "${key}" is too long to send via this relay (${plan.problem || 'more than one session'}). `
+                  + `Save it over USB, or update the board and relay firmware.`, 'error', 10000);
           return;
         }
-        for (let i = 0; i < chunks.length; i++) {
-          await sendMgmtReliable(relayConn,
-            `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},${i},${chunks.length},${chunks[i]}`,
-            i === 0 ? relayN : null);
-          if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
+      }
+      const send = async () => {
+        if (single) {
+          const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+          await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
+        } else {
+          await _sendRelaySession(relayConn, relayN, seqSaveTargetWCB, plan.sessions[0]);
         }
-        // The multi-chunk path is broadcast and un-ACKed, so we cannot claim success the way the
-        // single-chunk ETM path can. Say what actually happened rather than showing a green tick.
-        showToast(`Sequence "${key}" sent to WCB ${n} in ${chunks.length} parts — `
-                + `pull the board to confirm it stored`, 'info');
+      };
+      // Checked: the board is asked what it now holds (?MGMT,SEQGET) and the save sent again, under a new session, while
+      // it holds something else. A multi-chunk save goes as broadcasts nobody ACKs, and one lost chunk left the board
+      // without the sequence while this page showed it saved (wizard.seq_var_editors, run 20261024-173614). A WcbMgmt
+      // relay (NaviCore, MgmtRelay) cannot ask, so its save is sent once and said so, as before.
+      const parts = single ? 1 : plan.sessions[0].chunks.length;
+      const checks = !boardConfigs[relayN]?.isRelay;
+      let got = 'unchecked';
+      for (let attempt = 1; attempt <= RELAY_SEQ_SAVE_TRIES; attempt++) {
+        await send();
+        if (!checks) break;
+        await sleep(RELAY_SEQ_CHECK_DELAY_MS);
+        got = await _relaySeqCheck(relayConn, relayN, seqSaveTargetWCB, key, value);
+        if (got === 'noreply') {                 // the check's own request or answer lost: ask once more
+          await sleep(RELAY_SEQ_CHECK_DELAY_MS);
+          got = await _relaySeqCheck(relayConn, relayN, seqSaveTargetWCB, key, value);
+        }
+        if (got === 'ok') break;
+        termLog(relayN, `[Seq] "${key}" on WCB ${n}: ${got === 'noreply' ? 'no answer to the check'
+                         : got === 'missing' ? 'not on the board' : 'the board holds another value'}`
+                         + (attempt < RELAY_SEQ_SAVE_TRIES ? ' - sending it again' : ''), 'sys');
+      }
+      if (got === 'ok') {
+        showToast(`Sequence "${key}" saved on WCB ${n} (remote${parts > 1 ? `, ${parts} parts` : ''}) and checked`,
+                  'success');
+      } else if (got === 'unchecked' || got === 'noreply') {
+        showToast(`Sequence "${key}" sent to WCB ${n}${parts > 1 ? ` in ${parts} parts` : ''}`
+                + (got === 'noreply' ? `, but WCB ${relayN} did not answer the check` : '')
+                + ` - pull the board to confirm it stored`, 'info', 8000);
+      } else {
+        showToast(`Sequence "${key}" did not store on WCB ${n} after ${RELAY_SEQ_SAVE_TRIES} tries `
+                + `(${got === 'missing' ? 'the board does not have it' : 'the board holds another value'}). `
+                + `Try again, or save it over USB.`, 'error', 10000);
+        return;                                  // nothing stored: the config and baseline keep what the board has
       }
     } else {
       // Direct connection
@@ -6071,28 +6305,51 @@ class BoardConnection {
     }
   }
 
-  // Send a command and collect all response lines until timeout or sentinel
-  async sendAndCollect(command, timeoutMs = 8000, sentinel = 'End of Backup') {
+  // Send a command and collect all response lines until timeout or sentinel. timeoutMs is the wait for an answer.
+  // With idleMs, once the board answers the read lasts while it keeps sending: it ends after idleMs with no BYTES (not
+  // lines: _rxAt), and maxMs caps the whole read - so an answer of any length arrives whole. A full store of the
+  // shortest sequences prints ~190 KB of ?backup, ~18 s over a classic ESP32's 115200-baud USB, and each of its two
+  // one-line chains is ~62 KB, over 5 s for one line. With startMarker, lines before it are dropped and the sentinel
+  // counts only after it, so the tail of an earlier answer still arriving (a boot probe's) is never taken for this one.
+  async sendAndCollect(command, timeoutMs = 8000, sentinel = 'End of Backup',
+                       { idleMs = 0, maxMs = 0, startMarker = '' } = {}) {
     return new Promise((resolve) => {
       const lines = [];
-      let timer;
+      let timer, capTimer;
       let done = false;
+      let started = !startMarker;
 
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        clearTimeout(capTimer);
         this._dataCallbacks = this._dataCallbacks.filter(cb => cb !== onLine);
         resolve(lines.join('\n'));
       };
 
+      // Quiet for idleMs counts from the last bytes that arrived: a long line still arriving is not quiet.
+      const idleCheck = () => {
+        const quiet = Date.now() - (this._rxAt || 0);
+        if (quiet < idleMs) timer = setTimeout(idleCheck, idleMs - quiet);
+        else finish();
+      };
       const onLine = (line) => {
+        if (idleMs) {                        // the board is talking: wait for it to go quiet
+          clearTimeout(timer);
+          timer = setTimeout(idleCheck, idleMs);
+        }
+        if (!started) {
+          if (!line.includes(startMarker)) return;
+          started = true;
+        }
         lines.push(line);
         if (line.includes(sentinel)) finish();
       };
 
       this._dataCallbacks.push(onLine);
       timer = setTimeout(finish, timeoutMs);
+      if (idleMs && maxMs) capTimer = setTimeout(finish, maxMs);
       this.send(command + '\r').catch(finish);
     });
   }
@@ -6272,7 +6529,8 @@ class BoardConnection {
     this._shared = true;
     this._hub = hub;
     // The same splitter as the direct reader (parser.js makeLineSplitter): one streaming decoder per connection.
-    this._onHubData = WCBParser.makeLineSplitter(line => this._handleLine(line));
+    const splitHub = WCBParser.makeLineSplitter(line => this._handleLine(line));
+    this._onHubData = (bytes) => { this._rxAt = Date.now(); splitHub(bytes); };   // _rxAt: sendAndCollect's idle read
     this._onHubState = (st) => {
       // Reflect the shared port's open/closed state as this board's connection state.
       // Always re-apply (idempotent) so a card rebuilt mid-session can't get stuck
@@ -6364,6 +6622,7 @@ class BoardConnection {
           const { value, done } = await this.reader.read();
           if (done) { termLog(this.boardIndex, '[sr] reader done', 'sys'); break outer; }
           if (value?.length > 0 && !this._srDataSeen) { this._srDataSeen = true; termLog(this.boardIndex, `[sr] first data: ${value.length} bytes`, 'sys'); }
+          if (value?.length > 0) this._rxAt = Date.now();   // bytes, not lines: sendAndCollect's idle read
           splitLines(value);
         }
       } catch (e) {
@@ -7099,6 +7358,8 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     set('g-mac2',      newFields.macOctet2);
     set('g-mac3',      newFields.macOctet3);
     set('g-meshch',    newFields.meshChannel);
+    set('g-region',    newFields.region);
+    set('g-chsync',    newFields.chanSync ? 'on' : 'off');
     set('g-delimiter', newFields.delimiter);
     set('g-funcchar',  newFields.funcChar);
     set('g-cmdchar',   newFields.cmdChar);
@@ -7119,12 +7380,14 @@ function showGeneralMismatchModal(baselineBoard, baselineFields, newBoard, newFi
     onWCBQuantityChange();
     onGeneralPasswordChange();
     onGeneralMacChange();
+    onRegionChange();
     onMeshChannelChange();
+    onChanSyncChange();
     onGeneralCmdCharChange();
     onETMToggle();
     onETMChecksumToggle();
     onGeneralETMChange();
-    // NaviCore is one of the 16 fields this modal DIFFS and DISPLAYS (GENERAL_FIELD_LABELS
+    // NaviCore is one of the fields this modal DIFFS and DISPLAYS (GENERAL_FIELD_LABELS
     // ends with navicoreEnabled/navicoreId), but nothing above applied it — so a user who
     // read a NaviCore row and clicked "Use <new> values" got every other field applied and
     // that one silently ignored, and re-pulling the board re-opened the identical modal
@@ -7670,6 +7933,10 @@ async function boardAutoDetect(n) {
 //  cleared on reconnect) and re-send ?backup every 10 s until the board
 //  answers.  The moment "End of Backup" arrives in any received line the
 //  listener resolves immediately.
+// How a USB pull reads a backup (BoardConnection.sendAndCollect): as long as the board keeps sending - 3 s of quiet
+// ends it, 2 min caps it - and from its own header on. Nothing about it depends on how much the board has stored.
+const USB_PULL_READ = { idleMs: 3000, maxMs: 120000, startMarker: 'WCB Configuration Backup' };
+
 async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs = 5000 } = {}) {
   termLog(n, '⏳ Waiting for firmware to boot…', 'sys');
   if (preDelayMs > 0) await sleep(preDelayMs);
@@ -7679,6 +7946,11 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
     let tickTimer = null;
     const startedAt = Date.now();
     let sendAttempt = 0;
+    // A backup on its way: its header seen, its end not yet, and bytes within the last 5 s (a one-line chain of a full
+    // store takes longer than that). A probe sent meanwhile would queue another whole backup behind it (a full
+    // sequence store's takes up to ~18 s), so none is.
+    let backupAt = 0;
+    const answering = () => backupAt && Date.now() - Math.max(backupAt, conn._rxAt || 0) < 5000;
 
     // ── Persistent listener ───────────────────────────────────────────────
     // Registered once; _startReading dispatches every incoming line here.
@@ -7688,6 +7960,7 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
       // NB: do NOT echo every received line here — the normal terminal already shows
       // them, so echoing would double every line (and tag anything the user types
       // during the boot-watch with a "[wait]" prefix). We only watch for the sentinel.
+      if (line.includes('WCB Configuration Backup') || (backupAt && !line.includes('End of Backup'))) backupAt = Date.now();
       if (line.includes('End of Backup')) {
         done = true;
         clearTimeout(tickTimer);
@@ -7719,15 +7992,16 @@ async function waitForBoardReady(n, conn, { totalTimeoutMs = 150000, preDelayMs 
 
       termLog(n, `⏳ Still waiting… (${elapsed}s, probe ${sendAttempt}) connected=${connected} reader=${hasReader}`, 'sys');
 
-      if (connected && hasReader) {
+      if (connected && hasReader && !answering()) {
         // Always try the fixed bootstrap command first — works regardless of the
-        // board's configured funcChar (new firmware).  Then also send the
-        // funcChar-prefixed form as a fallback for pre-bootstrap firmware.
+        // board's configured funcChar (new firmware).  Then the funcChar-prefixed
+        // form as a fallback for pre-bootstrap firmware, unless a backup has
+        // started meanwhile (a second would only queue behind it).
         const pullFuncChar = _liveFuncChar(n);
         try {
           await conn.send('WCB_WEBTOOL_CONFIG_PULL\r');
-          await sleep(200);
-          if (!done) await conn.send(`${pullFuncChar}backup\r`);
+          await sleep(200);   // a board that takes it starts its backup's header well inside this
+          if (!done && !answering()) await conn.send(`${pullFuncChar}backup\r`);
         }
         catch (e) { termLog(n, `⚠ backup probe send failed: ${e?.message ?? e}`, 'sys'); }
       }
@@ -7782,13 +8056,16 @@ async function boardPull(n, opts = {}) {
   // Tier 2: funcChar-prefixed fallback — for firmware that pre-dates the
   //   bootstrap command.  Uses the best-known funcChar from the config/baseline,
   //   falling back to '?' (firmware default) for fresh boards.
+  // Each waits for the board to go quiet, not a fixed time: a full sequence store's backup takes ~9 s over a classic
+  // ESP32's 115200-baud USB, and the fixed 3 s and 8 s cut it off part way (USB_PULL_READ). The bootstrap's answer
+  // arriving after the fallback was sent then ended the fallback's read with no beginning.
   const BOOTSTRAP_CMD = 'WCB_WEBTOOL_CONFIG_PULL';
   termLog(n, BOOTSTRAP_CMD, 'in');
-  let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000);
+  let raw = await conn.sendAndCollect(BOOTSTRAP_CMD, 3000, 'End of Backup', USB_PULL_READ);
   if (!raw.includes('End of Backup')) {
     const pullFuncChar = _liveFuncChar(n);
     termLog(n, `${pullFuncChar}backup`, 'in');
-    raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000);
+    raw = await conn.sendAndCollect(`${pullFuncChar}backup`, 8000, 'End of Backup', USB_PULL_READ);
   }
 
   // A backup MUST be terminated by its end marker. Without this check a truncated or empty
@@ -8521,6 +8798,8 @@ async function boardGo(n, opts = {}) {
     config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
     [config.macOctet2, config.macOctet3] = macOctets;
     config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
+    config.region         = document.getElementById('g-region')?.value || '01';
+    config.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
     config.delimiter      = document.getElementById('g-delimiter').value || '^';
     config.funcChar       = document.getElementById('g-funcchar').value  || '?';
     config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -8547,6 +8826,19 @@ async function boardGo(n, opts = {}) {
       btn.disabled = false;
       btn.textContent = 'Push Config';
       return;
+    }
+
+    // A new number another board already has: the user decides (confirmWcbNumberTaken, Cancel by default), before
+    // anything is sent - as through a relay. Renumbering is deliberate, so it is asked, never refused.
+    if (boardBaselines[n] && boardBaselines[n].wcbNumber !== config.wcbNumber) {
+      const taken = _renumberTaken(n, config.wcbNumber, null);
+      if (taken && !(await confirmWcbNumberTaken(n, config.wcbNumber, taken))) {
+        boardPushOutcome[n] = { ok: false, aborted: true, reason: `cancelled: ${taken} - nothing was sent` };
+        termLog(n, `Push cancelled: ${taken}`, 'sys');
+        btn.disabled = false;
+        btn.textContent = 'Push Config';
+        return;
+      }
     }
 
     // ── Bootstrap: char-change commands must use the board's CURRENT funcChar ──
@@ -8833,8 +9125,14 @@ function installEtmListener(relayN) {
   const cb = (line) => {
     const onlineMatch  = line.match(/\[ETM\] WCB(\d+) came ONLINE/);
     const offlineMatch = line.match(/\[ETM\] WCB(\d+) went OFFLINE/);
+    // Not for a board being pushed right now: its pull would replace the config the push is sending - a two-step
+    // renumber's restart announces the board under its new number mid-push. A restart after the push announces it again.
+    const edgeSlot = (m) => _slotForWcbNumber(parseInt(m[1])) ?? parseInt(m[1]);
+    if ((onlineMatch || offlineMatch) && _pushingBoards.has(edgeSlot(onlineMatch || offlineMatch))) return;
+    // The line names a board NUMBER; everything below is keyed by slot. They differ for a board whose slot has not
+    // followed a renumber (_moveRemoteBoardToNumber keeps it where it is when the new slot is taken).
     if (onlineMatch) {
-      const bn = parseInt(onlineMatch[1]);
+      const bn = edgeSlot(onlineMatch);
       // Any in-flight wireless OTA owns the relay link: a config pull triggered
       // here (even for a DIFFERENT board) would fight the OTA stream for the
       // same relay USB bandwidth + ESP-NOW airtime. DEFER the edge (record it)
@@ -8858,7 +9156,7 @@ function installEtmListener(relayN) {
         startRemoteTermSession(relayN, bn);
       }
     } else if (offlineMatch) {
-      const bn = parseInt(offlineMatch[1]);
+      const bn = edgeSlot(offlineMatch);
       // Offline edges are EXPECTED noise while an OTA saturates the channel —
       // defer (record) rather than toast/badge/pull until the transfer finishes.
       if (_otaInProgress.size > 0) {
@@ -8893,12 +9191,224 @@ function removeEtmListener(relayN) {
   delete _etmCallbacks[relayN];
 }
 
+// A relay push, a session at a time (WCBParser.planRelayPush, docs/MGMT_RELAY.md §10). Chunks are cut by UTF-8 BYTES
+// (WCBParser.utf8Chunks): the relay counts bytes, and a 179-character chunk holding an 'é' was refused there.
 function fragmentString(str, chunkSize) {
-  const chunks = [];
-  for (let i = 0; i < str.length; i += chunkSize) {
-    chunks.push(str.slice(i, i + chunkSize));
+  return WCBParser.utf8Chunks(str, chunkSize);
+}
+
+// The most chunks ONE command may take through relayN to board n, where it is longer than one session: a long
+// ?SEQ,SAVE (up to 4025 characters, 23 chunks). Read from the capability tags each WCB advertises about itself
+// (WCBParser.relayLongChunks; _meshSeen, from the ?WDP,DUMP rows): a WCB that takes one as a target says "mgmt.rx24" -
+// every ESP32-S3 on the firmware that sends tags, and a classic ESP32 since it saves from the queued line (2026-10-24;
+// it said "mgmt.fwd24", forwarding 24 but taking 16, the day before); a WcbMgmt relay (NaviCore, MgmtRelay) forwards
+// any count. 0 = one session at most, as before - and so for a board or relay whose tags no dump has shown yet, as for
+// firmware that sends none.
+// Whether board n saves a ?SEQ,SAVE of the whole 3,999 characters the store takes. An ESP32-S3 (HW 3.1, 3.2) always
+// did; a classic ESP32 (HW 1.0, 2.x) does from the firmware that saves from the queued line (2026-10-24), which says
+// so with "mgmt.rx24" in its WDP row - before it, about 7x a value's length in heap stopped it near 2,400 characters.
+// The Sequence Builder warns only where this is false (seq-builder.js sbAnalyze).
+function boardTakesLongSave(n) {
+  const cfg = boardConfigs[n] || {};
+  if (+cfg.hwVersion === 31 || +cfg.hwVersion === 32) return true;
+  const tags = _meshSeen.get(+(cfg.wcbNumber || n))?.capTags || '';
+  const m = /(^|\s)mgmt\.rx(\d+)(\s|$)/.exec(tags);
+  return !!m && +m[2] >= 23;
+}
+
+function _relayLongChunks(relayN, n) {
+  const relay = boardConfigs[relayN];
+  const targetNum = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
+  const relayNum  = relay?.wcbNumber || relayN;
+  return WCBParser.relayLongChunks(_meshSeen.get(+targetNum)?.capTags, _meshSeen.get(+relayNum)?.capTags,
+                                   { relayForwardsAny: !!relay?.isRelay, maxChunks: MGMT_MAX_CHUNKS });
+}
+
+// Who else answers to newNum, in words, or '' when nothing the Wizard knows says another device has it: the relay's
+// own number, another slot's pulled or connected board, a live ?WDP,DUMP row for that number (_meshSeen, heard
+// within its TTL). A board given a number another one has shares that board's radio address (02:..:<n>) until one
+// of them is renumbered, so the push asks first (confirmWcbNumberTaken) - by USB or through a relay, one session or
+// two. relayN null: a USB push.
+function _renumberTaken(n, newNum, relayN) {
+  const num = +newNum;
+  if (relayN != null && +(boardConfigs[relayN]?.wcbNumber || relayN) === num) return `WCB ${num} is the relay's own number`;
+  for (const k of Object.keys(boardConfigs)) {
+    if (+k === +n || (relayN != null && +k === +relayN)) continue;
+    const pulled = boardBaselines[k]?.wcbNumber === num;
+    const live   = boardConnections[k]?.isConnected?.() && boardConfigs[k]?.wcbNumber === num;
+    if (pulled || live) return `WCB ${num} is already a board here (slot ${k})`;
   }
-  return chunks;
+  const seen = _meshSeen.get(num);
+  if (seen?.live) return `WCB ${num} is already on the mesh (${seen.client ? 'a client device' : 'a WCB'} heard by WDP)`;
+  return '';
+}
+
+// Ask before giving board n a number another device has (taken: _renumberTaken's words). Resolves true only for the
+// "Push anyway" button: Cancel, Escape, Enter (Cancel has the focus) and a click outside all keep both boards as
+// they are. twoSteps: a relay push that goes in two steps, whose rest is addressed to that number.
+function confirmWcbNumberTaken(n, newNum, taken, { twoSteps = false } = {}) {
+  return new Promise((resolve) => {
+    const body = document.getElementById('wcb-number-taken-body');
+    if (body) body.innerHTML = `
+      <p>This push gives <strong>WCB ${n}</strong> the number <strong>${newNum}</strong>, but ${_wdpEsc(taken)}.</p>
+      <p>Two boards on one number share one radio address. Until one of them is given another number, the mesh cannot
+      tell them apart: commands for WCB ${newNum} reach both or neither, and each can be taken for the other.</p>
+      ${twoSteps ? `<p>This push goes in two steps: after the restart, the rest of it is addressed to WCB ${newNum},
+      so the other board may take it too.</p>` : ''}
+      <p style="margin-top:10px">Cancel leaves both boards as they are. Push anyway only if you are about to give the
+      other board a new number as well.</p>`;
+    const modal   = document.getElementById('wcb-number-taken-modal');
+    const okBtn   = document.getElementById('wcb-number-taken-confirm');
+    const noBtn   = document.getElementById('wcb-number-taken-cancel');
+    if (!modal || !okBtn || !noBtn) { resolve(false); return; }
+    const done = (v) => {
+      modal.classList.remove('open');
+      okBtn.onclick = noBtn.onclick = modal.onclick = null;
+      modal.removeEventListener('keydown', onKey, true);
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); done(false); }
+      else if (e.key === 'Enter' && document.activeElement !== okBtn) { e.preventDefault(); done(false); }
+    };
+    okBtn.onclick = () => done(true);
+    noBtn.onclick = () => done(false);
+    modal.onclick = (e) => { if (e.target === modal) done(false); };
+    modal.addEventListener('keydown', onKey, true);
+    modal.classList.add('open');
+    noBtn.focus();
+  });
+}
+
+// How long step 2 of a two-step renumber waits to hear the board under its new number: its restart waits for 4 s of
+// quiet (20 s at most, rule 11), a boot takes about 5 s and its first WDP advert follows ~1.6 s later.
+let _renumberReturnMs = 45000;
+const RENUMBER_POLL_MS = 2000;
+
+// After step 1 of a two-step renumber (sent at sentAt): poll relayN's ?WDP,DUMP until it has a WCB row for num heard
+// since then (AGE no older than the time since sentAt), or _renumberReturnMs passes -> true / false. Before its restart
+// the board's adverts carry the new number from the old address, which every receiver drops (the sender-MAC binding),
+// so a fresh row means the board is back under the new number - or, if the user confirmed a number another board has,
+// that board. Every relay answers ?WDP,DUMP: a WCB from its neighbour table, a WcbMgmt relay from WCB_Client's.
+async function _awaitBoardAs(relayN, num, sentAt) {
+  const deadline = sentAt + _renumberReturnMs;
+  while (Date.now() < deadline) {
+    const conn = boardConnections[relayN];
+    if (!conn?.isConnected()) return false;
+    while (_meshDiscoverBusy && Date.now() < deadline) await sleep(200);   // one ?WDP,DUMP on the relay at a time
+    try {
+      const raw   = await conn.sendAndCollect(`${_relayFuncChar(relayN)}WDP,DUMP`, 4000, '[WDP:END');
+      const nodes = parseWdpDump(raw).nodes;
+      _noteMeshDump(nodes);
+      const since = (Date.now() - sentAt) / 1000;
+      if (nodes.some((nd) => nd.n === +num && !nd.client && nd.live && nd.age <= since)) return true;
+    } catch (_) { /* the next poll asks again */ }
+    await sleep(RENUMBER_POLL_MS);
+  }
+  return false;
+}
+
+// Numbers a board left by a relay renumber: { to, at }. The relay (and every other board) keeps the old number's WDP
+// row - stale, never forgotten - so a row for it not heard since the move is the moved board's leftover, not a board:
+// it must not surface a section of its own or count as taken (_rowLeftByRenumber). A fresh one is a board again.
+const _renumberedAway = new Map();
+function _rowLeftByRenumber(nd) {
+  const r = nd && _renumberedAway.get(nd.n);
+  if (!r) return false;
+  // Heard since the move (AGE is whole seconds, so a margin of one): a board answers to that number again.
+  if (nd.age + 1 < (Date.now() - r.at) / 1000) { _renumberedAway.delete(nd.n); return false; }
+  return true;
+}
+
+// A relay push that gave board n (slot n) the number num: the board shows once, under num. Its config, baseline, relay
+// route, push outcome, terminal pane and mesh records move to slot num, and slot n is dropped (or, inside the WCBQ
+// floor, left as an empty placeholder) - otherwise the mesh poll adds a section for num beside it, and the ETM
+// listener, which goes by number, never finds the board under its new one. Kept where it is (with a toast) when slot
+// num holds another board. Returns the slot the board is in.
+function _moveRemoteBoardToNumber(n, num, relayN) {
+  n = +n; num = +num;
+  if (n === num) return n;
+  const busy = boardConnections[num]?.isConnected?.() || !!boardBaselines[num] ||
+               (remoteRelayForBoard[num] !== undefined && remoteRelayForBoard[num] !== relayN);
+  if (busy) {
+    showToast(`WCB ${n} now answers to ${num}, but slot ${num} holds another board, so it stays in slot ${n}. `
+            + `Give one of them another number.`, 'warning', 10000);
+    return n;
+  }
+  _rtermKeepAliveStop(n);
+  boardConfigs[num]   = boardConfigs[n];
+  boardBaselines[num] = boardBaselines[n];
+  boardPushOutcome[num] = boardPushOutcome[n];   // slot n keeps its copy: a caller reads the slot it pushed
+  delete boardConfigs[n];
+  delete boardBaselines[n];
+  delete remoteRelayForBoard[n];
+  _meshBoards.delete(n);
+  _meshBoards.add(num);
+  _meshSeen.delete(n);
+  _renumberedAway.delete(num);
+  _renumberedAway.set(n, { to: num, at: Date.now() });
+  reconcileBoardGrid();                    // builds section num from boardConfigs[num]; drops section n outside the floor
+  if (document.getElementById(`section-board-${n}`)) {
+    // Inside the WCBQ floor: an empty placeholder, as a slot nobody has been found on.
+    boardConfigs[n] = WCBParser.createDefaultBoardConfig();
+    boardConfigs[n].wcbNumber = n;
+    populateUIFromConfig(n, boardConfigs[n]);
+    updateConnectionUI(n, false);
+  }
+  populateUIFromConfig(num, boardConfigs[num]);
+  migrateTerminalPane(n, num);
+  setRemoteConnected(num, relayN);         // the route, the card, the ETM listener and the remote terminal
+  updateBoardStatusBadge(num, 'configured');
+  _refreshRouteHostDropdowns();
+  termLog(relayN, `[Remote] WCB ${n} is now WCB ${num}: moved to slot ${num}`, 'sys');
+  return num;
+}
+
+// The commands one relay session may carry: the target queues them all at once, from its WiFi task, and its command
+// queue holds 200 (WCB.ino) - a session of more lost the rest.
+const MGMT_PUSH_MAX_CMDS = 150;
+
+// How long to wait after a session before the next: long enough for the target to run what it queued (a ?SEQ,SAVE or
+// ?SEQ,CLEAR rewrites the sequence store, up to a few hundred ms; most commands take a few) and at least the 2 s after
+// which a target gives up a session that lost a chunk (handleMgmtPacket's busy guard), so a lost chunk costs that
+// session, never the next one too.
+const RELAY_SESSION_GAP_MS = 2500;
+function _relaySessionGap(session, funcChar = '?') {
+  const seq = session.list.filter((c) => /^SEQ,(SAVE|CLEAR),/i.test(c.slice(funcChar.length))).length;
+  return Math.max(RELAY_SESSION_GAP_MS, seq * 250 + (session.cmds - seq) * 25);
+}
+
+// One session's chunks through the relay, MGMT_CHUNK_DELAY apart, under a session id of its own.
+// A checked relay save (updateSequence): tries in all, and the wait before asking what the board holds. A save is
+// stored within ~100 ms of its last chunk (the store's append); 1.5 s leaves room for a busy target.
+const RELAY_SEQ_SAVE_TRIES    = 3;
+const RELAY_SEQ_CHECK_DELAY_MS = 1500;
+
+// What board targetWCB holds under key, asked through relayN (?MGMT,SEQGET; a value too long for one reply comes in
+// parts the relay joins), against value -> 'ok' | 'different' | 'missing' | 'noreply'. Only a WCB relay answers.
+async function _relaySeqCheck(relayConn, relayN, targetWCB, key, value) {
+  const tag = `[MGMT:SEQVAL,${targetWCB}]${key},`;
+  let raw = '';
+  try {
+    raw = await relayConn.sendAndCollect(`${_relayFuncChar(relayN)}MGMT,SEQGET,${targetWCB},${key}`, 8000, tag);
+  } catch (_) { return 'noreply'; }
+  const line = String(raw || '').split('\n').map((l) => l.replace(/\r$/, '').replace(/^\[TERM:\d+\]/, ''))
+                                .find((l) => l.startsWith(tag));
+  if (!line) return 'noreply';
+  const rest = line.slice(tag.length);
+  if (rest.startsWith('OK,')) return rest.slice(3) === value ? 'ok' : 'different';
+  return 'missing';
+}
+
+async function _sendRelaySession(relayConn, relayN, targetWCB, session) {
+  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const total = session.chunks.length;
+  for (let i = 0; i < total; i++) {
+    const cmd = `${_relayFuncChar(relayN)}MGMT,FRAG,${targetWCB},${sessionId},${i},${total},${session.chunks[i]}\r`;
+    termLog(relayN, cmd.trim(), 'in');
+    await relayConn.send(cmd);
+    if (i < total - 1) await sleep(MGMT_CHUNK_DELAY);
+  }
 }
 
 async function boardGoRemote(n, opts = {}) {
@@ -8953,6 +9463,8 @@ async function boardGoRemote(n, opts = {}) {
   config.espnowPassword = document.getElementById('g-password').value || 'change_me_or_risk_takeover';
   [config.macOctet2, config.macOctet3] = macOctets;
   config.meshChannel    = parseInt(document.getElementById('g-meshch')?.value) || 1;
+  config.region         = document.getElementById('g-region')?.value || '01';
+  config.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
   config.delimiter      = document.getElementById('g-delimiter').value || '^';
   config.funcChar       = document.getElementById('g-funcchar').value  || '?';
   config.cmdChar        = document.getElementById('g-cmdchar').value   || ';';
@@ -8988,26 +9500,44 @@ async function boardGoRemote(n, opts = {}) {
   // MGMT reboot session unreachable.  Appending the reboot to the same session
   // ensures the sequence is: config change → reboot, all inside one session
   // execution, with no ESP-NOW exchange in between.
-  const cmdToSend = (needsReboot && !skipReboot) ? cmdString + delim + funcChar + 'reboot' : cmdString;
-  const chunks    = fragmentString(cmdToSend, MGMT_CHUNK_SIZE);
-  const total     = chunks.length;
-
-  // The relay rejects a session claiming more than MGMT_MAX_CHUNKS chunks, and the target
-  // reassembles into a fixed 16-slot array with a uint16_t arrival mask — so an oversized push was
-  // discarded WHOLESALE at the far end while this side happily streamed every chunk and then
-  // reported success and advanced the baseline. Refuse up front and say what to trim.
-  // Up front means BEFORE the network-group confirm and the character bootstrap below (F14, W-9): refused after
-  // them, the user was asked to approve a push that could never be sent, and a bootstrap had already switched the
-  // target's delimiter or function identifier - leaving it on characters the rest of the push never arrived in.
-  if (total > MGMT_MAX_CHUNKS) {
-    const maxChars = MGMT_MAX_CHUNKS * MGMT_CHUNK_SIZE;
-    boardPushOutcome[n].reason = `too large to push via a relay (${cmdToSend.length} chars, max ${maxChars})`;
-    showToast(`WCB ${n}: config is too large to push via a relay (${cmdToSend.length} chars, `
-            + `max ${maxChars}). Push it over USB, or reduce stored sequences/variables.`, 'error', 12000);
-    termLog(relayN, `[Remote] Refusing push for WCB ${n}: ${total} chunks exceeds the `
-                  + `${MGMT_MAX_CHUNKS}-chunk relay limit (${cmdToSend.length} > ${maxChars} chars)`, 'err');
+  // The push as relay sessions (WCBParser.planRelayPush, docs/MGMT_RELAY.md §10). The relay forwards a session of at
+  // most MGMT_MAX_CHUNKS chunks and a released target reassembles no more, so a push longer than one session goes as
+  // several, each whole commands, the network and restart commands in the last; one fits one, in its own order, as
+  // before. Planned BEFORE the network-group confirm and the character bootstrap below (F14, W-9): a push that cannot
+  // be sent is refused before the user is asked to approve it and before a bootstrap switches the target's delimiter or
+  // function identifier. Refused only for what cannot be carried at all (one command longer than this board and relay
+  // take) - nothing is sent then.
+  // Addressed to the number the board answers to NOW - its baseline's. A push that changes it (?WCB,<new>) used to go
+  // to the new number, which the board only takes once that push runs, so it never arrived. A push that changes it
+  // and needs more than one session goes in two steps (planRelayPush): ?WCB,<new> and ?reboot to the number it has
+  // now; once the relay hears it under the new number (_awaitBoardAs), the rest to the new number (session.to 'new').
+  const relayPushTarget = boardBaselines[n]?.wcbNumber || boardConfigs[n]?.wcbNumber || n;
+  const relayNewTarget  = config.wcbNumber || relayPushTarget;
+  const wcbChange       = !!boardBaselines[n] && boardBaselines[n].wcbNumber !== config.wcbNumber;
+  const plan = WCBParser.planRelayPush(cmdString, {
+    funcChar, delim, reboot: needsReboot && !skipReboot, chunkBytes: MGMT_CHUNK_SIZE, maxChunks: MGMT_MAX_CHUNKS,
+    maxCmds: MGMT_PUSH_MAX_CMDS, longChunks: _relayLongChunks(relayN, n), wcbChange,
+    restReboot: (rest) => !skipReboot && commandStringNeedsReboot(rest, funcChar, delim) });
+  if (plan.problem) {
+    boardPushOutcome[n].reason = `cannot be pushed via a relay: ${plan.problem}`;
+    showToast(`WCB ${n}: this push cannot go via a relay — ${plan.problem}. Push it over USB.`, 'error', 12000);
+    termLog(relayN, `[Remote] Refusing push for WCB ${n}: ${plan.problem}`, 'err');
     if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
     return false;
+  }
+  const total = plan.sessions.reduce((t, x) => t + x.chunks.length, 0);
+
+  // ── A new number another board already has: the user decides (confirmWcbNumberTaken, Cancel by default) ──
+  // Not refused: renumbering is deliberate, and the user may be about to move the other board too. Asked before the
+  // network-group confirm and the bootstrap, so Cancel sends nothing.
+  if (wcbChange) {
+    const taken = _renumberTaken(n, relayNewTarget, relayN);
+    if (taken && !(await confirmWcbNumberTaken(n, relayNewTarget, taken, { twoSteps: plan.renumber }))) {
+      boardPushOutcome[n] = { ok: false, aborted: true, reason: `cancelled: ${taken} - nothing was sent` };
+      termLog(relayN, `[Remote] Push for WCB ${n} cancelled: ${taken}`, 'sys');
+      if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
+      return false;
+    }
   }
 
   // ── Network-group change guard ─────────────────────────────────────
@@ -9040,7 +9570,7 @@ async function boardGoRemote(n, opts = {}) {
   {
     const bootstrap = charPlan.commands;
     if (bootstrap.length) {
-      const bootTargetWCB = boardConfigs[n]?.wcbNumber || n;
+      const bootTargetWCB = relayPushTarget;
       termLog(relayN, `[Remote] WCB ${n}: switching command characters before the push`, 'sys');
       for (const bcmd of bootstrap) {
         const bSession = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
@@ -9066,23 +9596,41 @@ async function boardGoRemote(n, opts = {}) {
     showToast(`⚠️ WCB ${n}: board will reboot after push — remote connection may be lost`, 'warning', 6000);
   }
 
-  // Generate a random 4-char hex session ID
-  const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  const sessions = plan.sessions;
+  termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s)`
+                + (sessions.length > 1 ? ` in ${sessions.length} sessions` : '')
+                + (plan.renumber ? `: first the number ${relayNewTarget} and a restart to WCB ${relayPushTarget}, then `
+                                 + `the rest to WCB ${relayNewTarget} once it is heard under that number` : ''), 'sys');
 
-  termLog(relayN, `[Remote] Pushing WCB ${n} config (${changeLabel}) — ${total} chunk(s), session ${sessionId}`, 'sys');
-
-  let pushSucceeded = false;
+  let pushSucceeded = false, backAsNew = false;
+  _pushingBoards.add(n);   // the 12 s mesh poll holds off: _awaitBoardAs reads the relay's ?WDP,DUMP itself
   try {
     // Route by the board's configured WCB NUMBER, not its UI slot — the two can differ
     // (auto-migration, relay setups). The single-chunk MGMT paths already resolve wcbNumber;
     // this multi-chunk push must match or a mismatched board's config lands on the wrong WCB.
-    const pushTargetWCB = boardConfigs[n]?.wcbNumber || n;
-    for (let i = 0; i < chunks.length; i++) {
-      const relayFcPush = _relayFuncChar(relayN);
-      const cmd = `${relayFcPush}MGMT,FRAG,${pushTargetWCB},${sessionId},${i},${total},${chunks[i]}\r`;
-      termLog(relayN, cmd.trim(), 'in');
-      await relayConn.send(cmd);
-      if (i < chunks.length - 1) await sleep(MGMT_CHUNK_DELAY);
+    for (let s = 0; s < sessions.length; s++) {
+      const sentAt = Date.now();
+      await _sendRelaySession(relayConn, relayN, sessions[s].to === 'new' ? relayNewTarget : relayPushTarget, sessions[s]);
+      if (sessions[s].restart) {
+        // Step 1 is in: the board takes the new number and restarts once its queue has been quiet for 4 s. The rest
+        // goes only once the relay hears it under the new number, at its new address.
+        termLog(relayN, `[Remote] WCB ${relayPushTarget} takes the number ${relayNewTarget} and restarts — waiting `
+                      + `for WCB ${relayNewTarget} on the mesh…`, 'sys');
+        if (!(await _awaitBoardAs(relayN, relayNewTarget, sentAt))) {
+          throw new Error(`WCB ${relayPushTarget} was given the number ${relayNewTarget} and told to restart, but WCB `
+                        + `${relayNewTarget} was not heard through WCB ${relayN} within `
+                        + `${Math.round(_renumberReturnMs / 1000)} s, so the rest of the push was not sent. Pull it `
+                        + `(it is asked for as WCB ${relayNewTarget}) to see which number it answers to, then push again`);
+        }
+        termLog(relayN, `[Remote] WCB ${relayNewTarget} is back — sending the rest of the push`, 'sys');
+        // It answers to the new number now: a push after a failed step 2 goes there, with the rest as its diff.
+        if (boardBaselines[n]) boardBaselines[n].wcbNumber = relayNewTarget;
+        backAsNew = true;
+        continue;
+      }
+      // The target runs a session's commands from its queue: let it, and let a session that lost a chunk lapse
+      // (_relaySessionGap), before the next one arrives.
+      if (s < sessions.length - 1) await sleep(_relaySessionGap(sessions[s], funcChar));
     }
     showToast(`WCB ${n}: ${changeLabel} sent via WCB ${relayN}`, 'success');
     termLog(relayN, `[Remote] All chunks sent for WCB ${n}`, 'sys');
@@ -9092,13 +9640,19 @@ async function boardGoRemote(n, opts = {}) {
     boardPushOutcome[n] = { ok: true, aborted: false, reason: '' };
   } catch (e) {
     boardPushOutcome[n] = { ok: false, aborted: false, reason: e.message };
-    showToast(`Remote push failed: ${e.message}`, 'error');
+    showToast(`Remote push failed: ${e.message}`, 'error', 15000);
     termLog(relayN, `[Remote] Error: ${e.message}`, 'err');
+  } finally {
+    _pushingBoards.delete(n);
   }
 
   // Always restore the button — boardGoRemote has no other reset path
   if (btn) { btn.disabled = false; btn.textContent = 'Push Config'; }
   if (pushSucceeded) updateBoardStatusBadge(n, 'configured');
+  // A renumbered board shows once, under its new number (_moveRemoteBoardToNumber): its slot, relay route, terminal
+  // pane and mesh records follow it, so the mesh poll does not add a second section for it. Also when step 2 of a
+  // two-step renumber failed: the board was heard under its new number.
+  if ((pushSucceeded && wcbChange) || backAsNew) _moveRemoteBoardToNumber(n, relayNewTarget, relayN);
 
   return pushSucceeded && needsReboot;
 }
@@ -9135,6 +9689,12 @@ const PULL_RETRY_MS     = 2500;
 // 12, sized for a board that is still rebooting) gets a full PULL_TIMEOUT_MS + PULL_RETRY_MS more per extra attempt,
 // so its ~100 s budget is not cut to 40 s.
 const PULL_DEADLINE_MS  = 40000;
+// ...and a parts reply gets as long as its parts take, whatever their number and pace: every NEW part moves the cap out
+// to (parts still to come) x PULL_PART_MS + PULL_TIMEOUT_MS from now, if that is later. Parts come ~0.65 s apart for a
+// config of long sequences and ~1.26 s for 2,972 short ones (22 parts in 27.7 s, wizard.remote_pull_many_sequences: a
+// part costs the target a walk of the config up to it). With one lost part and the retry, a pull like that ran past
+// 40 s. A job is still bounded: K parts, each within PULL_TIMEOUT_MS of the one before.
+const PULL_PART_MS      = 1500;
 
 // One pull attempt on the air per relay. The relay reassembles ONE reply at a time and a new session wipes the one
 // in progress (WCB.ino handleConfigFragPacket; WcbMgmt the same), so two targets answering through one relay at once
@@ -9221,7 +9781,7 @@ async function remoteBoardPull(relayN, targetN, attempt = 1, maxAttempts = MAX_P
     deadlineMs: PULL_DEADLINE_MS + Math.max(0, maxAttempts - MAX_PULL_ATTEMPTS) * (PULL_TIMEOUT_MS + PULL_RETRY_MS),
     conn: null, onLine: null, ticket: null,
     onAir: false, settled: false, finished: false,
-    attemptTimer: null, retryTimer: null, deadlineTimer: null, deadlineAt: 0,
+    attemptTimer: null, retryTimer: null, deadlineTimer: null, deadlineAt: 0, calledAt: Date.now(),
     notUtf8Id: null,   // the job id of the first join that held U+FFFD (_pullNotUtf8)
     firstSent: false, resolveFirst: null, rejectFirst: null,
   };
@@ -9312,6 +9872,7 @@ function _pullOnLine(pull, line) {
         clearTimeout(pull.attemptTimer);
         pull.attemptTimer = setTimeout(() => _pullAttemptFailed(pull, null), PULL_TIMEOUT_MS);
       }
+      if (r.progress) _pullBudgetParts(pull, r.K, r.have);
       return;
     case 'legacy':
       _pullSucceeded(pull, r.body);
@@ -9388,6 +9949,17 @@ function _pullFailNow(pull, reason) {
   showToast(`WCB${pull.targetN}: ${reason}`, 'error');
   termLog(pull.relayN, `[Remote] Config pull from WCB${pull.targetN} stopped: ${reason}`, 'err');
   _pullSettle(pull, false);
+}
+
+// A new part of a job of K, `have` of them in: the pull's cap moves out to cover the rest from now, if that is later.
+function _pullBudgetParts(pull, K, have) {
+  if (!(K > 0)) return;
+  const until = Date.now() + Math.max(0, K - (have || 0)) * PULL_PART_MS + PULL_TIMEOUT_MS;
+  if (until <= pull.deadlineAt) return;
+  pull.deadlineAt = until;
+  pull.deadlineMs = until - pull.calledAt;
+  clearTimeout(pull.deadlineTimer);
+  pull.deadlineTimer = setTimeout(() => _pullGiveUp(pull), until - Date.now());
 }
 
 function _pullGiveUp(pull) {
@@ -9579,6 +10151,8 @@ function syncGeneralFromConfig(config) {
   set('g-mac2',      config.macOctet2);
   set('g-mac3',      config.macOctet3);
   set('g-meshch',    config.meshChannel || 1);
+  set('g-region',    config.region || '01');
+  set('g-chsync',    config.chanSync !== false ? 'on' : 'off');
   set('g-delimiter', config.delimiter);
   set('g-funcchar',  config.funcChar);
   set('g-cmdchar',   config.cmdChar);
@@ -9591,6 +10165,8 @@ function syncGeneralFromConfig(config) {
     onGeneralPasswordChange();
     onGeneralMacChange();
     onGeneralCmdCharChange();
+    onRegionChange();             // also re-marks the channel dropdown for the region
+    onChanSyncChange();
   });
 
   const etmEl = document.getElementById('g-etm-enabled');
@@ -9645,6 +10221,8 @@ function captureGeneralDOMSnapshot() {
     mac2:      g('g-mac2'),
     mac3:      g('g-mac3'),
     meshch:    g('g-meshch'),
+    region:    g('g-region'),
+    chsync:    g('g-chsync'),
     wcbq:      g('g-wcbq'),
     delimiter: g('g-delimiter'),
     funcchar:  g('g-funcchar'),
@@ -9660,6 +10238,8 @@ function restoreGeneralDOMSnapshot(snap) {
   set('g-mac2',      snap.mac2);
   set('g-mac3',      snap.mac3);
   set('g-meshch',    snap.meshch);
+  if (snap.region) set('g-region', snap.region);
+  if (snap.chsync) set('g-chsync', snap.chsync);
   set('g-wcbq',      snap.wcbq);
   set('g-delimiter', snap.delimiter);
   set('g-funcchar',  snap.funcchar);
@@ -9671,15 +10251,18 @@ function restoreGeneralDOMSnapshot(snap) {
   onGeneralPasswordChange();
   onGeneralMacChange();
   onGeneralCmdCharChange();
+  onRegionChange();
+  onChanSyncChange();
 }
 
 // ─── Reboot Detection ─────────────────────────────────────────────
 // Returns true if any command in the built string requires a board reboot
 // to take effect, based on WCB firmware documentation and source code.
 //
-// Reboot-required:  HW, WCB (the number), MAC, WCBCH, WIFI, KYBER, MAESTRO,REMOTE, MAP PWM input (not OUT)
+// Reboot-required:  HW, WCB (the number), MAC, WCBCH, REGION, WIFI (not WIFI,TOKEN), KYBER, MAESTRO,REMOTE,
+//                   MAP PWM input (not OUT)
 // Immediate effect: WCBQ (the firmware reconciles peers live - ?WCBQ, WCB.ino), EPASS, DELIM, FUNCCHAR, CMDCHAR,
-//                   BAUD, LABEL, BCAST, MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ
+//                   BAUD, LABEL, BCAST, MAESTRO, ETM, MAP SERIAL, MAP PWM OUT, SEQ, CHSYNC, WIFI,TOKEN
 //
 // Both checks read the chain command by command - split exactly as the push splits it, on delimiter + function
 // identifier - and look only at each command's own verb. They used to match substrings of the whole chain, so a
@@ -9698,7 +10281,9 @@ function commandStringNeedsReboot(cmdString, funcChar = '?', delim = '^') {
     verb === 'WCB'   ||   // Board number — peers, MAC and ETM re-init need a reboot (not WCBQ: that is live)
     verb === 'MAC'   ||   // MAC octets — ESP-NOW identity
     verb === 'WCBCH' ||   // Mesh channel — firmware applies it on reboot, not live
-    verb === 'WIFI'  ||   // WiFi mode/SSID — firmware applies it on reboot, not live
+    verb === 'REGION' ||  // Channel sync region — applied at the next boot, before the channel (CHANNEL_SYNC.md §6)
+    // WiFi mode/SSID — firmware applies it on reboot, not live. Not the token: it applies to the next session.
+    (verb === 'WIFI' && sub !== 'TOKEN') ||
     // Kyber mode — serial port reservation. MAESTRO,REMOTE too: it is how a push leaves Kyber LOCAL for remote,
     // and the Maestro-remote bridge task only starts at boot. buildCommandString (parser.js) sends it only on a
     // real mode change or a full push, so a delta push of Maestro lines alone doesn't ask for a reboot.
@@ -9900,6 +10485,8 @@ function loadSystemFileContent(content) {
       fields: extractGeneralFields({
         wcbQuantity:    system.general.wcbQuantity,
         meshChannel:    system.general.meshChannel,
+        region:         system.general.region,
+        chanSync:       system.general.chanSync,
         espnowPassword: system.general.espnowPassword,
         macOctet2:      system.general.macOctet2,
         macOctet3:      system.general.macOctet3,
@@ -9912,6 +10499,8 @@ function loadSystemFileContent(content) {
     syncGeneralFromConfig(Object.assign(WCBParser.createDefaultBoardConfig(), {
       wcbQuantity: system.general.wcbQuantity,
       meshChannel: system.general.meshChannel,
+      region:      system.general.region,
+      chanSync:    system.general.chanSync,
       espnowPassword: system.general.espnowPassword,
       macOctet2: system.general.macOctet2,
       macOctet3: system.general.macOctet3,
@@ -9955,6 +10544,8 @@ function loadSystemFileContent(content) {
 function exportSystemFile() {
   systemConfig.general.wcbQuantity    = parseInt(document.getElementById('g-wcbq').value) || 1;
   systemConfig.general.meshChannel    = parseInt(document.getElementById('g-meshch').value) || 1;
+  systemConfig.general.region         = document.getElementById('g-region')?.value || '01';
+  systemConfig.general.chanSync       = (document.getElementById('g-chsync')?.value ?? 'on') !== 'off';
   systemConfig.general.espnowPassword = document.getElementById('g-password').value;
   systemConfig.general.macOctet2      = document.getElementById('g-mac2').value?.toUpperCase();
   systemConfig.general.macOctet3      = document.getElementById('g-mac3').value?.toUpperCase();
@@ -13903,6 +14494,21 @@ function _wdpAttr(s) {
   return _wdpEsc(s).replace(/"/g, '&quot;');
 }
 
+// What the Wizard last read about each device in a ?WDP,DUMP (the mesh poll, the panel's Refresh), by number - the
+// queried board's own row (PEER=3) included: { capTags, live, client, at }. A WCB's capability tags say what its
+// firmware takes (docs/WDP_DESIGN.md §3; _relayLongChunks); live says it was heard within the WDP TTL
+// (_renumberTaken). An entry is replaced by the next row that names its number, and kept while none does: a board
+// that drops out of a dump has not changed its firmware. A relay renumber drops the old number's entry and ignores the
+// stale row the board left under it (_rowLeftByRenumber). Also read during a two-step renumber (_awaitBoardAs).
+const _meshSeen = new Map();
+function _noteMeshDump(nodes) {
+  const at = Date.now();
+  for (const nd of nodes || []) {
+    if (!nd || nd.n < 1 || _rowLeftByRenumber(nd)) continue;   // the stale row a renumbered board left behind
+    _meshSeen.set(nd.n, { capTags: nd.capTags || '', live: !!nd.live, client: !!nd.client, at });
+  }
+}
+
 // Parse the ?WDP,DUMP response. String fields are scrubbed of ',' and ']' on the
 // board, so [^,] / [^\]] field matching is safe. PEER= (membership: 0 none,
 // 1 WCBQ-floor, 2 auto-joined) and the [WDPCFG:...] summary are optional so
@@ -13911,8 +14517,14 @@ function _wdpAttr(s) {
 function parseWdpDump(raw) {
   const nodes = {}, order = [];
   let cfg = null;
+  // [WDPCH:...] (docs/CHANNEL_SYNC.md §2): one per device that sent its channel facts, the queried board first - which
+  // can come before that board's own [WDP:] row, so they are kept by number and attached at the end. A dump with none
+  // at all is from a board whose firmware predates channel sync (chanSeen false): it cannot say who else would follow.
+  const chans = new Map();
   for (const line of String(raw).split('\n')) {
     const t = line.trim();
+    const ch = WCBParser.parseWdpChanLine(t);
+    if (ch) { chans.set(ch.n, ch); continue; }
     let m = t.match(/^\[WDP:N=(\d+),CLIENT=(\d+),ALIAS=([^,]*),HW=(\d+),HWREV=([^,]*),FW=([^,]*),CAP=([0-9A-Fa-f]+),CTRL=(\d+),CAPTAGS=([^,]*),MAESTRO=([^,]*),AGE=(\d+),SEEN=(\d+)(?:,PEER=(\d))?\]$/);
     if (m) {
       const n = +m[1];
@@ -13949,7 +14561,49 @@ function parseWdpDump(raw) {
     if (m) cfg = { enabled: m[1] === undefined ? true : m[1] === '1',
                    autojoin: m[2] === '1', peers: +m[3] };
   }
-  return { nodes: order.map(n => nodes[n]), cfg };
+  for (const n of order) nodes[n].chan = chans.get(n) ?? null;
+  return { nodes: order.map(n => nodes[n]), cfg, chanSeen: chans.size > 0 };
+}
+
+// ─── Channel sync in the mesh panel (docs/CHANNEL_SYNC.md) ────────────────────
+// The leader comes from the queried board's ?CHSYNC ([CHSYNC:...] line), which only the Refresh button asks for: the
+// 12 s sweep must not put a command into the terminal that firmware before channel sync answers "Unknown command".
+// The sweep keeps showing the last answer, with its age.
+let _chanSyncStatus = null;   // { wcb, st (WCBParser.parseChanSyncStatus), at }
+
+// The Channel cell: the channel facts a device advertised, or why there are none. Colour on the tag's edge only.
+function _wdpChanCell(nd, chanSeen, st) {
+  const c = nd.chan;
+  if (!c) {
+    if (!chanSeen) return '<span class="wdp-sub">&mdash;</span>';
+    return `<span class="wdp-ch-tag wdp-ch-old" title="It sent no channel facts: its firmware predates channel sync. ` +
+           `When the mesh moves to another channel this device stays behind, and nothing on the mesh hears it until ` +
+           `it is updated or moved by hand.">older firmware: won't follow a channel move</span>`;
+  }
+  const tags = [];
+  if (st && st.leader === nd.n) tags.push('<span class="wdp-ch-tag wdp-ch-lead" title="The device the mesh follows (the queried board\'s ?CHSYNC)">leader</span>');
+  if (c.pinned) tags.push('<span class="wdp-ch-tag wdp-ch-pin" title="Joined to an access point: the mesh goes to its channel, not the other way">pinned</span>');
+  if (!c.sync)  tags.push('<span class="wdp-ch-tag wdp-ch-off" title="Channel sync is off on it (?CHSYNC,OFF): it never moves">sync off</span>');
+  if (c.rank === 255) tags.push('<span class="wdp-sub" title="Rank 255: never leads (temporary peers, management relays); it still follows">never leads</span>');
+  const rank = c.rank !== null && c.rank !== 255 ? ` · rank ${c.rank}` : '';
+  return `${c.ch ?? '?'} <span class="wdp-sub">${_wdpEsc(c.cc || '')}${rank}</span>${tags.length ? ' ' + tags.join(' ') : ''}`;
+}
+
+// The line above the table: who leads, or why the panel cannot say.
+function _wdpChanSummary(nodes, viaWcb, chanSeen, st, at) {
+  if (!chanSeen) return `<div class="rc-devices-note">WCB ${viaWcb}'s firmware predates channel sync, so it cannot ` +
+                        `tell which boards would follow a channel move. Update it to see that here.</div>`;
+  if (!st) return `<div class="wdp-toolbar"><span class="wdp-sub">Channel sync: <button class="wdp-btn" onclick="wdpMeshRefresh()" ` +
+                  `title="Asks WCB ${viaWcb} for its channel sync status (?CHSYNC)">Refresh</button> to see who leads.</span></div>`;
+  const age  = at ? Math.round((Date.now() - at) / 1000) : 0;
+  const ln   = nodes.find(nd => nd.n === st.leader);
+  const who  = st.leader === +viaWcb ? `WCB ${viaWcb} (this board)`
+             : ln ? `${_wdpKind(ln)} ${ln.n}${ln.alias ? ` (${_wdpEsc(ln.alias)})` : ''}`
+             : `#${st.leader}`;
+  const lead = st.leader ? `${who}${st.leaderRank !== null ? `, rank ${st.leaderRank}${st.leaderPinned ? ', pinned' : ''}` : ''}` : 'none heard';
+  return `<div class="wdp-toolbar"><span class="wdp-sub">WCB ${viaWcb}: channel sync ${st.enabled ? 'on' : '<strong>off</strong>'} · ` +
+         `channel ${st.ch ?? '?'} of 1–${st.maxCh ?? '?'} (region ${_wdpEsc(st.cc || '?')}) · ` +
+         `leader ${lead} · ${_wdpEsc(st.state || 'idle')}${age > 20 ? ` · as of ${age < 120 ? age + ' s' : Math.round(age / 60) + ' min'} ago` : ''}</span></div>`;
 }
 
 const _WDP_CAP_BITS = [
@@ -13991,9 +14645,13 @@ function _wdpPeerCell(nd) {
   return '<span class="wdp-sub">not peered</span>';
 }
 
-function renderWdpMesh(nodes, viaWcb, cfg) {
+// chanSeen: the dump carried [WDPCH] lines (parseWdpDump); left out, it is read off the nodes. Without them the queried
+// board's firmware predates channel sync: no Channel column (it could only say "unknown" on every row), a note instead.
+function renderWdpMesh(nodes, viaWcb, cfg, chanSeen) {
   const body = document.getElementById('wdp-mesh-body');
   if (!body) return;
+  if (chanSeen === undefined) chanSeen = (nodes || []).some(nd => nd.chan);
+  const cs = _chanSyncStatus && +_chanSyncStatus.wcb === +viaWcb ? _chanSyncStatus : null;
 
   // WDP turned OFF on this board — a definitive state, not "no neighbors yet".
   // (cfg.enabled is only reported by firmware that sends the EN= field.)
@@ -14063,6 +14721,7 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
       <td>${_wdpKind(nd)}</td>
       <td>${_wdpEsc(_wdpPlatform(nd))}</td>
       <td>${_wdpEsc(nd.fw || '—')}${nd.hwRev ? ' <span class="wdp-sub">(' + _wdpEsc(nd.hwRev) + ')</span>' : ''}</td>
+      ${chanSeen ? `<td>${_wdpChanCell(nd, chanSeen, cs?.st)}</td>` : ''}
       <td>${caps || '&mdash;'}</td>
       <td>${maestro}</td>
       <td>${ifs}</td>
@@ -14071,11 +14730,11 @@ function renderWdpMesh(nodes, viaWcb, cfg) {
       <td>${isSelf ? '<span class="wdp-live">&#9679; this board</span>' : (nd.live ? '<span class="wdp-live">&#9679; live</span>' : '<span class="wdp-sub">stale</span>')}</td>
     </tr>`;
   }).join('');
-  body.innerHTML = toolbar + `
+  body.innerHTML = toolbar + _wdpChanSummary(nodes, viaWcb, chanSeen, cs?.st, cs?.at) + `
     <div class="wdp-mesh-scroll">
       <table class="wdp-mesh-table">
         <thead><tr>
-          <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>
+          <th>WCB</th><th>Name</th><th>Kind</th><th>Platform</th><th>Firmware</th>${chanSeen ? '<th>Channel</th>' : ''}
           <th>Capabilities</th><th>Maestros</th><th>Devices</th><th>Peer</th><th>Age</th><th>State</th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -14116,7 +14775,13 @@ async function wdpMeshRefresh() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
-    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks, _renumberTaken)
+    // Who leads: asked only here, and only of a board whose dump shows it has channel sync (its own [WDPCH] line).
+    if (parsed.chanSeen) {
+      const st = WCBParser.parseChanSyncStatus(await t.conn.sendAndCollect(`${t.fc}CHSYNC`, 2500, '[CHSYNC:'));
+      if (st) _chanSyncStatus = { wcb: t.wcbNum, st, at: Date.now() };
+    }
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);
   } catch (e) {
     if (body) body.innerHTML = `<div class="rc-devices-note">Failed to read the mesh: ${_wdpEsc((e && e.message) || e)}</div>`;
   } finally {
@@ -14278,8 +14943,9 @@ async function meshAutoDiscoverTick() {
   try {
     const raw    = await t.conn.sendAndCollect(`${t.fc}WDP,DUMP`, 4000, '[WDP:END');
     const parsed = parseWdpDump(raw);
+    _noteMeshDump(parsed.nodes);   // capability tags and presence by number (_relayLongChunks, _renumberTaken)
     if (!parsed.nodes || !parsed.nodes.length) return;
-    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg);   // keep the panel live (covers clients)
+    renderWdpMesh(parsed.nodes, t.wcbNum, parsed.cfg, parsed.chanSeen);   // keep the panel live (covers clients)
     // Feed EVERY relay card from this sweep — any connected board's dump shows the whole mesh,
     // so the relay card stays live even when the mesh is queried through a non-relay board.
     for (const rs of _relaySlots) { _relayNodes[rs] = parsed.nodes; renderRelayCard(rs); }
@@ -14291,6 +14957,9 @@ async function meshAutoDiscoverTick() {
       // its own dedicated card, so it must NOT be surfaced as a numbered mesh board (that was
       // the duplicate "WCB 19"). NB: match relays by NUMBER (_relaySlots is keyed by wcbNumber).
       if (n === t.wcbNum || _relaySlots.has(n)) continue;
+      // The row a board renumbered through a relay left under its old number (every board keeps it, stale): the
+      // board itself is shown under its new number, so this is no board (_moveRemoteBoardToNumber).
+      if (_rowLeftByRenumber(nd)) continue;
       if (nd.client) {
         seenClients.add(n);
         upsertClientCard(nd);                              // clients get a lightweight status/capabilities card
