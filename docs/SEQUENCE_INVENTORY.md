@@ -340,8 +340,8 @@ status instead of nothing. Silence is what makes a config pull through older fir
 here (§1) and reintroducing it in the replacement would recreate the very bug this routes around.
 One reply allows a 2,903-character value (with a 5-character key), and the store takes up to
 3,999 (§3d): past one reply a requester with parts gets the value in parts, an older one
-`TOOBIG`. What usually stops a long value first is the heap a save costs (§3b): on a classic
-ESP32 about 2,400 characters, so only an ESP32-S3 holds one past one reply. HIL
+`TOOBIG`. Every board saves the whole 3,999 since 2026-10-24 (§3b: a classic ESP32 stopped near 2,400 characters
+before), so a value past one reply is on any board. HIL
 `inv.seqget_largest` finds the largest value a board actually stores and round-trips it;
 `inv.seqget_parts` pulls a 3,999-character one from W3 (an ESP32-S3) whole, and the old requester's
 `TOOBIG` with `?DEBUG,ONEREPLY`.
@@ -384,12 +384,18 @@ is receive-only (it parses inbound `bb`/`bc`/`bd` and NACKs; there is no `sendBu
 A second, bespoke write path would drift from the one the Wizard and the console
 already use. Don't add one.
 
-**A long save costs about 7× its length in heap while it runs.** The line is copied at
-almost every layer of the dispatcher before `saveStoredCommandsToPreferences()` takes its
-own copy: the port's line buffer, the queue item, `args`, its upper-cased twin and the SEQ
-arguments. A classic-ESP32 board has about 24 KB of byte-addressable heap after boot, so
-a value of about 2,400 characters or more either fails with "Out of memory: could not copy"
-or reaches the store with little heap left.
+**A save holds about 2× its length in heap while it runs**: the port's line buffer and its
+queue item while it is queued, the dispatched command and the store's small write buffer while
+it runs. `handleSingleCommand` sends a `?SEQ,SAVE` straight to `saveSequenceChars`, which reads the
+key and value in place from the command's own text and writes the value to the file from there
+(`seqStorePut(key, p, n)`), and the chain splitter queues a `?SEQ,SAVE` token as a slice of its line
+(`enqueueCommand(p, n, ...)`). So the whole 3,999 saves on a classic ESP32 hosting its access point
+(~19 KB free), over USB or pushed through a relay (it takes a 24-chunk session too: `MGMT_RX_MAX_CHUNKS`,
+[MGMT_RELAY.md](MGMT_RELAY.md) §10). Until 2026-10-24 the line was copied at almost every layer of the
+dispatcher (the IF check's trimmed copy, `cmd.substring(1)`, `args`, its upper-cased twin, the SEQ
+arguments, the save's own), about 7× its length, and a classic board stopped near 2,400 characters with
+"Out of memory: could not copy" (HIL `inv.push_long_sequence`, `mgmt.seqval_session_reaped`: "largest
+free block 692 bytes" for 2,784).
 `?STATS`'s "min free since boot" is the sum of each heap region's own low point, not one
 moment's free heap. After such a save it can read near 0 until the next reboot, without the
 board ever having been out of memory (tracker #75).
@@ -752,6 +758,7 @@ Full worked example: `WCBClient/examples/SequenceInventory`.
 |---|---|---|
 | 2026-10-23 | §3a: a value longer than one reply comes in parts (`SEQVAL_PART_REQ` 31, `SEQVAL_PART` 34, `WCB_ResultWire.h`, shared with `WCB_Client` 1.20.0; [MGMT_RELAY.md](MGMT_RELAY.md) §10), joined by the requester and delivered once; `TOOBIG` only to a requester that cannot take parts. The SEQVAL dedup is on (requester, key, part), an old request counting as part 0. HIL `inv.seqget_parts`, `inv.push_long_sequence`; `inv.seqget_largest` expects the value whole past one reply. | — |
 | 2026-10-23 | §3: an old one-reply request for a list too long for one reply gets the `[ERROR] Result too large to relay` text again instead of no answer (Greg: keep the error). | — |
+| 2026-10-24 | §3a, §3b: a `?SEQ,SAVE` reads its key and value in place and writes the value from there (`saveSequenceChars`, `seqStorePut(key, p, n)`, the splitter's slice enqueue), about 2× its length in heap instead of 7×: the whole 3,999 saves on a classic ESP32 hosting its access point, over USB and through a relay (24-chunk sessions on both chips). Greg: "it should work as long as it has enough room to store it in the board". HIL `inv.push_long_sequence` now stores it on W2. | — |
 | 2026-10-22 | §3: the names list in pages. One reply carries 2,912 characters, about 180 names, and the store holds a few hundred, so a longer list could not be listed over the mesh at all (`?MGMT,SEQ` printed `[ERROR] Result too large to relay`, which `WCB_Client` read as an empty list). A requester now asks for page 0 with a 59-byte `SEQ_PAGE_REQ` (28) ahead of the old 13; a list that fits still goes as type 14, one that does not goes a page per request as type 29 (`<hash>,<count>,<page>,<pages>,<keyBytes>,<keys>`, greedy pages of up to 2,880 bytes of key text, `WCB_SeqNamesWire.h`, shared with `WCB_Client` 1.19.0), and the requester joins them and prints one line / fires the callback once. An old one-reply request for a list that does not fit is not answered. The dedup is on (requester, page), timed from the end of the answer. The target and `?SEQ,NAMES` walk the keys alone (`seqStoreForEachKey`) instead of building the list three times in heap. §3's sizing (80 keys, `MAX_STORED_COMMANDS`) predated the file store and is replaced. Host test `tests/seqnames_page_test.cpp`; HIL `inv.mgmt_seq_paged`, `ncmesh.seq_pull_paged`. | — |
 | 2026-09-29 | §3d: the store is mounted for each call and unmounted as it returns. Held for 3 s after a call, a `?backup` left its 1.7 KB in use under a 250-token one-line restore, which lost four tokens to out-of-memory (HIL `backup.one_line_restore`, run `20260929-194057`). Bench-verified: a full store (32,727 bytes, 36 sequences) still pulls whole, in 12 of 16 parts. | `8e5d24f` |
 | 2026-09-29 | §3d: sequences move out of NVS into a file of their own, `/seqs` on the 128 KB `spiffs` partition (`WCB_SeqStore`), capped at 32 KB so a full store's config still pulls; NVS keeps the `seq_mig_done` marker, whose absence clears the file (a factory reset that blanks only NVS). Every boot that mounts moves what NVS lists into the file; a boot that cannot mount runs on the NVS layout (`?DEBUG,SEQNVS` forces one). `?SEQ,GET` answers `NOTFOUND` for `key_list` and `seq_mig_done`; a mesh request the store cannot answer right then gets no reply; a value that cannot be read is never hashed. §3a `TOOBIG` is reachable now that the store takes 3,999 characters. | `fecd481` |

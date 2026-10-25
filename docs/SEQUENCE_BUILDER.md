@@ -79,7 +79,7 @@ text. It reports adding such a command to a timed sequence as an error.
 | error | Over 3,999 characters | The store's limit (docs/SEQUENCE_INVENTORY.md §3d) |
 | warn | A step runs a sequence that has delays of its own, and steps follow it | One timed chain runs at a time: starting the second replaces the first, and this sequence's remaining steps never run (`command_timer.cpp:105`) |
 | warn | A step runs a sequence this board does not have | A recall inside a body runs this board's copy only (`WCB.ino:8471`) |
-| warn | Over 2,400 characters | A classic ESP32 runs short of heap saving more (docs/SEQUENCE_INVENTORY.md §3b) |
+| warn | Over 2,400 characters, for a board that does not say it takes 3,999 | A classic ESP32 on firmware before 2026-10-24 runs short of heap saving more (docs/SEQUENCE_INVENTORY.md §3b); one on later firmware says `mgmt.rx24`, and an ESP32-S3 always took it (app.js `boardTakesLongSave`) |
 | warn | A device command went to a port by default | No board has a port labelled for that device |
 | info | IF in a timed sequence | Conditions are evaluated when the chain is read, at the start, not when their step fires |
 | info | A gap over 30 minutes | Written as several delays |

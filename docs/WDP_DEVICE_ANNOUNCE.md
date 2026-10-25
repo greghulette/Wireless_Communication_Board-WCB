@@ -81,7 +81,7 @@ Copy the spelling exactly. If your device isn't on the list, you can still annou
 
 `hp.servo` · `hp.led` · `audio.trigger` · `audio.play` · `led.wled` · `led.pixel` · `led.logic` · `servo.maestro` · `servo.pwm` · `panel.magic` · `panel.data` · `dome.spin` · `dome.periscope` · `sensor.lifeform`
 
-The `mgmt.` domain is taken: WCBs use it for tags about themselves (`mgmt.fwd24` on a classic board, `mgmt.rx24` on an ESP32‑S3 — what their firmware takes when the config tool pushes through the mesh; see [`WDP_DESIGN.md`](WDP_DESIGN.md) §3). Don't use it for your device.
+The `mgmt.` domain is taken: WCBs use it for tags about themselves (`mgmt.rx24` on both chips — what their firmware takes when the config tool pushes through the mesh; see [`WDP_DESIGN.md`](WDP_DESIGN.md) §3). Don't use it for your device.
 
 ## When to send it
 
