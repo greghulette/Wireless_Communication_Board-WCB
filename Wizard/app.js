@@ -5465,7 +5465,6 @@ async function updateSequence(n, rowId) {
       // Remote board — send via MGMT FRAG through the relay
       const relayConn = boardConnections[relayN];
       if (!relayConn?.isConnected()) { showToast(`Relay WCB ${relayN} not connected`, 'error'); return; }
-      const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
       const relayFc   = _relayFuncChar(relayN);
       const seqSaveTargetWCB = boardConfigs[n]?.wcbNumber || n;
       logTarget = relayN;
@@ -5474,26 +5473,60 @@ async function updateSequence(n, rowId) {
       // payload.length() <= 198 BYTES (186 under ?ETM,CHKSM; WCB.ino handleMgmtForward), and anything
       // longer fell through to the FRAG path, where one chunk over 179 bytes is refused. Fragment
       // properly when it does not fit the shortcut, by bytes (a value can hold multi-byte characters).
-      if (new TextEncoder().encode(cmd).length <= MGMT_SINGLE_MAX) {
-        await sendMgmtReliable(relayConn,
-          `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
-        showToast(`Sequence "${key}" updated on WCB ${n} (remote)`, 'success');
-      } else {
+      const single = new TextEncoder().encode(cmd).length <= MGMT_SINGLE_MAX;
+      let plan = null;
+      if (!single) {
         // One command: one session, of up to MGMT_MAX_CHUNKS chunks, or a long one where this board and relay take
-        // it (_relayLongChunks: an ESP32-S3 target and the relay say so in their WDP capability tags) -
-        // docs/MGMT_RELAY.md §10.
-        const plan = WCBParser.planRelayPush(cmd, { funcChar, delim, chunkBytes: MGMT_CHUNK_SIZE,
-                                                    maxChunks: MGMT_MAX_CHUNKS, longChunks: _relayLongChunks(relayN, n) });
+        // it (_relayLongChunks: the target and the relay say so in their WDP capability tags) - docs/MGMT_RELAY.md §10.
+        plan = WCBParser.planRelayPush(cmd, { funcChar, delim, chunkBytes: MGMT_CHUNK_SIZE,
+                                              maxChunks: MGMT_MAX_CHUNKS, longChunks: _relayLongChunks(relayN, n) });
         if (plan.problem || plan.sessions.length !== 1) {
           showToast(`Sequence "${key}" is too long to send via this relay (${plan.problem || 'more than one session'}). `
                   + `Save it over USB, or update the board and relay firmware.`, 'error', 10000);
           return;
         }
-        await _sendRelaySession(relayConn, relayN, seqSaveTargetWCB, plan.sessions[0]);
-        // The multi-chunk path is broadcast and un-ACKed, so we cannot claim success the way the
-        // single-chunk ETM path can. Say what actually happened rather than showing a green tick.
-        showToast(`Sequence "${key}" sent to WCB ${n} in ${plan.sessions[0].chunks.length} parts — `
-                + `pull the board to confirm it stored`, 'info');
+      }
+      const send = async () => {
+        if (single) {
+          const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+          await sendMgmtReliable(relayConn, `${relayFc}MGMT,FRAG,${seqSaveTargetWCB},${sessionId},0,1,${cmd}`, relayN);
+        } else {
+          await _sendRelaySession(relayConn, relayN, seqSaveTargetWCB, plan.sessions[0]);
+        }
+      };
+      // Checked: the board is asked what it now holds (?MGMT,SEQGET) and the save sent again, under a new session, while
+      // it holds something else. A multi-chunk save goes as broadcasts nobody ACKs, and one lost chunk left the board
+      // without the sequence while this page showed it saved (wizard.seq_var_editors, run 20261024-173614). A WcbMgmt
+      // relay (NaviCore, MgmtRelay) cannot ask, so its save is sent once and said so, as before.
+      const parts = single ? 1 : plan.sessions[0].chunks.length;
+      const checks = !boardConfigs[relayN]?.isRelay;
+      let got = 'unchecked';
+      for (let attempt = 1; attempt <= RELAY_SEQ_SAVE_TRIES; attempt++) {
+        await send();
+        if (!checks) break;
+        await sleep(RELAY_SEQ_CHECK_DELAY_MS);
+        got = await _relaySeqCheck(relayConn, relayN, seqSaveTargetWCB, key, value);
+        if (got === 'noreply') {                 // the check's own request or answer lost: ask once more
+          await sleep(RELAY_SEQ_CHECK_DELAY_MS);
+          got = await _relaySeqCheck(relayConn, relayN, seqSaveTargetWCB, key, value);
+        }
+        if (got === 'ok') break;
+        termLog(relayN, `[Seq] "${key}" on WCB ${n}: ${got === 'noreply' ? 'no answer to the check'
+                         : got === 'missing' ? 'not on the board' : 'the board holds another value'}`
+                         + (attempt < RELAY_SEQ_SAVE_TRIES ? ' - sending it again' : ''), 'sys');
+      }
+      if (got === 'ok') {
+        showToast(`Sequence "${key}" saved on WCB ${n} (remote${parts > 1 ? `, ${parts} parts` : ''}) and checked`,
+                  'success');
+      } else if (got === 'unchecked' || got === 'noreply') {
+        showToast(`Sequence "${key}" sent to WCB ${n}${parts > 1 ? ` in ${parts} parts` : ''}`
+                + (got === 'noreply' ? `, but WCB ${relayN} did not answer the check` : '')
+                + ` - pull the board to confirm it stored`, 'info', 8000);
+      } else {
+        showToast(`Sequence "${key}" did not store on WCB ${n} after ${RELAY_SEQ_SAVE_TRIES} tries `
+                + `(${got === 'missing' ? 'the board does not have it' : 'the board holds another value'}). `
+                + `Try again, or save it over USB.`, 'error', 10000);
+        return;                                  // nothing stored: the config and baseline keep what the board has
       }
     } else {
       // Direct connection
@@ -9346,6 +9379,27 @@ function _relaySessionGap(session, funcChar = '?') {
 }
 
 // One session's chunks through the relay, MGMT_CHUNK_DELAY apart, under a session id of its own.
+// A checked relay save (updateSequence): tries in all, and the wait before asking what the board holds. A save is
+// stored within ~100 ms of its last chunk (the store's append); 1.5 s leaves room for a busy target.
+const RELAY_SEQ_SAVE_TRIES    = 3;
+const RELAY_SEQ_CHECK_DELAY_MS = 1500;
+
+// What board targetWCB holds under key, asked through relayN (?MGMT,SEQGET; a value too long for one reply comes in
+// parts the relay joins), against value -> 'ok' | 'different' | 'missing' | 'noreply'. Only a WCB relay answers.
+async function _relaySeqCheck(relayConn, relayN, targetWCB, key, value) {
+  const tag = `[MGMT:SEQVAL,${targetWCB}]${key},`;
+  let raw = '';
+  try {
+    raw = await relayConn.sendAndCollect(`${_relayFuncChar(relayN)}MGMT,SEQGET,${targetWCB},${key}`, 8000, tag);
+  } catch (_) { return 'noreply'; }
+  const line = String(raw || '').split('\n').map((l) => l.replace(/\r$/, '').replace(/^\[TERM:\d+\]/, ''))
+                                .find((l) => l.startsWith(tag));
+  if (!line) return 'noreply';
+  const rest = line.slice(tag.length);
+  if (rest.startsWith('OK,')) return rest.slice(3) === value ? 'ok' : 'different';
+  return 'missing';
+}
+
 async function _sendRelaySession(relayConn, relayN, targetWCB, session) {
   const sessionId = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
   const total = session.chunks.length;

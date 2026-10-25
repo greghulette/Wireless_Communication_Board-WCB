@@ -179,4 +179,46 @@ async function feedWdpDump(page, text, { slot = 1, wcbNum = 1 } = {}) {
   }, { text, slot, wcbNum });
 }
 
-module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake, wdpRow, wdpDump, feedWdpDump };
+// The board behind a fake relay, as far as its sequences go: it joins the ?MGMT,FRAG sessions slot `relay` was sent
+// for `target`, in the order they completed, applies their ?SEQ,SAVE and ?SEQ,CLEAR to `seqs`, and answers
+// ?MGMT,SEQGET,<target>,<key> as a WCB relay prints the reply. `drop` (the source of (i) => bool) loses the i-th
+// completed session, 0-based - a chunk lost on the air. Asked again, it answers from everything sent so far.
+async function relayTargetSeqs(page, { relay = 1, target = 2, seqs = {}, drop = '' } = {}) {
+  await page.evaluate(({ relay, target, seqs, drop }) => {
+    const c = boardConnections[relay];
+    const lost = drop ? new Function('i', `return (${drop})(i);`) : () => false;
+    const held = () => {
+      const store = { ...seqs };
+      const sessions = new Map();
+      const done = [];
+      for (const e of __fake.log) {
+        if (e.slot !== relay || e.op !== 'send') continue;
+        const m = /^.MGMT,FRAG,(\d+),([0-9A-F]{4}),(\d+),(\d+),([\s\S]*)$/.exec(e.s);
+        if (!m || +m[1] !== target) continue;
+        if (!sessions.has(m[2])) sessions.set(m[2], { total: +m[4], chunks: {} });
+        const ss = sessions.get(m[2]);
+        ss.chunks[+m[3]] = m[5];
+        if (!ss.done && Object.keys(ss.chunks).length === ss.total) { ss.done = true; done.push(ss); }
+      }
+      done.forEach((ss, i) => {
+        if (lost(i)) return;
+        const cmd = Array.from({ length: ss.total }, (_, k) => ss.chunks[k]).join('');
+        let m;
+        if ((m = /^.SEQ,SAVE,([^,]+),([\s\S]*)$/.exec(cmd))) store[m[1]] = m[2];
+        else if ((m = /^.SEQ,CLEAR,(.+)$/.exec(cmd))) delete store[m[1]];
+      });
+      return store;
+    };
+    const prior = c.sendAndCollect;
+    c.sendAndCollect = async (s, ...rest) => {
+      const m = /^.MGMT,SEQGET,(\d+),(.+)$/.exec(String(s));
+      if (!m || +m[1] !== target) return prior.call(c, s, ...rest);
+      __fake.log.push({ slot: relay, op: 'collect', s: String(s), at: Date.now() });
+      const st = held();
+      return m[2] in st ? `[MGMT:SEQVAL,${target}]${m[2]},OK,${st[m[2]]}` : `[MGMT:SEQVAL,${target}]${m[2]},NOTFOUND,`;
+    };
+  }, { relay, target, seqs, drop });
+}
+
+module.exports = { EPASS, board, backup, chain, install, pullFake, push, edit, relayFake, wdpRow, wdpDump, feedWdpDump,
+                   relayTargetSeqs };

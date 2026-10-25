@@ -349,6 +349,7 @@ _FAKE_MORE = (
     ("editors_fake_mappings", "The mapping editor sends at once: Save with bidir puts the reverse on the destination board through the relay, Remove sends CLEAR, a removal while disconnected is only local (left as found), a moved PWM output is cleared"),
     ("editors_fake_bidir_remove", "(should) Removing a bidirectional serial mapping also clears its mirror on the destination board (W-21)"),
     ("editors_fake_seq_var", "The sequence and variable editors: save, rename, test, remove; a remote save in one packet or as a multi-chunk session; variables set, rename, clear, a bad name refused, ;V for a temporary; ?VAR,LIST parsed, relay too"),
+    ("editors_fake_relay_seq_checked", "A sequence saved on W2 through W1 is checked with ?MGMT,SEQGET: a lost session is sent again and checked; lost every time, three tries end in an error and the baseline keeps what W2 has; through a WcbMgmt relay it is sent once and said so"),
     ("editors_fake_live_controls", "The WLED controls send ;L<id>,<verb> directly or through the relay; the HCR status modal renders the firmware's line, polls every 3 s only while open, and says when HCR is not configured"),
     ("flasher_fake_helpers", "The flasher's decisions: the detected chip wins, S2 and an unknown chip with no HW refused, the S3 bootloader by flash size (none when unknown), a changed partition table makes an update full, the branch from /dev/ or a valid override"),
 )

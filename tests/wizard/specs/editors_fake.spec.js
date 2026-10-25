@@ -5,7 +5,7 @@
 // (specs/board_more.spec.js). Runs standalone, in CI, and under the harness by id (s30_wizard.py).
 const { test, expect } = require('../lib/fixtures');
 const { openWizard } = require('../lib/wizard');
-const { board, chain, install, pullFake, push, edit } = require('../lib/fake');
+const { board, chain, install, pullFake, push, edit, relayTargetSeqs } = require('../lib/fake');
 
 // WCB1 on USB (slot 1), WCB2 managed through it (slot 2), as "Manage via relay" leaves them.
 async function w1AndW2(page, w1 = [], w2 = []) {
@@ -89,6 +89,7 @@ test('wizard.editors_fake_bidir_remove (should) removing a bidirectional serial 
 
 test('wizard.editors_fake_seq_var the sequence and variable editors: save, rename (clear the old key first), test (local, or mesh-wide) and remove on a USB board; a remote save in one packet, and one over 198 characters as a multi-chunk session; variables set, rename, clear, refuse a bad name, set a temporary with ;V; and ?VAR,LIST parses the firmware\'s lines, through the relay too', async ({ page }) => {
   await w1AndW2(page, ['SEQ,SAVE,hello,;S1hi', 'VAR,SET,hilv,5'], ['SEQ,SAVE,far,;S2x']);
+  await relayTargetSeqs(page, { seqs: { far: ';S2x' } });   // W2 stores what reaches it, and answers the save's check
   const row = (n, i = 0) => page.evaluate(({ n, i }) => document.querySelectorAll(`#b${n}-seq-tbody tr`)[i].id, { n, i });
   const setText = (sel, v) => page.evaluate(({ sel, v }) => { const e = document.querySelector(sel); e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, { sel, v });
   let r1 = await row(1);
@@ -151,6 +152,57 @@ test('wizard.editors_fake_seq_var the sequence and variable editors: save, renam
   await page.evaluate((l) => { for (const x of l) boardConnections[1]._handleLine(`[TERM:2]${x}`); return window.__refresh; }, LIST);
   expect(await page.evaluate(() => [...document.querySelectorAll('#b2-var-tbody tr.var-row-live')].map((r) => r.textContent.replace(/\s+/g, ' ').trim())))
     .toEqual(['count 7 Persistent on board — not in config', expect.stringContaining('Temporary')]);
+  expect(page.wizErrors).toEqual([]);
+});
+
+// A relayed save is checked: updateSequence asks W2 through the relay what it holds (?MGMT,SEQGET) and sends the save
+// again, under a new session, while W2 holds something else - a multi-chunk save goes as broadcasts nobody ACKs, and
+// one lost chunk left W2 without the sequence while the page said saved (wizard.seq_var_editors, run 20261024-173614).
+test('wizard.editors_fake_relay_seq_checked a sequence saved on W2 through W1 is checked with ?MGMT,SEQGET: its first session lost, it is sent again and checked; lost every time, three tries end in an error and the baseline keeps what W2 has; through a WcbMgmt relay it is sent once, unchecked, and said so', async ({ page }) => {
+  const long = Array.from({ length: 12 }, (_, i) => `;S2${'L'.repeat(28)}${i}`).join('^');
+  const setText = (sel, v) => page.evaluate(({ sel, v }) => { const e = document.querySelector(sel); e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, { sel, v });
+  const sessions = () => page.evaluate(() => new Set(__fake.sent(1).map((x) => /^.MGMT,FRAG,2,([0-9A-F]{4}),/.exec(x)?.[1])
+                                                                     .filter(Boolean)).size);
+  const checks = () => page.evaluate(() => __fake.log.filter((e) => e.slot === 1 && e.op === 'collect' &&
+                                                                  /MGMT,SEQGET,2,far$/.test(e.s)).length);
+  const save = async (value) => {
+    const r2 = await page.evaluate(() => document.querySelector('#b2-seq-tbody tr').id);
+    await setText(`#${r2} .seq-val-textarea`, value.split('^').join('\n'));
+    await page.evaluate(() => { __fake.log.length = 0; __fake.toasts.length = 0; window.sleep = () => Promise.resolve(); });
+    await page.evaluate((id) => updateSequence(2, id), r2);
+    return page.evaluate(() => ({ toast: __fake.toastText(), base: boardBaselines[2].sequences.find((q) => q.key === 'far')?.value }));
+  };
+
+  // The first session lost: sent again, then checked.
+  await w1AndW2(page, [], ['SEQ,SAVE,far,;S2x']);
+  await relayTargetSeqs(page, { seqs: { far: ';S2x' }, drop: '(i) => i === 0' });
+  let r = await save(long);
+  expect(await sessions(), 'two sessions: the first was lost').toBe(2);
+  expect(await checks(), 'checked after each').toBe(2);
+  expect(r.toast).toMatch(/saved on WCB 2 \(remote, \d+ parts\) and checked/);
+  expect(r.base).toBe(long);
+
+  // Lost every time: three tries, an error, and the baseline keeps what W2 holds.
+  await w1AndW2(page, [], ['SEQ,SAVE,far,;S2x']);
+  await relayTargetSeqs(page, { seqs: { far: ';S2x' }, drop: '() => true' });
+  r = await save(long);
+  expect(await sessions(), 'three tries').toBe(3);
+  expect(r.toast).toMatch(/did not store on WCB 2 after 3 tries \(the board holds another value\)/);
+  expect(r.base, 'the baseline keeps W2\'s value').toBe(';S2x');
+
+  // A short save in one packet is checked too.
+  await w1AndW2(page, [], ['SEQ,SAVE,far,;S2x']);
+  await relayTargetSeqs(page, { seqs: { far: ';S2x' } });
+  r = await save(';S2y');
+  expect([await sessions(), await checks()]).toEqual([1, 1]);
+  expect(r.toast).toMatch(/saved on WCB 2 \(remote\) and checked/);
+
+  // A WcbMgmt relay cannot answer ?MGMT,SEQGET: sent once, unchecked, and said so.
+  await w1AndW2(page, [], ['SEQ,SAVE,far,;S2x']);
+  await page.evaluate(() => { boardConfigs[1].isRelay = true; });
+  r = await save(long);
+  expect([await sessions(), await checks()]).toEqual([1, 0]);
+  expect(r.toast).toMatch(/sent to WCB 2 in \d+ parts - pull the board to confirm it stored/);
   expect(page.wizErrors).toEqual([]);
 });
 
