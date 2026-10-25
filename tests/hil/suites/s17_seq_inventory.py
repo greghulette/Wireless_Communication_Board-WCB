@@ -1295,19 +1295,18 @@ def seqget_multichunk(bench):
 
 
 RELAY_MAX_PAYLOAD = 2912   # MGMT_MAX_CHUNKS 16 x (CONFIG_PAYLOAD_SIZE 183 - 1); '<key>,OK,<value>' must fit (WCB.ino:3845)
-SEQ_LADDER = (2950, 2400, 2000, 1800, 1600, 1400, 1200, 1000, 900)
+SEQ_LADDER = (3999, 2950, 2400, 2000, 1800, 1600, 1400, 1200, 1000, 900)
 SEQGET_TRIES = 4           # ~1 in 4 multi-frag replies was lost on the bench (small sample): 4 tries leave ~1 %
 
 
-@test("inv.seqget_largest", "The longest W1 sequence on a 2950..900 ladder round-trips exactly, locally and via W2 (in parts past 2903, docs/MGMT_RELAY.md §10); refusals are clean", needs=["wcb1"], links=[])
+@test("inv.seqget_largest", "The longest W1 sequence on a 3999..900 ladder round-trips exactly, locally and via W2 (in parts past 2903, docs/MGMT_RELAY.md §10); refusals are clean. Since 2026-10-24 a classic ESP32 stores the 3,999 itself", needs=["wcb1"], links=[])
 def seqget_largest(bench):
-    """Replaces inv.seqget_toobig, whose >2903-character stored value W1 cannot hold (tracker #58). Two walls, neither
-    a defect: ?SEQ,SAVE holds ~7 full-length String copies while it makes the 8th (WCB_Storage.cpp:675) against
-    ~27 KB of byte-addressable heap (the old 'largest block 38900' was the 32-bit-only IRAM heap), and an NVS string
-    cannot span a page, so a configured board refuses long values (WCB_Storage.cpp:703-706). The largest storable
-    length moves as NVS fills, so this asserts behaviour, not a number: each refusal names its cause and leaves no
-    phantom key, the stored value comes back byte-exact, and on the day a value over 2903 characters stores this same
-    test checks it comes back whole in parts (TOOBIG until 2026-10-23; inv.seqget_parts does it on W3, which can)."""
+    """Replaces inv.seqget_toobig, whose >2903-character stored value W1 could not hold (tracker #58). Until 2026-10-24 a
+    ?SEQ,SAVE held ~7 full-length String copies on the way to the store and a classic ESP32 stopped near 2,400; it
+    reads the value in place now (saveSequenceChars, docs/SEQUENCE_INVENTORY.md §3b), so W1 should store the first
+    rung, the store's whole 3,999. A board on the NVS fallback is still bound by an NVS string not spanning a page, so
+    this asserts behaviour, not a number: each refusal names its cause and leaves no phantom key, the stored value
+    comes back byte-exact, and one over 2903 characters comes back whole in parts (TOOBIG until 2026-10-23)."""
     w = usb_wcb(bench)
     key = "HILTB"
     head = f";S1{marker('a')}^***"      # a recall would send only the marker; the filler is a comment
@@ -1416,8 +1415,8 @@ VALUE_PART = re.compile(r"^\[MGMT\] Sequence-value request '([^']*)' from WCB(\d
 
 
 def _w3_or_skip(bench):
-    """W3 on its own USB console: an ESP32-S3, the only bench board with the heap to store a 3,999-character value
-    (seq.value_over_3999_refused) - a classic ESP32 stops near 2,400 (inv.seqget_largest)."""
+    """W3 on its own USB console: an ESP32-S3, which stores a 3,999-character value (seq.value_over_3999_refused); the
+    classic boards do too since 2026-10-24 (inv.seqget_largest, inv.push_long_sequence)."""
     if 3 not in bench.usb_wcbs():
         raise Skip("W3 has no USB console here")
     return WCB(bench.dev(bench.usb_wcbs()[3]))
@@ -1509,12 +1508,14 @@ def seqget_parts(bench):
 LONG_KEY = "HILLONGPUSH"
 
 
-@test("inv.push_long_sequence", "A ?SEQ,SAVE longer than one push session reaches an ESP32-S3: W1 relays a 3,999-character value to W3 as ONE ?MGMT,FRAG session of 23 chunks (a relay forwards 24 since 2026-10-23, and W1's ?WDP,DUMP says what each takes first: mgmt.fwd24 or mgmt.rx24 on its own row, mgmt.rx24 on W3's, no mgmt.rx on W2's), W3 stores it and reads it back byte for byte on its own console, and W1 gets it back whole through ?MGMT,SEQGET,3 (in parts); the same session to W2, a classic ESP32 that takes 16, stores nothing; both cleared after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2", "wcb3"], links=[])
+@test("inv.push_long_sequence", "A ?SEQ,SAVE longer than one push session reaches every WCB: W1 relays a 3,999-character value to W3 (an ESP32-S3) and to W2 (a classic ESP32 hosting its access point) as ONE ?MGMT,FRAG session of 23 chunks each (W1's ?WDP,DUMP says what each takes first: mgmt.rx24 on all three rows), each stores it and reads it back byte for byte on its own console, and W1 gets W3's back whole through ?MGMT,SEQGET,3 (in parts); the same value typed on W2's own USB console stores too - a classic board took 16 chunks and stopped near 2,400 characters until 2026-10-24; all cleared after (docs/MGMT_RELAY.md §10)", needs=["wcb1", "wcb2", "wcb3"], links=[])
 def push_long_sequence(bench):
-    """handleMgmtForward (WCB.ino) forwards up to MGMT_FWD_MAX_CHUNKS (24) chunks; an ESP32-S3 target reassembles up to
-    MGMT_RX_MAX_CHUNKS (24) and a classic one 16 - it could not run a ?SEQ,SAVE that long anyway (about 7 times its
-    length in heap). The chunks go out 30 ms apart, as inv.seqget_multichunk sends them, each 179 characters at most
-    (a longer one is refused); a session that loses one is sent again, under a new session id."""
+    """handleMgmtForward (WCB.ino) forwards up to MGMT_FWD_MAX_CHUNKS (24) chunks and a target reassembles up to
+    MGMT_RX_MAX_CHUNKS (24) on both chips. A classic one took 16 until 2026-10-24: a ?SEQ,SAVE cost about 7 times its
+    length in heap through the dispatcher, so it could not run one that long. It saves from the queued line now
+    (handleSingleCommand, saveSequenceChars), so W2, hosting its access point (~19 KB free), takes the whole 3,999, over
+    the mesh and on its own console. The chunks go out 30 ms apart, as inv.seqget_multichunk sends them, each 179
+    characters at most (a longer one is refused); a session that loses one is sent again, under a new session id."""
     w, w3 = usb_wcb(bench), _w3_or_skip(bench)
     w2 = WCB(bench.dev("wcb2"))
     _store_or_skip(w3)
@@ -1544,8 +1545,9 @@ def push_long_sequence(bench):
                         f"not relay the session")
     if "mgmt.rx24" not in tags.get(3, []):
         problems.append(f"W{me}'s row for W3 says CAPTAGS {tags.get(3)}, without mgmt.rx24: the Wizard would refuse the push")
-    if 2 in tags and any(t.startswith("mgmt.rx") for t in tags[2]):
-        problems.append(f"W{me}'s row for W2 (a classic ESP32) says CAPTAGS {tags[2]}: it takes 16 chunks")
+    if "mgmt.rx24" not in tags.get(2, []):
+        problems.append(f"W{me}'s row for W2 (a classic ESP32) says CAPTAGS {tags.get(2)}, without mgmt.rx24: the Wizard "
+                        f"would refuse it the push")
     with config_guard(bench, 2, 3):
         _clear_seq(w3, LONG_KEY)
         try:
@@ -1569,10 +1571,25 @@ def push_long_sequence(bench):
                     time.sleep(RELAY_SPACING_S + 1.0)
                 if got != f"[MGMT:SEQVAL,3]{LONG_KEY},OK,{value}":
                     problems.append(f"?MGMT,SEQGET,3 gave back {len(got or '')} characters, not the value whole")
-            # W2, a classic ESP32, takes 16 chunks a session: the 23-chunk session is dropped whole, nothing runs.
-            push(2)
-            if _seqval(w2, LONG_KEY) != f"[MGMT:SEQVAL,2]{LONG_KEY},NOTFOUND,":
-                problems.append(f"W2 stored {LONG_KEY} from a 23-chunk session it cannot take")
+            # W2, a classic ESP32 hosting its access point: the same 23-chunk session, stored whole.
+            stored2 = None
+            for attempt in range(1, 4):
+                push(2)
+                stored2 = _seqval(w2, LONG_KEY)
+                if stored2 and ",OK," in stored2:
+                    break
+                notes.append(f"push {attempt} to W2: no {LONG_KEY} yet (a chunk lost on the air?)")
+            if stored2 != f"[MGMT:SEQVAL,2]{LONG_KEY},OK,{value}":
+                problems.append(f"W2 stored {len(stored2 or '')} characters under {LONG_KEY} from the 23-chunk session, "
+                                f"not the {len(value)}-character value whole")
+            # ...and the same value typed on its own USB console.
+            _clear_seq(w2, LONG_KEY)
+            out = [x.rstrip() for x in w2.run(f"?SEQ,SAVE,{LONG_KEY},{value}", timeout=12)]
+            if not any(x.startswith(f"Stored: Key='{LONG_KEY}'") for x in out):
+                said = [x[:100] for x in out if "memory" in x or "Failed" in x or "Invalid" in x or "empty" in x]
+                problems.append(f"W2's own ?SEQ,SAVE of the {len(value)}-character value was not stored: {said}")
+            elif _seqval(w2, LONG_KEY) != f"[MGMT:SEQVAL,2]{LONG_KEY},OK,{value}":
+                problems.append(f"W2's own ?SEQ,SAVE of {LONG_KEY} did not read back whole")
         finally:
             _clear_seq(w3, LONG_KEY)
             _clear_seq(w2, LONG_KEY)

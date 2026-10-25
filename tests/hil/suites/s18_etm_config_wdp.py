@@ -1257,10 +1257,10 @@ def _expected_cap(tokens, n):
 
 
 def _own_tags(hw):
-    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): the classic build
-    forwards a 24-chunk push session as a relay (mgmt.fwd24); the ESP32-S3 build (HW 3.1 / 3.2) takes one as a target,
-    and so forwards one too (mgmt.rx24 alone: rx implies fwd)."""
-    return "mgmt.rx24" if hw in (31, 32) else "mgmt.fwd24"
+    """The CAPTAGS a WCB advertises about itself (wcbOwnCapTags, WCB.ino; docs/WDP_DESIGN.md §3): both builds take a
+    24-chunk push session as a target, and so forward one too (mgmt.rx24 alone: rx implies fwd). The classic build said
+    mgmt.fwd24 (it took 16) until 2026-10-24, when a save stopped costing ~7x its length in heap."""
+    return "mgmt.rx24"
 
 
 @test("wdp.dump_fields", "?WDP,DUMP rows for W1 (self), W2 and NaviCore match their configuration; a WCB's CAPTAGS are its build's own tags (mgmt.fwd24, or mgmt.rx24 on an ESP32-S3), on its self row and on W1's row for W2", needs=["wcb1"], links=[])

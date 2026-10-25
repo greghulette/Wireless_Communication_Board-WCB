@@ -1761,7 +1761,7 @@ def wdp_neighbour_table(bench):
         if nr is None:
             problems.append(f"NaviCore has no row for W{n}")
             continue
-        # CAPTAGS too: a WCB advertises its own since 2026-10-23 (mgmt.fwd24, + mgmt.rx24 on an S3; WDP_DESIGN.md §3),
+        # CAPTAGS too: a WCB advertises its own since 2026-10-23 (mgmt.rx24 on both chips; WDP_DESIGN.md §3),
         # and WCB_Client decodes CAPTAGS from any sender - only DEVTYPE makes a row a client (CLIENT=1).
         keys = ("ALIAS", "HW", "FW", "CAP", "CTRL", "MAESTRO", "CAPTAGS")
         bad = {k: (nr.get(k), sr.get(k)) for k in keys if nr.get(k) != sr.get(k)}
