@@ -14,10 +14,14 @@ The Kyber checks route the SBUS controller's output B to the Kyber for two pad p
 KyberPad): one MarcDuino command, one Maestro 1 script (restartScript, which W1 S1's probe stands in for). While routed
 the Kyber may stream its CH1-3 pass-through setTargets, so W2's Maestro 2 may centre a servo (hil/servos.py lists
 probe.device_links).
+
+The first check is not a wire but the config that makes W1 S1 a stand-in Maestro (_w1_stand_in): without it every test
+that reads NaviCore's or the Kyber's Maestro frames on W1 S1 fails one by one, each saying only that nothing arrived.
 """
 import time
 
 from .navicore import NaviCore, SBUS_FULL_FPS
+from .wcb import WCB
 
 FPS_CLEAR_S = 2.2      # #L09's fps is the last whole second loop() timed: read again once a clean one has passed
 
@@ -61,6 +65,26 @@ def kyber_press(bench, button):
         with k.KyberPad(bench, ctl, ch, released, k._pad_rest(bench, ch) or released) as pad:
             pad.press(values[button])
     return action, line.encode()
+
+
+def _w1_stand_in(bench):
+    """W1 S1's stand-in Maestro. There is no real Maestro on W1 (Maestro 1 is on NaviCore, Maestro 2 on W2): W1 is
+    Maestro_Remote (?MAESTRO,REMOTE; ?KYBER,LIST 'Kyber is Remote') with Maestro 1 local on S1, so every Maestro frame
+    NaviCore or the Kyber sends to remote slot 4 comes out W1 S1 into probe 1's header and moves nothing. On 2026-10-25
+    both lines were taken off W1 as a stray Maestro and every W1 S1 frame test failed with W1 logging the broadcast and
+    forwarding nothing; Greg chose to keep the stand-in on W1. Read-only: ?KYBER,LIST and ?MAESTRO,LIST."""
+    name = "W1 S1 stand-in Maestro (?MAESTRO,REMOTE, M1 on S1)"
+    dev = bench.usb_wcbs().get(1)
+    if not dev:
+        return Check(name, None, "W1 has no USB console in bench.json")
+    w = WCB(bench.dev(dev))
+    kyber = [x.strip() for x in w.run("?KYBER,LIST") if x.startswith("Kyber is")]
+    maestros = [x.strip() for x in w.run("?MAESTRO,LIST") if x.startswith("  Maestro ")]
+    seen = f"{kyber[0] if kyber else 'no Kyber line in ?KYBER,LIST'}; {', '.join(maestros) or 'no Maestros'}"
+    if kyber == ["Kyber is Remote"] and "Maestro 1 → Local S1" in maestros:
+        return Check(name, True, seen)
+    return Check(name, False, f"{seen}: put it back on W1 with ?MAESTRO,M1:W1S1:57600 and ?MAESTRO,REMOTE (probe 1 on "
+                              f"W1 S1 stands in for a Maestro; there is no real one on W1)")
 
 
 def _sbus_a(bench):
@@ -178,7 +202,7 @@ def _kyber(bench):
 def run_all(bench, log=print):
     """Every device-link check -> [Check]; each is logged as it finishes. An error in one is that link's failure."""
     out = []
-    for fn in (_sbus_a, _nc_maestro, _kyber):
+    for fn in (_w1_stand_in, _sbus_a, _nc_maestro, _kyber):
         try:
             got = fn(bench)
         except Exception as e:  # noqa: BLE001 - a check that cannot run is a finding about the bench, not a crash
