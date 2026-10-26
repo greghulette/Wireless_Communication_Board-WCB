@@ -185,6 +185,43 @@ test.describe('the bench config', () => {
     T.expectNoPageErrors(page);
   });
 
+  test('nctool.command_route_typed a routing prefix typed into a command goes into its destination when the field is left: ";w2;s3testing" sets WCB 2 / Serial 3 and keeps "testing" (stored as the ;W2;S3 broadcast), ";W3,;M11" and ";w3;M12" set WCB 3 with auto-route (a unicast), a paste takes it at once; a chained command, a board past 20 and a port past 5 stay as typed', async ({ page, emu }) => {
+    await T.openTool(page);
+    await T.connectUsb(page, emu);
+    await page.evaluate(() => setEditingMode(2));
+    await page.locator('#assignment-list > div').nth(1).click();   // mode 2 button 2: no mapping, a blank row open
+    const cmd = page.locator('#fields-1-0-cmd');
+    const dest = () => page.evaluate(() => [document.getElementById('fields-1-0-wcbsel').value, document.getElementById('fields-1-0-portsel').value]);
+    const act = () => page.evaluate(() => readActionFromUI('1', 0));
+    await cmd.fill(';w2;s3testing');
+    expect(await dest(), 'not while typing').toEqual(['1', 'auto']);
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue('testing');
+    expect(await dest()).toEqual(['2', '3']);
+    expect(await act()).toEqual({ type: 'wcb_broadcast', cmd: ';W2;S3testing' });
+    await cmd.fill(';W3,;M11');
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue(';M11');
+    expect(await dest()).toEqual(['3', 'auto']);
+    expect(await act()).toEqual({ type: 'wcb_unicast', target: '3', cmd: ';M11' });
+    await cmd.fill(';w3;M12');
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue(';M12');
+    expect(await act()).toEqual({ type: 'wcb_unicast', target: '3', cmd: ';M12' });
+    // A paste: at once.
+    await cmd.evaluate((e) => { e.value = ';W2;S1F0025'; e.dispatchEvent(new InputEvent('input', { inputType: 'insertFromPaste', bubbles: true })); });
+    await expect(cmd).toHaveValue('F0025');
+    expect(await dest()).toEqual(['2', '1']);
+    // As typed: a chain, a board past 20, a port past 5.
+    for (const v of [';w2;s3a^;w3;s1b', ';W25;S1x', ';W2;S7x']) {
+      await cmd.fill(v);
+      await cmd.press('Tab');
+      await expect(cmd).toHaveValue(v);
+      expect(await dest()).toEqual(['2', '1']);
+    }
+    T.expectNoPageErrors(page);
+  });
+
   test('nctool.wcb_network_profiles the dirty badge tracks the WCB Network fields, a USB Save carries the branch, a profile loads into the fields, and a seventh profile is refused', async ({ page, emu }) => {
     const dialogs = T.answerDialogs(page, ['HIL3', 'HIL4', 'HIL5', 'HIL6', 'HIL7']);
     await T.openTool(page);

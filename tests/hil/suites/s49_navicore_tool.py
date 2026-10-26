@@ -88,6 +88,7 @@ _L1 = (
     ("test_action_refusal_shown", "(should) A TEST_ACTION the board refuses (ok:false) is reported to the user (D-NC20)"),
     ("command_view_limits", "The command field reserves the ;W<n>;S<p> prefix after a destination change, warns past 95, and flags only a chained unicast of implicitly-routed verbs"),
     ("command_view_cap_on_open", "(should) An action stored with a ;W<n>;S<p> prefix opens with the prefix already reserved in the field cap"),
+    ("command_route_typed", "A routing prefix typed into a command goes into its destination when the field is left (;w2;s3testing: WCB 2 / Serial 3 and testing; ;W3,;M11: WCB 3 auto-route), a paste at once; a chain, a board past 20 and a port past 5 stay as typed"),
     ("wcb_network_profiles", "The dirty badge tracks the WCB Network fields, a USB Save carries the branch, a profile loads into the fields, and a seventh profile is refused"),
     ("wcb_network_bridged_strip", "Over the bridge a WCB Network edit is not sent: alone it says so, with other edits it is stripped and kept out of the new baseline"),
     # The Firmware tab: GitHub, CryptoJS and esptool-js served by page.route; the emulator speaks ?OTALOCAL and the ?OTA relay.
