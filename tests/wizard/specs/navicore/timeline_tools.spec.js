@@ -140,7 +140,7 @@ test.describe('the timeline editor', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.timeline_length_tracks_actions Trim start moves everything to 0 and shortens the clip; a longer length holds each servo\'s last pose to the new end, a shorter one asks and deletes what lies past it (declined, the field goes back); + Maestro asks a slot and a channel and adds the empty track; + Action opens the popover at the cursor, needs a command, lands an action on a free time (5 ms past another\'s), edits it pre-filled and deletes it; with no servo keyframes the script export says so', async ({ page, emu }) => {
+  test('nctool.timeline_length_tracks_actions Trim start moves everything to 0 and shortens the clip; a longer length holds each servo\'s last pose to the new end, a shorter one asks and deletes what lies past it (declined, the field goes back); + Maestro asks a slot and a channel and adds the empty track; + Action opens the popover at the cursor, needs a command, lands an action on a free time (5 ms past another\'s), edits it pre-filled and deletes it, and offers no Delay (a clip never applies one) while keeping one an action carries; with no servo keyframes the script export says so', async ({ page, emu }) => {
     const answers = [];
     const dialogs = T.answerDialogs(page, answers);
     await T.openTool(page);
@@ -187,19 +187,24 @@ test.describe('the timeline editor', () => {
     await expect(page.locator('#tl-action-modal')).toHaveClass(/open/);
     await page.locator('#tl-action-fields-cmd').fill(';S2HILTL');
     await page.locator('#tl-action-time').fill('200');   // the stop's time: the new action lands 5 ms past it
-    await page.locator('#tl-action-delay').fill('20');
+    // No Delay field: a clip replays each action through rcExecuteActionNow (NaviCore.ino recCbDispatch), which never
+    // applies one, so an action fires at its time.
+    await expect(page.locator('#tl-action-delay')).toHaveCount(0);
+    await expect(page.locator('#tl-action-delay-note')).toBeHidden();
     await page.locator('#tl-action-note').fill('tl note');
     await page.locator('#tl-action-apply').click();
     await expect(page.locator('#tl-action-modal')).not.toHaveClass(/open/);
     const acts = (await model(page)).actions;
     expect(acts.map(([t, a]) => [t, a.type])).toEqual([[200, 'stop'], [205, 'wcb_unicast']]);
-    expect(acts[1][1]).toEqual({ type: 'wcb_unicast', target: '1', cmd: ';S2HILTL', delay: 20, note: 'tl note' });
+    expect(acts[1][1]).toEqual({ type: 'wcb_unicast', target: '1', cmd: ';S2HILTL', note: 'tl note' });
+    // A delay a recorded action carries is kept as it is, and the popover says a clip does not apply it.
+    await page.evaluate(() => { _tlClip.actions[1].action.delay = 20; });
     // Edit it: pre-filled; its Delete removes it.
     await page.evaluate(() => _tlOpenActionEditor(_tlClip.actions[1], 0));
     await expect(page.locator('#tl-action-title')).toHaveText('Edit action');
     await expect(page.locator('#tl-action-time')).toHaveValue('205');
     await expect(page.locator('#tl-action-fields-cmd')).toHaveValue(';S2HILTL');
-    await expect(page.locator('#tl-action-delay')).toHaveValue('20');
+    await expect(page.locator('#tl-action-delay-note')).toHaveText('This action carries a 20 ms delay, which a clip does not apply: it fires at its time. Move it to fire later.');
     await expect(page.locator('#tl-action-note')).toHaveValue('tl note');
     await expect(page.locator('#tl-action-delete')).toBeVisible();
     await page.locator('#tl-action-fields-cmd').fill(';S2HILTL2');

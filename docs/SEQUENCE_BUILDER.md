@@ -182,7 +182,10 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   edge and swatch, with the barest wash along its track. A lane takes its
   board's home colour unless another lane on screen holds it; then it takes the first free one, so lanes on screen
   never share a colour (`sbColorOf`). Lanes are assigned in order of first appearance in time, which is also the row
-  strip's order, so a sequence opens in the colours its strip shows. A lane keeps its colour while the builder is
+  strip's order, so a sequence opens in the colours its strip shows. NaviCore's clip timeline draws its actions the
+  same way, with this palette and these home slots (NaviCore `docs/CONFIG_TOOL.md` §7, `TL_BOARD_SLOT`), so a device
+  wears one colour in both tools; the unit tests hold the two equal. There, a lane with a home colour picks before one
+  without, so a port lane cannot take Maestro's colour by appearing first. A lane keeps its colour while the builder is
   open, so a lane that comes or goes repaints no other. A ninth lane is grey. A step is outlined in its lane's colour
   (a 2px border, a light wash inside), and its text stays in the theme's ink. A solid fill was tried and made the
   labels harder to read. Reference steps are dashed and fainter. A
@@ -239,7 +242,7 @@ this repo:
 
 | Test | Covers |
 |---|---|
-| `tests/wizard/unit/seq_builder.test.js` (`npm run unit`, CI) | compile, parse and both round trips; the firmware rules above; routes and recall keys; `sbAnalyze`; the real `cmdlib/` files: normalization, decode specificity, encode/decode inverse for every visible command |
+| `tests/wizard/unit/seq_builder.test.js` (`npm run unit`, CI) | compile, parse and both round trips; the firmware rules above; routes and recall keys; `sbAnalyze`; the real `cmdlib/` files: normalization, decode specificity, encode/decode inverse for every visible command; with NaviCore beside this repo, its `cmdlib/` copies and its timeline's palette and home slots |
 | `tests/wizard/specs/seq_builder_fake.spec.js` (CI; HIL `wizard.seq_builder_*`) | in the real page against a fake board: opening a sequence as is (its strip and timeline in the same colours), editing and dragging, the composer and drag-and-drop from the library, label routing, a new sequence, the warnings, Save & Test's wire, device lanes on one port, lining up with another sequence (start, drag, sticking, remembered), the DroidNet trigger, Align and Space evenly. `SB_SHOTS=<dir>` saves a screenshot at each step, in the light theme with `SB_THEME=light` |
 
 ## Revision log
@@ -248,6 +251,7 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
+| 2026-10-25 | (this commit) | §5 and §7: NaviCore's clip timeline uses this palette and these home slots, held equal by a unit test | Greg: "i kind of like that [the timeline] and want to implement it on the navicore as well" |
 | 2026-10-21 | (this commit) | A step's box stands apart from its dot, `SB_EV_GAP` (10 px) to the right; the dot alone sits at the time | Greg: "move the text off to the right slightly of the dot. not connected" |
 | 2026-10-21 | `a44875d` | Align (to first, last, playhead) and Space evenly for a multi-selection; a dot marks each step's firing time in place of the thick left edge, and time 0 moves 8 px off the label column so its dot shows; the builder sets `color-scheme` from the Wizard's theme | Greg: "an align button if i choose more than 2 commands"; "a dot/star on each command to represent the trigger ... someone could potentially think the command takes the whole box duration"; "formatting isn't following light mode vs dark mode" |
 | 2026-10-20 | `0f625d5` | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
