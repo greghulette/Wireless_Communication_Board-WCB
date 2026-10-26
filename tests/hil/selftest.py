@@ -5757,7 +5757,8 @@ def t_sbusfault_old_image_skips(tmp):
            if r["status"] != "SKIP" or "no INF8 test verbs" not in r["detail"] or "sbus-9.9" not in r["detail"]}
     assert not bad, bad
     assert set(sb.sent) == {'{"t":"flags"}', '{"t":"ping"}'}, sorted(set(sb.sent))
-    assert not old.saved and not nav.sent, (old.saved, nav.sent)
+    # NaviCore hears only the run's start-of-run firmware record (resume.record_firmware: one PING), none of the tests.
+    assert not old.saved and nav.sent in ([], ['{"type":"PING"}']), (old.saved, nav.sent)
 
 
 # ---------------------------------------------------------------------------- nc_guard (NAVICORE.md INF3)
@@ -11719,7 +11720,8 @@ class SbusWorld(FakeInf8):
     buttons are the bench's: its SK and SL stick clicks on the matrix channel at 1074 and 1033 (slots 19 and 20), S1-S6
     unassigned. mut: 'fixed_reader' (D-NC72's and D-NC73's fixes), 'loose_reader' (a partial buffer decodes at a
     silence), 'no_budget' ("frames" is ignored and the stream runs on), 'mode_saves' ("save":false saves), 'dip_two' (a
-    dip lasts two frames)."""
+    dip lasts two frames), 'sticks_on_knobs' (getcfg rx/ry on CH23/CH24, Greg's bench since 2026-10-25; NaviSbusModel
+    puts its knobs there too)."""
     FPS = 111
 
     def __init__(self, mut=()):
@@ -11734,6 +11736,8 @@ class SbusWorld(FakeInf8):
                "btn": [{"l": f"S{i + 1}", "c": 0, "v": 1811} for i in range(6)] + [{"l": "SK", "c": 7, "v": 1074},
                                                                                   {"l": "SL", "c": 7, "v": 1033}],
                "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
+        if "sticks_on_knobs" in self.mut:
+            cfg["rx"], cfg["ry"] = 23, 24
         super().__init__(verbs=True, cfg=cfg, route=True)
         self.rest = list(self.channels)        # output A's frame while the controls are routed away from it
         fixed, loose = _reader_classes()
@@ -11801,10 +11805,10 @@ class SbusWorld(FakeInf8):
             self.advance()
             t, was24, now = o.get("t"), self.st["sbus24"], time.monotonic()
             if t == "a":
-                for axis, ch, neg in (("rx", 1, False), ("ry", 2, True), ("ly", 3, True), ("lx", 4, False)):
+                for axis, neg in (("rx", False), ("ry", True), ("ly", True), ("lx", False)):
                     f = max(-1.0, min(1.0, float(o.get(axis, 0))))
                     f = -f if neg else f
-                    self.channels[ch - 1] = int((f * 0.5 + 0.5) * 1639 + 172 + 0.5)
+                    self.channels[self.cfg[axis] - 1] = int((f * 0.5 + 0.5) * 1639 + 172 + 0.5)
                 return []
             if t == "sw":
                 s = self.cfg["sw"][o["i"]]
@@ -11892,12 +11896,17 @@ class NaviSbusModel(NaviModel):
     reader decoded last, and so do the monitor, rc_hb and rc_ch. mut, the engine's half: 'failsafe_cancels' and
     'frame_timeout' (D-NC21's fix: failsafe, or 100 ms with no frame, cancels a pending tap and hold), and the breaks
     'failsafe_ungated', 'failsafe_keeps_armed' (the gate leaves the matrix armed), 'lost_gates' (a lost frame gates like
-    failsafe), 'release_debounce_2' (a release needs two neutral frames at any debounce)."""
+    failsafe), 'release_debounce_2' (a release needs two neutral frames at any debounce), and the bench's half of
+    'sticks_on_knobs': J1 a passthrough on CH23 onto remote slot 4 channel 3, beside J2 on CH24, as on Greg's bench."""
     TIMEOUT_S = 0.1                           # frame_timeout's outage
 
     def __init__(self, world, mut=()):
         super().__init__()
         self.world, self.mut = world, set(mut)
+        if "sticks_on_knobs" in self.mut:
+            self.merge({"knobs": {"J1": {"channel": 23, "function": 1, "outputs": [
+                {"target": 4, "maestroCh": 3, "posMin": 4000, "posMax": 8000}]}}})
+            self.flash = self.text()
         self.links = {"W1S1": DevLink("W1S1"), "W1S2": DevLink("W1S2")}
         self.elock = threading.RLock()        # one loop(): the console and the engine never interleave
         self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
@@ -12225,6 +12234,23 @@ def t_sbusfault_suite_against_model(tmp):
     assert not any(s in log for s in SECRETS), "a credential reached session.log"
 
 
+def t_sbusfault_sticks_on_knobs(tmp):
+    """Greg's bench since 2026-10-25: the controller's rx and ry sticks on CH23 and CH24, where NaviCore's passthrough
+    knobs J1 (onto remote slot 4, whose frames reach W1 S1) and J2 sit. Every s50 test that moves a stick borrows the
+    knob there (s42 _free_sticks and _sticks_inert, s50 _io_rig and _hi_inert) instead of skipping, so the suite ends
+    as it does with free sticks, and the controller and NaviCore's config are left as found."""
+    res, world, model, log = _run_sbusfault_suite(tmp, mut=("sticks_on_knobs",))
+    assert (world.cfg["rx"], world.cfg["ry"]) == (23, 24), world.cfg
+    bad = [f"{tid}: {r['status']} (expected {SBUSFAULT_WANT.get(tid)}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != SBUSFAULT_WANT.get(tid)]
+    assert len(res) == len(SBUSFAULT_WANT) == 13, sorted(res)
+    assert not bad, "\n".join(bad)
+    assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True,
+                        "route": "navicore"} and not world.saved, (world.st, world.saved)
+    assert model.text() == model.flash, "NaviCore's config was not left as found"
+    assert '"J1":{"channel":23' in model.flash.replace(" ", ""), "J1 is not on CH23 in the model"
+
+
 # (test, world mutation, the status it must then get, a piece of its detail)
 SBUSFAULT_MUTATIONS = (
     ("sbus.truncated_frame_no_phantom", "fixed_reader", "PASS", ""),
@@ -12506,7 +12532,7 @@ TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (
 TESTS += [t_ncrec_helpers, t_ncrec_suite_against_model, t_ncrec_mutations]   # NC-WP12 (suites/s48_navicore_rec.py)
 TESTS += [t_sbus_inf8_verbs, t_sbus_reader_model, t_sbus_dump_variants, t_sbusfault_helpers,   # INF8, NC-WP11
           t_sbusfault_old_image_skips, t_sbusfault_suite_against_model,                       # (s50_navicore_sbus_faults)
-          t_sbusfault_mutations]
+          t_sbusfault_mutations, t_sbusfault_sticks_on_knobs]
 
 
 def t_bridge_hooks(tmp):

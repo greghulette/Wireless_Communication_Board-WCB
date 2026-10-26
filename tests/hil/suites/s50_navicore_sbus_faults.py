@@ -39,7 +39,8 @@ from hil.sbus import (FLAG_FAILSAFE, FLAG_LOST, FRAME_LEN, HEADER, FOOTER, SBUS_
 from suites.common import link, marker, usb_wcb
 from suites.s41_navicore_engine import FLAGS_ALL, _count, _engine_inert, _remote_slot, _wait_all
 from suites.s42_navicore_sbus_engine import (AXIS_INDEX, CMD_TARGET, Sticks, _frames, _free_channels, _free_knobs, _free_switches,
-                                             _knob, _monitor_frames, _out, _press, _samples_ok, _stick, _sw_tiers,
+                                             _free_sticks, _knob, _monitor_frames, _out, _press, _samples_ok,
+                                             _stick, _sticks_inert, _sw_tiers,
                                              _taps, _unmapped_buttons, _wait_frames, knob_pos)
 
 STICKS = ("rx", "ry", "ly", "lx")      # getcfg names each stick's channel under these keys (SBUSController buildCfgJson)
@@ -136,14 +137,16 @@ def _inert(bench):
 
 
 @contextmanager
-def _hi_inert(bench, ncfg):
+def _hi_inert(bench, ncfg, also=()):
     """For a test that switches the controller to SBUS-16: NaviCore then reads CH17-24 as 992 (sbus_reader.h decodeFrame
     :283), so a switch bound there fires the tier of its middle band and a knob drives its outputs to mid-range (on this
     bench switch SJ's text tiers, and the dome's RS and J2 knobs). Inside nc_guard every switch and every knob on CH17-24
-    is unbound (channel 0, the rest of each object as it was); with none there, no guard and no write. -> (the guard or
-    None, the labels unbound)."""
+    is unbound (channel 0, the rest of each object as it was), and so is a knob with a function on a channel in `also`
+    (the stick a test moves, s42 _free_sticks); with none there, no guard and no write. -> (the guard or None, the
+    labels unbound)."""
     sw = sorted(lab for lab, s in (ncfg.get("switches") or {}).items() if 17 <= (s.get("channel") or 0) <= 24)
-    kn = sorted(lab for lab, k in (ncfg.get("knobs") or {}).items() if 17 <= (k.get("channel") or 0) <= 24)
+    kn = sorted(lab for lab, k in (ncfg.get("knobs") or {}).items() if 17 <= (k.get("channel") or 0) <= 24
+                or (k.get("function") and k.get("channel") in also))
     if not sw and not kn:
         yield None, []
         return
@@ -189,7 +192,9 @@ def _io_rig(g, rx, ry, slot):
     """Inside nc_guard `g`: a free knob on the rx stick's channel passing through to channel x of remote Maestro slot
     `slot` (its frames reach W1 S1; the device is hosted nowhere, so nothing moves), and a free switch on the ry stick's
     channel firing one W1 S2 marker per position -> (x, {position: marker}). The ry stick rests in the switch's middle
-    band, which the save seeds without firing. Skip without a free knob and a free switch."""
+    band, which the save seeds without firing. Skip without a free knob and a free switch. A knob already on either
+    stick is unbound first (s42 _free_sticks)."""
+    _free_sticks(g, rx, ry)
     knobs, switches = _free_knobs(g.before), _free_switches(g.before)
     if not knobs or not switches:
         raise Skip("no free knob and free switch to borrow")
@@ -287,7 +292,7 @@ def _describe(raw, frame):
 @test("sbus.test_verbs", "The SBUS controller's INF8 test verbs act on the wire as NaviCore reads it: the flags byte "
       "shows as lost/failsafe, the stream stops and starts with no reset, a budget of 5 lets exactly 5 frames through, a "
       "raw value holds until the stick writes its channel again, a dip is one frame at 992; bad arguments are refused "
-      "and send nothing (the rx stick's channel, bound to nothing)", needs=["sbus", "navicore"], links=[])
+      "and send nothing (the rx stick's channel; a knob on it is unbound for the test)", needs=["sbus", "navicore"], links=[])
 def test_verbs(bench):
     """INF8's acceptance on the bench, the first test to run after the controller is flashed with the hil-week image
     (SBUSController.ino processCommandJson "flags", "stream", "ch", "glitch"; sendGlitch; loop()). NaviCore's #L09 gives
@@ -300,70 +305,72 @@ def test_verbs(bench):
     found = nc.sbus_dump()["channels"]
     st0 = dict(ctl.verbs)
     problems, notes = [], []
-    try:
-        prod = (st0.get("flags"), st0.get("stream"), st0.get("budget"), st0.get("sbus24"), st0.get("saved24"))
-        if prod != (0, True, -1, True, True) or cfg.get("sbus24") is not True:
-            problems.append(f"the probe reads {st0} and getcfg sbus24 {cfg.get('sbus24')}: not a controller streaming "
-                            f"SBUS-24 with flags 0 as saved")
-        for v, want in ((FLAG_LOST, ("YES", "no")), (FLAG_FAILSAFE, ("no", "YES")),
-                        (FLAG_LOST | FLAG_FAILSAFE, ("YES", "YES")), (0, ("no", "no"))):
-            ctl.flags(v)
+    with _sticks_inert(bench, ncfg, ch) as (g, _):
+        nc = g.nc if g else nc
+        try:
+            prod = (st0.get("flags"), st0.get("stream"), st0.get("budget"), st0.get("sbus24"), st0.get("saved24"))
+            if prod != (0, True, -1, True, True) or cfg.get("sbus24") is not True:
+                problems.append(f"the probe reads {st0} and getcfg sbus24 {cfg.get('sbus24')}: not a controller streaming "
+                                f"SBUS-24 with flags 0 as saved")
+            for v, want in ((FLAG_LOST, ("YES", "no")), (FLAG_FAILSAFE, ("no", "YES")),
+                            (FLAG_LOST | FLAG_FAILSAFE, ("YES", "YES")), (0, ("no", "no"))):
+                ctl.flags(v)
+                time.sleep(0.3)
+                d = nc.sbus_dump()
+                if (d["lost"], d["failsafe"]) != want:
+                    problems.append(f"flags {v:#04x}: NaviCore reads lost={d['lost']} failsafe={d['failsafe']}, expected "
+                                    f"lost={want[0]} failsafe={want[1]}")
+            f0 = _quiet(ctl, nc)
+            a = nc.sbus_dump()
+            time.sleep(0.6)
+            b = nc.sbus_dump()
+            if int(b["frames"] or 0) != f0 or b["age"] <= a["age"]:
+                problems.append(f"with the stream off NaviCore's counter went {f0} -> {b['frames']} and ageMs "
+                                f"{a['age']} -> {b['age']}")
+            ctl.stream(True, frames=5)
             time.sleep(0.3)
-            d = nc.sbus_dump()
-            if (d["lost"], d["failsafe"]) != want:
-                problems.append(f"flags {v:#04x}: NaviCore reads lost={d['lost']} failsafe={d['failsafe']}, expected "
-                                f"lost={want[0]} failsafe={want[1]}")
-        f0 = _quiet(ctl, nc)
-        a = nc.sbus_dump()
-        time.sleep(0.6)
-        b = nc.sbus_dump()
-        if int(b["frames"] or 0) != f0 or b["age"] <= a["age"]:
-            problems.append(f"with the stream off NaviCore's counter went {f0} -> {b['frames']} and ageMs "
-                            f"{a['age']} -> {b['age']}")
-        ctl.stream(True, frames=5)
-        time.sleep(0.3)
-        f1 = _frames_count(nc)
-        st = ctl.test_state()
-        if f1 - f0 != 5:
-            problems.append(f"a budget of 5 frames: NaviCore decoded {f1 - f0}")
-        if st.get("stream") or st.get("budget") != 0:
-            problems.append(f"after its budget the stream did not stop: {st}")
-        # Bad arguments, with the stream off so anything a refused verb sent would still show as a frame.
-        refused = ({"t": "flags", "v": 256}, {"t": "flags", "v": -1}, {"t": "stream", "on": True, "frames": 0},
-                   {"t": "stream", "on": True, "frames": 1001}, {"t": "ch", "c": 0, "v": 5}, {"t": "ch", "c": 25, "v": 5},
-                   {"t": "ch", "c": ch, "v": 2048}, {"t": "glitch", "kind": "truncate", "n": 36},
-                   {"t": "glitch", "kind": "garbage", "n": 65}, {"t": "glitch", "kind": "double", "n": 1},
-                   {"t": "glitch", "kind": "gap", "n": 51}, {"t": "glitch", "kind": "dip", "n": 25},
-                   {"t": "glitch", "kind": "zap", "n": 3})
-        for obj in refused:
-            r = ctl.test_verb(obj, check=False)
-            if r.get("ok"):
-                problems.append(f"{json.dumps(obj, separators=(',', ':'))} was accepted")
-        time.sleep(0.2)
-        st = ctl.test_state()
-        if _frames_count(nc) != f1 or (st.get("flags"), st.get("stream"), st.get("budget")) != (0, False, 0):
-            problems.append(f"a refused verb changed something: {_frames_count(nc) - f1} frame(s), state {st}")
-        # A raw value, and the dip: one frame with the channel at 992, alone with the stream off.
-        ctl.channel(ch, 700)
-        ctl.glitch("dip", ch)
-        time.sleep(0.15)
-        f2 = _frames_count(nc)
-        dip = decode(nc.sbus_raw())
-        if f2 - f1 != 1 or dip["channels"][ch - 1] != SBUS_CENTER:
-            problems.append(f"the dip: {f2 - f1} frame(s), CH{ch} = {dip['channels'][ch - 1]} in the last one "
-                            f"(expected one frame at {SBUS_CENTER})")
-        ctl.stream(True)
-        d = nc.sbus_full_rate()
-        if d["channels"][ch - 1] != 700:
-            problems.append(f"after the dip CH{ch} reads {d['channels'][ch - 1]}, not the raw 700")
-        ctl.axes(0, 0, 0, 0)
-        time.sleep(0.4)
-        back = nc.sbus_dump()["channels"][ch - 1]
-        if back != found[ch - 1]:
-            problems.append(f"the stick did not take CH{ch} back from the raw value: {back}, not {found[ch - 1]}")
-        notes.append(f"probe {st0}; the dip frame read CH{ch} = {dip['channels'][ch - 1]}")
-    finally:
-        _put_back(ctl, nc, cfg, found, problems)
+            f1 = _frames_count(nc)
+            st = ctl.test_state()
+            if f1 - f0 != 5:
+                problems.append(f"a budget of 5 frames: NaviCore decoded {f1 - f0}")
+            if st.get("stream") or st.get("budget") != 0:
+                problems.append(f"after its budget the stream did not stop: {st}")
+            # Bad arguments, with the stream off so anything a refused verb sent would still show as a frame.
+            refused = ({"t": "flags", "v": 256}, {"t": "flags", "v": -1}, {"t": "stream", "on": True, "frames": 0},
+                       {"t": "stream", "on": True, "frames": 1001}, {"t": "ch", "c": 0, "v": 5}, {"t": "ch", "c": 25, "v": 5},
+                       {"t": "ch", "c": ch, "v": 2048}, {"t": "glitch", "kind": "truncate", "n": 36},
+                       {"t": "glitch", "kind": "garbage", "n": 65}, {"t": "glitch", "kind": "double", "n": 1},
+                       {"t": "glitch", "kind": "gap", "n": 51}, {"t": "glitch", "kind": "dip", "n": 25},
+                       {"t": "glitch", "kind": "zap", "n": 3})
+            for obj in refused:
+                r = ctl.test_verb(obj, check=False)
+                if r.get("ok"):
+                    problems.append(f"{json.dumps(obj, separators=(',', ':'))} was accepted")
+            time.sleep(0.2)
+            st = ctl.test_state()
+            if _frames_count(nc) != f1 or (st.get("flags"), st.get("stream"), st.get("budget")) != (0, False, 0):
+                problems.append(f"a refused verb changed something: {_frames_count(nc) - f1} frame(s), state {st}")
+            # A raw value, and the dip: one frame with the channel at 992, alone with the stream off.
+            ctl.channel(ch, 700)
+            ctl.glitch("dip", ch)
+            time.sleep(0.15)
+            f2 = _frames_count(nc)
+            dip = decode(nc.sbus_raw())
+            if f2 - f1 != 1 or dip["channels"][ch - 1] != SBUS_CENTER:
+                problems.append(f"the dip: {f2 - f1} frame(s), CH{ch} = {dip['channels'][ch - 1]} in the last one "
+                                f"(expected one frame at {SBUS_CENTER})")
+            ctl.stream(True)
+            d = nc.sbus_full_rate()
+            if d["channels"][ch - 1] != 700:
+                problems.append(f"after the dip CH{ch} reads {d['channels'][ch - 1]}, not the raw 700")
+            ctl.axes(0, 0, 0, 0)
+            time.sleep(0.4)
+            back = nc.sbus_dump()["channels"][ch - 1]
+            if back != found[ch - 1]:
+                problems.append(f"the stick did not take CH{ch} back from the raw value: {back}, not {found[ch - 1]}")
+            notes.append(f"probe {st0}; the dip frame read CH{ch} = {dip['channels'][ch - 1]}")
+        finally:
+            _put_back(ctl, nc, cfg, found, problems)
     bench.note("; ".join(notes))
     assert not problems, "; ".join(problems)
 
@@ -371,7 +378,7 @@ def test_verbs(bench):
 @test("sbus.route_isolates", "The SBUS controller's route verb (output B, S4, for a Kyber): routed to the Kyber, a raw "
       "value never reaches NaviCore, which keeps a full-rate stream at rest with no flag; a stopped stream and the "
       "failsafe flag there leave NaviCore's untouched; routed to both, and back to NaviCore, it reads the value (the rx "
-      "stick's channel, bound to nothing)", needs=["sbus", "navicore"], links=[])
+      "stick's channel; a knob on it is unbound for the test)", needs=["sbus", "navicore"], links=[])
 def route_isolates(bench):
     """The second SBUS output (SBUSController branch kyber-sbus, "route"): the controls go to output A (S5, NaviCore),
     output B (S4, a Kyber) or both, and an output not routed gets no input - A carries the rest frame the controller
@@ -387,34 +394,36 @@ def route_isolates(bench):
     rest = found[ch - 1]
     v = 400 if abs(rest - 400) > 300 else 1600
     problems = []
-    try:
-        if ctl.test_state().get("route") != "navicore":
-            problems.append(f"the controller did not start routed to NaviCore: {ctl.verbs}")
-        ctl.route("kyber")
-        ctl.channel(ch, v)
-        ctl.flags(FLAG_FAILSAFE)
-        ctl.stream(False)
-        time.sleep(0.5)
-        d = nc.sbus_full_rate()
-        if d["channels"][ch - 1] != rest:
-            problems.append(f"routed to the Kyber, NaviCore read CH{ch} {d['channels'][ch - 1]}, not its rest {rest}")
-        if d["fps"] < SBUS_FULL_FPS or (d["lost"], d["failsafe"]) != ("no", "no"):
-            problems.append(f"routed to the Kyber with the stream off and failsafe on there, NaviCore's own stream read "
-                            f"fps {d['fps']} lost={d['lost']} failsafe={d['failsafe']}")
-        ctl.flags(0)
-        ctl.stream(True)
-        for to in ("both", "navicore"):
-            st = ctl.route(to)
-            if st.get("route") != to:
-                problems.append(f"route {to}: the reply says {st.get('route')}")
-            time.sleep(0.4)
-            got = nc.sbus_dump()["channels"][ch - 1]
-            if got != v:
-                problems.append(f"routed to {to}, NaviCore read CH{ch} {got}, not the raw {v}")
-        if ctl.test_verb({"t": "route", "to": "elsewhere"}, check=False).get("ok"):
-            problems.append('{"t":"route","to":"elsewhere"} was accepted')
-    finally:
-        _put_back(ctl, nc, cfg, found, problems)
+    with _sticks_inert(bench, ncfg, ch) as (g, _):
+        nc = g.nc if g else nc
+        try:
+            if ctl.test_state().get("route") != "navicore":
+                problems.append(f"the controller did not start routed to NaviCore: {ctl.verbs}")
+            ctl.route("kyber")
+            ctl.channel(ch, v)
+            ctl.flags(FLAG_FAILSAFE)
+            ctl.stream(False)
+            time.sleep(0.5)
+            d = nc.sbus_full_rate()
+            if d["channels"][ch - 1] != rest:
+                problems.append(f"routed to the Kyber, NaviCore read CH{ch} {d['channels'][ch - 1]}, not its rest {rest}")
+            if d["fps"] < SBUS_FULL_FPS or (d["lost"], d["failsafe"]) != ("no", "no"):
+                problems.append(f"routed to the Kyber with the stream off and failsafe on there, NaviCore's own stream read "
+                                f"fps {d['fps']} lost={d['lost']} failsafe={d['failsafe']}")
+            ctl.flags(0)
+            ctl.stream(True)
+            for to in ("both", "navicore"):
+                st = ctl.route(to)
+                if st.get("route") != to:
+                    problems.append(f"route {to}: the reply says {st.get('route')}")
+                time.sleep(0.4)
+                got = nc.sbus_dump()["channels"][ch - 1]
+                if got != v:
+                    problems.append(f"routed to {to}, NaviCore read CH{ch} {got}, not the raw {v}")
+            if ctl.test_verb({"t": "route", "to": "elsewhere"}, check=False).get("ok"):
+                problems.append('{"t":"route","to":"elsewhere"} was accepted')
+        finally:
+            _put_back(ctl, nc, cfg, found, problems)
     assert not problems, "; ".join(problems)
 
 
@@ -1141,7 +1150,7 @@ def test_verbs_ram_only(bench):
     ch = _stick(nc, cfg, ncfg, "rx")
     found = nc.sbus_dump()["channels"]
     problems, notes, boot, st = [], [], [], None
-    with _hi_inert(bench, ncfg) as (g, unbound):
+    with _hi_inert(bench, ncfg, also=(ch,)) as (g, unbound):
         nc = g.nc if g else nc
         try:
             ctl.sbus16(True)

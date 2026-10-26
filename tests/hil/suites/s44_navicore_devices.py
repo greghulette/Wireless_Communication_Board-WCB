@@ -61,7 +61,8 @@ from suites.s22_maestro_kyber import _settle_maestro2
 from suites.s40_navicore_config import HOOK_SKIP, _all_actions, _flushed, _hooks
 from suites.s41_navicore_engine import _engine_inert, _hosted_remote_slot, _probe_ms, _remote_slot
 from suites.s42_navicore_sbus_engine import (CMD_ACCEL, CMD_SPEED, CMD_TARGET, DBG_WIRE, Sticks, _free_channels,
-                                             _free_knobs, _knob, _out, _stick, axis_value, knob_pos, pololu_frames)
+                                             _free_knobs, _free_sticks, _knob, _out, _stick, axis_value, knob_pos,
+                                             pololu_frames)
 
 CMD_GO_HOME, CMD_STOP_SCRIPT, CMD_SUB, CMD_SUB_P = 0x22, 0x24, 0x27, 0x28   # WcbCmd WcbMaestro.h:66-69
 WCBSTREAM_CAP = 177              # WCBStream _buf[177] (WCB_Client WCBStream.h:104): what one Kyber packet can carry
@@ -1129,11 +1130,12 @@ def knob_local_readback(bench):
     knob_pos) and writes maestroSetTarget on the knob's slot, here the local Maestro 1 (Serial2), which ?MAE,GET reads
     back. maestroIdleReleaseTick sends target 0 once the channel has been idle releaseIdleMs (:2731-2752); the next stick
     move writes a real target again (:1033-1058). A free knob is borrowed inside nc_guard, on the controller's rx stick
-    (bound to nothing, s42 _stick), with one output on the channel _local_channel picks and a range of base +-200, so the
-    stick's centre gives the base exactly. The guard restores the knob, and its restore resets the release state
-    (resetMaestroReleaseState); the channel is then put back to its starting target (off here). What moves: the rx
-    stick (re-emitted on SBUS OUT, and the controller's own RC PWM 1) and that one channel within 5800-6200, off for a
-    second or two after each idle release."""
+    (no switch or the matrix on it, s42 _stick; a knob already there is unbound for the test, _free_sticks), with one
+    output on the channel _local_channel picks and a range of base +-200, so the stick's centre gives the base exactly.
+    The guard restores the knob, and its restore resets the release state (resetMaestroReleaseState); the channel is
+    then put back to its starting target (off here). What moves: the rx stick (re-emitted on SBUS OUT, and the
+    controller's own RC PWM 1) and that one channel within 5800-6200, off for a second or two after each idle
+    release."""
     ctl, nc, scfg, ncfg = _sbus_setup(bench)
     ch_sbus = _stick(nc, scfg, ncfg, "rx")
     slot, dev, ch, p0, base = _local_channel(nc, ncfg)
@@ -1143,6 +1145,7 @@ def knob_local_readback(bench):
     try:
         with nc_guard(bench) as g:
             nc = g.nc
+            _free_sticks(g, ch_sbus)
             knobs = _free_knobs(g.before)
             if not knobs:
                 raise Skip("no free knob to borrow")

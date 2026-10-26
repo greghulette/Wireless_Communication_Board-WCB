@@ -548,9 +548,12 @@ class NaviCore:
 
     def rc_events(self, since, kind="rc_trig", btn=None):
         """[(timestamp, object)] of the '"type":"<kind>"' JSON lines after mark `since` (rc_trig, rc_mode, ...), for
-        rc_trig optionally one button slot; timestamps are the host's (SerialDevice.lines)."""
+        rc_trig optionally one button slot; timestamps are the host's (SerialDevice.lines). Only lines that are JSON from
+        their first character count: while a remote terminal is open on NaviCore (?RTERM from Intellex or the Wizard) a
+        relayed copy such as '[TERM:1]{"type":"rc_trig",...}' passes the filter too, and json.loads raised on it - two
+        ERRORs in run 20261025-211905 (ncengine.rc_trig_emit, mesh_trigger_burst)."""
         return [(ts, json.loads(x)) for ts, x in list(self.dev.lines[since:])
-                if f'"type":"{kind}"' in x and (btn is None or f'"btn":{btn},' in x)]
+                if x.startswith("{") and f'"type":"{kind}"' in x and (btn is None or f'"btn":{btn},' in x)]
 
     def sbus_dump(self):
         """#L09 with the #L12 poke -> parse_sbus_dump's dict. NaviCore holds a finished block until more output

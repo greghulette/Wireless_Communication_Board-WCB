@@ -33,7 +33,7 @@ from hil.runner import Skip, test
 from hil.wizard import run_unit_tests, run_wizard_test
 from suites.common import link, marker, padded, usb_wcb, usb_wcb_number
 from suites.s21_navicore_sbus import _sbus_setup
-from suites.s42_navicore_sbus_engine import _check_value, _stick, axis_arg, axis_value
+from suites.s42_navicore_sbus_engine import _check_value, _free_sticks, _stick, axis_arg, axis_value
 from suites.s47_navicore_ota import (_bench_image, _flash_pass, _idle, _line1, _on_bench_image, _record, _restartable,
                                      _runs, _slot, _status)
 
@@ -270,27 +270,27 @@ def board_test_action_wire(bench):
 def board_live_grid(bench):
     """nct.live.pwm_update on the board: PWM_UPDATE carries NaviCore's decoded channels (sendPWMUpdate,
     NaviCore.ino:3131) and updateChannelsGrid shows each as fmtVal's SBUS count (index.html:11379-11432, :3418-3420). The
-    rx stick's channel must be one NaviCore binds to nothing and rest at centre (s42 _stick); each count's axis argument
-    is s42's axis_arg, checked here first with #L09 so a miss can be told apart from a controller mapping error. The
-    stick is centred again whatever happens (the spec does, and so does this)."""
+    rx stick's channel must be one no switch and not the matrix reads, and rest at centre (s42 _stick); a knob on it is
+    unbound inside the guard before the stick moves (s42 _free_sticks). Each count's axis argument is s42's axis_arg,
+    checked here first with #L09 so a miss can be told apart from a controller mapping error. The stick is centred
+    again whatever happens (the spec does, and so does this)."""
     ctl, nc, cfg, ncfg = _sbus_setup(bench)
     ch = _stick(nc, cfg, ncfg, "rx")
     rest = axis_value(cfg, "rx", 0.0)
     points = []
-    try:
-        for value in (rest + 300, rest - 300):
-            arg = axis_arg(cfg, "rx", value)
-            ctl.axes(0, 0, arg, 0)
-            time.sleep(0.4)
-            bad = _check_value(nc, ch, value, f"the rx stick at {value}")
-            if bad:
-                raise AssertionError("; ".join(bad))
-            points.append({"arg": arg, "value": value})
-    finally:
-        ctl.axes(0, 0, 0, 0)
     with nc_guard(bench) as g:
         _quiet(g.nc)
+        _free_sticks(g, ch)
         try:
+            for value in (rest + 300, rest - 300):
+                arg = axis_arg(cfg, "rx", value)
+                ctl.axes(0, 0, arg, 0)
+                time.sleep(0.4)
+                bad = _check_value(g.nc, ch, value, f"the rx stick at {value}")
+                if bad:
+                    raise AssertionError("; ".join(bad))
+                points.append({"arg": arg, "value": value})
+            ctl.axes(0, 0, 0, 0)
             run_wizard_test(bench, "nctool.board_live_grid", device="navicore", pipe=True,
                             args={"ch": ch, "rest": rest, "points": points})
         finally:

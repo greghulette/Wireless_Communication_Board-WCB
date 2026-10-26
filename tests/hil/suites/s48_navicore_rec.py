@@ -63,7 +63,7 @@ from suites.s40_navicore_config import _flushed, _hooks, _inert_keys
 from hil.sbus import SBUS_CENTER
 from suites.s41_navicore_engine import _act, _count, _probe_ms, _remote_slot, _wait_all
 from suites.s42_navicore_sbus_engine import (CMD_ACCEL, CMD_SPEED, CMD_TARGET, DBG_WIRE, PAYLOAD, _free_channels, _free_knobs,
-                                            _knob, _knob_rig, _out, knob_pos)
+                                            _free_sticks, _knob, _knob_rig, _out, knob_pos)
 from suites.s44_navicore_devices import wire_log
 
 REC_MAX_MS = 60000          # the capture cap, navicore_record.h:115 (checkRecordBackstop :1012-1021)
@@ -1432,6 +1432,7 @@ def live_stick_keyframes(bench):
     problems, notes = [], []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")

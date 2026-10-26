@@ -120,7 +120,8 @@ From the latest GET_CONFIG, secrets removed:
 - Switches: SC (CH10) has setEasing tiers on slots 1 and 2; SI (CH16) and SJ (CH17) broadcast `;W1;S3`, `;W2;S2`
   and `;W1;S1` text onto probe-wired ports.
 - SBUS channels NaviCore binds nothing to: 1, 2, 14, 20, 21, 22. The controller's rx and ry sticks are CH1 and CH2
-  (`hil/servos.py:68-69`), which gives two free, finely steerable inputs.
+  (`hil/servos.py:68-69`), which gives two free, finely steerable inputs. (Since 2026-10-25 Greg keeps them on CH23
+  and CH24, NaviCore's passthrough knobs J1 and J2: a stick test unbinds the knob inside its guard, s42 `_free_sticks`.)
 - The image on the board is `results/builds/navicore` (2026-09-22 21:02, HEAD plus the working tree; FLASHED.md). It
   predates the F13 WCB_Client, so `navicore.pull_over_limit` always takes its pre-F13 branch, and its PING reports
   the committed DTG `v0.2.0_102105QSEP26`, which cannot tell images apart.
@@ -1267,7 +1268,8 @@ the W1S2 probe:
 >   D-NC44's `(should)`. "A delayed copy survives" is in `ncengine.delay_queue`.
 > - `sbus.lock_under_load` uses `SBUS_FULL_FPS` (90), not 100 (the harness's rule since NC-WP1).
 
-Inputs are the free channels: the rx and ry sticks (CH1, CH2), fine-steerable through `{"t":"a"}`. Outputs go to
+Inputs are the rx and ry sticks (CH1, CH2 then; CH23, CH24 since 2026-10-25, with the knobs there unbound for the
+test), fine-steerable through `{"t":"a"}`. Outputs go to
 remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 - Matrix and taps: `sbus.matrix_logical_band`, `sbus.matrix_debounce_n`, `sbus.tap_saturation_4`,
