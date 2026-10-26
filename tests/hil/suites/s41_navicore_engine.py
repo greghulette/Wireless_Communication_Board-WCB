@@ -811,16 +811,29 @@ def maestro_skip_running_slot(bench):
             if f"[DISPATCH] Maestro {slot}  setTarget,{ch},{p0}" not in lines or any("skipped" in x for x in lines):
                 problems.append("a gated action after the move stopped was skipped or not dispatched")
             settle()
-            m11, nm = l11.mark(), nc.dev.mark()
-            nc.test_action(act("setTarget,5,6000", True, target=rslot))
-            lines = _flushed(nc, nm, settle=0.3)
-            if f"[DISPATCH] Maestro {rslot} gate: cache stale → sent getMovingState, fail-open" not in lines:
-                problems.append(f"remote slot {rslot}: no 'cache stale ... fail-open' line")
             frame = _pololu(rdev, 0x84, 5, 6000)
-            try:
-                l11.expect(frame, timeout=3, since=m11)
-            except AssertionError:
-                problems.append(f"remote slot {rslot}: {frame.hex(' ')} never reached W1 S1")
+            for attempt in (1, 2):
+                time.sleep(0.4)                       # past maeGateMs: on a second try the remote cache is stale again
+                m11, nm = l11.mark(), nc.dev.mark()
+                nc.test_action(act("setTarget,5,6000", True, target=rslot))
+                lines = _flushed(nc, nm, settle=0.3)
+                stale = f"[DISPATCH] Maestro {rslot} gate: cache stale → sent getMovingState, fail-open" in lines
+                try:
+                    l11.expect(frame, timeout=3, since=m11)
+                    reached_w1 = True
+                except AssertionError:
+                    reached_w1 = False
+                if reached_w1 or attempt == 2:
+                    break
+                # The frame is one unacknowledged Kyber broadcast, sent the instant the gate's ;M4,getMovingState
+                # reaches W1, which forwards that read to W2 (its M4 -> WCB2 row), likely with its radio busy then.
+                # Lost once in run 20261025-221857, then 3 of 3 alone; NaviCore never re-sends a lost broadcast.
+                bench.note(f"remote slot {rslot}: W1 S1 missed {frame.hex(' ')} once (an unacknowledged broadcast); "
+                           f"once more")
+            if not stale:
+                problems.append(f"remote slot {rslot}: no 'cache stale ... fail-open' line")
+            if not reached_w1:
+                problems.append(f"remote slot {rslot}: {frame.hex(' ')} never reached W1 S1, twice")
         finally:
             nc.test_action(act(f"setTarget,{ch},{p0}", False))
             settle()
