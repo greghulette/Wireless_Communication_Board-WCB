@@ -161,6 +161,27 @@ test.describe('the action timeline', () => {
     await page.locator('#at-zoom-fit').click();
     await expect(page.locator('#at-view')).toHaveText('view 6 s · max 30:00');
     await expect(page.locator('#at-svg .at-limit')).toHaveCount(0);
+    // ⤢ Expand widens the editor to the window, remembered, and the timeline fits the room; the next editor opens
+    // wide; ⤡ Shrink puts it back.
+    const box = async (sel) => (await page.locator(sel).boundingBox()).width;
+    const w0 = await box('#modal .modal'), t0 = await box('#at-svg');
+    await page.locator('#at-expand').click();
+    await expect(page.locator('#modal')).toHaveClass(/\bat-wide\b/);
+    await expect(page.locator('#at-expand')).toHaveText('⤡ Shrink');
+    await expect.poll(() => box('#modal .modal')).toBeGreaterThan(w0 + 300);
+    await expect.poll(() => box('#at-svg')).toBeGreaterThan(t0 + 300);
+    await expect(page.locator('#at-view')).toHaveText('view 6 s · max 30:00');
+    expect(await page.evaluate(() => localStorage.getItem('nc_at_expanded'))).toBe('1');
+    await shot(page, '01b-expanded');
+    await page.evaluate(() => closeModal());
+    await expect(page.locator('#modal')).not.toHaveClass(/\bat-wide\b/);
+    await openButton(page, 12);
+    await expect(page.locator('#modal')).toHaveClass(/\bat-wide\b/);
+    await page.locator('#at-expand').click();
+    await expect(page.locator('#modal')).not.toHaveClass(/\bat-wide\b/);
+    await expect(page.locator('#at-expand')).toHaveText('⤢ Expand');
+    await expect.poll(() => box('#modal .modal')).toBeLessThan(w0 + 5);
+    expect(await page.evaluate(() => localStorage.getItem('nc_at_expanded'))).toBe('0');
     // The double tap fires the single tap's actions too: drawn above, read only, in the same colours.
     await showTier(page, 2);
     await expect(page.locator('#tier-card-1 #at-inline')).toHaveCount(0);
