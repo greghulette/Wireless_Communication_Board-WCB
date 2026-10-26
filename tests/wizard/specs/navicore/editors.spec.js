@@ -47,6 +47,7 @@ test.describe('the bench config', () => {
     expect(BENCH.mappings['102'].t1[0].skipRunning).toBe(true);
     await page.locator('#assignment-list > div').nth(1).click();   // button 2, mode 1: the mapping with the gate
     await expect(page.locator('#modal')).toHaveClass(/open/);
+    await T.openRow(page, 1, 0);
     await page.locator('#note-1-0').fill('hil gate');              // an unchanged Apply sends nothing (D-NC32)
     await modalApply(page);
     const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
@@ -107,6 +108,7 @@ test.describe('the bench config', () => {
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await page.locator('#assignment-list > div').nth(9).click();   // button 10: three actions, one delayed, one noted
+    await T.openRow(page, 1, 0);
     await page.locator('#fields-1-0-cmd').fill(';S2HILTESTED');     // an unsaved edit is what gets fired
     await page.locator('#action-1-0 .btn-test-action').click();
     await page.locator('#action-1-1 .btn-test-action').click();
@@ -149,6 +151,7 @@ test.describe('the bench config', () => {
     const cmd = page.locator('#fields-p0-0-cmd');
     await expect(cmd).toHaveValue('HILSIA');
     expect(await page.evaluate(() => [document.getElementById('fields-p0-0-wcbsel').value, document.getElementById('fields-p0-0-portsel').value])).toEqual(['1', '3']);
+    await T.openRow(page, 'p0', 0);
     await page.locator('#fields-p0-0-wcbsel').selectOption('12');
     await page.locator('#fields-p0-0-portsel').selectOption('3');
     expect(await cmd.evaluate((e) => e.maxLength), 'a 7-character prefix reserves 7').toBe(95 - ';W12;S3'.length);
@@ -158,6 +161,7 @@ test.describe('the bench config', () => {
     await page.evaluate(() => closeModal());
     // Button 13 (;S2HIL113^;S3HIL113 to WCB 1): ;s never routes, so no chain warning; ;M does.
     await page.locator('#assignment-list > div').nth(12).click();
+    await T.openRow(page, 1, 0);
     const chain = page.locator('#fields-1-0 > div').filter({ hasText: 'Chained command sent to one board' });
     await expect(chain).toBeHidden();
     const setCmd = (v) => page.locator('#fields-1-0-cmd').evaluate((e, v) => { e.value = v; e.dispatchEvent(new Event('input')); }, v);
