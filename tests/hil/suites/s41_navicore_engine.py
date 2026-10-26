@@ -37,7 +37,9 @@ from suites.s40_navicore_config import HOOK_SKIP, _flushed, _hooks, _inert_keys
 EARLY_MS = 100          # a delayed marker may beat its nominal delay by this much on the probe clock
 LATE_MS = 400           # ...or trail it by this much
 AT_ONCE_MS = 400        # the markers of one dispatch pass land within this of each other
-WARN_FULL = re.compile(r"^WARN: pendingActions full \(8 slots\)")        # scheduleAction, NaviCore.ino:2029-2040
+PENDING_SLOTS = 32       # PENDING_ACTION_SLOTS (rc_config.h; 8 before NaviCore 40560c1)
+# scheduleAction with every slot busy: the action is DROPPED, named (NaviCore 40560c1; it used to fire at once).
+WARN_FULL = re.compile(r"^WARN: pendingActions full \((\d+) slots\) - dropped type \d+ '([^']*)' due in (\d+) ms")
 REMOTE_TRIGGER_QUEUE = 8                                                 # xQueueCreate(8, ...) (NaviCore.ino:4842)
 STALL_MS = 4000                                                          # the #L90 stall mesh_trigger_burst uses
 FLAGS_ALL = DBG_MAESTRO | DBG_WCB | DBG_WLED | DBG_MP3 | DBG_SERIAL | DBG_DFP
@@ -243,18 +245,20 @@ def tiers_exclusive_cumulative(bench):
 
 # ============================================================ delays
 @test("ncengine.delay_queue", "Delayed actions run in parallel from the trigger on the probe clock (two 1000 ms delays "
-      "land together, 2000 ms after); with 10 delayed actions the 8 pending slots fill and the 9th and 10th fire at once, "
-      "each with 'WARN: pendingActions full (8 slots)'; a delayed copy still fires after a SET_CONFIG removes its "
-      "mapping", needs=["navicore", "wcb1"], links=["W1S2"])
+      "land together, 2000 ms after); 33 delayed actions fill the 32 pending slots and the 33rd is dropped, never firing, "
+      "named by one 'WARN: pendingActions full (32 slots) - dropped'; a delayed copy still fires after a SET_CONFIG "
+      "removes its mapping", needs=["navicore", "wcb1"], links=["W1S2"])
 def delay_queue(bench):
-    """scheduleAction (NaviCore.ino:2029-2040) copies the action into one of PENDING_ACTION_SLOTS (8) with fireAt =
-    now + delay, or, with every slot busy, prints the WARN and runs it now with its delay dropped; checkPendingActions
-    (:2202-2220) runs each when due from its own copy, so a SET_CONFIG that removes the mapping cannot recall it. Part 1
-    measures three delays against an undelayed marker of the same tier. Part 2 fills the queue: tap 2 on a
-    non-exclusive mapping schedules t1's five actions (1000-1400 ms) then t2's five (1500-1900 ms), so t2's 4th and 5th
-    find it full; they are the time reference, and the eight others must land at their own delays. Part 3 removes the
-    mapping while its 2500 ms action is pending (the save stalls loop(), hence the extra slack). Everything is marker
-    bytes on W1 S2; the mappings sit on inert keys inside nc_guard."""
+    """scheduleAction (NaviCore.ino) copies the action into one of PENDING_ACTION_SLOTS (32) with fireAt = now + delay,
+    or, with every slot busy, DROPS it and prints the WARN naming it (NaviCore 40560c1: firing it at once, as before,
+    would turn a 20-minute delay into now); checkPendingActions runs each when due from its own copy, so a SET_CONFIG
+    that removes the mapping cannot recall it. Part 1 measures three delays against an undelayed marker of the same
+    tier. Part 2 fills the queue: a triple tap on a non-exclusive mapping schedules t1's nine delayed actions (1000-1400
+    ms, after an undelayed reference), t2's ten (1500-1950) and t3's ten (2000-2450), 29 in all; a single tap on a
+    second mapping then schedules four more (2600-2750 ms after it), of which three take the last slots and the fourth
+    is dropped. Every scheduled one must land once at its delay, and the dropped one never. Part 3 removes the mapping
+    while its 2500 ms action is pending (the save stalls loop(), hence the extra slack). Everything is marker bytes on
+    W1 S2; the mappings sit on inert keys inside nc_guard."""
     l12 = link(bench, 1, "S2")
     problems, notes = [], []
 
@@ -269,16 +273,21 @@ def delay_queue(bench):
 
     with nc_guard(bench) as g:
         nc = g.nc
-        k1, k2, k3 = _inert_keys(g.before, 3)
+        k1, k2, k3, k4 = _inert_keys(g.before, 4)
         z, a, b, c = (marker(x) for x in ("DZ", "DA", "DB", "DC"))
-        p = [marker(f"P{i}") for i in range(5)]
-        q = [marker(f"Q{i}") for i in range(5)]
+        r = marker("PR")                                    # part 2's undelayed reference
+        p = [marker(f"P{i}") for i in range(9)]             # t1: 1000-1400 ms
+        q = [marker(f"Q{i}") for i in range(10)]            # t2: 1500-1950 ms
+        u = [marker(f"U{i}") for i in range(10)]            # t3: 2000-2450 ms
+        v = [marker(f"V{i}") for i in range(4)]             # k4: 2600-2750 ms; v[3] finds the queue full
         y, x = marker("DY"), marker("DX")
         nc.set_config({"mappings": {
             k1: {"exclusive": False, "t1": [_act(z), _act(a, 1000), _act(b, 1000), _act(c, 2000)]},
-            k2: {"exclusive": False, "t1": [_act(p[i], 1000 + 100 * i) for i in range(5)],
-                 "t2": [_act(q[i], 1500 + 100 * i) for i in range(5)]},
-            k3: {"exclusive": False, "t1": [_act(y), _act(x, 2500)]}}})
+            k2: {"exclusive": False, "t1": [_act(r)] + [_act(p[i], 1000 + 50 * i) for i in range(9)],
+                 "t2": [_act(q[i], 1500 + 50 * i) for i in range(10)],
+                 "t3": [_act(u[i], 2000 + 50 * i) for i in range(10)]},
+            k3: {"exclusive": False, "t1": [_act(y), _act(x, 2500)]},
+            k4: {"exclusive": False, "t1": [_act(v[i], 2600 + 50 * i) for i in range(4)]}}})
         # Part 1: parallel delays
         mode, btn = divmod(int(k1), 100)
         pm = l12.mark()
@@ -289,26 +298,37 @@ def delay_queue(bench):
         late(tz, _probe_ms(l12, pm, b), 1000, "delay 1000 (second, in parallel)")
         late(tz, _probe_ms(l12, pm, c), 2000, "delay 2000")
         time.sleep(0.5)
-        # Part 2: ten delayed actions, eight slots
+        # Part 2: 33 delayed actions, 32 slots
         mode, btn = divmod(int(k2), 100)
+        mode4, btn4 = divmod(int(k4), 100)
         pm, nm = l12.mark(), nc.dev.mark()
-        nc.trigger(mode, btn, 2)
-        got = _wait_all(l12, pm, p + q, 5.0)
+        nc.trigger(mode, btn, 3)                          # 29 scheduled
+        nc.trigger(mode4, btn4, 1)                        # 3 more fill the queue, the 4th is dropped
+        scheduled = [r] + p + q + u + v[:3]
+        got = _wait_all(l12, pm, scheduled, 6.0)
+        time.sleep(0.6)                                   # past v[3]'s 2750 ms: it would have landed by now
+        got = l12.received(pm)
         lines = _flushed(nc, nm, settle=0.1)
-        missing = [t for t in p + q if _count(got, t) != 1]
+        missing = [t for t in scheduled if _count(got, t) != 1]
         if missing:
-            problems.append(f"overflow: {len(missing)} of the 10 delayed markers did not arrive exactly once")
-        warns = sum(1 for s in lines if WARN_FULL.match(s))
-        if warns != 2:
-            problems.append(f"overflow: {warns} 'pendingActions full' WARN lines, expected 2 (the 9th and 10th)")
-        ref, tenth = _probe_ms(l12, pm, q[3]), _probe_ms(l12, pm, q[4])
-        if ref is not None and tenth is not None and tenth - ref > 250:
-            problems.append(f"overflow: the 10th landed {tenth - ref} ms after the 9th; both fire at once when the "
-                            f"queue is full")
-        for i in range(5):
-            late(ref, _probe_ms(l12, pm, p[i]), 1000 + 100 * i, f"t1 action {i + 1} (delay {1000 + 100 * i})")
-        for i in range(3):
-            late(ref, _probe_ms(l12, pm, q[i]), 1500 + 100 * i, f"t2 action {i + 1} (delay {1500 + 100 * i})")
+            problems.append(f"overflow: {len(missing)} of the {len(scheduled)} scheduled markers did not arrive exactly once")
+        if _count(got, v[3]):
+            problems.append("overflow: the 33rd delayed action fired; a full queue drops it")
+        warns = [m for m in (WARN_FULL.match(s) for s in lines) if m]
+        if len(warns) != 1:
+            problems.append(f"overflow: {len(warns)} 'pendingActions full' WARN lines, expected 1 (the 33rd)")
+        else:
+            slots, cmd, due = warns[0].group(1), warns[0].group(2), warns[0].group(3)
+            if slots != str(PENDING_SLOTS) or not cmd.endswith(v[3]) or due != "2750":
+                problems.append(f"overflow: the WARN named {slots} slots, a command ending {cmd[-8:]!r}, due in {due} ms; "
+                                f"expected {PENDING_SLOTS} slots, the 33rd action, 2750 ms")
+        ref = _probe_ms(l12, pm, r)
+        for i in range(9):
+            late(ref, _probe_ms(l12, pm, p[i]), 1000 + 50 * i, f"t1 action {i + 2} (delay {1000 + 50 * i})")
+        for i in range(10):
+            late(ref, _probe_ms(l12, pm, q[i]), 1500 + 50 * i, f"t2 action {i + 1} (delay {1500 + 50 * i})")
+        for i in range(10):
+            late(ref, _probe_ms(l12, pm, u[i]), 2000 + 50 * i, f"t3 action {i + 1} (delay {2000 + 50 * i})")
         time.sleep(0.5)
         # Part 3: the mapping goes, its pending copy stays
         mode, btn = divmod(int(k3), 100)

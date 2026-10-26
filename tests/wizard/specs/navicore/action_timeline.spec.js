@@ -119,7 +119,7 @@ test.describe('the action timeline', () => {
     expect(labels).toEqual([
       ['clips', 'Play "beep"'], ['C', 'Run Sequence (short) · 03'], ['M1', 'Run subroutine · 1'], ['A', 'Play track 5'],
       ['D:flthy-hps:W2S1', 'Color Projector · Front · Blue']]);
-    await expect(page.locator('#at-count')).toHaveText('5 of 5 actions');
+    await expect(page.locator('#at-count')).toHaveText('5 of 10 actions');   // this board's firmware stores 10 (its limits)
     // Sequence 03 (;m11^;t4000^;w2testing), pulled from WCB 1 and drawn from its action at 1 s: steps at 1 s and 5 s.
     const ref = page.locator('#at-svg g.at-ref');
     await expect(ref).toHaveAttribute('data-state', 'ready');
@@ -151,7 +151,7 @@ test.describe('the action timeline', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.action_timeline_edit Shift-click selects several steps; Align puts them at the first\'s, the last\'s or the cursor\'s time, at one time in the order they were laid out, and Space evenly evens the middle; the arrow keys nudge 10 / 100 / 1 ms; Delete removes the selection; each is one undo step and Redo puts it back; a dragged step sticks to the cursor or another step with a guide, Alt places it to the ms, never under 0; a click edits the step, a click on a lane\'s empty space starts one of its kind, and a fifth action is the last; Apply writes the rows in time order with their delays, which the button\'s Apply saves, and Cancel with changes asks first', async ({ page, emu }) => {
+  test('nctool.action_timeline_edit Shift-click selects several steps; Align puts them at the first\'s, the last\'s or the cursor\'s time, at one time in the order they were laid out, and Space evenly evens the middle; the arrow keys nudge 10 / 100 / 1 ms; Delete removes the selection; each is one undo step and Redo puts it back; a dragged step sticks to the cursor or another step with a guide, Alt places it to the ms, never under 0; a click edits the step, a click on a lane\'s empty space starts one of its kind; Apply writes the rows in time order with their delays, which the button\'s Apply saves, and Cancel with changes asks first', async ({ page, emu }) => {
     const answers = [];
     const dialogs = T.answerDialogs(page, answers);
     await T.openTool(page);
@@ -243,7 +243,7 @@ test.describe('the action timeline', () => {
     await page.locator('#at-step-apply').click();
     await expect(page.locator('#at-step-modal')).not.toHaveClass(/open/);
     expect(await times(page)).toEqual([0, 450, 800, 1000]);
-    // A click on the MP3 lane's empty space starts an MP3 action there; the fifth fills the tap.
+    // A click on the MP3 lane's empty space starts an MP3 action there.
     const laneY = await page.evaluate(() => {
       const n = document.querySelector('#at-svg .at-lane-name[data-lane="A"]');
       return document.getElementById('at-svg').getBoundingClientRect().top + +n.getAttribute('y') - 4;
@@ -255,10 +255,7 @@ test.describe('the action timeline', () => {
     await page.locator('#at-step-time').fill('1500');
     await page.locator('#at-step-apply').click();
     expect(await times(page)).toEqual([0, 450, 800, 1000, 1500]);
-    await expect(page.locator('#at-count')).toHaveText('5 of 5 actions');
-    await page.locator('#at-add').click();
-    await expect(page.locator('#at-step-modal')).not.toHaveClass(/open/);
-    await expect(status(page)).toHaveText('This tap already has 5 actions, as many as the board holds. Delete one to add another.');
+    await expect(page.locator('#at-count')).toHaveText('5 of 10 actions');
     // Move the Maestro step before the MP3 one, then Apply: the rows come back in time order with their delays.
     await (await stepAt(page, 800)).locator('.at-ev-hit').click({ position: { x: 6, y: 10 } });
     await page.locator('#at-step-time').fill('300');
@@ -347,17 +344,17 @@ test.describe('the action timeline', () => {
     expect(Math.abs(dropped.t - 600)).toBeLessThanOrEqual(3);
     await expect(await stepAt(page, dropped.t)).toHaveAttribute('data-lane', 'A');
     await shot(page, '06-library-added');
-    // Fill the tap, then the library refuses a sixth.
-    await page.evaluate(() => { for (const t of [1200, 1300]) _atAddResolved({ type: 'mp3', fn: 3 }, t); });
-    await expect(page.locator('#at-count')).toHaveText('5 of 5 actions');
+    // Fill the tap to the board's ten, then the library refuses an eleventh.
+    await page.evaluate(() => { for (let i = 0; i < 7; i++) _atAddResolved({ type: 'mp3', fn: 3 }, 1200 + 100 * i); });
+    await expect(page.locator('#at-count')).toHaveText('10 of 10 actions');
     await page.locator('#at-lib-search').fill('toggle');
     await libCmd(page, 'mp3.stop').click();
-    await expect(page.locator('#at-count')).toHaveText('5 of 5 actions');
-    await expect(status(page)).toHaveText('This tap already has 5 actions, as many as the board holds. Delete one to add another.');
+    await expect(page.locator('#at-count')).toHaveText('10 of 10 actions');
+    await expect(status(page)).toHaveText('This tap already has 10 actions, as many as the board holds. Delete one to add another.');
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.action_timeline_warn the timeline says where the board would not run the tap as drawn: a delay over 65535 ms (16 bits) is an error that blocks Apply until the step is moved; a triple tap that queues more than 8 delayed actions with the taps firing with it is warned of (the rest fire at once); two timed sequences on one WCB overlapping is warned of (the second replaces the first); clip controls are noted as skipped by Test; an incomplete row is said to be left out', async ({ page, emu }) => {
+  test('nctool.action_timeline_warn the timeline says where the board would not run the tap as drawn: a delay past the board\'s 30 minutes is an error that blocks Apply until the step is moved; two timed sequences on one WCB overlapping is warned of (the second replaces the first); clip controls are noted as skipped by Test; an incomplete row is said to be left out', async ({ page, emu }) => {
     await T.openTool(page);
     await theme(page);
     await connect(page, emu);
@@ -366,7 +363,7 @@ test.describe('the action timeline', () => {
       exclusive: false,
       t1: [d(';S1a', 100), d(';S1b', 200), d(';S1c', 300), d(';S1d', 400)],
       t2: [d(';S1e', 100), d(';S1f', 200), d(';S1g', 300)],
-      t3: [d(';C03', 500), d(';C04', 1500), { type: 'play', cmd: 'beep', fn: 0 }, d(';S1h', 70000)],
+      t3: [d(';C03', 500), d(';C04', 1500), { type: 'play', cmd: 'beep', fn: 0 }, d(';S1h', 2000000)],
     });
     // A blank row on the triple tap (no command yet).
     await page.locator('#tiers-container .tier-tab[data-tier="3"]').click();
@@ -375,21 +372,20 @@ test.describe('the action timeline', () => {
     await expect(page.locator('#at-svg .at-ref')).toHaveCount(2);
     await expect.poll(() => page.locator('#at-svg g.at-ref').evaluateAll((gs) => gs.map((g) => g.dataset.state))).toEqual(['ready', 'ready']);
     await expect(page.locator('#at-warn > div')).toHaveText([
-      '✖ “h” has a 70000 ms delay: the board stores at most 65535 ms (a 16-bit delay) and would wrap it. Move it.',
-      '⚠ This press queues 10 delayed actions with the taps that fire with it: the board holds 8 at once, so the rest fire at once, their delays dropped (PENDING_ACTION_SLOTS).',
+      '✖ “h” has a 2000000 ms delay: this board stores at most 1800000 ms (30:00.000) and would cut it. Move it.',
       '⚠ WCB 1 runs one timed sequence at a time: starting 04 at 1.500 s replaces 03, which runs until 4.500 s.',
       'ℹ ▶ Test skips the clip controls (record, play, stop); a press runs them.',
     ]);
     await expect(status(page)).toHaveText('1 incomplete row is not on the timeline (no command yet); Apply leaves it out, as Save would.');
     await expect(page.locator('#at-apply')).toBeDisabled();
-    expect(await page.evaluate(() => _at.events.find((e) => e.action.cmd === ';S1h').t)).toBe(65535);
+    expect(await page.evaluate(() => _at.events.find((e) => e.action.cmd === ';S1h').t)).toBe(1800000);
     await shot(page, '07-warnings');
     // Moved, the error goes and Apply works; the blank row is gone, the rest are in time order.
     const h = await page.evaluate(() => _at.events.find((e) => e.action.cmd === ';S1h').t);
     await (await stepAt(page, h)).locator('.at-ev-hit').click({ position: { x: 6, y: 10 } });
     await page.locator('#at-step-time').fill('2500');
     await page.locator('#at-step-apply').click();
-    await expect(page.locator('#at-warn > div').first()).toHaveText(/^⚠ This press queues 10 delayed actions/);
+    await expect(page.locator('#at-warn > div').first()).toHaveText(/^⚠ WCB 1 runs one timed sequence at a time/);
     await expect(page.locator('#at-apply')).toBeEnabled();
     await page.locator('#at-apply').click();
     expect((await rowsOf(page, 3)).map((a) => [a.cmd || a.type, a.delay || 0])).toEqual([['beep', 0], [';C03', 500], [';C04', 1500], [';S1h', 2500]]);
@@ -454,6 +450,63 @@ test.describe('the action timeline', () => {
     await expect(page.locator('#at-title')).toHaveText(/^⏱ Switch SB · Down/);
     expect(await times(page)).toEqual([250]);
     await page.keyboard.press('Escape');
+    T.expectNoPageErrors(page);
+  });
+});
+
+test.describe('the action timeline on a board whose firmware predates the limits', () => {
+  test.use({ emuOptions: { config: BENCH, roster: ROSTER, seqs: SEQS, legacyLimits: true } });
+
+  test('nctool.action_timeline_legacy_board a board on firmware from before ten actions a tier sends no limits, so the tool holds to the old ones: five actions a tap (+ Add action and the timeline stop there), a delay to 65535 ms (past it the timeline says the board would wrap it), and eight pending slots (more in one press is warned of, the rest firing at once); Save refuses a config the board would cut and sends nothing; a board on current firmware lifts them', async ({ page, emu }) => {
+    const dialogs = T.answerDialogs(page, []);
+    await T.openTool(page);
+    await theme(page);
+    // No board yet: the tool's own maxima.
+    expect(await page.evaluate(() => ncLimits())).toEqual({ actionsPerTier: 10, maxDelayMs: 1800000, pendingSlots: 32, legacy: false });
+    await connect(page, emu);
+    expect(await page.evaluate(() => ncLimits())).toEqual({ actionsPerTier: 5, maxDelayMs: 65535, pendingSlots: 8, legacy: true });
+    const d = (cmd, delay) => ({ type: 'wcb_unicast', target: '1', cmd, delay });
+    await openButton(page, 12, { exclusive: false, t1: [d(';S1a', 100), d(';S1b', 200), d(';S1c', 300), d(';S1d', 400), d(';S1e', 500)] });
+    await expect(page.locator('#tier-card-1 .btn-add-action')).toBeDisabled();
+    await expect(page.locator('#tier-card-1 .btn-add-action')).toHaveText('Max 5 actions');
+    await openTimeline(page, 1);
+    await expect(page.locator('#at-count')).toHaveText('5 of 5 actions');
+    await page.locator('#at-add').click();
+    await expect(page.locator('#at-step-modal')).not.toHaveClass(/open/);
+    await expect(status(page)).toHaveText('This tap already has 5 actions, as many as the board holds. Delete one to add another.');
+    await page.locator('#at-close').click();
+    await page.evaluate(() => closeModal());
+    // A triple tap queuing 10 delayed actions with the taps that fire with it, one of them past 65535 ms.
+    await openButton(page, 12, {
+      exclusive: false,
+      t1: [d(';S1a', 100), d(';S1b', 200), d(';S1c', 300), d(';S1d', 400)],
+      t2: [d(';S1e', 100), d(';S1f', 200), d(';S1g', 300)],
+      t3: [d(';S1h', 500), d(';S1i', 600), d(';S1j', 70000)],
+    });
+    await openTimeline(page, 3);
+    await expect(page.locator('#at-warn > div')).toHaveText([
+      '✖ “j” has a 70000 ms delay: this board stores at most 65535 ms (1:05.535) and would wrap it. Move it.',
+      '⚠ This press queues 10 delayed actions with the taps that fire with it: the board holds 8 at once, shared with every other button and switch, and fires the rest at once, their delays dropped (PENDING_ACTION_SLOTS; firmware before the 32 slots).',
+    ]);
+    await expect(page.locator('#at-apply')).toBeDisabled();
+    await shot(page, '09-legacy-board');
+    await page.locator('#at-close').click();
+    await page.evaluate(() => closeModal());
+    // Save: a tap of six actions, and the 70 s delay above, are refused before anything is sent.
+    await page.evaluate(() => {
+      config.mappings['112'] = { exclusive: false, t1: ['a', 'b', 'c', 'd', 'e', 'f'].map((c) => ({ type: 'wcb_unicast', target: '1', cmd: ';S1' + c })),
+                                 t3: [{ type: 'wcb_unicast', target: '1', cmd: ';S1j', delay: 70000 }] };
+    });
+    const sent = emu.requests('SET_CONFIG').length;
+    await page.evaluate(() => saveConfigToBoard());
+    await expect.poll(() => dialogs.map((x) => x.message)).toContainEqual(
+      'Not saved — this board would drop or cut part of it:\n\n• Mode 1 button 12 single tap: 6 actions (this board stores 5)\n• Mode 1 button 12 triple tap, action 1: a 70000 ms delay (this board stores up to 65535 ms)\n\n' +
+      'This board runs firmware from before 10 actions a tier and 30-minute delays: update its firmware (Firmware tab), or trim these.');
+    expect(emu.requests('SET_CONFIG')).toHaveLength(sent);
+    // A board on current firmware sends its limits: they lift, and the same config saves.
+    emu.config.lim = { actions: 10, maxDelayMs: 1800000, pending: 32, legacy: false };
+    await page.evaluate(() => sendJSON({ type: 'GET_CONFIG' }));
+    await expect.poll(() => page.evaluate(() => ncLimits().actionsPerTier)).toBe(10);
     T.expectNoPageErrors(page);
   });
 });

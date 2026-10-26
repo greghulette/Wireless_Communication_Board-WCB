@@ -59,7 +59,10 @@ TOP_KEYS = ("txModel", "threeAxisGimbals", "sbusOutEnabled", "wifiEnabled", "wif
             "boardType", "tapWindowMs", "holdMs", "switchSettleMs", "chRateHz", "matrixChannel", "matrixDebounceFrames",
             "funcBindings", "peerEvent", "thresholds", "mappings", "switches", "knobs", "hcrDest", "maestros",
             "wcbNetwork", "wcbProfiles", "mp3Dest", "dfpDest", "wledSlots", "auxBaud", "serialLabels", "serialBcast",
-            "modeReport", "statsReport", "smoothProfiles")
+            "modeReport", "statsReport", "smoothProfiles", "limits")
+# The "limits" rcConfigToJSON ends with (NaviCore 40560c1+): what this firmware stores, which the tool holds its editors to.
+ACTIONS_PER_TIER, MAX_DELAY_MS, PENDING_SLOTS = 10, 1800000, 32
+LIMITS = {"actionsPerTier": ACTIONS_PER_TIER, "maxDelayMs": MAX_DELAY_MS, "pendingSlots": PENDING_SLOTS}
 SWITCHES = ("SA", "SB", "SC", "SD", "SE", "SF", "SG", "SH", "SI", "SJ")          # RC_SWITCH_LABELS (rc_config.h:209)
 SWITCH_DEFAULT_CH = (8, 9, 10, 11, 12, 13, 14, 15, 0, 0)                         # (:210)
 SWITCH_DEFAULT_POS = (3, 3, 3, 3, 3, 2, 3, 2, 2, 2)                              # (:211)
@@ -405,7 +408,10 @@ def _shape_problems(cfg):
     if not isinstance(cfg.get("funcBindings"), dict) or list(cfg["funcBindings"]) != ["mode"]:
         p.append("funcBindings is not {mode}")
     pe = cfg.get("peerEvent") or {}
-    if list(pe) != ["alert", "actions"] or len(pe.get("actions") or []) > 5:
+    if cfg.get("limits") != LIMITS:
+        p.append(f"limits is {cfg.get('limits')!r}, not {LIMITS!r} (rc_config.h RC_ACTIONS_PER_TIER, RC_MAX_DELAY_MS, "
+                 f"PENDING_ACTION_SLOTS)")
+    if list(pe) != ["alert", "actions"] or len(pe.get("actions") or []) > ACTIONS_PER_TIER:
         p.append("peerEvent is not {alert, actions[<=5]}")
     th = cfg.get("thresholds") or []
     if len(th) != 36 or any(list(t) != ["id", "label", "minPwm", "maxPwm"] for t in th):
@@ -420,7 +426,7 @@ def _shape_problems(cfg):
         if not m.get("exclusive") and len(m) == 1:
             p.append(f"mappings.{key}: an empty mapping printed (rc_config.h:1262 leaves them out)")
         for t in range(1, 5):
-            if f"t{t}" in m and not 1 <= len(m[f"t{t}"]) <= 5:
+            if f"t{t}" in m and not 1 <= len(m[f"t{t}"]) <= ACTIONS_PER_TIER:
                 p.append(f"mappings.{key}.t{t}: {len(m[f't{t}'])} actions (1-5 printed)")
     sw = cfg.get("switches") or {}
     if list(sw) != list(SWITCHES):
@@ -675,27 +681,31 @@ def diff_toplevel(bench):
 
 
 def _mapping_case(tag):
-    """(what is sent for one inert key, what GET_CONFIG must print for it). Seven actions in t1: the retired 'smooth'
+    """(what is sent for one inert key, what GET_CONFIG must print for it). Thirteen actions in t1: the retired 'smooth'
     type is dropped and the rest close up (actionFromJson returns false, the slot is reused: rc_config.h:1596-1600,
-    :1151-1152), the sixth parseable one is cut (5 per tier, :1598); 'maestro_remote' is read as the unified 'maestro'
-    (:1086-1095); a zero delay is not printed; exclusive defaults to false (:1590); a tier with only a note prints its
-    note (:1276)."""
+    :1151-1152), and past the tenth parseable one they are cut (RC_ACTIONS_PER_TIER 10, :1598); 'maestro_remote' is
+    read as the unified 'maestro' (:1086-1095); a delay past 30 minutes is clamped to RC_MAX_DELAY_MS and a negative
+    one, not a uint32_t, reads as 0 (rcActionSetDelay); a zero delay is not printed; exclusive defaults to false
+    (:1590); a tier with only a note prints its note (:1276)."""
     a1 = {"type": "wcb_unicast", "target": "1", "cmd": f";S0,{tag}a", "delay": 1500, "skipRunning": True}
-    a2 = {"type": "maestro", "target": "4", "cmd": "setTarget,5,6000", "skipRunning": True}
-    a3 = {"type": "serial", "port": "S9", "cmd": f"{tag}s"}
+    a2 = {"type": "maestro", "target": "4", "cmd": "setTarget,5,6000", "skipRunning": True, "delay": MAX_DELAY_MS + 200000}
+    a3 = {"type": "serial", "port": "S9", "cmd": f"{tag}s", "delay": -5}
     a4 = {"type": "hcr", "fn": 99, "chan": 0, "track": 0}
     a5 = {"type": "maestro_remote", "target": "4", "cmd": "goHome"}
     a6 = {"type": "stop"}
     a7 = {"type": "play", "cmd": f"{tag}p", "fn": 1, "delay": 0}
-    sent = {"t1": [a1, {"type": "smooth", "cmd": "set,1,1"}, a2, a3, a4, a5, a6], "t1note": f"{tag}t1",
+    more = [{"type": "wcb_unicast", "target": "1", "cmd": f";S0,{tag}{i}", "delay": 100 * i} for i in range(1, 7)]
+    sent = {"t1": [a1, {"type": "smooth", "cmd": "set,1,1"}, a2, a3, a4, a5, a6] + more, "t1note": f"{tag}t1",
             "t2note": f"{tag}t2", "t4": [a7, {"type": "smooth", "cmd": "clear"}]}
-    want = {"exclusive": False, "t1": [a1, a2, a3, a4, {"type": "maestro", "target": "4", "cmd": "goHome"}],
+    want = {"exclusive": False, "t1": [a1, {**a2, "delay": MAX_DELAY_MS}, {k: v for k, v in a3.items() if k != "delay"}, a4,
+                                       {"type": "maestro", "target": "4", "cmd": "goHome"}, a6] + more[:4],
             "t1note": f"{tag}t1", "t2note": f"{tag}t2", "t4": [{"type": "play", "cmd": f"{tag}p", "fn": 1}]}
     return sent, want
 
 
-@test("nccfg.mappings_per_key", "mappings replaces only the keys it names: an inert key gets 5 of 7 actions (the "
-      "retired type dropped, the legacy maestro_remote read as maestro), an exclusive-only mapping prints, keys "
+@test("nccfg.mappings_per_key", "mappings replaces only the keys it names: an inert key gets 10 of 13 actions (the "
+      "retired type dropped, the legacy maestro_remote read as maestro, a delay past 30 min clamped to it, a negative "
+      "one read as none), an exclusive-only mapping prints, keys "
       "436/137/0 are ignored, every other mapping is untouched, and {} clears a key: GET_CONFIG ends byte-identical",
       needs=["navicore"], links=[])
 def mappings_per_key(bench):
@@ -719,7 +729,7 @@ def mappings_per_key(bench):
         _save(nc, {"mappings": {key: {}, key2: {}}})
         if nc.config(raw=True) != g.before_text:
             problems.append("after {} for both keys GET_CONFIG is not byte-identical to the snapshot")
-        bench.note(f"keys {key} and {key2}: 5 of 7 t1 actions kept, the exclusive-only mapping printed, then both "
+        bench.note(f"keys {key} and {key2}: 10 of 13 t1 actions kept, the exclusive-only mapping printed, then both "
                    f"cleared by {{}}")
     problems = [p for p in problems if p]
     assert not problems, "; ".join(problems)

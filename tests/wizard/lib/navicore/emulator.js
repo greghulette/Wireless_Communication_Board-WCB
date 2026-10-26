@@ -73,7 +73,7 @@ class NaviEmulator {
   constructor(opts = {}) {
     this.mode = opts.mode || 'direct';
     this.version = opts.version || 'v0.2.0_281200QSEP26';
-    this.config = new NcConfig();
+    this.config = new NcConfig({ legacyLimits: !!opts.legacyLimits });   // legacyLimits: firmware before 40560c1
     if (opts.config) this.config.fromJSON(JSON.parse(JSON.stringify(opts.config)));
     this.cmdlib = opts.cmdlib ?? null;            // the stored /cmdlib.json text, or null (nothing stored)
     this.fragPaceMs = opts.fragPaceMs ?? 5;       // the firmware paces 150 ms (FRAG_PACING_MS); specs need not wait
