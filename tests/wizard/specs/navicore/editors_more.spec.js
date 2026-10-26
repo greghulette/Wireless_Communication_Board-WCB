@@ -191,7 +191,7 @@ test.describe('the bench config', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.tier_test_button a tier\'s ▶ Test is refused unconnected, with no actions, and while an upload is in flight; connected it fires the tier\'s actions in order through TEST_ACTION, waiting each action\'s delay first and dropping delay and note from what it sends, names the sequence, disables itself meanwhile; a recorder control is skipped and counted; an upload starting mid-sequence aborts it; a switch position tests the same way with an unsaved edit', async ({ page, emu }) => {
+  test('nctool.tier_test_button a tier\'s ▶ Test is refused unconnected, with no actions, and while an upload is in flight; connected it fires the tier\'s actions through TEST_ACTION the way a press does, each at its delay after the start (a delayed action does not hold back the ones after it), dropping delay and note from what it sends, names the sequence, disables itself meanwhile; a recorder control is skipped and counted; an upload starting mid-sequence aborts it; a switch position tests the same way with an unsaved edit', async ({ page, emu }) => {
     await T.openTool(page);
     // Unconnected.
     await page.locator('#assignment-list > div').nth(9).click();   // button 10: three actions, one delayed, one noted
@@ -213,33 +213,35 @@ test.describe('the bench config', () => {
     await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Upload in progress — test again when it finishes'));
     await page.evaluate(() => { _bridgeUploadInFlight = false; });
     expect(emu.requests('TEST_ACTION')).toEqual([]);
-    // The whole tier: A at once, B after its 500 ms, C (its note dropped).
+    // The whole tier as a press fires it (rcExecuteAction schedules each delay from the press): A and C at once (C's
+    // note dropped), B 500 ms after the start.
     await page.locator('#tier-note-1').fill('HIL seq');
     const btn = tierTest(page, 1);
     await btn.click();
     expect(await T.termLines(page, /▶ \[test\] playing 3 action\(s\) — "HIL seq"/)).toHaveLength(1);
     await expect(btn).toBeDisabled();
     await expect(btn).toHaveClass(/fired/);
-    await T.waitRequests(emu, 'TEST_ACTION', 1);
+    await T.waitRequests(emu, 'TEST_ACTION', 2);
+    expect(emu.requests('TEST_ACTION').map((m) => m.action.cmd)).toEqual([';S2HIL110A', ';W1;S3HIL110C']);
     await page.clock.fastForward(600);
     await T.waitRequests(emu, 'TEST_ACTION', 3);
     expect(emu.requests('TEST_ACTION').map((m) => m.action)).toEqual([
       { type: 'wcb_unicast', target: '1', cmd: ';S2HIL110A' },
-      { type: 'wcb_unicast', target: '2', cmd: ';S2HIL110B' },
       { type: 'wcb_broadcast', cmd: ';W1;S3HIL110C' },
+      { type: 'wcb_unicast', target: '2', cmd: ';S2HIL110B' },
     ]);
     expect(await T.termLines(page, /◀ \[test\] sequence complete — 3 fired$/)).toHaveLength(1);
     await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Tested “HIL seq” — 3 actions fired'));
     await expect(btn).toBeEnabled();
-    // An upload that starts during B's delay aborts the rest.
+    // An upload that starts during B's delay aborts the rest (A and C have gone).
     await btn.click();
-    await T.waitRequests(emu, 'TEST_ACTION', 4);
+    await T.waitRequests(emu, 'TEST_ACTION', 5);
     await page.evaluate(() => { _bulkActive = true; });
     await page.clock.fastForward(600);
     expect(await T.termLines(page, /· \[test\] aborted — a config\/library upload started mid-test/)).toHaveLength(1);
-    expect(await T.termLines(page, /◀ \[test\] sequence complete — 1 fired$/)).toHaveLength(1);
+    expect(await T.termLines(page, /◀ \[test\] sequence complete — 2 fired$/)).toHaveLength(1);
     await page.evaluate(() => { _bulkActive = false; });
-    expect(emu.requests('TEST_ACTION')).toHaveLength(4);
+    expect(emu.requests('TEST_ACTION')).toHaveLength(5);
     expect(emu.requests('SET_CONFIG'), 'Test never saves').toEqual([]);
     await page.evaluate(() => closeModal());
     // A recorder control is skipped, not sent.
@@ -248,14 +250,14 @@ test.describe('the bench config', () => {
     expect(await T.termLines(page, /· \[test\] step 1: "play" is a recorder control — skipped/)).toHaveLength(1);
     expect(await T.termLines(page, /◀ \[test\] sequence complete — 0 fired, 1 skipped/)).toHaveLength(1);
     await expect.poll(() => T.toasts(page)).toContainEqual(expect.stringContaining('Tested sequence — 0 actions fired, 1 skipped'));
-    expect(emu.requests('TEST_ACTION')).toHaveLength(4);
+    expect(emu.requests('TEST_ACTION')).toHaveLength(5);
     await page.evaluate(() => closeModal());
     // A switch position: the row as typed, unsaved, fires.
     await page.locator('.switch-zone[data-sw="SB"]:visible').first().click();
     await page.locator('#fields-p0-0-cmd').fill(';S3HILSW');
     await tierTest(page, 'p0').click();
-    await T.waitRequests(emu, 'TEST_ACTION', 5);
-    expect(emu.requests('TEST_ACTION')[4].action).toEqual({ type: 'wcb_unicast', target: '1', cmd: ';S3HILSW' });
+    await T.waitRequests(emu, 'TEST_ACTION', 6);
+    expect(emu.requests('TEST_ACTION')[5].action).toEqual({ type: 'wcb_unicast', target: '1', cmd: ';S3HILSW' });
     expect(emu.requests('SET_CONFIG')).toEqual([]);
     T.expectNoPageErrors(page);
   });

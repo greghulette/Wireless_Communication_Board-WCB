@@ -300,7 +300,9 @@ test.describe('the picker', () => {
 });
 
 test.describe('the stored-sequence source', () => {
-  test.use({ emuOptions: { config: BENCH, seqs: { 1: { wave: ';A,PLAY,1^;H,STIM,H,MOD *** says hello', spin: ';M11' } } } });
+  // WCB 1 online: _wcbSeqBoards asks only boards the 3 s status poll reports online, so without it the ⟳ re-read
+  // asked no one whenever the poll had landed first (a race the spec lost when it ran slower).
+  test.use({ emuOptions: { config: BENCH, roster: { online: [1], known: [1] }, seqs: { 1: { wave: ';A,PLAY,1^;H,STIM,H,MOD *** says hello', spin: ';M11' } } } });
 
   test('nctool.seq_source_parity a sequence-keyed command\'s field is a dropdown read off the mesh: opening the composer pulls each WCB\'s names (GET_WCB_SEQ) and groups them per board, picking one previews the verb and reads the body (GET_WCB_SEQVAL) shown line by line with its comment, the manual entry types a key the boards do not have, ⟳ re-reads, and Use writes the verb as a unicast; Change re-opens with the key selected', async ({ page, emu }) => {
     await T.openTool(page);
