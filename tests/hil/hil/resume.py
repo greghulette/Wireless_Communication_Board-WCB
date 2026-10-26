@@ -584,13 +584,25 @@ def check_wires(bench, ckpt, log, should_abort=None):
             baud = bench.port_baud(link.wcb, link.port)
         except Exception:  # noqa: BLE001
             baud = "its configured"
-        if bench.links.check(link):
+        try:
+            ok = bench.links.check(link)
+        except Exception as e:  # noqa: BLE001
+            # A wire driven by a device rather than a console (port_stimulus kyber_button: the Kyber's pad pressed
+            # through the SBUS controller) fails when that device does not open - run 20261025-211905, W3S5: a Chrome
+            # page held the controller's port, and the SerialException escaping here ended every resume with no
+            # reason given. Note it and go on: step 10 pings the controller and names its port when it is the device.
+            log(f"{link.key}: not checked - its stimulus failed ({_first(e)}); its tests will show the wire")
+            continue
+        if ok:
             log(f"{link.key} -> {link.probe_name} {link.header}: ok at {baud} baud")
             if not link.verified:      # the same stimulus, configured baud and orientation verify() records
                 link.verified = True
                 confirmed = True
             continue
-        other = bench.links.check(link, swap=not link.swap)
+        try:
+            other = bench.links.check(link, swap=not link.swap)
+        except Exception:  # noqa: BLE001 - the same device-driven stimulus as above
+            other = False
         bad.append(f"{link.key} -> {link.probe_name} header {link.header} did not verify at {baud} baud. Check that "
                    f"cable: GND, and TX/RX to {link.probe_name} header {link.header}."
                    + (" (It answers with TX/RX the other way round - a different cable?)" if other else ""))
