@@ -28,6 +28,10 @@ leaves no staging directory - but a Wizard vendor/ file is a line, not a failure
 it); the Wizard also takes what its index.html loads beyond WCB_FILES, the cmdlib/ vendors its code names and the
 images those name, and a same-stamp copy lacking one is fetched whole again (0.2.2-0.2.3); the branch's /dev/<branch>/
 copy when it is published, else main's with a note; --tool all as two independent swaps.
+
+group "tools_auto" (intellex.tools_auto_update_unit, Intellex 0.2.7): host._auto_update_tools_once - the pass the host
+runs by itself 30 s after start and every 5 min - with the real fetch_webui run in this process in place of the
+subprocess (host.proc.run), against the stand-in: what is fetched, what is not, the /_api/status token, autoUpdated.
 """
 import contextlib
 import datetime
@@ -1186,6 +1190,95 @@ def frozen_copy_choice(ctx):
             shutil.rmtree(d, ignore_errors=True)
         (user / "webui_wcb.source.json").unlink(missing_ok=True)
     check(not problems, "; ".join(problems))
+
+# ------------------------------------------------------------------ group "tools_auto"
+@case("the tools update themselves (Intellex 0.2.7: host._auto_update_tools_once, the pass its loop runs 30 s after "
+      "start and every 5 min) against the Pages stand-in, the REAL fetcher doing the fetch as Update tools does: a "
+      "config tool older than its published copy is fetched whole and byte for byte, the Wizard at its published stamp "
+      "is not fetched; /_api/status's tools token moves for the config tool alone and webui-version reports "
+      "autoUpdated with the new stamp; a second pass fetches nothing; a newer copy that will not download whole "
+      "changes nothing and records nothing", group="tools_auto")
+def tools_auto_update(ctx):
+    import asyncio
+    import subprocess
+    import fetch_webui as fw
+    import host
+    from bridge_units import _server
+    s = _server()
+    problems = []
+    runs = []
+
+    def inproc(argv, **_k):
+        """host's proc.run(_fetcher_argv(...)): fetch_webui.main() here, under _github_is, as the subprocess would."""
+        runs.append(list(argv))
+        rc, out = _run(argv[2:])
+        return subprocess.CompletedProcess(argv, rc, out, "")
+
+    def one_pass():
+        host._fetch_lock = asyncio.Lock()          # bound to this pass's loop, not the server's
+        return asyncio.run(host._auto_update_tools_once())
+
+    def tools_token():
+        code, body = s.req("GET", "/_api/status", timeout=30)
+        return (body or {}).get("tools") or {}
+
+    nc_old = _config_site(NC, "HIL-NC-OLD", "old")
+    nc_new = _config_site(NC, "HIL-NC-NEW", "new")
+    wz = _wizard_site(WCB, "HIL-WZ-SAME", "same")
+    pages = _Pages()
+    real_run = host.proc.run
+    host.proc.run = inproc
+    host._tools_auto.clear()
+    try:
+        with _github_is(pages) as refused, _scratch_tmp(ctx, "tools_auto"):
+            _fresh_bundles()
+            _branches("main", "main")
+            _put(str(fw.WEBUI), _config_disk(nc_old, NC))
+            _put(str(fw.WEBUI_WCB), _wizard_disk(wz, WCB))
+            pages.serve({**nc_new, **wz})
+            tok0 = tools_token()
+            k = pages.mark()
+            changed = one_pass()
+            asked = pages.since(k)
+            if changed != ["navicore"] or len(runs) != 1 or runs[0][runs[0].index("--tool") + 1] != "navicore":
+                problems.append(f"a newer config tool: changed {changed}, fetcher runs {runs}; expected ['navicore'], "
+                                f"one run of --tool navicore")
+            if _tree(str(fw.WEBUI)) != _config_disk(nc_new, NC):
+                problems.append("the config tool on disk after the pass: "
+                                + _diff(_tree(str(fw.WEBUI)), _config_disk(nc_new, NC)))
+            wz_files = [p for p in asked if p.startswith(f"{WCB}/") and not p.endswith("/Wizard/app.js")]
+            if wz_files:
+                problems.append(f"the Wizard, at its published stamp, was fetched: {wz_files[:4]}")
+            tok1 = tools_token()
+            if not tok0 or tok1.get("navicore") == tok0.get("navicore") or tok1.get("wcb") != tok0.get("wcb"):
+                problems.append(f"/_api/status tools: {tok0} -> {tok1}; expected the config tool's token alone to move")
+            code, wv = s.req("GET", "/_api/webui-version", timeout=60)
+            auto = (wv or {}).get("autoUpdated") or {}
+            if auto.get("version") != "HIL-NC-NEW" or ((wv or {}).get("wcb") or {}).get("autoUpdated") is not None:
+                problems.append(f"webui-version autoUpdated {auto}, wcb {((wv or {}).get('wcb') or {}).get('autoUpdated')};"
+                                f" expected HIL-NC-NEW and None")
+            # Everything current: a second pass fetches nothing.
+            runs.clear()
+            if one_pass() != [] or runs:
+                problems.append(f"a second pass with every tool current ran the fetcher: {runs}")
+            # A newer copy missing a file: the fetch fails, the copy on disk and what was recorded stay as they were.
+            broken = _config_site(NC, "HIL-NC-NEWER", "newer", drop=(f"{NC}/config_tool/flasher.js",))
+            pages.serve({**broken, **wz})
+            before_disk, before_auto = _tree(str(fw.WEBUI)), dict(host._tools_auto)
+            runs.clear()
+            got = one_pass()
+            if got != [] or len(runs) != 1 or _tree(str(fw.WEBUI)) != before_disk or host._tools_auto != before_auto:
+                problems.append(f"a newer copy that cannot download whole: changed {got}, runs {len(runs)}, disk "
+                                f"{_diff(_tree(str(fw.WEBUI)), before_disk)}, recorded {host._tools_auto}")
+            if refused:
+                problems.append(f"reached for the network: {refused[:3]}")
+    finally:
+        host.proc.run = real_run
+        host._tools_auto.clear()
+        pages.close()
+        _fresh_bundles()
+    check(not problems, "; ".join(problems))
+
 
 if __name__ == "__main__":
     sys.exit(_ixpy.main())

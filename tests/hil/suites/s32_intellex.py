@@ -87,9 +87,14 @@ def stage_selftest(bench):
 
 
 # ------------------------------------------------------------------ IX-WP3: Intellex's own smoke tools, on the stage
+# Every no-hardware smoke in Intellex's tools/ (its CLAUDE.md "Verifying"). smoke_updates (the two updates, and since
+# 2026-10-26 the tools updating themselves, U7), smoke_ws_auth (the access token) and smoke_tools_reload (a page
+# reloading onto a newer tool when safe) joined 2026-10-27. Left out on purpose: smoke_host, smoke_transport and
+# smoke_ws drive a real droid by hand (the s33-s36 bench tests cover those paths).
 _PY_SMOKES = ("smoke_fanout", "smoke_probe_identity", "smoke_reconnect_identity", "smoke_ghproxy", "smoke_wiki",
-              "smoke_test_hooks")
-_NODE_SMOKES = ("smoke_mesh_route", "smoke_doorway_via_wcb", "smoke_ota_label", "smoke_wizard_reconnect")
+              "smoke_test_hooks", "smoke_updates", "smoke_ws_auth")
+_NODE_SMOKES = ("smoke_mesh_route", "smoke_doorway_via_wcb", "smoke_ota_label", "smoke_wizard_reconnect",
+                "smoke_tools_reload")
 
 
 def _register_py_smoke(name):
@@ -1078,6 +1083,35 @@ def reconnect_idle_gate(bench):
       "request, the shim backs navigator.serial and says there is no transport (Playwright; IX-WP4)")
 def ui_tools_load(bench):
     run_intellex_test(bench, "intellex.ui_tools_load")
+
+
+def _swap_tool(host, body):
+    """A newer copy of a tool landing on the staged host as fetch_webui.py _swap_in lands one: the whole directory, a
+    copy of it here, renamed into place (the old one kept as .prev). Only the directory's identity changes, which is what
+    /_api/status `tools` follows (host.py _bundle_identity)."""
+    name = {"navicore": "webui", "wcb": "webui_wcb"}.get(body.get("tool"))
+    if not name:
+        raise AssertionError(f"swap_tool: no tool {body.get('tool')!r}")
+    cur = os.path.join(host.stage, "src", name)
+    new, prev = cur + ".hilnew", cur + ".prev"
+    for d in (new, prev):
+        shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(cur, new)
+    os.rename(cur, prev)
+    os.rename(new, cur)
+    return {"ok": True}
+
+
+@test("intellex.ui_tools_reload_when_safe", "An open tool page reloads itself onto a newer copy of its tool once "
+      "nothing would be lost (Intellex 0.2.7, 'reload when safe'): an idle config tool and Wizard reload within seconds "
+      "of a copy landing; the config tool's open window and a key just pressed (15 s) hold it, the Wizard's unpushed "
+      "settings hold it, each saying so, and it reloads once that is gone (Playwright; Greg 2026-10-26 'It doesn't make "
+      "sense to have to manually refresh the page if we update them')")
+def ui_tools_reload_when_safe(bench):
+    """tests/intellex/specs/ui_tools_reload.spec.js against the worktree tools: intellex_shim.js onToolsStatus/pageBusy
+    reading the real tools' own state. A copy lands through the swap_tool hook (_swap_tool); the host's own fetch is
+    intellex.tools_auto_update_unit, the logic state by state smoke_tools_reload."""
+    run_intellex_test(bench, "intellex.ui_tools_reload_when_safe", hooks={"swap_tool": _swap_tool}, timeout=300.0)
 
 
 def _bundle_versions(bench):
@@ -2559,6 +2593,21 @@ def tool_serving_unit(bench):
     the stage's src, paths.FROZEN set for the frozen case, the fetcher replaced by a stand-in that swaps the Wizard."""
     require(bench)
     run_intellex_py(bench, "intellex.tool_serving_unit", "webui_units.py", args={"group": "tool_serving"})
+
+
+@test("intellex.tools_auto_update_unit", "The tools update themselves (Intellex 0.2.7): the host's own pass, the real "
+      "fetcher fetching from a stand-in for GitHub Pages - a config tool older than its published copy fetched whole "
+      "and byte for byte, the Wizard at its published stamp left alone; /_api/status's tools token moves for that "
+      "tool alone and webui-version reports autoUpdated; a second pass fetches nothing; a newer copy that will not "
+      "download whole changes nothing (in-process; Greg 2026-10-26 'It doesn't make sense to have to manually "
+      "refresh the page if we update them')")
+def tools_auto_update_unit(bench):
+    """Intellex src/host.py _auto_update_tools_once and api_status `tools` on its real build_app() in the venv
+    (tests/intellex/py/webui_units.py group tools_auto); host.proc.run runs tools/fetch_webui.py's main() in-process so
+    its downloads reach the 127.0.0.1 stand-in, never GitHub. The loop itself stays off (INTELLEX_AUTO_TOOLS=0, as for
+    every staged host); a page reloading onto the new copy is intellex.ui_tools_reload_when_safe."""
+    require(bench)
+    run_intellex_py(bench, "intellex.tools_auto_update_unit", "webui_units.py", args={"group": "tools_auto"})
 
 
 # A stand-in Python for the launcher scripts. Each name a launcher looks for on PATH (python3.11, python3, ...) and the
