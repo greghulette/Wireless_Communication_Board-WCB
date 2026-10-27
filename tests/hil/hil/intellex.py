@@ -370,7 +370,10 @@ class IntellexHost:
                    INTELLEX_DATA_DIR=os.path.join(self.stage, "appdata", "Intellex"),
                    INTELLEX_SERIAL_ALLOW=",".join(self.allow_ports),
                    INTELLEX_DISCOVER_HOSTS=",".join(self.discover_hosts),
-                   INTELLEX_WS_ALLOW=",".join(self.ws_hosts))
+                   INTELLEX_WS_ALLOW=",".join(self.ws_hosts),
+                   # Never a tool swapped under a test: an online host would fetch a newer published one by itself
+                   # (Intellex host._auto_update_tools_loop, 2026-10-26). A test of that sets it back in env.
+                   INTELLEX_AUTO_TOOLS="0")
         if self.offline:
             env["INTELLEX_OFFLINE"] = "1"
         env.update(self.extra_env)
@@ -732,7 +735,7 @@ def run_intellex_py(bench, test_id, script, args=None, device=None, tools="none"
     if allow_ports is None:
         allow_ports = [port] if port else []
     e = {"LOCALAPPDATA": os.path.join(sd, "appdata"), "INTELLEX_DATA_DIR": os.path.join(sd, "appdata", "Intellex"),
-         "INTELLEX_OFFLINE": "1",
+         "INTELLEX_OFFLINE": "1", "INTELLEX_AUTO_TOOLS": "0",
          "INTELLEX_SERIAL_ALLOW": ",".join(allow_ports), "INTELLEX_DISCOVER_HOSTS": "",
          "INTELLEX_WS_ALLOW": ",".join(ws_hosts)}
     e.update(env or {})

@@ -28,7 +28,8 @@ from hil.runner import Skip, test
 from hil.ws import WsClient, WsEndpoint
 
 SHIM_TAG = '<script src="/_intellex.js"></script>'   # Intellex host.py SHIM_TAG
-STATUS_KEYS = ("attached", "target", "lastError", "reconnecting", "wantsLink", "kind", "role", "relayId")
+STATUS_KEYS = ("attached", "target", "lastError", "reconnecting", "wantsLink", "kind", "role", "relayId", "tools",
+               "flashing")   # tools / flashing: a page reloads onto a newer tool when safe (Intellex 2026-10-26)
 # Every POST route in Intellex's build_app EXCEPT /_api/wifi-bounce: were the Origin guard ever broken, that request
 # would run netsh against this PC's WiFi adapter, the one the week's unattended session reaches the internet through.
 GUARDED_POSTS = ("/_api/attach", "/_api/detach", "/_api/identify", "/_api/signals", "/_api/branch", "/_api/flash",
@@ -1831,7 +1832,7 @@ def app_browser_mode(bench):
             problems.append(f"app.py's own /_api/status: {st} {body}")
         py = require(bench)[1]
         e = {k: v for k, v in os.environ.items() if not k.startswith("INTELLEX_")}
-        e.update(PYTHONUTF8="1", BROWSER=browser, INTELLEX_OFFLINE="1", INTELLEX_SERIAL_ALLOW="",
+        e.update(PYTHONUTF8="1", BROWSER=browser, INTELLEX_OFFLINE="1", INTELLEX_AUTO_TOOLS="0", INTELLEX_SERIAL_ALLOW="",
                  INTELLEX_DISCOVER_HOSTS="", INTELLEX_DATA_DIR=os.path.join(sd, "appdata", "Intellex"))
         t0 = time.monotonic()
         try:
