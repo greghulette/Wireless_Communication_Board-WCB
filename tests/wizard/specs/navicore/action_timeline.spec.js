@@ -4,7 +4,7 @@
 // with the taps that fire with it drawn above (not exclusive) and the stored sequence an action runs drawn under it
 // (GET_WCB_SEQVAL). The rows below are one line each (buildActionRow, _arPaintTier), numbered in their device's colour,
 // and open to their fields on a click. The timeline is drawn from the rows: a dragged dot sets its row's delay and the
-// row goes where it fires (_atStartDrag, _arSettle), a click opens its row, a double click adds one there (_atAddAt);
+// row goes where it fires (_atStartDrag, _arSettle), a click on a dot opens its row, a click on empty space adds one there (_atAddAt);
 // the zoom bar (_atSetView), the warnings (_atProblems), ▶ Preview and the tap's ▶ Test with the cursor running
 // (_atRunCursor, _testTierActions). TL_SHOTS=<dir> saves a screenshot at each step (TL_THEME=light for the light theme).
 const fs = require('node:fs');
@@ -82,13 +82,14 @@ async function dragDot(page, ai, toX, { alt = false, during = null } = {}) {
   await page.mouse.up();
   if (alt) await page.keyboard.up('Alt');
 }
-// Double-click the timeline at time t, on a lane (its key) or on the "+ Action" row (null).
-async function dblclickAt(page, t, laneKey) {
+// Click the timeline at time t, on a lane (its key) or on the "+ Action" row (null); `double`: a double click.
+async function clickAt(page, t, laneKey, { double = false } = {}) {
   const y = await page.evaluate((k) => {
     const el = k ? document.querySelector(`#at-svg .at-lane-bg[data-lane="${k}"]`) : document.querySelector('#at-svg .at-new-bg');
     return document.getElementById('at-svg').getBoundingClientRect().top + +el.getAttribute('y') + 4;
   }, laneKey);
-  await page.mouse.dblclick(await xOf(page, t), y);
+  if (double) await page.mouse.dblclick(await xOf(page, t), y);
+  else await page.mouse.click(await xOf(page, t), y);
 }
 const status = (page) => page.locator('#at-status');
 const tierTest = (page, tier) => page.locator(`#tier-card-${tier} button[title^="Play this whole sequence"]`);
@@ -199,7 +200,7 @@ test.describe('the action timeline', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.action_timeline_edit a click on a dot opens its row (one open at a time) and marks the dot; a dragged dot sets its row\'s delay, sticks to another dot with a guide (Alt: to the ms), never under 0, and the row goes where it fires — after those already at its time; a delay typed in a row and Done does the same, while a row only opened and closed stays put; the grip reorders, a right-click removes; a double click on a lane\'s empty space adds an action of its kind there; the button\'s Apply saves the rows and Cancel drops them', async ({ page, emu }) => {
+  test('nctool.action_timeline_edit a click on a dot opens its row (one open at a time) and marks the dot; a dragged dot sets its row\'s delay, sticks to another dot with a guide (Alt: to the ms), never under 0, and the row goes where it fires — after those already at its time; a delay typed in a row and Done does the same, while a row only opened and closed stays put; the grip reorders, a right-click removes; a click on a lane\'s empty space adds an action of its kind there; the button\'s Apply saves the rows and Cancel drops them', async ({ page, emu }) => {
     await T.openTool(page);
     await theme(page);
     await connect(page, emu);
@@ -252,8 +253,8 @@ test.describe('the action timeline', () => {
     // A right-click on a dot removes its row.
     await dot(page, 0).locator('.at-ev-hit').click({ button: 'right', position: { x: 6, y: 10 } });
     expect((await cmds()).map((c) => c[0])).toEqual(['mp3', ';C03', ';M11']);
-    // A double click on the MP3 lane's empty space adds an MP3 action there, open (no builder for the MP3 editor).
-    await dblclickAt(page, 1500, 'A');
+    // A click on the MP3 lane's empty space adds an MP3 action there, open (no builder for the MP3 editor).
+    await clickAt(page, 1500, 'A');
     await expect(page.locator('#cmdlib-modal')).not.toHaveClass(/open/);
     const added = await page.evaluate(() => +document.querySelector('#rows-1 .action-row.ar.open').dataset.ai);
     await expect(page.locator(`#type-1-${added}`)).toHaveValue('mp3');
@@ -277,14 +278,18 @@ test.describe('the action timeline', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.action_timeline_library a double click on the timeline adds an action at that time and opens the command library for it; a command with no fields lands as a new action row would route it, in its device\'s lane, numbered where it fires; one with fields uses the composer, and a device string goes to the WCB port labelled for it; Cancel leaves a blank row, which the next double click reuses; a full tap refuses more', async ({ page, emu }) => {
+  test('nctool.action_timeline_library a click on the timeline\'s empty space adds an action at that time and opens the command library for it (a double click adds one, and leaves the library open); a command with no fields lands as a new action row would route it, in its device\'s lane, numbered where it fires; one with fields uses the composer, and a device string goes to the WCB port labelled for it; Cancel leaves a blank row, which the next double click reuses; a full tap refuses more', async ({ page, emu }) => {
     await T.openTool(page);
     await theme(page);
     await connect(page, emu);
     await openButton(page, 12, { exclusive: false, t1: [{ type: 'wcb_unicast', target: '1', cmd: ';M11', delay: 800 }] });
-    // No fields: the MP3 Trigger's configured home (config.mp3Dest: WCB 2), at 300 ms, before the Maestro action.
-    await dblclickAt(page, 300, null);
+    // No fields: the MP3 Trigger's configured home (config.mp3Dest: WCB 2), at 300 ms, before the Maestro action. A
+    // double click (out of habit) adds one action, and its second click does not close the library the first opened.
+    await clickAt(page, 300, null, { double: true });
     await expect(page.locator('#cmdlib-modal')).toHaveClass(/open/);
+    await page.waitForTimeout(300);
+    await expect(page.locator('#cmdlib-modal')).toHaveClass(/open/);
+    await expect(page.locator('#rows-1 .action-row.ar')).toHaveCount(2);
     await page.locator('#cmdlib-search').fill('toggle');
     await page.locator('.cmdlib-item[data-board="wcb-mp3"][data-cmd="mp3.stop"]').click();
     await page.locator('#cmdlib-use').click();
@@ -297,7 +302,7 @@ test.describe('the action timeline', () => {
     expect((await lines(page, 1))[0].slice(0, 1).concat((await lines(page, 1))[0].slice(2, 4))).toEqual(['1', 'MP3 Trigger', 'Start/Stop Toggle']);
     await expect(dot(page, 1)).toHaveAttribute('data-lane', 'A');
     // Fields: the composer; WCB 2 says its Serial 1 has the Flthy HP controller, so the string goes out there.
-    await dblclickAt(page, 600, 'M1');
+    await clickAt(page, 600, 'M1');
     await page.locator('#cmdlib-search').fill('color projector');
     await page.locator('.cmdlib-item[data-board="flthy-hps"][data-cmd="flthy.led.colorproj"]').click();
     await page.locator('#cmdlib-body select[data-pname="designator"]').selectOption('R');
@@ -310,24 +315,24 @@ test.describe('the action timeline', () => {
     expect((await rowsOf(page, 1)).map((a) => a.cmd)).toEqual([';A,STOP', ';W2;S1R0021', ';M11']);
     await expect(page.locator('#at-svg g.at-ev[data-lane="D:flthy-hps:W2S1"] .at-ev-label')).toHaveText('Color Projector · Rear · Red');
     await shot(page, '04-library-added');
-    // Cancel: a blank row stays (said so under the timeline); the next double click fills it rather than add one.
-    await dblclickAt(page, 1200, null);
+    // Cancel: a blank row stays (said so under the timeline); the next click fills it rather than add one.
+    await clickAt(page, 1200, null);
     await page.locator('#cmdlib-close').click();
     await expect(page.locator('#rows-1 .action-row.ar')).toHaveCount(4);
     await expect(status(page)).toHaveText('1 action has no command yet: not on the timeline, and Save leaves it out.');
-    await dblclickAt(page, 1400, null);
+    await clickAt(page, 1400, null);
     await expect(page.locator('#cmdlib-modal')).toHaveClass(/open/);
     await page.locator('#cmdlib-close').click();
     await expect(page.locator('#rows-1 .action-row.ar')).toHaveCount(4);
     const blank = await page.evaluate(() => +document.querySelector('#rows-1 .action-row.ar.open').dataset.ai);
     expect(Math.abs(+(await page.locator(`#delay-1-${blank}`).inputValue()) - 1400)).toBeLessThanOrEqual(3);
-    // Fill the tap to the board's ten; then a double click refuses, and opens nothing.
+    // Fill the tap to the board's ten; then a click refuses, and opens nothing.
     await page.evaluate(() => { for (let i = 0; i < 6; i++) addActionRow(1, { type: 'mp3', fn: 3, delay: 2000 + 100 * i }); });
     await expect(page.locator('#rows-1 .action-row.ar')).toHaveCount(10);
     await expect(page.locator('#tier-card-1 .btn-add-action')).toHaveText('Max 10 actions');
     await page.locator(`#action-1-${blank} .btn-remove-action`).click();   // the blank one goes; nine stay
     await page.evaluate(() => addActionRow(1, { type: 'mp3', fn: 3, delay: 3000 }));
-    await dblclickAt(page, 1600, null);
+    await clickAt(page, 1600, null);
     await expect(page.locator('#cmdlib-modal')).not.toHaveClass(/open/);
     await expect(status(page)).toHaveText('This tap already has 10 actions, as many as the board holds. Remove one to add another.');
     T.expectNoPageErrors(page);
@@ -421,7 +426,7 @@ test.describe('the action timeline', () => {
 test.describe('the action timeline on a board whose firmware predates the limits', () => {
   test.use({ emuOptions: { config: BENCH, roster: ROSTER, seqs: SEQS, legacyLimits: true } });
 
-  test('nctool.action_timeline_legacy_board a board on firmware from before ten actions a tier sends no limits, so the tool holds to the old ones: five actions a tap (+ Add action and the timeline\'s double click stop there), a delay to 65535 ms (past it the timeline says the board would wrap it; the zoom stops there), and eight pending slots (more in one press is warned of, the rest firing at once); Save refuses a config the board would cut and sends nothing; a board on current firmware lifts them', async ({ page, emu }) => {
+  test('nctool.action_timeline_legacy_board a board on firmware from before ten actions a tier sends no limits, so the tool holds to the old ones: five actions a tap (+ Add action and a click on the timeline stop there), a delay to 65535 ms (past it the timeline says the board would wrap it; the zoom stops there), and eight pending slots (more in one press is warned of, the rest firing at once); Save refuses a config the board would cut and sends nothing; a board on current firmware lifts them', async ({ page, emu }) => {
     const dialogs = T.answerDialogs(page, []);
     await T.openTool(page);
     await theme(page);
@@ -433,7 +438,7 @@ test.describe('the action timeline on a board whose firmware predates the limits
     await openButton(page, 12, { exclusive: false, t1: [d(';S1a', 100), d(';S1b', 200), d(';S1c', 300), d(';S1d', 400), d(';S1e', 500)] });
     await expect(page.locator('#tier-card-1 .btn-add-action')).toBeDisabled();
     await expect(page.locator('#tier-card-1 .btn-add-action')).toHaveText('Max 5 actions');
-    await dblclickAt(page, 700, null);
+    await clickAt(page, 700, null);
     await expect(page.locator('#cmdlib-modal')).not.toHaveClass(/open/);
     await expect(status(page)).toHaveText('This tap already has 5 actions, as many as the board holds. Remove one to add another.');
     await expect(page.locator('#at-view')).toHaveText('view 2 s · max 1:05.535');
