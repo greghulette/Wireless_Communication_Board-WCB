@@ -150,7 +150,7 @@ function fwButtons(page) {
 // by itself), and a click on the line opens its fields, as a user does; one row is open at a time.
 async function openRow(page, tier, ai) {
   const row = page.locator(`#action-${tier}-${ai}`);
-  if (!(await row.evaluate((r) => r.classList.contains('open')))) await row.locator('.ar-time').click();
+  if (!(await row.evaluate((r) => r.classList.contains('open')))) await row.locator('.ar-num').click();   // (the time is a field)
   await expect(row).toHaveClass(/\bopen\b/);
 }
 

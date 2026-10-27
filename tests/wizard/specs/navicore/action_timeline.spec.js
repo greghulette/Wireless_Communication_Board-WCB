@@ -66,7 +66,7 @@ const events = (page) => page.evaluate(() => _at.events.map((e) => [e.t, e.actio
 // The tier's rows as Save would read them, and as their lines say: [number, time, device, what, note].
 const rowsOf = (page, tier) => page.evaluate((t) => collectTierActions(t), tier);
 const lines = (page, tier) => page.evaluate((t) => [...document.querySelectorAll(`#rows-${t} .action-row.ar`)].map((r) =>
-  ['.ar-num', '.ar-time', '.ar-dev', '.ar-cmd', '.ar-note'].map((c) => r.querySelector(c).textContent)), tier);
+  ['.ar-num', '.ar-time', '.ar-dev', '.ar-cmd', '.ar-note'].map((c) => { const el = r.querySelector(c); return el.tagName === 'INPUT' ? el.value : el.textContent; })), tier);
 const openAi = (page, tier) => page.evaluate((t) => [...document.querySelectorAll(`#rows-${t} .action-row.ar.open`)].map((r) => +r.dataset.ai), tier);
 const dot = (page, ai) => page.locator(`#at-svg g.at-ev[data-ev="${ai}"]`);
 const xOf = (page, t) => page.evaluate((tt) => document.getElementById('at-svg').getBoundingClientRect().left + _atTimeToX(tt), t);
@@ -200,7 +200,7 @@ test.describe('the action timeline', () => {
     T.expectNoPageErrors(page);
   });
 
-  test('nctool.action_timeline_edit a click on a dot opens its row (one open at a time) and marks the dot; a dragged dot sets its row\'s delay, sticks to another dot with a guide (Alt: to the ms), never under 0, and the row goes where it fires — after those already at its time; a delay typed in a row and Done does the same, while a row only opened and closed stays put; the grip reorders, a right-click removes; a click on a lane\'s empty space adds an action of its kind there; the button\'s Apply saves the rows and Cancel drops them', async ({ page, emu }) => {
+  test('nctool.action_timeline_edit a click on a dot opens its row (one open at a time) and marks the dot; a dragged dot sets its row\'s delay, sticks to another dot with a guide (Alt: to the ms), never under 0, and the row goes where it fires — after those already at its time; a delay typed in a row and Done does the same, as does a time typed on its line (ms or with a unit; Escape keeps it, what is not a time is refused), while a row only opened and closed stays put; the grip reorders, a right-click removes; a click on a lane\'s empty space adds an action of its kind there; the button\'s Apply saves the rows and Cancel drops them', async ({ page, emu }) => {
     await T.openTool(page);
     await theme(page);
     await connect(page, emu);
@@ -240,6 +240,39 @@ test.describe('the action timeline', () => {
     expect(await openAi(page, 1)).toEqual([]);
     expect(await cmds()).toEqual([[';W2;S1F0025', 0], ['mp3', 0], [';C03', 300], [';M11', 800]]);
     expect(await page.evaluate(() => _at.events.find((e) => e.id === 3).t)).toBe(300);
+    // The time on a line is typed into, the row staying folded: ms or with a unit; the row goes where it fires;
+    // Escape keeps it; what is not a time is refused.
+    const time = page.locator('#action-1-1 .ar-time');
+    await time.click();
+    await expect(time).toHaveValue('0');                      // the ms while it is typed
+    expect(await openAi(page, 1)).toEqual([]);
+    await time.fill('1.5s');
+    await time.press('Enter');
+    await expect(page.locator('#delay-1-1')).toHaveValue('1500');
+    await expect(time).toHaveValue('1.5 s');
+    expect(await cmds()).toEqual([[';W2;S1F0025', 0], [';C03', 300], [';M11', 800], ['mp3', 1500]]);
+    expect(await page.evaluate(() => _at.events.find((e) => e.id === 1).t)).toBe(1500);
+    await time.click();
+    await time.fill('2:00');
+    await time.press('Escape');
+    await expect(page.locator('#delay-1-1')).toHaveValue('1500');
+    await time.click();
+    await time.fill('soon');
+    await time.press('Enter');
+    await expect(page.locator('#delay-1-1')).toHaveValue('1500');
+    await time.click();
+    await time.press('ArrowDown');
+    await time.press('Shift+ArrowDown');
+    await expect(time).toHaveValue('400');
+    await time.press('Enter');
+    await expect(page.locator('#delay-1-1')).toHaveValue('400');
+    expect(await cmds()).toEqual([[';W2;S1F0025', 0], [';C03', 300], ['mp3', 400], [';M11', 800]]);
+    expect(await openAi(page, 1)).toEqual([]);
+    // Back as it was for what follows.
+    await time.click();
+    await time.fill('0');
+    await time.press('Enter');
+    expect(await cmds()).toEqual([[';W2;S1F0025', 0], ['mp3', 0], [';C03', 300], [';M11', 800]]);
     // The grip drags a row up the list: actions at one time fire in list order.
     const grip = await page.locator('#action-1-1 .ar-grip').boundingBox();
     const first = await page.locator('#action-1-0').boundingBox();
