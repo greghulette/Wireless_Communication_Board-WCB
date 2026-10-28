@@ -149,6 +149,51 @@ static int dropLocalKyberTargets(uint8_t maestroID, uint8_t port, bool portFreed
   return dropped;
 }
 
+// Remote targets follow remote slots the same way (tracker #73 D7b), keyed (id, host board): forwardDataFromKyber
+// sends a remote target's bytes to its board, so one left behind by ?MAESTRO,CLEAR kept the Kyber feeding a Maestro
+// the board was told to forget, and ?backup's KYBER,LOCAL line re-created the cleared slot on restore. Drop every
+// remote target (maestroID, hostWCB). Returns how many were dropped.
+static int dropRemoteKyberTargets(uint8_t maestroID, uint8_t hostWCB) {
+  if (!kyberTracksLocalSlots() || hostWCB == 0 || hostWCB == (uint8_t)WCB_Number) return 0;
+  int dropped = 0;
+  for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+    KyberTarget &t = kyberTargets[j];
+    if (!t.enabled || t.maestroID != maestroID || t.targetWCB != hostWCB) continue;
+    Serial.printf("✓ Removed Kyber target M%d → WCB%d (no Maestro slot left for it)\n", t.maestroID, hostWCB);
+    t.enabled = false;       // one bool store, as dropLocalKyberTargets
+    dropped++;
+  }
+  return dropped;
+}
+
+// Add the remote target (maestroID, hostWCB) unless one is already there - for a remote slot just CLAIMED (a ?MAESTRO
+// to another board, or one WDP learned). It used to be reconcileKyberTargetsFromMaestroConfigs, keyed by id alone, run
+// after every WDP auto-add: learning Maestro 2 on WCB4 added a target for every configured id without one (an M1 an
+// explicit ?KYBER,LOCAL list had left out), and none for WCB4's Maestro 2, since another board's Maestro 2 had one
+// (full run 20261027-100142, mesh.relay_renumber_reboot). targetPort 1: unused for a remote target, which the
+// remote board routes (forwardDataFromKyber); it is what ?backup has always printed for one.
+static bool addRemoteKyberTarget(uint8_t maestroID, uint8_t hostWCB) {
+  if (!kyberTracksLocalSlots() || hostWCB == 0 || hostWCB == (uint8_t)WCB_Number) return false;
+  int freeIdx = -1;
+  for (int j = 0; j < MAX_KYBER_TARGETS; j++) {
+    const KyberTarget &t = kyberTargets[j];
+    if (t.enabled && t.maestroID == maestroID && t.targetWCB == hostWCB) return false;
+    if (!t.enabled && freeIdx < 0) freeIdx = j;
+  }
+  if (freeIdx < 0) {
+    Serial.printf("⚠️  Kyber target table is full (%d) - Maestro %d on WCB%d gets no Kyber data\n",
+                  MAX_KYBER_TARGETS, maestroID, hostWCB);
+    return false;
+  }
+  kyberTargets[freeIdx].maestroID  = maestroID;
+  kyberTargets[freeIdx].targetWCB  = hostWCB;
+  kyberTargets[freeIdx].targetPort = 1;
+  __asm__ __volatile__("" ::: "memory");     // enabled last (addLocalKyberTarget says why)
+  kyberTargets[freeIdx].enabled    = true;
+  Serial.printf("✓ Kyber target M%d → WCB%d added\n", maestroID, hostWCB);
+  return true;
+}
+
 // Add the local target (maestroID, WCB_Number, port) unless it is already there. Only for a slot
 // configureMaestro has just CLAIMED: re-issuing ?MAESTRO for an existing slot (a baud change, the full
 // MAESTRO chain every Wizard delta push re-sends) must leave an explicit ?KYBER,LOCAL target list alone.
@@ -776,7 +821,7 @@ String remaining = message;
     uint8_t effectiveRemoteWCB = (targetWCB == WCB_Number) ? 0 : targetWCB;
     uint8_t keyPort            = (targetWCB == WCB_Number) ? (uint8_t)serialPort : 0;
     int8_t slot = findSlotByMaestroIDPortTarget(maestroID, keyPort, effectiveRemoteWCB);
-    const bool newSlot = (slot < 0);   // only a newly claimed local slot adds its Kyber target (below)
+    const bool newSlot = (slot < 0);   // only a newly claimed slot adds its Kyber target (below)
     if (slot < 0) {
       slot = findEmptySlot();
       if (slot < 0) {
@@ -878,6 +923,8 @@ String remaining = message;
       saveMaestroSettings();
       Serial.printf("✓ Maestro %d: Remote on WCB%d (unicast, slot %d)\n", 
                     maestroID, targetWCB, slot + 1);
+      // As the local branch: a new slot adds its target, a re-issued one leaves an explicit list alone (D7b).
+      if (newSlot && addRemoteKyberTarget((uint8_t)maestroID, (uint8_t)targetWCB)) saveKyberTargets();
     }
     
     startIdx = nextComma + 1;
@@ -937,6 +984,9 @@ bool maestroAutoAddRemote(uint8_t maestroID, uint8_t hostWCB, uint32_t baud) {
   saveMaestroSettings();
   Serial.printf("[WDP] auto-added remote Maestro %d on WCB%d @ %lu baud (slot %d)\n",
                 maestroID, hostWCB, (unsigned long)baud, slot + 1);
+  // A targeted Kyber host forwards to this Maestro from now on, and to nothing else new (D7b); a baud refresh
+  // above leaves the target table alone.
+  if (addRemoteKyberTarget(maestroID, hostWCB)) saveKyberTargets();
   return true;
 }
 
@@ -950,6 +1000,7 @@ static int _clearMaestroSlot(int8_t slot) {
 
   uint8_t freedPort = maestroConfigs[slot].serialPort;
   uint8_t freedId   = maestroConfigs[slot].maestroID;
+  uint8_t freedHost = maestroConfigs[slot].remoteWCB;
   int     dropped   = 0;
 
   maestroConfigs[slot].configured = false;
@@ -983,6 +1034,8 @@ static int _clearMaestroSlot(int8_t slot) {
     }
     // Remote slots store serialPort 0, so only a local slot gets here (tracker #73 D7).
     dropped = dropLocalKyberTargets(freedId, freedPort, !portStillUsed);
+  } else if (freedHost > 0) {
+    dropped = dropRemoteKyberTargets(freedId, freedHost);   // D7b
   }
   return dropped;
 }
