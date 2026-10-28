@@ -18,7 +18,12 @@
 // rcConfigToJSON(forMesh) :1371-1372), chanSync (:1373, :1688) and wcbNetwork.region (RC_REGIONS :50-54, rcRegionValid
 // :57-62; :1505, :1962-1970), and wcbNetwork.channel takes 1-13 (:1960-1961, profiles :1988).
 
-const THRESHOLDS = 36, TAP_TIERS = 4, ACTIONS = 5, SWITCHES = 10, KNOBS = 11, KNOB_OUTS = 10;
+const THRESHOLDS = 36, TAP_TIERS = 4, ACTIONS = 10, SWITCHES = 10, KNOBS = 11, KNOB_OUTS = 10;
+// The action limits (rc_config.h RC_ACTIONS_PER_TIER, RC_MAX_DELAY_MS, PENDING_ACTION_SLOTS; NaviCore 40560c1), which
+// rcConfigToJSON prints as "limits". LEGACY: a NaviCore built before them - 5 actions a tier, a 16-bit delay that
+// wraps, 8 slots, and no "limits" printed (new NcConfig({ legacyLimits: true }), emulator option legacyLimits).
+const LIMITS = { actions: ACTIONS, maxDelayMs: 1800000, pending: 32, legacy: false };
+const LEGACY_LIMITS = { actions: 5, maxDelayMs: 0xFFFF, pending: 8, legacy: true };
 const MAESTROS = 8, MAE_CH = 32, WLED = 4, PROFILES = 6, SMOOTH = 6, MAX_BOARDS = 20;
 const SWITCH_LABELS = ['SA', 'SB', 'SC', 'SD', 'SE', 'SF', 'SG', 'SH', 'SI', 'SJ'];
 const SWITCH_DEFAULT_CH = [8, 9, 10, 11, 12, 13, 14, 15, 0, 0];
@@ -71,10 +76,13 @@ const emptyMapping = () => ({ exclusive: false, t: Array.from({ length: TAP_TIER
 
 // actionFromJson (rc_config.h:1063-1156) -> the action as actionToJson prints it (:970-1061), or null when the type
 // is not one the firmware knows (it is then dropped, and takes no slot).
-function actionFrom(obj) {
+function actionFrom(obj, lim = LIMITS) {
   if (!isObj(obj)) return null;
   const type = jStr(obj.type, '');
-  const delay = u16(jInt(obj.delay, 0));
+  // rcActionSetDelay(a, obj["delay"] | (uint32_t)0): a negative or out-of-range number is not a uint32_t, so 0; then
+  // clamped to RC_MAX_DELAY_MS. Legacy firmware took `obj["delay"] | 0` into a uint16_t, which wraps.
+  const dj = jInt(obj.delay, 0);
+  const delay = lim.legacy ? u16(dj) : ((dj < 0 || dj > 0xFFFFFFFF) ? 0 : Math.min(lim.maxDelayMs, dj));
   let a = null;
   if (type === 'wcb_unicast') {
     a = { type, target: strl(jStr(obj.target, ''), 6), cmd: strl(jStr(obj.cmd, ''), 96) };
@@ -117,11 +125,11 @@ function actionFrom(obj) {
 }
 
 // Up to ACTIONS valid actions from a JSON array, invalid ones skipped (rc_config.h:1596-1601).
-function actionsFrom(list) {
+function actionsFrom(list, lim = LIMITS) {
   const out = [];
   for (const o of arr(list)) {
-    if (out.length >= ACTIONS) break;
-    const a = actionFrom(o);
+    if (out.length >= lim.actions) break;
+    const a = actionFrom(o, lim);
     if (a) out.push(a);
   }
   return out;
@@ -159,6 +167,7 @@ const transportName = (c) => (c === 2 ? 'off' : c === 1 ? 'wcb' : 'serial');
 class NcConfig {
   constructor(opts = {}) {
     this.factoryPassword = opts.factoryPassword || FACTORY_PW;
+    this.lim = opts.legacyLimits ? LEGACY_LIMITS : LIMITS;
     this.loadDefaults();
   }
 
@@ -232,7 +241,7 @@ class NcConfig {
     if (has(doc, 'peerEvent')) {
       const pe = isObj(doc.peerEvent) ? doc.peerEvent : {};
       s.peerAlert = jBool(pe.alert, s.peerAlert);
-      if (has(pe, 'actions')) s.peerActions = actionsFrom(pe.actions);
+      if (has(pe, 'actions')) s.peerActions = actionsFrom(pe.actions, this.lim);
     }
     if (has(doc, 'thresholds')) {
       arr(doc.thresholds).slice(0, THRESHOLDS).forEach((th0, i) => {
@@ -251,7 +260,7 @@ class NcConfig {
         m.exclusive = jBool(mo.exclusive, false);
         for (let ti = 0; ti < TAP_TIERS; ti++) {
           m.t[ti].note = strl(jStr(mo[`t${ti + 1}note`], ''), 20);
-          if (has(mo, `t${ti + 1}`)) m.t[ti].a = actionsFrom(mo[`t${ti + 1}`]);
+          if (has(mo, `t${ti + 1}`)) m.t[ti].a = actionsFrom(mo[`t${ti + 1}`], this.lim);
         }
         s.mappings[(mode - 1) * THRESHOLDS + (btn - 1)] = m;
       }
@@ -266,7 +275,7 @@ class NcConfig {
         sw.positions = u8(jInt(so.positions, SWITCH_DEFAULT_POS[i]));
         for (let pi = 0; pi < 3; pi++) {
           sw.t[pi].note = strl(jStr(so[`p${pi}note`], ''), 20);
-          if (has(so, `p${pi}`)) sw.t[pi].a = actionsFrom(so[`p${pi}`]);
+          if (has(so, `p${pi}`)) sw.t[pi].a = actionsFrom(so[`p${pi}`], this.lim);
         }
       });
     }
@@ -517,6 +526,9 @@ class NcConfig {
       }
       return { name: p.name, entries };
     });
+    // Last, as rcConfigToJSON prints it: what the firmware stores (the tool holds its editors to it). Legacy firmware
+    // prints none.
+    if (!this.lim.legacy) out.limits = { actionsPerTier: this.lim.actions, maxDelayMs: this.lim.maxDelayMs, pendingSlots: this.lim.pending };
     return out;
   }
 

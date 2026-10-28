@@ -5757,7 +5757,8 @@ def t_sbusfault_old_image_skips(tmp):
            if r["status"] != "SKIP" or "no INF8 test verbs" not in r["detail"] or "sbus-9.9" not in r["detail"]}
     assert not bad, bad
     assert set(sb.sent) == {'{"t":"flags"}', '{"t":"ping"}'}, sorted(set(sb.sent))
-    assert not old.saved and not nav.sent, (old.saved, nav.sent)
+    # NaviCore hears only the run's start-of-run firmware record (resume.record_firmware: one PING), none of the tests.
+    assert not old.saved and nav.sent in ([], ['{"type":"PING"}']), (old.saved, nav.sent)
 
 
 # ---------------------------------------------------------------------------- nc_guard (NAVICORE.md INF3)
@@ -6650,6 +6651,9 @@ class NaviModel:
     session.log hashes it."""
     FW = "v0.2.0_102105QSEP26"
     FACTORY_PW = "DomeNet"
+    # NaviCore 40560c1 / 9f19b3e (rc_config.h): RC_ACTIONS_PER_TIER 10 (was 5), RC_MAX_DELAY_MS 30 min (the delay was a
+    # uint16_t), PENDING_ACTION_SLOTS 32 (was 8), and rcConfigToJSON's closing "limits" saying so.
+    ACTIONS_PER_TIER, MAX_DELAY_MS, PENDING_ACTION_SLOTS = 10, 1800000, 32
     REGIONS = ("01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
                "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT", "JP", "KR", "LI", "LT", "LU", "LV", "MT", "MX", "NL",
                "NO", "NZ", "PL", "PT", "RO", "SE", "SI", "SK", "TW", "US")     # RC_REGIONS (chansync rc_config.h:50-54)
@@ -6748,7 +6752,9 @@ class NaviModel:
         """actionFromJson (rc_config.h:1063-1155) -> the internal action, or None."""
         o = o if isinstance(o, dict) else {}
         t = _nm_pick(o, "type", "")
-        a = {"type": None, "target": "", "cmd": "", "delay": _nm_wrap(_nm_pick(o, "delay", 0), 16), "skipRunning": False,
+        d = o.get("delay")            # `obj["delay"] | (uint32_t)0`: a uint32_t, else 0; rcActionSetDelay clamps it
+        d = min(d, NaviModel.MAX_DELAY_MS) if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 0xFFFFFFFF else 0
+        a = {"type": None, "target": "", "cmd": "", "delay": d, "skipRunning": False,
              "note": "", "fn": 0, "chan": 0, "track": 0}
         if t in ("wcb_unicast", "maestro_remote", "maestro"):
             a.update(type="maestro" if t != "wcb_unicast" else t, target=_nm_cut(_nm_pick(o, "target", ""), 6),
@@ -6800,7 +6806,7 @@ class NaviModel:
         out = []
         if isinstance(obj, dict) and key in obj:
             for o in obj[key] if isinstance(obj[key], list) else []:
-                if len(out) >= 5:
+                if len(out) >= self.ACTIONS_PER_TIER:
                     break
                 a = self.action_from(o)
                 if a:
@@ -7122,6 +7128,8 @@ class NaviModel:
         d["smoothProfiles"] = [{"name": p["name"], "entries": [{"mid": m, "ch": ch, "spd": v[0], "acc": v[1]}
                                                                for (m, ch), v in sorted(p["entries"].items()) if v[0] or v[1]]}
                                for p in r["smooth"]]
+        d["limits"] = {"actionsPerTier": self.ACTIONS_PER_TIER, "maxDelayMs": self.MAX_DELAY_MS,
+                       "pendingSlots": self.PENDING_ACTION_SLOTS}
         return d
 
     def text(self):
@@ -10989,7 +10997,9 @@ class NaviRecModel(NaviModel):
     FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if "REC" not in rx.pattern) + (re.compile(r"^\?REC,START", re.I),)
     CAP = 24000
     LINKS = ("W1S1", "W1S2")
-    PENDING_SLOTS = 8
+    PENDING_SLOTS = NaviModel.PENDING_ACTION_SLOTS
+    RA_TYPE = {"wcb_unicast": 1, "wcb_broadcast": 2, "maestro_local": 3, "maestro": 4, "serial": 5, "hcr": 6, "mp3": 7,
+               "record": 8}      # RcActionType (rc_config.h), for the WARN line
     GREG = {"rec_3": (1, REC_V1_BYTES, [{"t": 0, "k": 1, "slot": 1, "ch": 0, "pos": 6000},
                                         {"t": 50, "k": 1, "slot": 1, "ch": 0, "pos": 6100},
                                         {"t": 120, "k": 0, "type": "wcb_unicast", "target": "2", "cmd": ";S2x"},
@@ -11055,7 +11065,7 @@ class NaviRecModel(NaviModel):
         """rcExecuteActionNow (NaviCore.ino:2047-2131): the capture tap, then the effect."""
         if self.capturing and (a["type"] not in ("record", "play", "stop") or "capture_meta" in self.mut):
             ev = dict(self.action_to(a))
-            if "delay_zero" in self.mut:
+            if "delay_kept" not in self.mut:     # captureAction clears it: tMs is when it fired (NaviCore 40560c1)
                 ev.pop("delay", None)
             ev.update(t=self.ms(self.rec_start), k=0)
             self.buf.append(ev)
@@ -11085,8 +11095,9 @@ class NaviRecModel(NaviModel):
             if len(self.pend) < self.PENDING_SLOTS:
                 self.pend.append((time.monotonic() + a["delay"] / 1000, a))
                 return []
-            return [f"WARN: pendingActions full ({self.PENDING_SLOTS} slots) — firing now, delay dropped"] + \
-                self.dispatch(a)
+            # NaviCore 40560c1: a full queue DROPS the action (it used to fire at once with its delay dropped)
+            return [f"WARN: pendingActions full ({self.PENDING_SLOTS} slots) - dropped type "
+                    f"{self.RA_TYPE.get(a['type'], 0)} '{a['cmd'][:40]}' due in {a['delay']} ms"]
         return self.dispatch(a)
 
     def json_line(self, line):
@@ -11628,7 +11639,7 @@ def t_ncrec_suite_against_model(tmp):
 # to catch, and each D-NC fix its (should) test asks for.
 NCREC_MUTATIONS = (
     ("ncrec.capture_scope", "capture_meta", "FAIL", "no play action"),
-    ("ncrec.capture_scope", "delay_zero", "FAIL", "the delays recorded"),
+    ("ncrec.capture_scope", "delay_kept", "FAIL", "the delays recorded"),
     ("ncrec.stop_semantics", "cli_stop_saves", "FAIL", "nothing saved"),
     ("ncrec.stop_semantics", "name_from_pending", "FAIL", "the name the take started with"),
     ("ncrec.play_timing_markers", "replay_at_once", "FAIL", "replayed gap"),
@@ -11719,7 +11730,8 @@ class SbusWorld(FakeInf8):
     buttons are the bench's: its SK and SL stick clicks on the matrix channel at 1074 and 1033 (slots 19 and 20), S1-S6
     unassigned. mut: 'fixed_reader' (D-NC72's and D-NC73's fixes), 'loose_reader' (a partial buffer decodes at a
     silence), 'no_budget' ("frames" is ignored and the stream runs on), 'mode_saves' ("save":false saves), 'dip_two' (a
-    dip lasts two frames)."""
+    dip lasts two frames), 'sticks_on_knobs' (getcfg rx/ry on CH23/CH24, Greg's bench since 2026-10-25; NaviSbusModel
+    puts its knobs there too)."""
     FPS = 111
 
     def __init__(self, mut=()):
@@ -11734,6 +11746,8 @@ class SbusWorld(FakeInf8):
                "btn": [{"l": f"S{i + 1}", "c": 0, "v": 1811} for i in range(6)] + [{"l": "SK", "c": 7, "v": 1074},
                                                                                   {"l": "SL", "c": 7, "v": 1033}],
                "wifiNets": [{"s": "DomeNet", "p": "sekrit99"}]}
+        if "sticks_on_knobs" in self.mut:
+            cfg["rx"], cfg["ry"] = 23, 24
         super().__init__(verbs=True, cfg=cfg, route=True)
         self.rest = list(self.channels)        # output A's frame while the controls are routed away from it
         fixed, loose = _reader_classes()
@@ -11801,10 +11815,10 @@ class SbusWorld(FakeInf8):
             self.advance()
             t, was24, now = o.get("t"), self.st["sbus24"], time.monotonic()
             if t == "a":
-                for axis, ch, neg in (("rx", 1, False), ("ry", 2, True), ("ly", 3, True), ("lx", 4, False)):
+                for axis, neg in (("rx", False), ("ry", True), ("ly", True), ("lx", False)):
                     f = max(-1.0, min(1.0, float(o.get(axis, 0))))
                     f = -f if neg else f
-                    self.channels[ch - 1] = int((f * 0.5 + 0.5) * 1639 + 172 + 0.5)
+                    self.channels[self.cfg[axis] - 1] = int((f * 0.5 + 0.5) * 1639 + 172 + 0.5)
                 return []
             if t == "sw":
                 s = self.cfg["sw"][o["i"]]
@@ -11892,12 +11906,17 @@ class NaviSbusModel(NaviModel):
     reader decoded last, and so do the monitor, rc_hb and rc_ch. mut, the engine's half: 'failsafe_cancels' and
     'frame_timeout' (D-NC21's fix: failsafe, or 100 ms with no frame, cancels a pending tap and hold), and the breaks
     'failsafe_ungated', 'failsafe_keeps_armed' (the gate leaves the matrix armed), 'lost_gates' (a lost frame gates like
-    failsafe), 'release_debounce_2' (a release needs two neutral frames at any debounce)."""
+    failsafe), 'release_debounce_2' (a release needs two neutral frames at any debounce), and the bench's half of
+    'sticks_on_knobs': J1 a passthrough on CH23 onto remote slot 4 channel 3, beside J2 on CH24, as on Greg's bench."""
     TIMEOUT_S = 0.1                           # frame_timeout's outage
 
     def __init__(self, world, mut=()):
         super().__init__()
         self.world, self.mut = world, set(mut)
+        if "sticks_on_knobs" in self.mut:
+            self.merge({"knobs": {"J1": {"channel": 23, "function": 1, "outputs": [
+                {"target": 4, "maestroCh": 3, "posMin": 4000, "posMax": 8000}]}}})
+            self.flash = self.text()
         self.links = {"W1S1": DevLink("W1S1"), "W1S2": DevLink("W1S2")}
         self.elock = threading.RLock()        # one loop(): the console and the engine never interleave
         self.armed, self.cand, self.cand_n, self.neutral_n = False, 0, 0, 0
@@ -12225,6 +12244,23 @@ def t_sbusfault_suite_against_model(tmp):
     assert not any(s in log for s in SECRETS), "a credential reached session.log"
 
 
+def t_sbusfault_sticks_on_knobs(tmp):
+    """Greg's bench since 2026-10-25: the controller's rx and ry sticks on CH23 and CH24, where NaviCore's passthrough
+    knobs J1 (onto remote slot 4, whose frames reach W1 S1) and J2 sit. Every s50 test that moves a stick borrows the
+    knob there (s42 _free_sticks and _sticks_inert, s50 _io_rig and _hi_inert) instead of skipping, so the suite ends
+    as it does with free sticks, and the controller and NaviCore's config are left as found."""
+    res, world, model, log = _run_sbusfault_suite(tmp, mut=("sticks_on_knobs",))
+    assert (world.cfg["rx"], world.cfg["ry"]) == (23, 24), world.cfg
+    bad = [f"{tid}: {r['status']} (expected {SBUSFAULT_WANT.get(tid)}) {r['detail'][:400]}"
+           for tid, r in res.items() if r["status"] != SBUSFAULT_WANT.get(tid)]
+    assert len(res) == len(SBUSFAULT_WANT) == 13, sorted(res)
+    assert not bad, "\n".join(bad)
+    assert world.st == {"flags": 0, "stream": True, "budget": -1, "sbus24": True, "saved24": True,
+                        "route": "navicore"} and not world.saved, (world.st, world.saved)
+    assert model.text() == model.flash, "NaviCore's config was not left as found"
+    assert '"J1":{"channel":23' in model.flash.replace(" ", ""), "J1 is not on CH23 in the model"
+
+
 # (test, world mutation, the status it must then get, a piece of its detail)
 SBUSFAULT_MUTATIONS = (
     ("sbus.truncated_frame_no_phantom", "fixed_reader", "PASS", ""),
@@ -12506,7 +12542,7 @@ TESTS += [t_intellex_run_link_check, t_intellex_tools_helpers]      # IX-WP7/8 (
 TESTS += [t_ncrec_helpers, t_ncrec_suite_against_model, t_ncrec_mutations]   # NC-WP12 (suites/s48_navicore_rec.py)
 TESTS += [t_sbus_inf8_verbs, t_sbus_reader_model, t_sbus_dump_variants, t_sbusfault_helpers,   # INF8, NC-WP11
           t_sbusfault_old_image_skips, t_sbusfault_suite_against_model,                       # (s50_navicore_sbus_faults)
-          t_sbusfault_mutations]
+          t_sbusfault_mutations, t_sbusfault_sticks_on_knobs]
 
 
 def t_bridge_hooks(tmp):

@@ -63,7 +63,7 @@ from suites.s40_navicore_config import _flushed, _hooks, _inert_keys
 from hil.sbus import SBUS_CENTER
 from suites.s41_navicore_engine import _act, _count, _probe_ms, _remote_slot, _wait_all
 from suites.s42_navicore_sbus_engine import (CMD_ACCEL, CMD_SPEED, CMD_TARGET, DBG_WIRE, PAYLOAD, _free_channels, _free_knobs,
-                                            _knob, _knob_rig, _out, knob_pos)
+                                            _free_sticks, _knob, _knob_rig, _out, knob_pos)
 from suites.s44_navicore_devices import wire_log
 
 REC_MAX_MS = 60000          # the capture cap, navicore_record.h:115 (checkRecordBackstop :1012-1021)
@@ -633,7 +633,7 @@ def record_save_list_rm(bench):
 
 # ============================================================ what a take captures
 @test("ncrec.capture_scope", "A take holds every dispatched action and nothing else: a TEST_ACTION marker, a TRIGGERed "
-      "tier's two markers (the delayed one at the time it fired, 600 ms on, its delay kept in the record) and a "
+      "tier's two markers (the delayed one at the time it fired, 600 ms on, recorded with no delay: its time is when it fired) and a "
       "Maestro setSpeed action, in order at their probe-clock spacing; not a play action sent meanwhile (a control, "
       "which also leaves the take running); ?REC,STOP ends it unsaved (RAM only: no clip is written)",
       needs=["navicore", "wcb1"], links=["W1S2"])
@@ -641,10 +641,10 @@ def capture_scope(bench):
     """captureAction (navicore_record.h:258-263) is called first thing in rcExecuteActionNow (NaviCore.ino:2052), which
     every dispatch reaches: TEST_ACTION (rcTestAction, NaviCore.ino:2155-2168), a TRIGGERed tier (rcDispatch
     :2281-2306, then rcExecuteAction :2135-2147), and a delayed action when checkPendingActions fires its copy
-    (:2202-2220). So the delayed marker is captured at its fire time with the pending copy's delayMs still set, which
-    actionToJson writes as "delay" (rc_config.h:976); the replay ignores it (recCbDispatch calls rcExecuteActionNow,
-    NaviCore.ino:2192). RECORD_REPLAY_DESIGN.md §4 says stored events carry delay 0 and §5 that setSpeed is never
-    captured: doc drift (NAVICORE.md D-NC36), noted; the code is followed. A play action is never captured
+    (:2202-2220). So the delayed marker is captured at its fire time, and captureAction clears the pending copy's delay
+    (NaviCore 40560c1: tMs already is when it fired, and replay never delays, recCbDispatch -> rcExecuteActionNow), as
+    RECORD_REPLAY_DESIGN.md §4 says; before 40560c1 the delay was kept (NAVICORE.md D-NC36). §5 says setSpeed is never
+    captured: doc drift, noted; the code is followed. A play action is never captured
     (navicore_record.h:260), and pollControl ignores it while recording (:1045-1053: neither REPLAYING nor idle).
     ?REC,STOP ends the take unsaved (stop() :315-328) and prints ?REC,INFO (NaviCore.ino:3464-3467); the bare
     ?REC,EDITLOAD then streams the take from RAM (parse_resident). The mapping sits on an inert key inside nc_guard (s40
@@ -691,9 +691,9 @@ def capture_scope(bench):
         problems.append(f"the take holds {shape}; expected {want}, all actions (no play action, no rc_trig)")
     else:
         ta, tb, tc = (evs[i]["t"] for i in range(3))
-        if evs[2].get("delay") != DELAY_MS or "delay" in evs[0] or "delay" in evs[1]:
-            problems.append(f"the delays recorded are {[e.get('delay') for e in evs[:3]]}; expected none, none, "
-                            f"{DELAY_MS} (the pending copy's delayMs, kept)")
+        if any("delay" in e for e in evs[:3]):
+            problems.append(f"the delays recorded are {[e.get('delay') for e in evs[:3]]}; expected none at all "
+                            f"(captureAction clears a delay: the time recorded is when it fired)")
         if not DELAY_MS - 2 <= tc - tb <= DELAY_MS + 60:
             problems.append(f"the delayed marker was captured {tc - tb} ms after its tier's first; it fires "
                             f"{DELAY_MS} ms on")
@@ -1432,6 +1432,7 @@ def live_stick_keyframes(bench):
     problems, notes = [], []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")

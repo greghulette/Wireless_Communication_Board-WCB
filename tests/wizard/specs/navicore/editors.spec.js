@@ -47,6 +47,7 @@ test.describe('the bench config', () => {
     expect(BENCH.mappings['102'].t1[0].skipRunning).toBe(true);
     await page.locator('#assignment-list > div').nth(1).click();   // button 2, mode 1: the mapping with the gate
     await expect(page.locator('#modal')).toHaveClass(/open/);
+    await T.openRow(page, 1, 0);
     await page.locator('#note-1-0').fill('hil gate');              // an unchanged Apply sends nothing (D-NC32)
     await modalApply(page);
     const [sent] = await T.waitRequests(emu, 'SET_CONFIG');
@@ -107,6 +108,7 @@ test.describe('the bench config', () => {
     await T.openTool(page);
     await T.connectUsb(page, emu);
     await page.locator('#assignment-list > div').nth(9).click();   // button 10: three actions, one delayed, one noted
+    await T.openRow(page, 1, 0);
     await page.locator('#fields-1-0-cmd').fill(';S2HILTESTED');     // an unsaved edit is what gets fired
     await page.locator('#action-1-0 .btn-test-action').click();
     await page.locator('#action-1-1 .btn-test-action').click();
@@ -149,6 +151,7 @@ test.describe('the bench config', () => {
     const cmd = page.locator('#fields-p0-0-cmd');
     await expect(cmd).toHaveValue('HILSIA');
     expect(await page.evaluate(() => [document.getElementById('fields-p0-0-wcbsel').value, document.getElementById('fields-p0-0-portsel').value])).toEqual(['1', '3']);
+    await T.openRow(page, 'p0', 0);
     await page.locator('#fields-p0-0-wcbsel').selectOption('12');
     await page.locator('#fields-p0-0-portsel').selectOption('3');
     expect(await cmd.evaluate((e) => e.maxLength), 'a 7-character prefix reserves 7').toBe(95 - ';W12;S3'.length);
@@ -158,6 +161,7 @@ test.describe('the bench config', () => {
     await page.evaluate(() => closeModal());
     // Button 13 (;S2HIL113^;S3HIL113 to WCB 1): ;s never routes, so no chain warning; ;M does.
     await page.locator('#assignment-list > div').nth(12).click();
+    await T.openRow(page, 1, 0);
     const chain = page.locator('#fields-1-0 > div').filter({ hasText: 'Chained command sent to one board' });
     await expect(chain).toBeHidden();
     const setCmd = (v) => page.locator('#fields-1-0-cmd').evaluate((e, v) => { e.value = v; e.dispatchEvent(new Event('input')); }, v);
@@ -178,6 +182,43 @@ test.describe('the bench config', () => {
     const cmd = page.locator('#fields-p0-0-cmd');
     await expect(cmd).toHaveValue('HILSIA');
     expect(await cmd.evaluate((e) => e.maxLength), 'the cap on open for ";W1;S3" + command').toBe(95 - ';W1;S3'.length);
+    T.expectNoPageErrors(page);
+  });
+
+  test('nctool.command_route_typed a routing prefix typed into a command goes into its destination when the field is left: ";w2;s3testing" sets WCB 2 / Serial 3 and keeps "testing" (stored as the ;W2;S3 broadcast), ";W3,;M11" and ";w3;M12" set WCB 3 with auto-route (a unicast), a paste takes it at once; a chained command, a board past 20 and a port past 5 stay as typed', async ({ page, emu }) => {
+    await T.openTool(page);
+    await T.connectUsb(page, emu);
+    await page.evaluate(() => setEditingMode(2));
+    await page.locator('#assignment-list > div').nth(1).click();   // mode 2 button 2: no mapping, a blank row open
+    const cmd = page.locator('#fields-1-0-cmd');
+    const dest = () => page.evaluate(() => [document.getElementById('fields-1-0-wcbsel').value, document.getElementById('fields-1-0-portsel').value]);
+    const act = () => page.evaluate(() => readActionFromUI('1', 0));
+    await cmd.fill(';w2;s3testing');
+    expect(await dest(), 'not while typing').toEqual(['1', 'auto']);
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue('testing');
+    expect(await dest()).toEqual(['2', '3']);
+    expect(await act()).toEqual({ type: 'wcb_broadcast', cmd: ';W2;S3testing' });
+    await cmd.fill(';W3,;M11');
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue(';M11');
+    expect(await dest()).toEqual(['3', 'auto']);
+    expect(await act()).toEqual({ type: 'wcb_unicast', target: '3', cmd: ';M11' });
+    await cmd.fill(';w3;M12');
+    await cmd.press('Tab');
+    await expect(cmd).toHaveValue(';M12');
+    expect(await act()).toEqual({ type: 'wcb_unicast', target: '3', cmd: ';M12' });
+    // A paste: at once.
+    await cmd.evaluate((e) => { e.value = ';W2;S1F0025'; e.dispatchEvent(new InputEvent('input', { inputType: 'insertFromPaste', bubbles: true })); });
+    await expect(cmd).toHaveValue('F0025');
+    expect(await dest()).toEqual(['2', '1']);
+    // As typed: a chain, a board past 20, a port past 5.
+    for (const v of [';w2;s3a^;w3;s1b', ';W25;S1x', ';W2;S7x']) {
+      await cmd.fill(v);
+      await cmd.press('Tab');
+      await expect(cmd).toHaveValue(v);
+      expect(await dest()).toEqual(['2', '1']);
+    }
     T.expectNoPageErrors(page);
   });
 

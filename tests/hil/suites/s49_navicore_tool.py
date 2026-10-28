@@ -33,7 +33,7 @@ from hil.runner import Skip, test
 from hil.wizard import run_unit_tests, run_wizard_test
 from suites.common import link, marker, padded, usb_wcb, usb_wcb_number
 from suites.s21_navicore_sbus import _sbus_setup
-from suites.s42_navicore_sbus_engine import _check_value, _stick, axis_arg, axis_value
+from suites.s42_navicore_sbus_engine import _check_value, _free_sticks, _stick, axis_arg, axis_value
 from suites.s47_navicore_ota import (_bench_image, _flash_pass, _idle, _line1, _on_bench_image, _record, _restartable,
                                      _runs, _slot, _status)
 
@@ -69,7 +69,7 @@ _L1 = (
     ("rx_framing_markers", "Lines cut anywhere (a UTF-8 character included) reassemble; [MAE:], [OTA:], [TERM:] and plain text go where they belong; debug lines follow their chip; the pane keeps 3000 lines"),
     ("rx_fragments", "A fragmented CONFIG applies once whatever the order, duplicates and noise; broken envelopes are ignored; an idle session expires and never completes"),
     ("config_error_no_baseline", "A GET_CONFIG answered with an ERROR leaves the tool unloaded, and Save warns before pushing its defaults"),
-    ("apply_all_keys", "Every key GET_CONFIG carries lands in the tool unchanged but for four documented normalizations, and the General and WCB fields show it"),
+    ("apply_all_keys", "Every key GET_CONFIG carries lands in the tool unchanged but for four documented normalizations and the board's limits (read into ncLimits, never into the config), and the General and WCB fields show it"),
     ("no_phantom_diff", "Opening every Config tab and editor, then Save, sends nothing; the last tab is remembered and a stale name falls back to channels"),
     ("save_diff_payload", "An edit typed into General is the only thing Save sends; the hold clamp matches the firmware; a second Save sends nothing"),
     ("save_ack_correlation", "A NACK and a 12 s silence leave the baseline alone, an overlapping Save is refused, a stale saveId is ignored, an ACK with no saveId still counts"),
@@ -88,6 +88,7 @@ _L1 = (
     ("test_action_refusal_shown", "(should) A TEST_ACTION the board refuses (ok:false) is reported to the user (D-NC20)"),
     ("command_view_limits", "The command field reserves the ;W<n>;S<p> prefix after a destination change, warns past 95, and flags only a chained unicast of implicitly-routed verbs"),
     ("command_view_cap_on_open", "(should) An action stored with a ;W<n>;S<p> prefix opens with the prefix already reserved in the field cap"),
+    ("command_route_typed", "A routing prefix typed into a command goes into its destination when the field is left (;w2;s3testing: WCB 2 / Serial 3 and testing; ;W3,;M11: WCB 3 auto-route), a paste at once; a chain, a board past 20 and a port past 5 stay as typed"),
     ("wcb_network_profiles", "The dirty badge tracks the WCB Network fields, a USB Save carries the branch, a profile loads into the fields, and a seventh profile is refused"),
     ("wcb_network_bridged_strip", "Over the bridge a WCB Network edit is not sent: alone it says so, with other edits it is stripped and kept out of the new baseline"),
     # The Firmware tab: GitHub, CryptoJS and esptool-js served by page.route; the emulator speaks ?OTALOCAL and the ?OTA relay.
@@ -135,7 +136,7 @@ _L1 = (
     ("editors_misc", "One real edit on each of the Audio, WLED, Smoothing, Serial Ports and General panes; the hold threshold is clamped above the tap window and says so; one Save carries exactly those branches with the clamped values"),
     ("knob_editor_edits", "A knob editor driven for real: the pass-through function seeds an output, endpoints typed in us are stored in quarter-us, a second output, reverse, a smoothing profile, the switch override, Follow 3 modes with a mode-2 output removed alone; Apply writes the firmware's shape and pushes it to the board itself (a Save meanwhile is refused); an HCR-volume knob edits; Clear All drops the knob and the next Save ships it as {} so the board resets it"),
     ("switch_editor_edits", "A switch editor driven for real: actions typed on Mid survive a change to 2 positions, Down and Up keep their rows, delay and notes, Apply writes exactly that and pushes it to the board itself; back at 3 positions Mid shows what it kept; Clear All drops the switch and the next Save ships it as {} so the board resets it"),
-    ("tier_test_button", "A tier's Test is refused unconnected, with no actions and under an upload; connected it fires the tier's actions in order through TEST_ACTION, waiting each delay, skips a recorder control, aborts when an upload starts mid-sequence; a switch position tests an unsaved edit"),
+    ("tier_test_button", "A tier's Test is refused unconnected, with no actions and under an upload; connected it fires the tier's actions through TEST_ACTION each at its delay after the start, as a press does, skips a recorder control, aborts when an upload starts mid-sequence; a switch position tests an unsaved edit"),
     # The terminal's input side and the live view.
     ("terminal_input", "The terminal opens from the toolbar, its input is disabled until connected; a typed line goes to the board as is and is echoed, blanks send nothing, Up/Down walk the history, Timestamps and Auto-scroll toggle and are remembered, Clear empties the pane, Close closes it"),
     ("terminal_input_via_wcb", "Over the bridge a typed line is echoed clean and sent ;w20,-wrapped with its [TERM:20] reply in the same pane; the WCB column sends raw lines to the bridge WCB; Clear empties both panes"),
@@ -148,6 +149,12 @@ _L1 = (
     ("timeline_edit_tools", "The timeline's editing tools: a dot selected and deleted (Delete, a right-click), Undo and Ctrl+Z over the history, Trim refused at 0, an easing pair Shift-picked and applied (a non-adjacent pair refused), Smooth on the focused channel keeping the ends, zoom, and the discard confirm on close"),
     ("timeline_length_tracks_actions", "Trim start moves everything to 0; a longer length holds the last pose, a shorter one asks and deletes past the end (declined, the field goes back); + Maestro adds an empty track; + Action's popover needs a command, lands on a free time, edits pre-filled and deletes; no servo keyframes refuses the export"),
     ("timeline_preview_export", "Live frees each Maestro channel and sends the pose at the cursor, Preview streams ?MAE to the end and lands on the last pose, Live off stops the stream; the script export downloads a Maestro script with the keyframes reduced to frames"),
+    ("action_timeline_lanes", "A tap's card shows its actions on a timeline above its rows: each at its delay after the press, in the lane of the device it reaches named with where it goes, in the WCB Wizard's home colours, no two alike; each row one line, numbered and named in its dot's colour; the sequence an action runs read with GET_WCB_SEQVAL and drawn under it; the zoom bar steps, jumps and fits; ⤢ Expand widens the editor for it (remembered), ⤡ Shrink puts it back; the double tap's card takes the timeline over and (not exclusive) draws the single tap above as firing with it, an exclusive one does not"),
+    ("action_timeline_edit", "A click on a dot opens its row (one at a time) and marks the dot; a dragged dot sets its row's delay, sticks with a guide, Alt to the ms, never under 0, and the row goes where it fires; a typed delay and Done the same, as does a time typed on the line (ms or a unit; Escape keeps it, not a time refused), a row only opened and closed stays put; the grip reorders, a right-click removes; a click on a lane's empty space adds one of its kind; the button's Apply saves the rows and Cancel drops them"),
+    ("action_timeline_library", "A click on the timeline's empty space adds an action at that time and opens the command library (a double click adds one and leaves it open): a command with no fields lands routed as a new action row routes it, in its device's lane; one with fields goes through the composer, a device string to the WCB port labelled for it; Cancel leaves a blank row the next click reuses; a full tap refuses more"),
+    ("action_timeline_warn", "A delay past the board's 30 minutes is an error until the row's delay is changed; two timed sequences overlapping on one WCB is warned of; clip controls are noted as skipped by Test; a row with no command yet is said to be left out"),
+    ("action_timeline_legacy_board", "A board on firmware from before ten actions a tier sends no limits: the tool holds to five actions a tap (+ Add action and a click on the timeline stop there), a 65535 ms delay (past it the board would wrap it; the zoom stops there) and eight pending slots (more in one press warned of); Save refuses a config the board would cut and sends nothing; a board on current firmware lifts them"),
+    ("action_timeline_test_switch", "Preview with no board runs the cursor, lights each action and sends nothing; the tap's ▶ Test fires its rows each at its delay from the start (two at one delay together) with the cursor running; a switch position's card has the timeline, and a delay typed into its row moves its dot"),
     ("wcb_network_tools", "The WCB Network tab's tools: Reboot and Send gated until connected, the MAC octets as hex, password, ID and channel edit the config (REBOOT PENDING stays after a Save), Reboot clean asks plainly and sends REBOOT, dirty warns about NVS, Send validates and sends WCB_SEND, a profile deleted behind a confirm and one edited in place, the new-peer alert and actions saved as peerEvent"),
     ("mesh_stats_modal", "Mesh stats: the paged MESH_STATS reply merges into a line under each chip and the glance, a duplicate page is ignored and a gap waits for a fresh cycle, the stats checkbox hides the lines and stops the sub-poll, the modal's table, Refresh, auto-poll every 5 s until it closes, Reset behind a confirm then a re-read, unconnected it says to connect"),
     ("share_param_autoconnect", "Opened with ?share=1 while another tab holds the WCB, the tool joins that port as a follower by itself: no picker, no click, the handshake through the owner, the config loaded"),
@@ -264,27 +271,27 @@ def board_test_action_wire(bench):
 def board_live_grid(bench):
     """nct.live.pwm_update on the board: PWM_UPDATE carries NaviCore's decoded channels (sendPWMUpdate,
     NaviCore.ino:3131) and updateChannelsGrid shows each as fmtVal's SBUS count (index.html:11379-11432, :3418-3420). The
-    rx stick's channel must be one NaviCore binds to nothing and rest at centre (s42 _stick); each count's axis argument
-    is s42's axis_arg, checked here first with #L09 so a miss can be told apart from a controller mapping error. The
-    stick is centred again whatever happens (the spec does, and so does this)."""
+    rx stick's channel must be one no switch and not the matrix reads, and rest at centre (s42 _stick); a knob on it is
+    unbound inside the guard before the stick moves (s42 _free_sticks). Each count's axis argument is s42's axis_arg,
+    checked here first with #L09 so a miss can be told apart from a controller mapping error. The stick is centred
+    again whatever happens (the spec does, and so does this)."""
     ctl, nc, cfg, ncfg = _sbus_setup(bench)
     ch = _stick(nc, cfg, ncfg, "rx")
     rest = axis_value(cfg, "rx", 0.0)
     points = []
-    try:
-        for value in (rest + 300, rest - 300):
-            arg = axis_arg(cfg, "rx", value)
-            ctl.axes(0, 0, arg, 0)
-            time.sleep(0.4)
-            bad = _check_value(nc, ch, value, f"the rx stick at {value}")
-            if bad:
-                raise AssertionError("; ".join(bad))
-            points.append({"arg": arg, "value": value})
-    finally:
-        ctl.axes(0, 0, 0, 0)
     with nc_guard(bench) as g:
         _quiet(g.nc)
+        _free_sticks(g, ch)
         try:
+            for value in (rest + 300, rest - 300):
+                arg = axis_arg(cfg, "rx", value)
+                ctl.axes(0, 0, arg, 0)
+                time.sleep(0.4)
+                bad = _check_value(g.nc, ch, value, f"the rx stick at {value}")
+                if bad:
+                    raise AssertionError("; ".join(bad))
+                points.append({"arg": arg, "value": value})
+            ctl.axes(0, 0, 0, 0)
             run_wizard_test(bench, "nctool.board_live_grid", device="navicore", pipe=True,
                             args={"ch": ch, "rest": rest, "points": points})
         finally:

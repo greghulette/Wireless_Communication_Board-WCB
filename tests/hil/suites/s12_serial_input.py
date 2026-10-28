@@ -1421,7 +1421,7 @@ def usb_line_over_heap_dropped_whole(bench):
          f"drop line: {dropped[:1]}): the head ran on its own")
 
 
-@test("input.usb_line_cap_32k", "With W1's WiFi off, so its largest free block is past 32 KB, a 33 KB checksummed ;S0 chain typed on USB meets the cap: one '[SERIAL] S0: line longer than 32768 characters - dropped' line, no token runs, nothing verifies, and the next line runs; W1's own access point is put back (2 reboots)", needs=["wcb1"], links=[], opt_in="wifi_modes", opt_in_why="turns W1's access point off for one boot and reboots it twice")
+@test("input.usb_line_cap_32k", "With W1's WiFi off, so its largest free block is past 32 KB, a 33 KB checksummed ;S0 chain typed on USB meets the cap: one '[SERIAL] S0: line longer than 32768 characters - dropped' line, no token runs, nothing verifies, and the next line runs (sent up to three times while the heap drops it first); W1's own access point is put back (2 reboots)", needs=["wcb1"], links=[], opt_in="wifi_modes", opt_in_why="turns W1's access point off for one boot and reboots it twice")
 def usb_line_cap_32k(bench):
     """Coverage re-scan 2026-10-12, reader.line_cap_usb. processIncomingSerial (WCB.ino) appends a character only while
     the line is shorter than serialLineMax (32768 on USB, 4096 on S1-S5) and drops the whole line past it, so its head
@@ -1452,38 +1452,46 @@ def usb_line_cap_32k(bench):
             if largest < 40000:
                 raise AssertionError(f"with WiFi off W1's largest free block is {largest} bytes, too little for a "
                                      f"32 KB line to reach the cap")
-            tag = "Q" + nonce()[:1]
-            tokens = [f";S0{tag}{k:05d}" for k in range(33500 // 10)]
-            chain = "^".join(tokens)
-            line = f"{chain}^?CHK{zlib.crc32(chain.encode()) & 0xFFFFFFFF:08X}"
-            m = w.dev.mark()
-            w.dev.send_paced(line)
-            last, still, end = -1, time.monotonic(), time.monotonic() + 40.0
-            while time.monotonic() < end:                     # until W1's console has been quiet for 3 s
-                n = len(w.dev.since(m))
-                if n != last:
-                    last, still = n, time.monotonic()
-                elif time.monotonic() - still >= 3.0:
+            # Growing the line buffer past ~30 KB can need the old and the new copy at once (Arduino's String reallocs
+            # in 16-byte steps; one allocation landing after the buffer stops it growing in place), so even with a
+            # 45 KB block free the heap guard may drop the line before the cap does: 2:29 into full run 20261013-021405
+            # ('line too long for the free heap (32208 characters)'), and in 4 of 16 runs to 2026-10-27 (30832
+            # characters, 20261027-100142). The line is still dropped whole (checked each time); only the cap arm went
+            # unreached, so the line is sent again, up to three times, before that is a skip.
+            heap_drops = []
+            for attempt in range(3):
+                tag = "Q" + nonce()[:1]
+                tokens = [f";S0{tag}{k:05d}" for k in range(33500 // 10)]
+                chain = "^".join(tokens)
+                line = f"{chain}^?CHK{zlib.crc32(chain.encode()) & 0xFFFFFFFF:08X}"
+                m = w.dev.mark()
+                w.dev.send_paced(line)
+                last, still, end = -1, time.monotonic(), time.monotonic() + 40.0
+                while time.monotonic() < end:                     # until W1's console has been quiet for 3 s
+                    n = len(w.dev.since(m))
+                    if n != last:
+                        last, still = n, time.monotonic()
+                    elif time.monotonic() - still >= 3.0:
+                        break
+                    time.sleep(0.2)
+                out = [x.rstrip() for x in w.dev.since(m)]
+                ran = sum(1 for x in out if re.match(rf"^{tag}\d{{0,5}}$", x))
+                drops = [x for x in out if x.startswith("[SERIAL] S0:")]
+                bench.note(f"attempt {attempt + 1}: a {len(line)}-byte USB line: {ran} token(s) ran, drop lines {drops[:2]}")
+                heap_drop = len(drops) == 1 and re.match(r"^\[SERIAL\] S0: line too long for the free heap \(\d+ characters\) - dropped$",
+                                                         drops[0])
+                if drops != ["[SERIAL] S0: line longer than 32768 characters - dropped"] and not heap_drop:
+                    problems.append(f"expected one '[SERIAL] S0: line longer than 32768 characters - dropped', got {drops[:3]}")
+                if ran:
+                    problems.append(f"{ran} of the over-long line's tokens ran")
+                if _has(out, "Command checksum"):
+                    problems.append("the over-long line reached the checksum gate")
+                if w.rebooted_since(m):
+                    problems.append("W1 rebooted while it read the over-long line")
+                if problems or not heap_drop:
                     break
-                time.sleep(0.2)
-            out = [x.rstrip() for x in w.dev.since(m)]
-            ran = sum(1 for x in out if re.match(rf"^{tag}\d{{0,5}}$", x))
-            drops = [x for x in out if x.startswith("[SERIAL] S0:")]
-            bench.note(f"a {len(line)}-byte USB line: {ran} token(s) ran, drop lines {drops[:2]}")
-            # Growing the line buffer past ~32 KB can need the old and the new copy at once, so even with a 40 KB
-            # block free the heap guard may drop the line before the cap does - it did 2:29 into full run
-            # 20261013-021405 ('line too long for the free heap (32208 characters)'), where alone it had passed.
-            # The line is still dropped whole (checked below); only the cap arm went unreached, which is a skip.
-            heap_drop = len(drops) == 1 and re.match(r"^\[SERIAL\] S0: line too long for the free heap \(\d+ characters\) - dropped$",
-                                                     drops[0])
-            if drops != ["[SERIAL] S0: line longer than 32768 characters - dropped"] and not heap_drop:
-                problems.append(f"expected one '[SERIAL] S0: line longer than 32768 characters - dropped', got {drops[:3]}")
-            if ran:
-                problems.append(f"{ran} of the over-long line's tokens ran")
-            if _has(out, "Command checksum"):
-                problems.append("the over-long line reached the checksum gate")
-            if w.rebooted_since(m):
-                problems.append("W1 rebooted while it read the over-long line")
+                heap_drops.append(drops[0])
+                time.sleep(1.0)
             t = marker()
             if not any(x.strip() == t for x in w.run(f";S0{t}")):
                 problems.append("the line after the over-long one did not run")
@@ -1492,8 +1500,10 @@ def usb_line_cap_32k(bench):
                 _restore_ap(w, tok, ssid, problems)
     assert not problems, "; ".join(problems)
     if heap_drop:
-        raise Skip(f"W1's heap could not grow the line to the cap ({drops[0]}): dropped whole, nothing ran, but the "
-                   f"32 KB cap arm itself was not reached this time")
+        raise Skip(f"W1's heap could not grow the line to the cap three times running ({'; '.join(heap_drops)}): "
+                   f"dropped whole each time, nothing ran, but the 32 KB cap arm itself was not reached")
+    if heap_drops:
+        bench.note(f"the cap arm was reached after {len(heap_drops)} heap drop(s): {heap_drops}")
 
 
 @test("input.live_baud_text_port", "?BAUD on a soft port while text streams into it neither reboots W1 nor wedges its command reader: five same-rate re-begins of S3 under a stream of comment lines, then 19200 and back with the line quiet, after which a ;S0 line typed into S3 runs", needs=["wcb1"])

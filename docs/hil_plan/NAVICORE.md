@@ -120,7 +120,8 @@ From the latest GET_CONFIG, secrets removed:
 - Switches: SC (CH10) has setEasing tiers on slots 1 and 2; SI (CH16) and SJ (CH17) broadcast `;W1;S3`, `;W2;S2`
   and `;W1;S1` text onto probe-wired ports.
 - SBUS channels NaviCore binds nothing to: 1, 2, 14, 20, 21, 22. The controller's rx and ry sticks are CH1 and CH2
-  (`hil/servos.py:68-69`), which gives two free, finely steerable inputs.
+  (`hil/servos.py:68-69`), which gives two free, finely steerable inputs. (Since 2026-10-25 Greg keeps them on CH23
+  and CH24, NaviCore's passthrough knobs J1 and J2: a stick test unbinds the knob inside its guard, s42 `_free_sticks`.)
 - The image on the board is `results/builds/navicore` (2026-09-22 21:02, HEAD plus the working tree; FLASHED.md). It
   predates the F13 WCB_Client, so `navicore.pull_over_limit` always takes its pre-F13 branch, and its PING reports
   the committed DTG `v0.2.0_102105QSEP26`, which cannot tell images apart.
@@ -446,6 +447,7 @@ A feature counts once, by its main test; one whose main test is unattended but h
 | `nct.clips.backup_bundle` (H) | gap | `nctool.clip_backup_bundle` | L1 | WP3 |
 | `nct.clips.restore` (H) | gap (finding: mode not restored) | `nctool.clip_restore` (collision prompts, ACK retries, bridged 180-B refusal; (should) mode, D-NC33) | L1 | WP3 |
 | `nct.timeline.editor` (H) | gap | `nctool.timeline_editor_save` (partial loads read-only; upload == model; close mid-save aborts) | L1 | WP3 |
+| `nct.action.timeline` (M) | covered 2026-10-26 | `nctool.action_timeline_lanes` (inline in the tap's card: lanes per device, colours, the rows' one-line summaries in the dots' colours, the taps that fire with it, the sequence an action runs, the zoom bar); `nctool.action_timeline_edit` (a dot opens its row, drag with sticking sets the row's delay and moves it where it fires, typed delay and Done, grip reorder, right-click remove, a click on empty space adds of the lane's kind, Apply and Cancel); `nctool.action_timeline_library` (a click adds at a time and opens the library, a double click adds one, routing, a blank row reused, a full tap refused); `nctool.action_timeline_warn` (30-min delay, one timed sequence per WCB, clip controls, a row with no command); `nctool.action_timeline_test_switch` (Preview, the tap's Test at press timing with the cursor, switch positions); `nctool.action_timeline_legacy_board` (a board before the limits: 5 actions, 65535 ms, 8 slots, Save refused) | L1 | WP3 |
 | `nct.cmdlib.catalog`, `nct.cmdlib.encode_decode` (M) | gap | `nctool.unit` (encode then decode every library command); `nctool.cmdlib_catalog_codec` (groups, hidden boards, search) | L0, L1 | WP3 |
 | `nct.cmdlib.seq_source` (M) | gap (CONFIG_TOOL.md:427-430 claims a test that does not exist) | `nctool.unit` (_seqValueToLines equals the Wizard's seqValueToLines, Wizard/app.js:4404, over a corpus); `nctool.seq_source_parity` (the dropdown from WCB_SEQ/SEQVAL replies) | L0, L1 | WP3 |
 | `nct.cmdlib.custom_sync` (M) | gap | `nctool.cmdlib_sync` (SET_CMDLIB data intact, sys first; bulk envelopes &lt;= 187 B; hash == host FNV-1a); L2 `nctool.board_cmdlib_load` | L1, L2 | WP3/13 |
@@ -1266,7 +1268,8 @@ the W1S2 probe:
 >   D-NC44's `(should)`. "A delayed copy survives" is in `ncengine.delay_queue`.
 > - `sbus.lock_under_load` uses `SBUS_FULL_FPS` (90), not 100 (the harness's rule since NC-WP1).
 
-Inputs are the free channels: the rx and ry sticks (CH1, CH2), fine-steerable through `{"t":"a"}`. Outputs go to
+Inputs are the rx and ry sticks (CH1, CH2 then; CH23, CH24 since 2026-10-25, with the knobs there unbound for the
+test), fine-steerable through `{"t":"a"}`. Outputs go to
 remote slot 4 (bytes on W1S1, nothing moves) or to W1S2 markers.
 
 - Matrix and taps: `sbus.matrix_logical_band`, `sbus.matrix_debounce_n`, `sbus.tap_saturation_4`,

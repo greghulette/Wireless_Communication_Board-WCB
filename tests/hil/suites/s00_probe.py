@@ -28,10 +28,11 @@ def probe_links(bench):
     assert not bad, f"wires found but not verified: {bad} — re-run discovery or check the cable orientation"
 
 
-@test("probe.device_links", "Every device-to-device wire answers end to end, which the probe sweep cannot see: SBUS A "
-      "into NaviCore at full rate, NaviCore's J3 to Maestro 1 (?MAE,GET answers), and from one Kyber pad press its "
-      "MarcDuino line into W3 S5 (run by WCB3) and its Maestro frames into W3 S2 (hil/devchecks.py; a link whose devices "
-      "are not on the bench is skipped)", links=[])
+@test("probe.device_links", "Every device-to-device wire answers end to end, which the probe sweep cannot see: W1 S1's "
+      "stand-in Maestro is set up (?MAESTRO,REMOTE and Maestro 1 local on S1), SBUS A into NaviCore at full rate, "
+      "NaviCore's J3 to Maestro 1 (?MAE,GET answers), and from one Kyber pad press its MarcDuino line into W3 S5 (run by "
+      "WCB3) and its Maestro frames into W3 S2 (hil/devchecks.py; a link whose devices are not on the bench is skipped)",
+      links=[])
 def probe_device_links(bench):
     """2026-10-09: auto-detect verified 19 of 19 wires after a rebuild, and kyber.device_pad_serial found the Kyber's
     MarcDuino wire into W3 S5 off hours later. These checks run first, so a run stops on a device wire at once."""

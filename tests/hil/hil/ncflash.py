@@ -92,7 +92,11 @@ KNOWN_GOOD = "navicore"        # folder under BUILDS: the image on the board sin
 # navicore-fix18 stays beside it as the way back.
 # navicore-relay since 2026-10-23 11:40: NaviCore main 9e3d8b7 (mesh results in parts) with the hooks, against
 # WCB_Client 1.20.0 499fe6a (`build --library`), App SHA d721f5157076ef19, v0.2.0_231110ROCT26; navicore-chansync kept.
-BENCH_IMAGE = "navicore-relay"
+# navicore-limits since 2026-10-25 21:17: NaviCore main 9f19b3e (ten actions a tier, 30-minute delays, 32 slots and the
+# board's limits in its config) with the hooks, WCB_Client 1.20.0 499fe6a, App SHA c9b7e0e464ffe2b7,
+# v0.2.0_252112ROCT26; navicore-relay kept. This line lagged its flash by two days: ncota.image_identity failed in full
+# run 20261027-100142 and every same-image flash skipped.
+BENCH_IMAGE = "navicore-limits"
 FLASHED = "FLASHED.md"
 
 # NaviCore/CLAUDE.md:113 and docs/BUILD_AND_RELEASE.md:60, verbatim; build() refuses once CLAUDE.md stops naming it.

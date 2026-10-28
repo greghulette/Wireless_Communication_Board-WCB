@@ -3332,15 +3332,14 @@ def list_setup_line_matches_local(bench):
     assert list_line == local_line, f"?KYBER,LIST printed {list_line!r} for WCB2, ?KYBER,LOCAL printed {local_line!r}"
 
 
-@test("kyber.wdp_autolearn_folds_target", "On a targeted Kyber_Local board a remote Maestro learned from a WDP advert joins the Kyber targets and is saved: 'auto-added remote Maestro', '[WDP] Kyber targets updated for auto-learned remote Maestro', and ?KYBER,LIST and the chain name the W2 target (WDP on for the learn only; 2 reboots)", needs=["wcb1"], links=[])
+@test("kyber.wdp_autolearn_folds_target", "On a targeted Kyber_Local board a remote Maestro learned from a WDP advert joins the Kyber targets and is saved: 'auto-added remote Maestro', '✓ Kyber target M2 → WCB2 added', and ?KYBER,LIST and the chain name the W2 target (WDP on for the learn only; 2 reboots)", needs=["wcb1"], links=[])
 def wdp_autolearn_folds_target(bench):
     """WCB-WP53 row 9. When wdpOnAdvertReceived (WCB_WDP.cpp) adds or re-bauds a remote Maestro proxy
-    (maestroAutoAddRemote) on a Kyber_Local board in targeting mode, it runs reconcileKyberTargetsFromMaestroConfigs
-    (WCB_Storage.cpp), which gives every configured Maestro id that has no target one, saves the table and says so under
-    ?DEBUG,ON. The plan cleared W1's M2:W2 proxy AFTER the Kyber_Local setup; its remote target would survive that clear
-    (_clearMaestroSlot drops only a local slot's target, WCB_Maestro.cpp) and the reconcile, which matches on the id
-    alone, would find it and add nothing. So the proxy is cleared first, and ?KYBER,LOCAL,S2's auto-populated targets
-    never hold it. WDP stays off (it is saved) through the setup and the Kyber_Local boot, is on for the learn only, and
+    (maestroAutoAddRemote) on a Kyber_Local board in targeting mode, a newly claimed proxy adds its own (id, host)
+    target, saves the table and says so ('✓ Kyber target M<id> → WCB<n> added', addRemoteKyberTarget, WCB_Maestro.cpp;
+    tracker #73 D7b - until 2026-10-27 an id-keyed reconcile ran here, which gave every untargeted id a target instead:
+    kyber.wdp_auto_add_own_target). The proxy is cleared before the Kyber_Local setup, so ?KYBER,LOCAL,S2's
+    auto-populated targets never hold it. WDP stays off (it is saved) through the setup and the Kyber_Local boot, is on for the learn only, and
     is off again for the rebuild; what it adds is a remote proxy, which is never advertised."""
     w = usb_wcb(bench)
     _require_remote_pair(bench)
@@ -3382,7 +3381,7 @@ def wdp_autolearn_folds_target(bench):
                 w.run("?WDP,POLL")
                 try:
                     w.dev.expect(r"^\[WDP\] auto-added remote Maestro 2 on WCB2 @ \d+ baud \(slot \d\)", timeout=15, since=wm)
-                    w.dev.expect(r"^\[WDP\] Kyber targets updated for auto-learned remote Maestro", timeout=5, since=wm)
+                    w.dev.expect(r"^✓ Kyber target M2 → WCB2 added$", timeout=5, since=wm)
                 except AssertionError as e:
                     bad.append(f"the learn: {e}")
                 w.run("?WDP,OFF")

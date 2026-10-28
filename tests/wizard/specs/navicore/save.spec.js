@@ -32,7 +32,7 @@ async function fill(page, sel, value) {
 test.describe(() => {
   test.use({ emuOptions: { config: BENCH } });
 
-  test('nctool.apply_all_keys every key GET_CONFIG carries lands in the tool unchanged — but for four documented normalizations — and the General and WCB fields show it', async ({ page, emu }) => {
+  test('nctool.apply_all_keys every key GET_CONFIG carries lands in the tool unchanged — but for four documented normalizations, and the board\'s limits, which go to ncLimits() and never into the config — and the General and WCB fields show it', async ({ page, emu }) => {
     await T.openTool(page);
     await T.connectUsb(page, emu);
     const live = await page.evaluate(() => JSON.parse(JSON.stringify(config)));
@@ -43,6 +43,10 @@ test.describe(() => {
     // The audio destinations MERGE over the tool's defaults ({...config.mp3Dest, ...data.mp3Dest}, :9739-9744), so the
     // key the board leaves out for its transport comes from the default: an 'off'/'serial' dest keeps target '2'.
     for (const k of ['mp3Dest', 'dfpDest']) expected[k] = { transport: 'off', target: '2', port: 'S3', ...expected[k] };
+    // What the board stores is read apart (applyConfig(data, fromBoard), NaviCore CONFIG_SCHEMA.md §4): never into
+    // `config`, so a Save never sends it back.
+    delete expected.limits;
+    expect(await page.evaluate(() => ncLimits())).toEqual({ ...BENCH.limits, legacy: false });
     expect(diffPaths(JSON.parse(stable(live)), JSON.parse(stable(expected))), 'config after load vs the board').toEqual([]);
 
     const ui = await page.evaluate(() => Object.fromEntries(['tapwin-input', 'holdms-input', 'switchsettle-input', 'chrate-input',

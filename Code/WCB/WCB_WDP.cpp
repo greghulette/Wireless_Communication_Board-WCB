@@ -758,24 +758,12 @@ void wdpOnAdvertReceived(int senderWCB, const uint8_t *cmd) {
   bool isControllerPeer = (specialPeerEnabled && senderWCB == WCB_SPECIAL_PEER_ID);
   if (wdpAutoJoin && !wcbPeerTemporary[senderWCB - 1] &&
       (isControllerPeer || (!nb.isClient && wcbPeerActive[senderWCB - 1]))) {   // never derive PERSISTED config from a temp peer
-    bool maestroChanged = false;
+    // On a Kyber host forwarding by target, maestroAutoAddRemote also adds the newly learned Maestro's own target
+    // (tracker #73 D7b); the id-keyed reconcile that ran here after it added every other id instead.
     for (int i = 0; i < nb.maestroCount && i < WDP_MAX_MAESTRO; i++) {
       uint32_t baud = wdpCodeToBaud(nb.maestroBaudCode[i]);
       if (baud == 0) continue;   // unknown / garbled / baud-0 — nothing to configure
-      if (maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud))
-        maestroChanged = true;
-    }
-    // If THIS board is the Kyber host forwarding by target, a newly auto-learned
-    // remote Maestro must land in kyberTargets[] too — otherwise forwardDataFromKyber
-    // never broadcasts the sabre stream to the just-discovered board until a manual
-    // ?KYBER,LOCAL re-issue. Add-only so a manual remote-port stays put; broadcast
-    // mode (kyberUseTargeting==false) already reaches remote Maestros, so skip it.
-    if (maestroChanged && Kyber_Local && kyberUseTargeting) {
-      if (reconcileKyberTargetsFromMaestroConfigs() > 0) {
-        saveKyberTargets();
-        if (debugEnabled)
-          Serial.println("[WDP] Kyber targets updated for auto-learned remote Maestro");
-      }
+      maestroAutoAddRemote(nb.maestroIds[i], (uint8_t)senderWCB, baud);
     }
     for (int i = 0; i < nb.wledCount && i < WDP_MAX_WLED; i++) {   // same rules for WLED
       uint32_t baud = wdpCodeToBaud(nb.wledBaudCode[i]);

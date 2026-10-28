@@ -5,7 +5,7 @@
       "port": "COM6",
       "kind": "wcb",
       "wcb": 1,
-      "note": "HW 1.0 (LilyGO T7), CH9102"
+      "note": "HW 1.0 (LilyGO T7), CH9102. Test stand-in, keep it: ?MAESTRO,REMOTE and ?MAESTRO,M1:W1S1:57600 make probe 1 on W1 S1 play a Maestro (there is no real one on W1: Maestro 1 is on NaviCore, Maestro 2 on W2), so NaviCore's and the Kyber's remote-slot frames reach it and move nothing; probe.device_links checks it (hil/devchecks.py _w1_stand_in)"
     },
     "probe1": {
       "port": "COM11",

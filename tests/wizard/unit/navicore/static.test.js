@@ -77,6 +77,8 @@ test('nctool.static: the firmware/tool constant pairs agree (CONFIG_SCHEMA.md §
     ['tap tiers', num(cfg, /#define\s+RC_NUM_TAP_TIERS\s+(\d+)/, 'RC_NUM_TAP_TIERS'), num(html, /^const NUM_TAP_TIERS\s*=\s*(\d+)/m, 'NUM_TAP_TIERS')],
     ['long-press tap', num(cfg, /#define\s+RC_TAP_LONG\s+(\d+)/, 'RC_TAP_LONG'), num(html, /^const TAP_LONG\s*=\s*(\d+)/m, 'TAP_LONG')],
     ['actions per tier', num(cfg, /#define\s+RC_ACTIONS_PER_TIER\s+(\d+)/, 'RC_ACTIONS_PER_TIER'), num(html, /^const MAX_ACTIONS_PER_TIER\s*=\s*(\d+)/m, 'MAX_ACTIONS_PER_TIER')],
+    ['action delay (ms)', num(cfg, /#define\s+RC_MAX_DELAY_MS\s+(\d+)/, 'RC_MAX_DELAY_MS'), num(html, /^const AT_DELAY_MAX\s*=\s*(\d+)/m, 'AT_DELAY_MAX')],
+    ['pending slots', num(cfg, /#define\s+PENDING_ACTION_SLOTS\s+(\d+)/, 'PENDING_ACTION_SLOTS'), num(html, /^const AT_PENDING_MAX\s*=\s*(\d+)/m, 'AT_PENDING_MAX')],
     ['knob outputs', num(cfg, /#define\s+RC_KNOB_MAX_OUTPUTS\s+(\d+)/, 'RC_KNOB_MAX_OUTPUTS'), num(html, /^const KNOB_MAX_OUTPUTS\s*=\s*(\d+)/m, 'KNOB_MAX_OUTPUTS')],
     ['Maestro slots', num(cfg, /#define\s+RC_NUM_MAESTROS\s+(\d+)/, 'RC_NUM_MAESTROS'), num(html, /^const NUM_MAESTRO_SLOTS\s*=\s*(\d+)/m, 'NUM_MAESTRO_SLOTS')],
     ['WLED slots', num(cfg, /#define\s+RC_NUM_WLED\s+(\d+)/, 'RC_NUM_WLED'), num(html, /^const NUM_WLED_SLOTS\s*=\s*(\d+)/m, 'NUM_WLED_SLOTS')],

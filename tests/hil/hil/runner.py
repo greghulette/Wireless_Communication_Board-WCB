@@ -183,14 +183,28 @@ def area_of(t):
     return t["id"].split(".")[0]
 
 
+def _split_globs(selectors):
+    """(exact ids as a set, the globs). A full run names every id: 1,502 of them through fnmatch for each test thrashed
+    its 256-pattern cache, a regex compiled per pair, and the GUI sat at 100% CPU for two minutes before its run folder
+    appeared (2026-10-27)."""
+    exact = {s for s in selectors if not any(c in s for c in "*?[")}
+    return exact, [s for s in selectors if s not in exact]
+
+
 def select(selectors):
-    return [t for t in REGISTRY if not selectors or any(fnmatch.fnmatch(t["id"], s) for s in selectors)]
+    if not selectors:
+        return list(REGISTRY)
+    exact, globs = _split_globs(selectors)
+    return [t for t in REGISTRY if t["id"] in exact or any(fnmatch.fnmatch(t["id"], s) for s in globs)]
 
 
 def unmatched(selectors):
     """The selectors no registered test matches. select() drops them in silence, so a typo, or the '\r' a Windows list
     file leaves on every id, runs fewer tests than asked and still reads '0 failed' (2026-10-05: 103 of 104 ids)."""
-    return [s for s in selectors or [] if not any(fnmatch.fnmatch(t["id"], s) for t in REGISTRY)]
+    exact, globs = _split_globs(selectors or [])
+    ids = {t["id"] for t in REGISTRY}
+    return [s for s in selectors or []
+            if (s not in ids if s in exact else not any(fnmatch.fnmatch(i, s) for i in ids))]
 
 
 class Bench:

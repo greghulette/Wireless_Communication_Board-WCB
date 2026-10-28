@@ -430,6 +430,88 @@ def wdp_auto_add_beside_local(bench):
 # Rows 2 and 3: the RC relay. JSON from the mesh reaches W1's USB only while a host holds the 20 s window open
 # (WCB.ino:7941-7943) and no OTA command came in the last 8 s (:399-402, :5454, :5762, :6600, :6612); it goes through
 # a 64-slot queue drained in loop() (:377-411), and a full queue counts and prints every line it drops (:420-439).
+def _kyber_targets(line):
+    """The targets of a ?KYBER,LOCAL,S<n>,M<id>:W<wcb>S<p>:<baud>,... line, in table order: [(id, wcb, baud)]."""
+    return [(int(m.group(1)), int(m.group(2)), int(m.group(4)))
+            for m in re.finditer(r"M(\d):W(\d+)S(\d):(\d+)", line.split(",", 3)[3] if line.count(",") >= 3 else "")]
+
+
+@test("kyber.wdp_auto_add_own_target", "(should) On W3, the Kyber host forwarding by target, clearing its M2:W2 proxy takes that Maestro's Kyber target with it, and the proxy learnt back from W2's next advert brings back that one target and no other: W3's ?KYBER,LOCAL line ends as it began, with no target for a Maestro its explicit list left out (tracker #73 D7b; mesh.relay_renumber_reboot in full run 20261027-100142) (WDP on; no reboot)", needs=["wcb3", "wcb2"], links=[])
+def wdp_auto_add_own_target(bench):
+    """forwardDataFromKyber sends each enabled kyberTargets[] entry's bytes to its board, and ?backup's KYBER,LOCAL line
+    lists every one (WCB.ino), so a target is configuration. Local targets follow their slots since #73 D7
+    (dropLocalKyberTargets / addLocalKyberTarget, WCB_Maestro.cpp); D7b did the same for remote ones. Before it, a
+    cleared remote proxy kept its target, and every WDP auto-add on a targeted Kyber host ran
+    reconcileKyberTargetsFromMaestroConfigs, which added a target for every configured id that had none - keyed by id
+    alone, so the newly learnt Maestro got none when another board's Maestro of its id had one, and a Maestro the explicit
+    list left out got one. On the bench W3's list names M2:W2 only while its table also proxies M1 to W1, NaviCore and
+    W2: learning W2's Maestro 2 on WCB4 (a renumber) put M1:W1S1 into the line, and config_guard does not replay ?KYBER.
+    W3's proxy goes back into the slot it left only when every slot below it is taken (as
+    maestro.wdp_auto_add_readd_rebaud checks); the original ?KYBER,LOCAL line, an explicit list that rebuilds the target
+    table, is sent again if the line differs at the end."""
+    w3 = WCB(bench.dev("wcb3"))
+    toks = bench.config_tokens(3, refresh=True)
+    if "?WDP,OFF" in toks or "?WDP,AUTOJOIN,OFF" in toks:
+        raise Skip("W3's WDP or its auto-join is off, so it auto-adds no Maestro")
+    if "?WDP,OFF" in bench.config_tokens(2, refresh=True):
+        raise Skip("W2's WDP is off, so it advertises no Maestro")
+    kline = next((t for t in toks if t.upper().startswith("?KYBER,LOCAL,S")), None)
+    targets = _kyber_targets(kline or "")
+    if not kline or not targets:
+        raise Skip(f"W3 is not a Kyber host with an explicit target list ({kline!r})")
+    l3, l2 = _m_lines(toks), _m_lines(bench.config_tokens(2, refresh=True))
+    proxy, host = _slot(l3, 2, 2), _slot(l2, 2, 2)
+    if not host:
+        raise Skip("W2 hosts no local Maestro 2")
+    if not proxy or not any(t[:2] == (2, 2) for t in targets):
+        raise Skip(f"W3 has no M2:W2 proxy with a Kyber target to clear ({kline})")
+    if proxy[1] != host[1]:
+        raise Skip(f"W3's M2:W2 proxy is at {proxy[1]} baud but W2's Maestro 2 at {host[1]}")
+    line = f"?MAESTRO,M2:W2S{proxy[0]}:{proxy[1]}"
+    idx = next(i for i, t in enumerate(l3) if t.upper() == line.upper())
+    left_out = sorted({int(re.match(r"^\?MAESTRO,M(\d)", t, re.I).group(1)) for t in l3} - {t[0] for t in targets})
+    bench.note(f"W3's Kyber targets {targets}; ids in its Maestro table with no target: {left_out}")
+
+    def kyber_line():
+        return next((t for t in snapshot(bench, 3) if t.upper().startswith("?KYBER,LOCAL,S")), None)
+
+    bad = []
+    with config_guard(bench, 3):
+        k = _slot_of(w3, line)
+        if k != idx + 1:
+            raise Skip(f"W3's M2:W2 proxy sits in slot {k} with a free slot below it: learnt back, it would move and "
+                       f"reorder W3's table")
+        try:
+            m = w3.dev.mark()
+            out = [x.rstrip() for x in w3.run(f"?MAESTRO,CLEAR,M2:W2S{proxy[0]}")]
+            if f"Cleared Maestro M2:W2S{proxy[0]} (freed slot {k})" not in out:
+                raise AssertionError(f"?MAESTRO,CLEAR,M2:W2S{proxy[0]} printed {out}")
+            mid = _kyber_targets(kyber_line() or "")
+            if any(t[:2] == (2, 2) for t in mid):
+                bad.append(f"the cleared M2:W2 proxy kept its Kyber target: {mid} (?backup would re-create the slot)")
+            got, polls = _poll_expect(w3, AUTO_ADDED.format(mid=2, host=2), since=m)
+            if got is None:
+                bad.append(f"W3 did not learn the cleared M2:W2 proxy back from W2's advert ({polls} polls)")
+            elif (int(got.group(1)), int(got.group(2))) != (host[1], k):
+                bad.append(f"the proxy was learnt back at {got.group(1)} baud in slot {got.group(2)}, expected "
+                           f"{host[1]} in slot {k}")
+            time.sleep(1.0)
+            end = _kyber_targets(kyber_line() or "")
+            added = [t for t in end if t not in targets]
+            if added:
+                bad.append(f"learning M2:W2 added Kyber target(s) {added} the explicit list left out")
+            if not any(t[:2] == (2, 2) for t in end):
+                bad.append(f"learning M2:W2 back gave it no Kyber target: {end}")
+            if _m_lines(snapshot(bench, 3)) != l3:
+                bad.append("W3's Maestro table is not as before after the auto-add")
+        finally:
+            if line.upper() not in [t.upper() for t in _m_lines(snapshot(bench, 3))]:
+                w3.run(line)
+            if kyber_line() != kline:
+                w3.run(kline, timeout=8)
+    assert not bad, "; ".join(bad)
+
+
 @test("navicore.rc_relay_ota_pause", "Any ?OTALOCAL command pauses W1's RC telemetry relay for 8 s: a PING sent right after ?OTALOCAL,STATUS gets no relayed PONG and no rc_* line for 6 s, and a PING 9 s after it brings the PONG back (no OTA session, nothing erased; ~20 s)", needs=["wcb1", "navicore"], links=[])
 def rc_relay_ota_pause(bench):
     """WCB-WP28 row 2 (wcb.rx.rc_relay_paused_during_ota, wcb.rcrelay.ota_pause). ?OTALOCAL sets

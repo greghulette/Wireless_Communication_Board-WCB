@@ -26,7 +26,7 @@ ____    __    ____  __  .______       _______  __       _______      _______.   
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///*****                                                                                                         *****////
 ///*****                                          Created by Greg Hulette.                                      *****////
-///*****                                          Version 7.1.1_251514ROCT2026                                  *****////
+///*****                                          Version 7.1.1_272116ROCT2026                                  *****////
 ///*****                                                                                                        *****////
 ///*****                                 So exactly what does this all do.....?                                 *****////
 ///*****                       - Receives commands via Serial or ESP-NOW                                        *****////
@@ -203,7 +203,7 @@ bool debugPWMEnabled = false;
 bool debugPWMPassthrough = false;  // Debug flag for PWM passthrough operations
 // WCB Board HW and SW version Variables
 int wcb_hw_version = 0;  // Default = 0, Version 1.0 = 1 Version 2.1 = 21, Version 2.3 = 23, Version 2.4 = 24, Version 3.1 = 31, Version 3.2 = 32
-String SoftwareVersion = "7.1.1_251514ROCT2026";
+String SoftwareVersion = "7.1.1_272116ROCT2026";
 
 // ESP-NOW Statistics
 unsigned long espnowSendAttempts = 0;
@@ -4128,9 +4128,14 @@ void collectConfigCommands(const std::function<void(const String &cmd, bool incl
     // Append all enabled Kyber targets so the backup fully restores the routing table
     for (int i = 0; i < MAX_KYBER_TARGETS; i++) {
       if (!kyberTargets[i].enabled) continue;
-      // Look up baud from maestro config; fall back to the port's current baud rate
+      // Look up baud from the target's own Maestro slot - keyed (id, port) here or (id, board) remote, as the
+      // slots are (rule 5): by id alone a second board's Maestro of the same id took the first one's baud - then
+      // any slot of that id, then the port's current baud rate
       uint32_t baud = 9600;
-      int8_t slot = findSlotByMaestroID(kyberTargets[i].maestroID);
+      const bool here = kyberTargets[i].targetWCB == (uint8_t)WCB_Number;
+      int8_t slot = findSlotByMaestroIDPortTarget(kyberTargets[i].maestroID, here ? kyberTargets[i].targetPort : 0,
+                                                  here ? 0 : kyberTargets[i].targetWCB);
+      if (slot < 0) slot = findSlotByMaestroID(kyberTargets[i].maestroID);
       if (slot >= 0 && maestroConfigs[slot].baudRate > 0) {
         baud = maestroConfigs[slot].baudRate;
       } else if (kyberTargets[i].targetWCB == (uint8_t)WCB_Number &&

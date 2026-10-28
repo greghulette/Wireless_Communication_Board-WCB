@@ -1391,5 +1391,10 @@
    "name": "",
    "entries": []
   }
- ]
+ ],
+ "limits": {
+  "actionsPerTier": 10,
+  "maxDelayMs": 1800000,
+  "pendingSlots": 32
+ }
 }

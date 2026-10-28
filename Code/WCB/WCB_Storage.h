@@ -257,7 +257,6 @@ bool kyberModeReservesPort(int port);   // the one port a Kyber mode takes from 
 // kyberTargets[] entry, WITHOUT disturbing existing entries (or their documented
 // remote ports). Used when WDP auto-learns a remote Maestro so a Kyber-LOCAL host
 // begins forwarding to it with no manual ?KYBER,LOCAL re-issue. Returns # added.
-int reconcileKyberTargetsFromMaestroConfigs();
 void printKyberList();
 
 

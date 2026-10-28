@@ -146,7 +146,15 @@ function fwButtons(page) {
     .map((id) => [id, !document.getElementById(id).disabled])));
 }
 
+// Open an action row's fields. A tier's rows load folded to one line each (buildActionRow: a new or blank row opens
+// by itself), and a click on the line opens its fields, as a user does; one row is open at a time.
+async function openRow(page, tier, ai) {
+  const row = page.locator(`#action-${tier}-${ai}`);
+  if (!(await row.evaluate((r) => r.classList.contains('open')))) await row.locator('.ar-num').click();   // (the time is a field)
+  await expect(row).toHaveClass(/\bopen\b/);
+}
+
 module.exports = {
   TOOL_PATH, openTool, connectUsb, connectViaWcb, connectFast, state, termLines, toasts, waitRequests,
-  expectNoPageErrors, answerDialogs, fwButtons, captureDownloads, chooseFile,
+  expectNoPageErrors, answerDialogs, fwButtons, captureDownloads, chooseFile, openRow,
 };

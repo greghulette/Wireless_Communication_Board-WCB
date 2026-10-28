@@ -4,10 +4,12 @@ its taps, switch tiers, the mode switch, knobs, and the SBUS reader under load a
 but sbus.lock_under_load (it only reads) moves an SBUS channel or can make NaviCore move a servo, and those are in
 hil/servos.py.
 
-The inputs. The controller (hil/sbus.py SbusCtl) is driven with JSON only. Its rx and ry sticks (CH1 and CH2 on this
-bench: getcfg rx/ry) are channels NaviCore binds to nothing (NAVICORE.md §1.4; _stick re-checks against the running
-config), steerable to the exact SBUS count: axisToSbusRange is inverted here (axis_arg), and #L09 confirms the count
-where precision matters. A test binds a knob, a switch or the mode function to a stick inside nc_guard, so the
+The inputs. The controller (hil/sbus.py SbusCtl) is driven with JSON only. Its rx and ry sticks (getcfg rx/ry: CH1
+and CH2 until 2026-10-25, then CH23 and CH24, which Greg mapped onto NaviCore's passthrough knobs J1 and J2) are on
+channels no switch and not the matrix reads (_stick re-checks against the running config); a knob there is borrowed
+for the test - unbound inside its nc_guard (_free_sticks, or _sticks_inert for a test with no guard), so the stick
+moves nothing but what the test binds. They are steerable to the exact SBUS count: axisToSbusRange is inverted here
+(axis_arg), and #L09 confirms the count where precision matters. A test binds a knob, a switch or the mode function to a stick inside nc_guard, so the
 rebinding is undone byte-identically. The matrix is exercised with the controller's own matrix buttons: RB1 and RB2
 decode to slots no mapping uses in any mode here (rc_trig only, or a guarded marker mapping), and the controller's lua
 buttons sit on values no band covers, where a test places a logical band (22-36). Everything moved is released: the
@@ -30,6 +32,7 @@ import json
 import random
 import re
 import time
+from contextlib import contextmanager
 
 from hil.nc_guard import nc_guard
 from hil.navicore import DBG_HCR, SBUS_FULL_FPS
@@ -91,30 +94,62 @@ class Sticks:
         self.ctl.axes(0, 0, 0, 0)
 
 
-def _bound_channels(ncfg):
+def _bound_channels(ncfg, knobs=True):
     """SBUS channels NaviCore's config reads to act on: the matrix, every switch (tiers, the mode function, a knob's mode
-    override), every knob with a function."""
+    override), and with `knobs` every knob with a function."""
     out = {ncfg.get("matrixChannel")}
     out |= {s.get("channel") for s in (ncfg.get("switches") or {}).values()}
-    out |= {k.get("channel") for k in (ncfg.get("knobs") or {}).values() if k.get("function")}
+    if knobs:
+        out |= {k.get("channel") for k in (ncfg.get("knobs") or {}).values() if k.get("function")}
     out.discard(None)
     out.discard(0)
     return out
 
 
 def _stick(nc, cfg, ncfg, axis="rx"):
-    """The SBUS channel of the controller's `axis` stick, or Skip: NaviCore's running config must bind it to nothing,
-    and it must rest at its centre now."""
+    """The SBUS channel of the controller's `axis` stick, or Skip: no switch and not the matrix may read it in NaviCore's
+    running config, and it must rest at its centre now. A knob with a function there is the caller's to borrow: it
+    calls _free_sticks inside its nc_guard (or opens _sticks_inert) before the stick moves."""
     ch = cfg.get(axis)
     if not ch or not 1 <= ch <= 24:
         raise Skip(f"the controller names no channel for its {axis} stick")
-    if ch in _bound_channels(ncfg):
-        raise Skip(f"NaviCore binds CH{ch} (the {axis} stick) to something: moving it could act")
+    if ch in _bound_channels(ncfg, knobs=False):
+        raise Skip(f"NaviCore binds CH{ch} (the {axis} stick) to a switch or the matrix: moving it could act")
     rest = axis_value(cfg, axis, 0.0)
     now = nc.sbus_dump()["channels"][ch - 1]
     if now != rest:
         raise Skip(f"CH{ch} reads {now}, not the {axis} stick's centre {rest}: someone left it deflected")
     return ch
+
+
+def _stick_knobs(ncfg, chans):
+    """The labels of the knobs with a function on any of the SBUS channels `chans`, sorted."""
+    chans = set(chans)
+    return sorted(lab for lab, k in (ncfg.get("knobs") or {}).items()
+                  if isinstance(k, dict) and k.get("function") and k.get("channel") in chans)
+
+
+def _free_sticks(g, *chans):
+    """Inside nc_guard `g`, before a stick on `chans` moves: every knob with a function on those channels unbound
+    (channel 0, the rest of each object as it was - s50 _hi_inert's way), so the stick drives nothing but what the test
+    binds there. The controller's sticks may sit on NaviCore's passthrough knobs (rx/ry on CH23/24, J1/J2, since 2026-10-25;
+    Greg keeps it so). The guard puts the knobs back. -> the labels unbound; [] and no write when there are none."""
+    labs = _stick_knobs(g.before, chans)
+    if labs:
+        g.nc.set_config({"knobs": {lab: dict(g.before["knobs"][lab], channel=0) for lab in labs}})
+        time.sleep(1.0)
+    return labs
+
+
+@contextmanager
+def _sticks_inert(bench, ncfg, *chans):
+    """_free_sticks for a test with no nc_guard of its own: the guard is opened only when a knob is on `chans`.
+    -> (the guard or None, the labels unbound)."""
+    if not _stick_knobs(ncfg, chans):
+        yield None, []
+        return
+    with nc_guard(bench) as g:
+        yield g, _free_sticks(g, *chans)
 
 
 def _check_value(nc, ch, want, what):
@@ -723,6 +758,7 @@ def switch_tiers_settle_seed(bench):
     problems, notes = [], []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch, ch2)
         free = _free_switches(g.before)
         if not free:
             raise Skip("no free switch to rebind")
@@ -813,6 +849,7 @@ def switch_easing_seed(bench):
     try:
         with nc_guard(bench) as g:
             nc = g.nc
+            _free_sticks(g, ch)
             knobs, switches, prof = _free_knobs(g.before), _free_switches(g.before), _free_profile(g.before)
             if not knobs or not switches or prof is None:
                 raise Skip("no free knob, switch or smoothing profile to borrow")
@@ -896,6 +933,7 @@ def mode_switch_decode(bench):
     try:
         with nc_guard(bench) as g:
             nc = g.nc
+            _free_sticks(g, ch)
             try:
                 if k is None:
                     notes.append(f"no controller switch on the mode channel CH{mode_ch}: part 1 left out")
@@ -965,6 +1003,7 @@ def knob_passthrough_remote(bench):
     tgt = CMD_TARGET
     with nc_guard(bench) as g:
         nc = w.nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")
@@ -1025,6 +1064,7 @@ def knob_mode_aware(bench):
     tgt = CMD_TARGET
     with nc_guard(bench) as g:
         nc = w.nc = g.nc
+        _free_sticks(g, ch, ch2)
         knobs, switches = _free_knobs(g.before), _free_switches(g.before)
         if len(knobs) < 2 or not switches:
             raise Skip("fewer than two free knobs, or no switch for the override")
@@ -1078,6 +1118,7 @@ def knob_auto_release(bench):
     problems, notes = [], []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")
@@ -1168,6 +1209,7 @@ def knob_settle_resend(bench):
             problems.append(f"{what}: the resend came {gap} ms after the frame, not about 250 ms")
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")
@@ -1205,6 +1247,7 @@ def knob_easing_resolve(bench):
         return [f for f in _frames(l11, since, dev, {x}) if f[0] in (CMD_SPEED, CMD_ACCEL)]
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs, prof = _free_knobs(g.before), _free_profile(g.before)
         if not knobs or prof is None:
             raise Skip("no free knob or smoothing profile to borrow")
@@ -1283,6 +1326,7 @@ def knob_hcr_volume(bench):
     problems = []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")
@@ -1338,6 +1382,7 @@ def calibration_mutes_knobs(bench):
     problems = []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs = _free_knobs(g.before)
         if not knobs:
             raise Skip("no free knob to borrow")
@@ -1622,6 +1667,7 @@ def reconfig_live(bench):
     problems, notes = [], []
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         tap_ms, rate = g.before.get("tapWindowMs", 500), g.before.get("chRateHz", 5)
         free = _free_switches(g.before)
         if not free:
@@ -1750,6 +1796,7 @@ def knob_ease_switch_override(bench):
             problems.append(f"setEasing,{arg}: ACK {ack}")
     with nc_guard(bench) as g:
         nc = g.nc
+        _free_sticks(g, ch)
         knobs, p1 = _free_knobs(g.before), _free_profile(g.before)
         if not knobs or p1 is None:
             raise Skip("no free knob or smoothing profile to borrow")

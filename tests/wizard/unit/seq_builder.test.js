@@ -317,3 +317,39 @@ test('library: Wizard/cmdlib is the same as NaviCore\'s config_tool/cmdlib (droi
     }
   }
 });
+
+// A device wears one colour in both tools: NaviCore's action timeline (config_tool/index.html, --at-c1..8 and
+// AT_BOARD_SLOT, NaviCore docs/CONFIG_TOOL.md §4b) uses this builder's eight colours in its order, in both themes, and
+// give every board this builder knows the same home slot (NaviCore adds its own boards). Skipped where NaviCore is not
+// beside this repo (CI).
+test('colour: NaviCore\'s action timeline uses the builder\'s palette and home slots', (t) => {
+  const ncHtml = path.join(WIZ, '..', '..', 'NaviCore', 'config_tool', 'index.html');
+  if (!fs.existsSync(ncHtml)) { t.skip('NaviCore is not beside this repo'); return; }
+  const html = fs.readFileSync(ncHtml, 'utf8');
+  const css = fs.readFileSync(path.join(WIZ, 'seq-builder.css'), 'utf8');
+  // The colour tokens a rule block defines: { 'c1': '#..', ..., 'cx': '#..' }.
+  const tokens = (text, selector, prefix) => {
+    const at = text.indexOf(selector + ' {');
+    assert.ok(at >= 0, `${selector} not found`);
+    const block = text.slice(at, text.indexOf('}', at));
+    const out = {};
+    for (const m of block.matchAll(new RegExp(`--${prefix}-(c\\d|cx):\\s*(#[0-9a-fA-F]{6})`, 'g'))) out[m[1]] = m[2].toLowerCase();
+    assert.strictEqual(Object.keys(out).length, 9, `${selector}: expected --${prefix}-c1..8 and -cx`);
+    return out;
+  };
+  // NaviCore's dark tokens are the :root block that defines --at-c1 (its file has other :root blocks).
+  const ncDarkAt = html.indexOf('--at-c1:');
+  assert.ok(ncDarkAt >= 0, 'NaviCore: --at-c1 not found');
+  const ncDark = tokens(html.slice(html.lastIndexOf(':root', ncDarkAt)), ':root', 'at');
+  const ncLight = tokens(html.slice(html.indexOf('body.theme-light {', ncDarkAt)), 'body.theme-light', 'at');
+  assert.deepStrictEqual(ncDark, tokens(css, ':root', 'sb'), 'dark theme colours differ');
+  assert.deepStrictEqual(ncLight, tokens(css, ':root.light', 'sb'), 'light theme colours differ');
+  const table = (text, name) => {
+    const m = new RegExp(`const ${name} = (\\{[\\s\\S]*?\\n\\});`).exec(text);
+    assert.ok(m, `${name} not found`);
+    return vm.runInNewContext('(' + m[1] + ')');
+  };
+  const sb = table(fs.readFileSync(path.join(WIZ, 'seq-builder.js'), 'utf8'), 'SB_BOARD_SLOT');
+  const at = table(html, 'AT_BOARD_SLOT');
+  for (const [id, slot] of Object.entries(sb)) assert.strictEqual(at[id], slot, `${id}: home slot ${at[id]} in NaviCore, ${slot} here`);
+});

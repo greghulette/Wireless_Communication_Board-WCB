@@ -94,7 +94,9 @@ const methods = {
     const c = this.clips.get(clipName(name));
     if (!c || this.rec.state !== 'idle') return false;
     const cap = this.clipFault.cap || 24000;
-    this.rec.events = c.events.slice(0, cap).map((e) => ({ ...e }));
+    // loadClip clears a stored action's delay (NaviCore 40560c1: tMs is when it fired, and a clip saved before
+    // RcAction::delayHi holds padding there), so a download never shows one.
+    this.rec.events = c.events.slice(0, cap).map((e) => { const c2 = { ...e }; if (c2.k === 0) delete c2.delay; return c2; });
     this.rec.mode = c.mode;
     this.rec.loadedName = clipName(name);
     this.rec.loadedFc = c.events.length;
@@ -114,7 +116,11 @@ const methods = {
     out(`[REC] state=${st}  events=${this.rec.events.length}/${this.clipFault.cap || 24000}  dur=${durOf(this.rec.events)}ms  drops=0  buf=ok`);
   },
   // What a spec's transmitter "does" while recording: appended as the recorder would capture it.
-  recCapture(events) { if (this.rec.state === 'recording') for (const e of events) this.rec.events.push(normEvent(e)); },
+  // captureAction records an action with no delay: its tMs is when it fired (NaviCore 40560c1).
+  recCapture(events) {
+    if (this.rec.state !== 'recording') return;
+    for (const e of events) { const n = normEvent(e); if (n && n.k === 0) delete n.delay; this.rec.events.push(n); }
+  },
 
   // ?REC,... (NaviCore.ino:3444-3595). `relayed` = the capture sink is armed (the line came over the mesh).
   _recCli(line, out, relayed) {
