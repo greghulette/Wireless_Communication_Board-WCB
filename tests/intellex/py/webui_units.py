@@ -421,10 +421,12 @@ def webui_version_online(ctx):
             # missing/repaired (Intellex 0.2.3): what each copy's own page loads and the copy lacks - nothing, as these
             # copies' pages load nothing (the config tool's index.html is the stamp alone, the Wizard has none) - and
             # what the start's _repair_incomplete_tools fetched again, None: the stage started with no tool at all.
+            # autoUpdated (Intellex 0.2.7): what the host's own update pass fetched since start, None - INTELLEX_AUTO_TOOLS
+            # is 0 for every staged host (hil/intellex.py run_intellex_py).
             want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-NEW", "stale": True, "checked": True, "reason": "",
-                    "missing": [], "repaired": None,
+                    "missing": [], "repaired": None, "autoUpdated": None,
                     "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-NEW", "stale": True, "checked": True,
-                            "reason": "", "missing": [], "repaired": None}}
+                            "reason": "", "missing": [], "repaired": None, "autoUpdated": None}}
             if code != 200 or body != want:
                 problems.append(f"bundles older than Pages (navicore main, wcb hil-wzb): {code} {body}, expected {want}")
             asked = sorted(pages.github[k:])
@@ -439,9 +441,9 @@ def webui_version_online(ctx):
             k = len(pages.github)
             code, body = s.req("GET", "/_api/webui-version", timeout=60)
             want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-OLD", "stale": False, "checked": True, "reason": "",
-                    "missing": [], "repaired": None,
+                    "missing": [], "repaired": None, "autoUpdated": None,
                     "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-OLD", "stale": False, "checked": True,
-                            "reason": "", "missing": [], "repaired": None}}
+                            "reason": "", "missing": [], "repaired": None, "autoUpdated": None}}
             if code != 200 or body != want:
                 problems.append(f"bundles equal to their branch's Pages copy: {code} {body}, expected {want}")
             asked = sorted(pages.github[k:])
@@ -462,9 +464,9 @@ def webui_version_online(ctx):
             k = len(pages.github)
             code, body = s.req("GET", "/_api/webui-version", timeout=60)
             want = {"bundled": "HIL-NC-OLD", "published": "HIL-NC-OLD", "stale": True, "checked": True, "reason": "",
-                    "missing": ["hil-nc.js", "cmdlib/"], "repaired": None,
+                    "missing": ["hil-nc.js", "cmdlib/"], "repaired": None, "autoUpdated": None,
                     "wcb": {"bundled": "HIL-WZ-OLD", "published": "HIL-WZ-OLD", "stale": True, "checked": True,
-                            "reason": "", "missing": ["hil-seq.css", "hil-seq.js", "cmdlib/"], "repaired": None}}
+                            "reason": "", "missing": ["hil-seq.css", "hil-seq.js", "cmdlib/"], "repaired": None, "autoUpdated": None}}
             if code != 200 or body != want:
                 problems.append(f"copies whose page loads what they lack, at their branch's stamps: {code} {body}, "
                                 f"expected {want}")
