@@ -1153,14 +1153,26 @@ def test_verbs_ram_only(bench):
     with _hi_inert(bench, ncfg, also=(ch,)) as (g, unbound):
         nc = g.nc if g else nc
         try:
+            # The raw value is seen taking in SBUS-24 first: the rx stick is on CH23 on this bench (Greg 2026-10-25,
+            # the knob borrowed), past the 16 channels an SBUS-16 frame carries - full run 20261027-100142 read
+            # channels[22] of a 16-entry frame. The frame-format change puts the sticks back at 992, so the value is
+            # set again after it; whatever channel it is on, the reset must bring back 992.
+            ctl.channel(ch, 700)
+            time.sleep(0.5)
+            d = nc.sbus_full_rate()
+            if d["channels"][ch - 1] != 700:
+                raise AssertionError(f"the raw value did not take before the reset: CH{ch} = {d['channels'][ch - 1]}")
             ctl.sbus16(True)
             ctl.channel(ch, 700)
             ctl.flags(FLAG_LOST)
             time.sleep(0.5)
             d = nc.sbus_full_rate()
-            if d["variant"] != "SBUS-16" or d["lost"] != "YES" or d["channels"][ch - 1] != 700:
+            seen = d["channels"][ch - 1] if ch <= len(d["channels"]) else None
+            if d["variant"] != "SBUS-16" or d["lost"] != "YES" or (seen is not None and seen != 700):
                 raise AssertionError(f"the verbs did not take before the reset: {d['variant']}, lost={d['lost']}, "
-                                     f"CH{ch} = {d['channels'][ch - 1]}")
+                                     f"CH{ch} = {seen if seen is not None else 'not in an SBUS-16 frame'}")
+            if seen is None:
+                notes.append(f"CH{ch} is past SBUS-16's 16 channels: its raw value was seen in SBUS-24")
             ctl, boot = _reset_controller(bench, ctl)
             st = ctl.test_state()
             time.sleep(2.0)
