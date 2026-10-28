@@ -6651,6 +6651,9 @@ class NaviModel:
     session.log hashes it."""
     FW = "v0.2.0_102105QSEP26"
     FACTORY_PW = "DomeNet"
+    # NaviCore 40560c1 / 9f19b3e (rc_config.h): RC_ACTIONS_PER_TIER 10 (was 5), RC_MAX_DELAY_MS 30 min (the delay was a
+    # uint16_t), PENDING_ACTION_SLOTS 32 (was 8), and rcConfigToJSON's closing "limits" saying so.
+    ACTIONS_PER_TIER, MAX_DELAY_MS, PENDING_ACTION_SLOTS = 10, 1800000, 32
     REGIONS = ("01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
                "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT", "JP", "KR", "LI", "LT", "LU", "LV", "MT", "MX", "NL",
                "NO", "NZ", "PL", "PT", "RO", "SE", "SI", "SK", "TW", "US")     # RC_REGIONS (chansync rc_config.h:50-54)
@@ -6749,7 +6752,9 @@ class NaviModel:
         """actionFromJson (rc_config.h:1063-1155) -> the internal action, or None."""
         o = o if isinstance(o, dict) else {}
         t = _nm_pick(o, "type", "")
-        a = {"type": None, "target": "", "cmd": "", "delay": _nm_wrap(_nm_pick(o, "delay", 0), 16), "skipRunning": False,
+        d = o.get("delay")            # `obj["delay"] | (uint32_t)0`: a uint32_t, else 0; rcActionSetDelay clamps it
+        d = min(d, NaviModel.MAX_DELAY_MS) if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 0xFFFFFFFF else 0
+        a = {"type": None, "target": "", "cmd": "", "delay": d, "skipRunning": False,
              "note": "", "fn": 0, "chan": 0, "track": 0}
         if t in ("wcb_unicast", "maestro_remote", "maestro"):
             a.update(type="maestro" if t != "wcb_unicast" else t, target=_nm_cut(_nm_pick(o, "target", ""), 6),
@@ -6801,7 +6806,7 @@ class NaviModel:
         out = []
         if isinstance(obj, dict) and key in obj:
             for o in obj[key] if isinstance(obj[key], list) else []:
-                if len(out) >= 5:
+                if len(out) >= self.ACTIONS_PER_TIER:
                     break
                 a = self.action_from(o)
                 if a:
@@ -7123,6 +7128,8 @@ class NaviModel:
         d["smoothProfiles"] = [{"name": p["name"], "entries": [{"mid": m, "ch": ch, "spd": v[0], "acc": v[1]}
                                                                for (m, ch), v in sorted(p["entries"].items()) if v[0] or v[1]]}
                                for p in r["smooth"]]
+        d["limits"] = {"actionsPerTier": self.ACTIONS_PER_TIER, "maxDelayMs": self.MAX_DELAY_MS,
+                       "pendingSlots": self.PENDING_ACTION_SLOTS}
         return d
 
     def text(self):
@@ -10990,7 +10997,9 @@ class NaviRecModel(NaviModel):
     FORBIDDEN = tuple(rx for rx in NaviModel.FORBIDDEN if "REC" not in rx.pattern) + (re.compile(r"^\?REC,START", re.I),)
     CAP = 24000
     LINKS = ("W1S1", "W1S2")
-    PENDING_SLOTS = 8
+    PENDING_SLOTS = NaviModel.PENDING_ACTION_SLOTS
+    RA_TYPE = {"wcb_unicast": 1, "wcb_broadcast": 2, "maestro_local": 3, "maestro": 4, "serial": 5, "hcr": 6, "mp3": 7,
+               "record": 8}      # RcActionType (rc_config.h), for the WARN line
     GREG = {"rec_3": (1, REC_V1_BYTES, [{"t": 0, "k": 1, "slot": 1, "ch": 0, "pos": 6000},
                                         {"t": 50, "k": 1, "slot": 1, "ch": 0, "pos": 6100},
                                         {"t": 120, "k": 0, "type": "wcb_unicast", "target": "2", "cmd": ";S2x"},
@@ -11056,7 +11065,7 @@ class NaviRecModel(NaviModel):
         """rcExecuteActionNow (NaviCore.ino:2047-2131): the capture tap, then the effect."""
         if self.capturing and (a["type"] not in ("record", "play", "stop") or "capture_meta" in self.mut):
             ev = dict(self.action_to(a))
-            if "delay_zero" in self.mut:
+            if "delay_kept" not in self.mut:     # captureAction clears it: tMs is when it fired (NaviCore 40560c1)
                 ev.pop("delay", None)
             ev.update(t=self.ms(self.rec_start), k=0)
             self.buf.append(ev)
@@ -11086,8 +11095,9 @@ class NaviRecModel(NaviModel):
             if len(self.pend) < self.PENDING_SLOTS:
                 self.pend.append((time.monotonic() + a["delay"] / 1000, a))
                 return []
-            return [f"WARN: pendingActions full ({self.PENDING_SLOTS} slots) — firing now, delay dropped"] + \
-                self.dispatch(a)
+            # NaviCore 40560c1: a full queue DROPS the action (it used to fire at once with its delay dropped)
+            return [f"WARN: pendingActions full ({self.PENDING_SLOTS} slots) - dropped type "
+                    f"{self.RA_TYPE.get(a['type'], 0)} '{a['cmd'][:40]}' due in {a['delay']} ms"]
         return self.dispatch(a)
 
     def json_line(self, line):
@@ -11629,7 +11639,7 @@ def t_ncrec_suite_against_model(tmp):
 # to catch, and each D-NC fix its (should) test asks for.
 NCREC_MUTATIONS = (
     ("ncrec.capture_scope", "capture_meta", "FAIL", "no play action"),
-    ("ncrec.capture_scope", "delay_zero", "FAIL", "the delays recorded"),
+    ("ncrec.capture_scope", "delay_kept", "FAIL", "the delays recorded"),
     ("ncrec.stop_semantics", "cli_stop_saves", "FAIL", "nothing saved"),
     ("ncrec.stop_semantics", "name_from_pending", "FAIL", "the name the take started with"),
     ("ncrec.play_timing_markers", "replay_at_once", "FAIL", "replayed gap"),
