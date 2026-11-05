@@ -29,8 +29,9 @@ function sbChars(c) {
 function sbFmt(ms) {
   ms = Math.max(0, Math.round(+ms || 0));
   if (ms < 60000) return (ms / 1000).toFixed(3) + ' s';
-  const m = Math.floor(ms / 60000);
-  return m + ':' + ((ms % 60000) / 1000).toFixed(3).padStart(6, '0');
+  const sec = ((ms % 60000) / 1000).toFixed(3).padStart(6, '0');
+  if (ms < 3600000) return Math.floor(ms / 60000) + ':' + sec;
+  return Math.floor(ms / 3600000) + ':' + String(Math.floor(ms / 60000) % 60).padStart(2, '0') + ':' + sec;
 }
 
 // <cmdChar>T|t, then a delay: what parseCommandGroups reads as a group break. ;t500,<cmd> carries its first command
@@ -766,8 +767,7 @@ const SB_GUTTER   = 192;          // where time 0 is drawn, px: the 184 px lane 
                                   // step at 0 shows its whole trigger dot (seq-builder.css .sb-lane-track margin)
 const SB_EV_GAP   = 10;           // a step's box starts this far right of its time, clear of its dot (.sb-ev margin-left)
 const SB_ROW_H    = 30;           // one row of steps in a lane
-const SB_PPS_MIN  = 10;           // zoom, px per second ...
-const SB_PPS_MAX  = 5000;         // ... 5000 = 5 px per ms
+const SB_PPS_MAX  = 5000;         // zoom in as far as 5 px per ms; how far out is sbPpsMin()
 const SB_SNAPS    = [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000];
 const SB_SNAP_KEY = 'wcbWizard.seqBuilderSnap';
 const SB_UNDO_MAX = 200;
@@ -1382,14 +1382,18 @@ function sbRenderKey() {
 }
 
 function sbTickStep() {
-  const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000];
+  const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000,
+                 900000, 1800000, 3600000, 7200000, 10800000, 21600000, 43200000];
   for (const s of steps) if (s * S.pps / 1000 >= 80) return s;
-  return 600000;
+  return steps[steps.length - 1];
 }
+// 1.5 s, 2:30, 1:30:00.
 function sbTickLabel(ms, step) {
   const d = step >= 1000 ? 0 : step >= 100 ? 1 : step >= 10 ? 2 : 3;
   if (ms < 60000) return (ms / 1000).toFixed(d) + ' s';
-  return Math.floor(ms / 60000) + ':' + ((ms % 60000) / 1000).toFixed(d).padStart(d ? d + 3 : 2, '0');
+  const sec = ((ms % 60000) / 1000).toFixed(d).padStart(d ? d + 3 : 2, '0');
+  if (ms < 3600000) return Math.floor(ms / 60000) + ':' + sec;
+  return Math.floor(ms / 3600000) + ':' + String(Math.floor(ms / 60000) % 60).padStart(2, '0') + ':' + sec;
 }
 
 // Stack a lane's steps into rows where their labels would overlap; past three rows, steps too close to label at this
@@ -2230,19 +2234,30 @@ function sbScrollTo(t) {
   const x = SB_GUTTER + t * S.pps / 1000;
   if (x < tl.scrollLeft + SB_GUTTER + 20 || x > tl.scrollLeft + tl.clientWidth - 40) tl.scrollLeft = Math.max(0, x - SB_GUTTER - 80);
 }
+// Room Fit leaves after the last step, px: its label (at most 190 px, SB_EV_GAP after its time) stays on screen.
+const SB_FIT_TAIL = 220;
+// How far out the zoom goes: until the visible track spans 30 minutes, the longest one delay can be, or the whole
+// sequence and the playhead, with SB_FIT_TAIL after them, if that is longer. Delays add up, so the board sets no limit
+// on how long a sequence runs (command_timer.cpp parsedDelayLimit is per delay). A fixed floor of 10 px per second
+// stopped zooming out at about 3:30 on a wide screen, and kept Fit from fitting anything longer (Greg, 2026-11-05).
+function sbPpsMin() {
+  const tl = $('sb-tl');
+  const w = Math.max(SB_FIT_TAIL + 200, (tl ? tl.clientWidth : 1000) - SB_GUTTER);
+  return (w - SB_FIT_TAIL) * 1000 / Math.max(SB_DELAY_CAP_MS, sbEndT(), S.playhead);
+}
 function sbZoom(factor, clientX) {
   const tl = $('sb-tl');
   const rect = tl.getBoundingClientRect();
   const fx = clientX != null ? clientX - rect.left : SB_GUTTER + (tl.clientWidth - SB_GUTTER) / 2;
   const tAt = (tl.scrollLeft + fx - SB_GUTTER) * 1000 / S.pps;
-  S.pps = Math.min(SB_PPS_MAX, Math.max(SB_PPS_MIN, S.pps * factor));
+  S.pps = Math.min(SB_PPS_MAX, Math.max(sbPpsMin(), S.pps * factor));
   sbRenderTimeline();
   tl.scrollLeft = Math.max(0, SB_GUTTER + tAt * S.pps / 1000 - fx);
 }
 function sbFit() {
   const tl = $('sb-tl');
   const end = Math.max(sbEndT(), 1000);
-  S.pps = Math.min(SB_PPS_MAX, Math.max(SB_PPS_MIN, (tl.clientWidth - SB_GUTTER - 220) * 1000 / end));
+  S.pps = Math.min(SB_PPS_MAX, Math.max(sbPpsMin(), (tl.clientWidth - SB_GUTTER - SB_FIT_TAIL) * 1000 / end));
   sbRenderTimeline();
   tl.scrollLeft = 0;
 }

@@ -345,3 +345,34 @@ test('wizard.seq_builder_align with two or more steps selected, Align puts them 
   await page.click('#sbm-spread');
   expect(await out(page)).toBe(';M11^;A,PLAY,5^;T2000^;S3A001***holos^;T2000^;M12');
 });
+
+test('wizard.seq_builder_zoom zoom goes out until the view spans 30 minutes, or the whole of a sequence that runs longer, and Fit shows all of it: the board limits each delay, not the sequence', async ({ page }) => {
+  await setup(page);
+  await pullFake(page, 1, W1);
+  const span = async () => {                                     // ms across the visible track
+    const v = await page.evaluate(() => SeqBuilder.view());
+    const w = await page.locator('#sb-tl').evaluate((el) => el.clientWidth);
+    return (w - v.gutter) * 1000 / v.pps;
+  };
+  const zoomAllOut = async () => { for (let i = 0; i < 40; i++) await page.click('#sb-zout'); };
+
+  await openRow(page, 'flat');                                   // two steps at 0
+  await zoomAllOut();
+  expect(await span()).toBeGreaterThanOrEqual(30 * 60000);
+  await expect(page.locator('#sb-ruler')).toContainText('30:00');
+  await page.click('#sb-cancel');
+
+  await openRow(page, 'show');
+  await page.locator('.sb-ev', { hasText: 'Run subroutine · 2' }).click();
+  await page.fill('#sbi-t', '5400000');                          // an hour and a half in
+  await page.press('#sbi-t', 'Enter');
+  expect(await out(page)).toContain(';T1800000^');               // over 30 minutes: several delays
+  await page.click('#sb-fit');
+  const tl = await page.locator('#sb-tl').boundingBox();
+  const last = await page.locator('.sb-ev', { hasText: 'Run subroutine · 2' }).boundingBox();
+  expect(last.x + last.width).toBeLessThanOrEqual(tl.x + tl.width);
+  await zoomAllOut();
+  expect(await span()).toBeGreaterThanOrEqual(5400000);
+  await expect(page.locator('#sb-ruler')).toContainText('1:00:00');
+  await shot(page, '12-zoomed-out');
+});

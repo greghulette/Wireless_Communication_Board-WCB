@@ -72,6 +72,13 @@ test('compile: a gap over 30 minutes becomes several delays, which the board add
   assert.deepStrictEqual(SB.sbParse(v).events.map(e => e.t), [0, 2000000]);
 });
 
+test('times read as seconds, then m:ss, then h:mm:ss: a sequence has no length limit, only each delay', () => {
+  assert.strictEqual(SB.sbFmt(1250), '1.250 s');
+  assert.strictEqual(SB.sbFmt(150000), '2:30.000');
+  assert.strictEqual(SB.sbFmt(5400000), '1:30:00.000');
+  assert.strictEqual(SB.sbFmt(36061001), '10:01:01.001');
+});
+
 test('compile: an IF goes after its delay, right before its command', () => {
   assert.strictEqual(compile([ev(0, 'a'), ev(500, ';M11', { conds: ['mode=2'] })]), 'a^;T500^IF,mode=2^;M11');
 });

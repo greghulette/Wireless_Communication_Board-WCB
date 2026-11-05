@@ -215,6 +215,11 @@ each WCB verb translated both ways (`sbToCanon` / `sbFromCanon`). Device strings
   evenly keeps the first and last and spaces the ones between equally (`sbSpreadSel`). Each is one undo step. Steps at
   one time run in the order they sit in the timeline's list, so an aligned set goes into it, earliest first, where its
   first step was: it runs in the order it was laid out. Insert gap and Close gap shift everything after the playhead.
+- **Zoom** runs from 5 px per ms (`SB_PPS_MAX`) out until the visible track spans 30 minutes, the longest one delay
+  can be, or the whole sequence and the playhead, with room after them for the last label (`SB_FIT_TAIL`, 220 px),
+  if that is longer (`sbPpsMin`). Delays add up,
+  so the board limits each delay, not how long a sequence runs, and the builder sets no limit either: **Fit** fits a
+  sequence of any length. The ruler's steps run from 1 ms to 12 h, labelled `1.5 s`, `2:30` and `1:30:00`.
 - **Theme.** The builder follows the Wizard's theme, which is its own toggle (the `light` class on `<html>`), not the
   system's. The overlay sets `color-scheme` from it, so native dropdown lists, number spinners and scrollbars match.
 - **Preview** runs the playhead in real time in the browser and flashes each step, references' included, as it passes.
@@ -252,8 +257,9 @@ Newest first. One row per change that altered what this document describes.
 
 | Date | Commit | Change | Why |
 |---|---|---|---|
-| 2026-10-25 | (this commit) | §5 and §7: NaviCore's action timeline (button taps, switch positions) uses this palette and these home slots, held equal by a unit test | Greg: "i kind of like that [the timeline] and want to implement it on the navicore as well" |
-| 2026-10-21 | (this commit) | A step's box stands apart from its dot, `SB_EV_GAP` (10 px) to the right; the dot alone sits at the time | Greg: "move the text off to the right slightly of the dot. not connected" |
+| 2026-11-05 | (this commit) | Zoom out goes until the view spans 30 minutes or the whole sequence, whichever is longer (`sbPpsMin`), in place of a fixed 10 px/s; ruler steps to 12 h, `h:mm:ss` labels | Greg: zoom out "looks like its capped at 3:30 ... the timer can support much longer" |
+| 2026-10-25 | `88e0531` | §5 and §7: NaviCore's action timeline (button taps, switch positions) uses this palette and these home slots, held equal by a unit test | Greg: "i kind of like that [the timeline] and want to implement it on the navicore as well" |
+| 2026-10-21 | `f733e1a` | A step's box stands apart from its dot, `SB_EV_GAP` (10 px) to the right; the dot alone sits at the time | Greg: "move the text off to the right slightly of the dot. not connected" |
 | 2026-10-21 | `a44875d` | Align (to first, last, playhead) and Space evenly for a multi-selection; a dot marks each step's firing time in place of the thick left edge, and time 0 moves 8 px off the label column so its dot shows; the builder sets `color-scheme` from the Wizard's theme | Greg: "an align button if i choose more than 2 commands"; "a dot/star on each command to represent the trigger ... someone could potentially think the command takes the whole box duration"; "formatting isn't following light mode vs dark mode" |
 | 2026-10-20 | `0f625d5` | One library: `cmdlib/wcb/` moves to NaviCore beside the DroidNet snapshot, both Wizard folders become copies of NaviCore's, held to them by a test; DroidNet's `@A` trigger is case-insensitive (`caseInsensitive`); a template with no fixed text decodes only if nothing in it is free text; §6 Shipping it | Greg: "make it case insensitive"; "navicore should get the droidnet trigger too. isn't the purpose of the command library so they all stay in sync?" |
 | 2026-10-20 | `6b85763` | No colour wash behind library rows or lane labels: colour on their edges and swatches only; lane bands fainter | Greg, on the library: "still colored in?" |
